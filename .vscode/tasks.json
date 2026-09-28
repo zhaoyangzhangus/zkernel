@@ -1,0 +1,91 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "内核：构建（调试版）",
+            "detail": "make DEBUG=1 all —— -Og -g3，产物在 build/debug/（Ctrl+Shift+B 用）",
+            "type": "shell",
+            "command": "make",
+            "args": ["DEBUG=1", "all"],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "problemMatcher": ["$gcc"],
+            "presentation": {
+                "reveal": "silent",
+                "clear": true
+            }
+        },
+        {
+            "label": "内核：启动 QEMU 并等待 GDB",
+            "detail": "后台启动 QEMU（CPU 停在复位向量），等 gdbstub 就绪后 F5 的调试器才去连接",
+            "type": "shell",
+            "command": "${workspaceFolder}/tools/qemu-debug.sh",
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            // 【关键】不要加 dependsOn 去挂构建任务 —— 实测会让 F5 彻底失效：
+            //   QEMU 会被正常拉起来（preLaunchTask 确实执行了），
+            //   但 VS Code 的就绪检测失灵，永远等不到“任务就绪”，
+            //   于是调试器（cppdbg/gdb）一个进程都不会启动，界面上看起来就是“F5 没反应”。
+            //   构建本来就由脚本自己负责（见 qemu-debug.sh 里的 make -s DEBUG=1 all），
+            //   所以这里不需要依赖别的任务。
+            // 另外：改完这个文件要 Developer: Reload Window 才生效（任务定义是启动时加载的），
+            //       否则会以为“改了也没用”。
+            "isBackground": true,
+            "presentation": {
+                "reveal": "always",
+                "panel": "dedicated",
+                "clear": true
+            },
+            "problemMatcher": {
+                "owner": "qemu",
+                "source": "qemu",
+                // 脚本输出的是绝对路径，所以这里用纯 "absolute"。
+                // 注意不能写成 ["absolute", "..."],两元素数组只接受 relative / autoDetect
+                // （见 problemMatcher.ts 的 createProblemMatcher），写错会静默变成“无法转换为问题匹配器”。
+                "fileLocation": "absolute",
+                // 自定义 problemMatcher 的 pattern 会被 validateProblemPattern() 检查两条：
+                //   1. 必须同时有 file 和 message 捕获组，否则报“必须至少包含一个文件和一条消息”
+                //   2. 若 kind 不是 "file"，还必须再给 line 或 location 捕获组，
+                //      否则报“它必须为‘file’，代码行或消息匹配组其中的一项”
+                // 我们的诊断是针对脚本整体的（没有行号），所以显式声明 kind: "file" 走第 1 条即可。
+                "pattern": [
+                    {
+                        "kind": "file",
+                        "regexp": "^\\[qemu\\]\\s+(\\S+):\\s+(error|warning|info):\\s+(.*)$",
+                        "file": 1,
+                        "severity": 2,
+                        "message": 3
+                    }
+                ],
+                // 本任务真正需要的是这个 background 检测：beginsPattern/endsPattern 之间
+                // 表示“任务已就绪”，F5 才会继续去连 gdbstub。
+                // 正常运行时的输出不会命中上面的 pattern，所以不会往“问题”面板里刷东西。
+                "background": {
+                    "activeOnStart": true,
+                    "beginsPattern": "^\\[qemu\\] starting",
+                    "endsPattern": "^\\[qemu\\] gdbstub listening"
+                }
+            }
+        },
+        {
+            "label": "内核：停止调试用 QEMU",
+            "detail": "pkill 掉占用 gdbstub 端口的 QEMU",
+            "type": "shell",
+            "command": "make",
+            "args": ["debug-stop"],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "problemMatcher": [],
+            "presentation": {
+                "reveal": "silent"
+            }
+        }
+    ]
+}

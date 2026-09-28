@@ -1,0 +1,23 @@
+{
+    // IntelliSense 用的编译配置（只影响编辑器，不影响 make）
+    "C_Cpp.default.cStandard": "c11",
+    "C_Cpp.default.defines": [
+        "KERNEL_LOAD_ADDR=0x100000"
+    ],
+    "C_Cpp.default.includePath": [
+        "${workspaceFolder}/**"
+    ],
+
+    // build/ 里有 64MB 的磁盘镜像和几 MB 的 ELF，别让搜索、监视和 IntelliSense 去碰它们
+    "search.exclude": {
+        "build": true
+    },
+    "files.watcherExclude": {
+        "**/build/**": true
+    },
+    "C_Cpp.files.exclude": {
+        "**/.vscode": true,
+        "**/.vs": true,
+        "**/build": true
+    }
+}
