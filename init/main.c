@@ -21,6 +21,7 @@
 
 #include "../boot/bootinfo.h"
 #include "../drivers/serial.h"
+#include "../graphics/text.h"
 #include "../lib/printf.h"
 #include "../mm/pmm.h"
 
@@ -159,6 +160,17 @@ void kernel_main(BOOT_INFO *bi)
                bi->fb_pixel_format, (void *)(uintptr_t)bi->fb_base);
     else
         printf("[kernel] framebuffer: none\n");
+
+    if (fb_text_supported(bi)) {
+        fb_draw_text_a8(bi, 16, 16,
+                        "zkernel 12x24 A8\n"
+                        "ABCDEFGHIJKLMNOPQRSTUVWXYZ\n"
+                        "abcdefghijklmnopqrstuvwxyz 0123456789",
+                        0x00F2F5F7U, 0x00081018U);
+        printf("[kernel] framebuffer A8 font: rendered 12x24 demo\n");
+    } else {
+        printf("[kernel] framebuffer A8 font: unsupported GOP mode\n");
+    }
 
     dump_memory_map(bi);
 

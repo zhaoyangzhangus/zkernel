@@ -106,14 +106,14 @@ $(BOOTX64): $(BUILD)/boot.o
 	$(LLD) $(EFI_LDFLAGS) /out:$@ $<
 
 # 内核目标文件
-KERNEL_OBJS := $(BUILD)/main.o $(BUILD)/printf.o $(BUILD)/serial.o $(BUILD)/pmm.o
+KERNEL_OBJS := $(BUILD)/main.o $(BUILD)/printf.o $(BUILD)/serial.o $(BUILD)/pmm.o $(BUILD)/text.o
 
 .PHONY: all esp run run-nox run-gdb debug-stop test clean
 
 # ---------------------------------------------------------------------
 # 内核
 # ---------------------------------------------------------------------
-$(BUILD)/main.o: init/main.c boot/bootinfo.h lib/printf.h drivers/serial.h mm/pmm.h
+$(BUILD)/main.o: init/main.c boot/bootinfo.h lib/printf.h drivers/serial.h mm/pmm.h graphics/text.h
 	@mkdir -p $(BUILD)
 	$(CC) $(KCFLAGS) -c $< -o $@
 
@@ -126,6 +126,10 @@ $(BUILD)/serial.o: drivers/serial.c drivers/serial.h
 	$(CC) $(KCFLAGS) -c $< -o $@
 
 $(BUILD)/pmm.o: mm/pmm.c mm/pmm.h boot/bootinfo.h
+	@mkdir -p $(BUILD)
+	$(CC) $(KCFLAGS) -c $< -o $@
+
+$(BUILD)/text.o: graphics/text.c graphics/text.h graphics/console_font_a8.h boot/bootinfo.h
 	@mkdir -p $(BUILD)
 	$(CC) $(KCFLAGS) -c $< -o $@
 
@@ -201,9 +205,10 @@ debug-stop:
 HOSTCC ?= gcc
 TEST_CFLAGS := -std=c11 -O2 -Wall -Wextra -fno-builtin -Wno-format-truncation
 
-test: $(BUILD)/printf_test $(BUILD)/pmm_test
+test: $(BUILD)/printf_test $(BUILD)/pmm_test $(BUILD)/text_test
 	@./$(BUILD)/printf_test
 	@./$(BUILD)/pmm_test
+	@./$(BUILD)/text_test
 
 $(BUILD)/printf_test: tests/printf_test.c lib/printf.c lib/printf.h
 	@mkdir -p $(BUILD)
@@ -212,6 +217,10 @@ $(BUILD)/printf_test: tests/printf_test.c lib/printf.c lib/printf.h
 $(BUILD)/pmm_test: tests/pmm_test.c mm/pmm.c mm/pmm.h boot/bootinfo.h
 	@mkdir -p $(BUILD)
 	$(HOSTCC) $(TEST_CFLAGS) tests/pmm_test.c mm/pmm.c -o $@
+
+$(BUILD)/text_test: tests/text_test.c graphics/text.c graphics/text.h graphics/console_font_a8.h boot/bootinfo.h
+	@mkdir -p $(BUILD)
+	$(HOSTCC) $(TEST_CFLAGS) tests/text_test.c graphics/text.c -o $@
 
 clean:
 	rm -rf $(BUILD) $(DIST)
