@@ -1,5 +1,5 @@
 /*
- * pmm.h —— 早期物理页分配器
+ * pmm.h —— 早期物理内存分配器
  *
  * 第一版只支持分配，不支持释放。UEFI memory map 本身就是 free-range 元数据：
  * 每次分配成功后直接推进对应 MEM_CONVENTIONAL 描述符的 physical_start，
@@ -18,14 +18,10 @@
 int pmm_init(BOOT_INFO *boot_info);
 
 /*
- * 分配 page_count 个物理连续的 4 KiB 页。
+ * 分配至少 size 字节的物理连续内存。
+ * 实际占用大小自动向上对齐到 4 KiB 页边界。
  * 成功返回首个物理地址，失败返回 0。
  */
-uint64_t pmm_alloc_pages(uint64_t page_count);
-
-static inline uint64_t pmm_alloc_page(void)
-{
-    return pmm_alloc_pages(1);
-}
+uint64_t pmm_alloc(uint64_t size);
 
 #endif /* __KERNEL_MM_PMM_H__ */

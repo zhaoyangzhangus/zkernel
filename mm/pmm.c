@@ -1,9 +1,10 @@
 /*
- * pmm.c —— 直接复用 UEFI memory map 的最小物理页分配器
+ * pmm.c —— 直接复用 UEFI memory map 的最小物理内存分配器
  *
  * 约束：
  *   - 只从 MEM_CONVENTIONAL 分配；
- *   - 一次请求返回物理连续的 page_count 个 4 KiB 页；
+ *   - 调用方只传字节数 size；
+ *   - size 自动向上对齐到 4 KiB，返回物理连续区域；
  *   - 不支持 free；
  *   - 不建立任何按页元数据。
  *
@@ -33,18 +34,21 @@ int pmm_init(BOOT_INFO *boot_info)
     return 0;
 }
 
-uint64_t pmm_alloc_pages(uint64_t page_count)
+uint64_t pmm_alloc(uint64_t size)
 {
     uint64_t offset;
     uint64_t bytes;
+    uint64_t pages;
 
-    if (g_boot_info == NULL ||
-        page_count == 0 ||
-        page_count > UINT64_MAX / PMM_PAGE_SIZE) {
+    if (g_boot_info == NULL || size == 0)
         return 0;
-    }
 
-    bytes = page_count * PMM_PAGE_SIZE;
+    /* size + 4095 不能溢出。 */
+    if (size > UINT64_MAX - (PMM_PAGE_SIZE - 1))
+        return 0;
+
+    bytes = (size + PMM_PAGE_SIZE - 1) & ~(PMM_PAGE_SIZE - 1);
+    pages = bytes / PMM_PAGE_SIZE;
 
     /*
      * 不保存 current-index 游标：每次直接扫描 UEFI descriptors。
@@ -60,7 +64,7 @@ uint64_t pmm_alloc_pages(uint64_t page_count)
         uint64_t base;
 
         if (d->type != MEM_CONVENTIONAL ||
-            d->number_of_pages < page_count) {
+            d->number_of_pages < pages) {
             continue;
         }
 
@@ -73,13 +77,13 @@ uint64_t pmm_alloc_pages(uint64_t page_count)
         }
 
         /*
-         * 从该 free range 的低地址端切走 page_count 页。
+         * 从该 free range 的低地址端切走对齐后的 bytes。
          * descriptor 原地收缩，因此不需要额外 bitmap/free-list。
          */
         d->physical_start = base + bytes;
         if (d->virtual_start != 0)
             d->virtual_start += bytes;
-        d->number_of_pages -= page_count;
+        d->number_of_pages -= pages;
 
         return base;
     }

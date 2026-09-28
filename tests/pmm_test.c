@@ -1,5 +1,5 @@
 /*
- * pmm_test.c —— 不启动 QEMU，验证早期物理页分配器。
+ * pmm_test.c —— 不启动 QEMU，验证早期物理内存分配器。
  */
 #include <stdint.h>
 #include <stdio.h>
@@ -57,25 +57,36 @@ int main(void)
     bi.mmap_desc_count = TEST_DESC_COUNT;
 
     check(pmm_init(&bi) == 0, "pmm_init");
-    check(pmm_alloc_pages(0) == 0, "0 pages must fail");
+    check(pmm_alloc(0) == 0, "size 0 must fail");
+    check(pmm_alloc(UINT64_MAX) == 0, "size alignment overflow must fail");
 
-    check(pmm_alloc_pages(3) == 0x00200000, "allocate 3 pages");
-    check(desc(1)->physical_start == 0x00203000,
-          "first range advances by 3 pages");
-    check(desc(1)->number_of_pages == 2,
-          "first range keeps 2 pages");
+    /* 1 字节也必须占整整一页。 */
+    check(pmm_alloc(1) == 0x00200000, "1 byte rounds to one page");
+    check(desc(1)->physical_start == 0x00201000,
+          "first range advances by one page");
+    check(desc(1)->number_of_pages == 4,
+          "first range keeps 4 pages");
 
-    /* 2 页那段放不下 4 页，必须跳到下一段。 */
-    check(pmm_alloc_pages(4) == 0x00400000,
-          "allocate 4 pages from next fitting range");
+    /* 8193 字节向上对齐为 12288 字节，也就是 3 页。 */
+    check(pmm_alloc(8193) == 0x00201000,
+          "8193 bytes round to 3 pages");
+    check(desc(1)->physical_start == 0x00204000,
+          "first range advances by 3 more pages");
+    check(desc(1)->number_of_pages == 1,
+          "first range keeps 1 page");
 
-    /* 扫描从头开始，因此剩下的 2 页仍然可以被利用。 */
-    check(pmm_alloc_pages(2) == 0x00203000,
-          "allocate exact remainder of first range");
+    /* 4097 字节需要 2 页，第一段剩 1 页放不下，必须去下一段。 */
+    check(pmm_alloc(4097) == 0x00400000,
+          "4097 bytes use 2 pages from next fitting range");
 
-    check(pmm_alloc_pages(6) == 0x00404000,
-          "allocate exact remainder of second range");
-    check(pmm_alloc_page() == 0, "allocation fails after exhaustion");
+    /* 扫描从头开始，因此第一段最后 1 页仍然可以利用。 */
+    check(pmm_alloc(4096) == 0x00204000,
+          "exact page consumes first range remainder");
+
+    /* 第二段此前用了 2 页，还剩 8 页。 */
+    check(pmm_alloc(8 * PMM_PAGE_SIZE) == 0x00402000,
+          "exactly consume second range remainder");
+    check(pmm_alloc(1) == 0, "allocation fails after exhaustion");
 
     check(desc(0)->physical_start == 0x00100000 &&
           desc(0)->number_of_pages == 100,
