@@ -73,7 +73,7 @@ static void con_puts(const CHAR16 *str)
 /* 以十六进制打印，digits 为位数（不含 0x 前缀） */
 static void con_hex(UINT64 value, int digits)
 {
-    static const CHAR16 hexchar[] = L"0123456789ABCDEF";
+    static const char hexchar[] = "0123456789ABCDEF";
     CHAR16 buf[17];
     int i;
 
@@ -81,7 +81,7 @@ static void con_hex(UINT64 value, int digits)
     if (digits > 16) digits = 16;
 
     for (i = 0; i < digits; i++)
-        buf[i] = hexchar[(value >> (4 * (digits - 1 - i))) & 0xF];
+        buf[i] = (CHAR16)(hexchar[(value >> (4 * (digits - 1 - i))) & 0xF]);
     buf[digits] = L'\0';
 
     con_puts(buf);
