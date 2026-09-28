@@ -9,7 +9,7 @@
 
 /* OVMF 常见 DescriptorSize=48；结构本体只有 40 字节，顺便验证步进逻辑。 */
 #define TEST_DESC_SIZE 48u
-#define TEST_DESC_COUNT 3u
+#define TEST_DESC_COUNT 5u
 
 static uint8_t map_bytes[TEST_DESC_SIZE * TEST_DESC_COUNT];
 
@@ -42,14 +42,24 @@ int main(void)
     desc(0)->physical_start = 0x00100000;
     desc(0)->number_of_pages = 100;
 
-    /* 两段真正可供 PMM 使用的 ConventionalMemory。 */
-    desc(1)->type = MEM_CONVENTIONAL;
+    /* ExitBootServices 后 BootServicesCode/Data 也已经归内核所有。 */
+    desc(1)->type = MEM_BOOT_SERVICES_DATA;
     desc(1)->physical_start = 0x00200000;
     desc(1)->number_of_pages = 5;
 
-    desc(2)->type = MEM_CONVENTIONAL;
+    desc(2)->type = MEM_BOOT_SERVICES_CODE;
     desc(2)->physical_start = 0x00400000;
     desc(2)->number_of_pages = 10;
+
+    /* ConventionalMemory 仍然可用。 */
+    desc(3)->type = MEM_CONVENTIONAL;
+    desc(3)->physical_start = 0x00800000;
+    desc(3)->number_of_pages = 2;
+
+    /* RuntimeServices 必须保留。 */
+    desc(4)->type = MEM_RUNTIME_SERVICES_DATA;
+    desc(4)->physical_start = 0x00A00000;
+    desc(4)->number_of_pages = 100;
 
     bi.mmap_addr = (uint64_t)(uintptr_t)map_bytes;
     bi.mmap_size = sizeof(map_bytes);
@@ -86,11 +96,19 @@ int main(void)
     /* 第二段此前用了 2 页，还剩 8 页。 */
     check(pmm_alloc(8 * PMM_PAGE_SIZE) == 0x00402000,
           "exactly consume second range remainder");
-    check(pmm_alloc(1) == 0, "allocation fails after exhaustion");
+    check(pmm_alloc(3 * PMM_PAGE_SIZE) == 0,
+          "oversized allocation fails when no single range fits");
 
     check(desc(0)->physical_start == 0x00100000 &&
           desc(0)->number_of_pages == 100,
           "LoaderData is never consumed");
+    check(desc(4)->physical_start == 0x00A00000 &&
+          desc(4)->number_of_pages == 100,
+          "RuntimeServicesData is never consumed");
+
+    /* BootServices 两段耗尽后仍可继续使用 ConventionalMemory。 */
+    check(pmm_alloc(PMM_PAGE_SIZE) == 0x00800000,
+          "ConventionalMemory remains usable");
 
     if (failures == 0) {
         printf("pmm 测试通过：%d 项\n", checks);

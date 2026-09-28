@@ -2,7 +2,8 @@
  * pmm.c —— 直接复用 UEFI memory map 的最小物理内存分配器
  *
  * 约束：
- *   - 只从 MEM_CONVENTIONAL 分配；
+ *   - 从 ExitBootServices 后可回收的 MEM_CONVENTIONAL /
+ *     MEM_BOOT_SERVICES_CODE / MEM_BOOT_SERVICES_DATA 分配；
  *   - 调用方只传字节数 size；
  *   - size 自动向上对齐到 4 KiB，返回物理连续区域；
  *   - 不支持 free；
@@ -17,6 +18,18 @@
 #include <stdint.h>
 
 static BOOT_INFO *g_boot_info;
+
+static int pmm_type_usable(uint32_t type)
+{
+    /*
+     * ExitBootServices 成功后，BootServicesCode/Data 已不再被固件使用，
+     * 可以直接交给内核。LoaderCode/Data 暂时不能加入：kernel.elf、
+     * BOOT_INFO 和最终 memory-map buffer 本身都可能还位于 LoaderData。
+     */
+    return type == MEM_CONVENTIONAL ||
+           type == MEM_BOOT_SERVICES_CODE ||
+           type == MEM_BOOT_SERVICES_DATA;
+}
 
 int pmm_init(BOOT_INFO *boot_info)
 {
@@ -63,7 +76,7 @@ uint64_t pmm_alloc(uint64_t size)
                                        offset);
         uint64_t base;
 
-        if (d->type != MEM_CONVENTIONAL ||
+        if (!pmm_type_usable(d->type) ||
             d->number_of_pages < pages) {
             continue;
         }
