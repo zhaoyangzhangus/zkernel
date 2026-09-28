@@ -22,6 +22,7 @@
 #include "../boot/bootinfo.h"
 #include "../drivers/serial.h"
 #include "../lib/printf.h"
+#include "../mm/pmm.h"
 
 /* ------------------------------------------------------------------ */
 /* ELF 装载自检                                                        */
@@ -160,6 +161,32 @@ void kernel_main(BOOT_INFO *bi)
         printf("[kernel] framebuffer: none\n");
 
     dump_memory_map(bi);
+
+    /*
+     * 第一版物理页分配器直接把 UEFI memory map 当作 free-range 元数据。
+     * 这里只从 MEM_CONVENTIONAL 取页，因此不会碰到仍承载 bootinfo、
+     * memory map 缓冲区和内核映像的 LoaderData/LoaderCode。
+     */
+    if (pmm_init(bi) != 0) {
+        printf("[kernel] ERROR: pmm_init failed\n");
+        for (;;)
+            __asm__ volatile("hlt");
+    }
+
+    {
+        uint64_t one_page   = pmm_alloc_pages(1);
+        uint64_t seven_pages = pmm_alloc_pages(7);
+
+        if (one_page == 0 || seven_pages == 0) {
+            printf("[kernel] ERROR: physical page allocation failed\n");
+            for (;;)
+                __asm__ volatile("hlt");
+        }
+
+        printf("[kernel] pmm: 1 page at %p, 7 contiguous pages at %p\n",
+               (void *)(uintptr_t)one_page,
+               (void *)(uintptr_t)seven_pages);
+    }
 
     /* printf 自检：对照下面这行的实际输出，可以快速确认格式化是否正确 */
     printf("[kernel] printf: %d %u %#x %c [%5s][%-5s] %p %.3s\n",

@@ -4,7 +4,7 @@
 #    make          生成 build/EFI/BOOT/BOOTX64.EFI 和 build/kernel.elf
 #    make run      用 QEMU + OVMF 启动（带图形窗口和串口输出）
 #    make run-nox  无头模式运行，只从串口看输出
-#    make test     在开发机上测试 printf 的格式化逻辑（不开虚拟机）
+#    make test     在开发机上运行 host 单元测试（不开虚拟机）
 #    make DEBUG=1  调试构建（-Og -g3，产物在 build/debug/），供 VS Code F5 使用
 #    make esp      另外产出一个独立 FAT 镜像 dist/esp.img（真机 / 拷贝用）
 #    make clean
@@ -106,14 +106,14 @@ $(BOOTX64): $(BUILD)/boot.o
 	$(LLD) $(EFI_LDFLAGS) /out:$@ $<
 
 # 内核目标文件
-KERNEL_OBJS := $(BUILD)/main.o $(BUILD)/printf.o $(BUILD)/serial.o
+KERNEL_OBJS := $(BUILD)/main.o $(BUILD)/printf.o $(BUILD)/serial.o $(BUILD)/pmm.o
 
 .PHONY: all esp run run-nox run-gdb debug-stop test clean
 
 # ---------------------------------------------------------------------
 # 内核
 # ---------------------------------------------------------------------
-$(BUILD)/main.o: init/main.c boot/bootinfo.h lib/printf.h drivers/serial.h
+$(BUILD)/main.o: init/main.c boot/bootinfo.h lib/printf.h drivers/serial.h mm/pmm.h
 	@mkdir -p $(BUILD)
 	$(CC) $(KCFLAGS) -c $< -o $@
 
@@ -122,6 +122,10 @@ $(BUILD)/printf.o: lib/printf.c lib/printf.h drivers/serial.h
 	$(CC) $(KCFLAGS) -c $< -o $@
 
 $(BUILD)/serial.o: drivers/serial.c drivers/serial.h
+	@mkdir -p $(BUILD)
+	$(CC) $(KCFLAGS) -c $< -o $@
+
+$(BUILD)/pmm.o: mm/pmm.c mm/pmm.h boot/bootinfo.h
 	@mkdir -p $(BUILD)
 	$(CC) $(KCFLAGS) -c $< -o $@
 
@@ -197,12 +201,17 @@ debug-stop:
 HOSTCC ?= gcc
 TEST_CFLAGS := -std=c11 -O2 -Wall -Wextra -fno-builtin -Wno-format-truncation
 
-test: $(BUILD)/printf_test
+test: $(BUILD)/printf_test $(BUILD)/pmm_test
 	@./$(BUILD)/printf_test
+	@./$(BUILD)/pmm_test
 
 $(BUILD)/printf_test: tests/printf_test.c lib/printf.c lib/printf.h
 	@mkdir -p $(BUILD)
 	$(HOSTCC) $(TEST_CFLAGS) tests/printf_test.c lib/printf.c -o $@
+
+$(BUILD)/pmm_test: tests/pmm_test.c mm/pmm.c mm/pmm.h boot/bootinfo.h
+	@mkdir -p $(BUILD)
+	$(HOSTCC) $(TEST_CFLAGS) tests/pmm_test.c mm/pmm.c -o $@
 
 clean:
 	rm -rf $(BUILD) $(DIST)
