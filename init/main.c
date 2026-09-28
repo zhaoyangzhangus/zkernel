@@ -189,7 +189,8 @@ void kernel_main(BOOT_INFO *bi)
         uint64_t one_byte = pmm_alloc(1);
         uint64_t seven_pages = pmm_alloc(6 * PMM_PAGE_SIZE + 1);
 
-        if (one_byte == 0 || seven_pages == 0) {
+        if (one_byte == PMM_ALLOC_FAILED ||
+            seven_pages == PMM_ALLOC_FAILED) {
             printf("[kernel] ERROR: physical memory allocation failed\n");
             for (;;)
                 __asm__ volatile("hlt");
