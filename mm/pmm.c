@@ -1,4 +1,5 @@
 #include "pmm.h"
+#include "bootmem.h"
 
 #include <stddef.h>
 #include <stdint.h>
@@ -133,34 +134,6 @@ static bool count_range(uint64_t start, uint64_t pages, frame_count_t *count)
  * 真正的 bootstrap allocator。它只在 pmm_init() 内使用一次，
  * 直接收缩 UEFI MEM_CONVENTIONAL descriptor；初始化完成后生命周期结束。
  */
-static bool boot_alloc_pages(BOOT_INFO *bi, uint64_t pages, uint64_t *out_phys)
-{
-    uint8_t *p = (uint8_t *)(uintptr_t)bi->mmap_addr;
-
-    for (uint32_t i = 0; i < bi->mmap_desc_count;
-         ++i, p += bi->mmap_desc_size) {
-        BOOT_MEMORY_DESCRIPTOR *d = (BOOT_MEMORY_DESCRIPTOR *)(void *)p;
-
-        if (d->type != MEM_CONVENTIONAL || d->number_of_pages < pages)
-            continue;
-
-        uint64_t bytes = pages * PMM_PAGE_4K;
-        uint64_t base = d->physical_start;
-
-        if (base > UINT64_MAX - bytes)
-            return false;
-
-        d->physical_start = base + bytes;
-        d->number_of_pages -= pages;
-        if (d->virtual_start != 0)
-            d->virtual_start += bytes;
-
-        *out_phys = base;
-        return true;
-    }
-
-    return false;
-}
 
 static uint8_t *pool3_layout(uint8_t *p, pmm_pool3_t **out,
                              uint32_t capacity)

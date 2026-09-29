@@ -28,7 +28,7 @@ OVMF_VARS ?= /usr/share/OVMF/OVMF_VARS_4M.fd
 GDB_PORT  ?= 1234
 
 BOOTX64 := $(BUILD)/EFI/BOOT/BOOTX64.EFI
-KERNEL_OBJS := $(BUILD)/main.o $(BUILD)/printf.o $(BUILD)/pmm.o $(BUILD)/paging.o $(BUILD)/vm.o $(BUILD)/text.o
+KERNEL_OBJS := $(BUILD)/main.o $(BUILD)/printf.o $(BUILD)/bootmem.o $(BUILD)/pmm.o $(BUILD)/paging.o $(BUILD)/vm.o $(BUILD)/text.o
 
 .PHONY: all run debug-stop clean
 
@@ -50,11 +50,15 @@ $(BUILD)/printf.o: lib/printf.c lib/printf.h
 	@mkdir -p $(BUILD)
 	$(CC) $(KCFLAGS) -c $< -o $@
 
-$(BUILD)/pmm.o: mm/pmm.c mm/pmm.h boot/bootinfo.h
+$(BUILD)/bootmem.o: mm/bootmem.c mm/bootmem.h boot/bootinfo.h
 	@mkdir -p $(BUILD)
 	$(CC) $(KCFLAGS) -c $< -o $@
 
-$(BUILD)/paging.o: mm/paging.c mm/paging.h mm/pmm.h mm/vm.h boot/bootinfo.h
+$(BUILD)/pmm.o: mm/pmm.c mm/pmm.h mm/bootmem.h boot/bootinfo.h
+	@mkdir -p $(BUILD)
+	$(CC) $(KCFLAGS) -c $< -o $@
+
+$(BUILD)/paging.o: mm/paging.c mm/paging.h mm/bootmem.h mm/vm.h boot/bootinfo.h
 	@mkdir -p $(BUILD)
 	$(CC) $(KCFLAGS) -c $< -o $@
 

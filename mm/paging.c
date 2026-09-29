@@ -1,4 +1,5 @@
 #include "paging.h"
+#include "bootmem.h"
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -12,13 +13,14 @@
 #define PAGE_4K UINT64_C(0x1000)
 #define PAGE_2M UINT64_C(0x200000)
 #define PAGE_1G UINT64_C(0x40000000)
+#define PAGE_512G UINT64_C(0x8000000000)
 
 #define CR4_LA57 (UINT64_C(1) << 12)
 
 typedef struct {
-    BOOT_MEMORY_DESCRIPTOR *donor;
-    uint64_t donor_start;
-    uint64_t donor_pages;
+    uint64_t block_phys;
+    uint64_t block_pages;
+    uint64_t used_pages;
 
     uint64_t *pml4;
     uint64_t root_phys;
@@ -26,6 +28,12 @@ typedef struct {
     bool allow_1g;
     paging_info_t info;
 } paging_builder_t;
+
+typedef struct {
+    uint64_t pdpt;
+    uint64_t pd;
+    uint64_t pt;
+} table_count_t;
 
 static void zero_page(void *ptr)
 {
@@ -77,50 +85,142 @@ static bool cpu_has_1g_pages(void)
     return (edx & (UINT32_C(1) << 26)) != 0;
 }
 
-static BOOT_MEMORY_DESCRIPTOR *find_donor(BOOT_INFO *bi)
+static bool descriptor_bytes(const BOOT_MEMORY_DESCRIPTOR *d,
+                             uint64_t *out_bytes)
 {
-    BOOT_MEMORY_DESCRIPTOR *best = NULL;
-    uint8_t *p = (uint8_t *)(uintptr_t)bi->mmap_addr;
+    if (d->number_of_pages == 0 ||
+        d->number_of_pages > UINT64_MAX / PAGE_4K)
+        return false;
 
-    for (uint32_t i = 0; i < bi->mmap_desc_count;
-         ++i, p += bi->mmap_desc_size) {
-        BOOT_MEMORY_DESCRIPTOR *d =
-            (BOOT_MEMORY_DESCRIPTOR *)(void *)p;
+    uint64_t bytes = d->number_of_pages * PAGE_4K;
+    if (d->physical_start > UINT64_MAX - bytes)
+        return false;
 
-        if (d->type != MEM_CONVENTIONAL || d->number_of_pages == 0)
-            continue;
-
-        if (best == NULL || d->number_of_pages > best->number_of_pages)
-            best = d;
-    }
-
-    return best;
+    *out_bytes = bytes;
+    return true;
 }
 
 /*
- * 页表 bootstrap allocator：
- * 从同一个最大 Conventional descriptor 的高地址端向下拿 4K page。
- * descriptor 立即缩短，因此后面的 pmm_init() 永远看不到这些页。
- *
- * donor 的原始范围另存一份；建图时仍映射原始完整范围，所以页表页本身
- * 也包含在 identity/direct map 中。
+ * 对单个连续 range 按实际 1G->2M->4K 策略做 dry-run。
+ * 这里只统计这个 range 独立需要的 lower-level table 数，因此不同
+ * descriptor 落在同一个 table 时会略微重复计数；这是安全上界。
  */
+static bool estimate_range(uint64_t va, uint64_t pa, uint64_t bytes,
+                           bool allow_1g, table_count_t *out)
+{
+    uint64_t last_i4 = UINT64_MAX;
+    uint64_t last_pd = UINT64_MAX;
+    uint64_t last_pt = UINT64_MAX;
+
+    while (bytes != 0) {
+        uint64_t i4 = va >> 39;
+        if (i4 != last_i4) {
+            ++out->pdpt;
+            last_i4 = i4;
+        }
+
+        if (allow_1g &&
+            (va & (PAGE_1G - 1)) == 0 &&
+            (pa & (PAGE_1G - 1)) == 0 &&
+            bytes >= PAGE_1G) {
+            va += PAGE_1G;
+            pa += PAGE_1G;
+            bytes -= PAGE_1G;
+            continue;
+        }
+
+        uint64_t pd_key = va >> 30;
+        if (pd_key != last_pd) {
+            ++out->pd;
+            last_pd = pd_key;
+        }
+
+        if ((va & (PAGE_2M - 1)) == 0 &&
+            (pa & (PAGE_2M - 1)) == 0 &&
+            bytes >= PAGE_2M) {
+            va += PAGE_2M;
+            pa += PAGE_2M;
+            bytes -= PAGE_2M;
+            continue;
+        }
+
+        uint64_t pt_key = va >> 21;
+        if (pt_key != last_pt) {
+            ++out->pt;
+            last_pt = pt_key;
+        }
+
+        va += PAGE_4K;
+        pa += PAGE_4K;
+        bytes -= PAGE_4K;
+    }
+
+    return true;
+}
+
+static bool estimate_tables(const BOOT_INFO *bi, bool allow_1g,
+                            uint64_t *out_pages)
+{
+    table_count_t count = {0};
+    const uint8_t *p = (const uint8_t *)(uintptr_t)bi->mmap_addr;
+
+    for (uint32_t i = 0; i < bi->mmap_desc_count;
+         ++i, p += bi->mmap_desc_size) {
+        const BOOT_MEMORY_DESCRIPTOR *d =
+            (const BOOT_MEMORY_DESCRIPTOR *)(const void *)p;
+
+        if (!usable_ram_type(d->type) || d->number_of_pages == 0)
+            continue;
+
+        uint64_t bytes;
+        if (!descriptor_bytes(d, &bytes))
+            return false;
+
+        /*
+         * identity 和 direct-map 的 base 都保持 512G/1G/2M 对齐关系，
+         * 所以 lower-level table 形状相同。分别统计两套映射。
+         */
+        if (!estimate_range(d->physical_start,
+                            d->physical_start,
+                            bytes, allow_1g, &count))
+            return false;
+
+        if (d->physical_start >= VM_KERNEL_SIZE ||
+            bytes > VM_KERNEL_SIZE - d->physical_start)
+            return false;
+
+        if (!estimate_range(VM_DIRECT_MAP_BASE + d->physical_start,
+                            d->physical_start,
+                            bytes, allow_1g, &count))
+            return false;
+    }
+
+    /*
+     * +1 PML4 root。
+     * boot_alloc 会在一个 Conventional range 尾部切出连续页表块，
+     * 这可能把原本可用的大页边界拆开；给 identity/direct 各预留
+     * 一组 PD/PT 以及少量结构余量。
+     */
+    uint64_t total = UINT64_C(1) + count.pdpt + count.pd + count.pt;
+    if (total > UINT64_MAX - 16)
+        return false;
+
+    *out_pages = total + 16;
+    return true;
+}
+
 static bool alloc_table(paging_builder_t *b,
                         uint64_t **out_table, uint64_t *out_phys)
 {
-    BOOT_MEMORY_DESCRIPTOR *d = b->donor;
-
-    if (d == NULL || d->number_of_pages == 0)
+    if (b->used_pages >= b->block_pages)
         return false;
 
-    --d->number_of_pages;
-    uint64_t phys =
-        d->physical_start + d->number_of_pages * PAGE_4K;
+    uint64_t phys = b->block_phys + b->used_pages * PAGE_4K;
+    ++b->used_pages;
 
     uint64_t *table = (uint64_t *)(uintptr_t)phys;
     zero_page(table);
 
-    ++b->info.table_pages;
     *out_table = table;
     *out_phys = phys;
     return true;
@@ -217,11 +317,6 @@ static bool map_1g(paging_builder_t *b, uint64_t va, uint64_t pa)
 static bool map_range(paging_builder_t *b,
                       uint64_t va, uint64_t pa, uint64_t bytes)
 {
-    if ((va & (PAGE_4K - 1)) != 0 ||
-        (pa & (PAGE_4K - 1)) != 0 ||
-        (bytes & (PAGE_4K - 1)) != 0)
-        return false;
-
     while (bytes != 0) {
         if (b->allow_1g &&
             (va & (PAGE_1G - 1)) == 0 &&
@@ -229,7 +324,6 @@ static bool map_range(paging_builder_t *b,
             bytes >= PAGE_1G) {
             if (!map_1g(b, va, pa))
                 return false;
-
             va += PAGE_1G;
             pa += PAGE_1G;
             bytes -= PAGE_1G;
@@ -241,7 +335,6 @@ static bool map_range(paging_builder_t *b,
             bytes >= PAGE_2M) {
             if (!map_2m(b, va, pa))
                 return false;
-
             va += PAGE_2M;
             pa += PAGE_2M;
             bytes -= PAGE_2M;
@@ -259,32 +352,6 @@ static bool map_range(paging_builder_t *b,
     return true;
 }
 
-static bool descriptor_bytes(uint64_t pages, uint64_t *out_bytes)
-{
-    if (pages == 0 || pages > UINT64_MAX / PAGE_4K)
-        return false;
-
-    *out_bytes = pages * PAGE_4K;
-    return true;
-}
-
-static bool original_descriptor_range(const paging_builder_t *b,
-                                      const BOOT_MEMORY_DESCRIPTOR *d,
-                                      uint64_t *out_start,
-                                      uint64_t *out_bytes)
-{
-    uint64_t pages = d->number_of_pages;
-
-    if (d == b->donor)
-        pages = b->donor_pages;
-
-    if (!descriptor_bytes(pages, out_bytes))
-        return false;
-
-    *out_start = d->physical_start;
-    return *out_start <= UINT64_MAX - *out_bytes;
-}
-
 static bool map_all_usable(paging_builder_t *b,
                            const BOOT_INFO *bi, bool direct)
 {
@@ -295,33 +362,46 @@ static bool map_all_usable(paging_builder_t *b,
         const BOOT_MEMORY_DESCRIPTOR *d =
             (const BOOT_MEMORY_DESCRIPTOR *)(const void *)p;
 
-        if (!usable_ram_type(d->type))
+        if (!usable_ram_type(d->type) || d->number_of_pages == 0)
             continue;
 
-        uint64_t start;
         uint64_t bytes;
-        if (!original_descriptor_range(b, d, &start, &bytes))
+        if (!descriptor_bytes(d, &bytes))
             return false;
 
-        uint64_t va = start;
-
+        uint64_t va = d->physical_start;
         if (direct) {
-            if (start >= VM_KERNEL_SIZE ||
-                bytes > VM_KERNEL_SIZE - start)
+            if (d->physical_start >= VM_KERNEL_SIZE ||
+                bytes > VM_KERNEL_SIZE - d->physical_start)
                 return false;
-
-            va = VM_DIRECT_MAP_BASE + start;
+            va = VM_DIRECT_MAP_BASE + d->physical_start;
         }
 
-        if (!map_range(b, va, start, bytes))
+        if (!map_range(b, va, d->physical_start, bytes))
             return false;
     }
 
     return true;
 }
 
-static bool find_direct_span(const paging_builder_t *b,
-                             const BOOT_INFO *bi,
+static bool map_bootstrap_block(paging_builder_t *b, bool direct)
+{
+    uint64_t bytes = b->block_pages * PAGE_4K;
+    uint64_t va = b->block_phys;
+
+    if (direct) {
+        if (b->block_phys >= VM_KERNEL_SIZE ||
+            bytes > VM_KERNEL_SIZE - b->block_phys)
+            return false;
+        va = VM_DIRECT_MAP_BASE + b->block_phys;
+    }
+
+    return map_range(b, va, b->block_phys, bytes);
+}
+
+static bool find_direct_span(const BOOT_INFO *bi,
+                             uint64_t bootstrap_phys,
+                             uint64_t bootstrap_pages,
                              uint64_t *out_span)
 {
     uint64_t maximum = 0;
@@ -332,15 +412,23 @@ static bool find_direct_span(const paging_builder_t *b,
         const BOOT_MEMORY_DESCRIPTOR *d =
             (const BOOT_MEMORY_DESCRIPTOR *)(const void *)p;
 
-        if (!usable_ram_type(d->type))
+        if (!usable_ram_type(d->type) || d->number_of_pages == 0)
             continue;
 
-        uint64_t start;
         uint64_t bytes;
-        if (!original_descriptor_range(b, d, &start, &bytes))
+        if (!descriptor_bytes(d, &bytes))
             return false;
 
-        uint64_t end = start + bytes;
+        uint64_t end = d->physical_start + bytes;
+        if (end > maximum)
+            maximum = end;
+    }
+
+    if (bootstrap_pages != 0) {
+        uint64_t bytes = bootstrap_pages * PAGE_4K;
+        if (bootstrap_phys > UINT64_MAX - bytes)
+            return false;
+        uint64_t end = bootstrap_phys + bytes;
         if (end > maximum)
             maximum = end;
     }
@@ -362,46 +450,49 @@ int paging_early_takeover(BOOT_INFO *bi, paging_info_t *out_info)
             bi->mmap_size / bi->mmap_desc_size)
         return -1;
 
-    /* 当前先固定 4-level paging，不在 long mode 中途切 LA57。 */
     if ((read_cr4() & CR4_LA57) != 0)
         return -2;
 
-    paging_builder_t b = {0};
+    bool allow_1g = cpu_has_1g_pages();
 
-    b.donor = find_donor(bi);
-    if (b.donor == NULL)
+    uint64_t reserve_pages;
+    if (!estimate_tables(bi, allow_1g, &reserve_pages))
         return -3;
 
-    b.donor_start = b.donor->physical_start;
-    b.donor_pages = b.donor->number_of_pages;
-    b.allow_1g = cpu_has_1g_pages();
-    b.info.has_1g_pages = b.allow_1g ? 1U : 0U;
-
-    if (!find_direct_span(&b, bi, &b.info.direct_span))
+    uint64_t block_phys;
+    if (!boot_alloc_pages(bi, reserve_pages, &block_phys))
         return -4;
 
-    if (!alloc_table(&b, &b.pml4, &b.root_phys))
+    paging_builder_t b = {0};
+    b.block_phys = block_phys;
+    b.block_pages = reserve_pages;
+    b.allow_1g = allow_1g;
+    b.info.has_1g_pages = allow_1g ? 1U : 0U;
+
+    if (!find_direct_span(bi, block_phys, reserve_pages,
+                          &b.info.direct_span))
         return -5;
+
+    if (!alloc_table(&b, &b.pml4, &b.root_phys))
+        return -6;
 
     b.info.root_phys = b.root_phys;
 
     /*
-     * 当前 RIP/RSP/BOOT_INFO 仍是低地址，所以先建立所有 usable RAM 的
-     * identity mapping。之后再建立相同 RAM 的 high-half direct map。
-     *
-     * donor 使用分配前的原始范围，因此刚切出的所有页表页本身也在两套
-     * mapping 中。
+     * boot_alloc_pages 已从 Conventional memory map 中切走整块页表内存。
+     * 先映射剩余全部 usable RAM，再显式映射 bootstrap page-table block，
+     * 因而切 CR3 后页表自身也仍可通过 identity/direct map 访问。
      */
-    if (!map_all_usable(&b, bi, false))
-        return -6;
-
-    if (!map_all_usable(&b, bi, true))
+    if (!map_all_usable(&b, bi, false) ||
+        !map_bootstrap_block(&b, false))
         return -7;
 
-    /*
-     * 到这里所有可用 RAM（包括新页表页）都已经由自己的页表覆盖。
-     * 切 CR3 后不再依赖 UEFI page tables。
-     */
+    if (!map_all_usable(&b, bi, true) ||
+        !map_bootstrap_block(&b, true))
+        return -8;
+
+    b.info.table_pages = b.used_pages;
+
     write_cr3(b.root_phys);
 
     *out_info = b.info;

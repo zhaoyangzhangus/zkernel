@@ -19,8 +19,9 @@ typedef struct {
 /*
  * kernel_main() 的第一阶段。
  *
- * 直接从一个 Conventional descriptor 的高端切出页表页，在 PMM 初始化
- * 之前建立并切换到自己的 4-level page tables。
+ * 先统计所有 usable RAM 在 1G->2M->4K 策略下需要的页表结构，
+ * 再通过 boot_alloc_pages() 一次分配连续 bootstrap page-table block，
+ * 在 PMM 初始化之前建立并切换到自己的 4-level page tables。
  *
  * 所有最终可归内核使用的 RAM：
  *   LoaderCode/Data
