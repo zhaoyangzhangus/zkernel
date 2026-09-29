@@ -29,10 +29,6 @@ typedef struct {
 int pmm_init(BOOT_INFO *bi);
 pmm_cpu_t *pmm_boot_cpu(void);
 
-/* pmm_init() 从 Conventional 中切出的 bootstrap metadata 物理范围。 */
-uint64_t pmm_metadata_phys(void);
-uint64_t pmm_metadata_size(void);
-
 bool pmm_alloc4k(pmm_cpu_t *cpu, pmm_frame_t *out_frame);
 bool pmm_free4k(pmm_cpu_t *cpu, pmm_frame_t frame);
 

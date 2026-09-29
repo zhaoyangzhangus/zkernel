@@ -47,6 +47,26 @@ void kernel_main(BOOT_INFO *bi)
            bi->mmap_desc_count,
            (unsigned long)(usable_pages(bi) / 256));
 
+    /*
+     * 第一件事先接管 CR3，并把所有可用 RAM 同时建立 identity/direct map。
+     * 后面的 PMM/VM 初始化都运行在内核自己的页表上。
+     */
+    paging_info_t paging;
+    int status = paging_early_takeover(bi, &paging);
+    if (status != 0) {
+        printf("[kernel] early paging takeover failed: %d\n", status);
+        halt();
+    }
+
+    printf("[kernel] paging cr3=%p direct=%lu MiB tables=%lu "
+           "1G=%lu 2M=%lu 4K=%lu\n",
+           (void *)(uintptr_t)paging.root_phys,
+           (unsigned long)(paging.direct_span >> 20),
+           (unsigned long)paging.table_pages,
+           (unsigned long)paging.leaf_1g,
+           (unsigned long)paging.leaf_2m,
+           (unsigned long)paging.leaf_4k);
+
     if (fb_text_supported(bi)) {
         fb_draw_text_a8(bi, 16, 16,
                         "zkernel 12x24 A8\n"
@@ -55,7 +75,7 @@ void kernel_main(BOOT_INFO *bi)
                         0x00F2F5F7U, 0x00081018U);
     }
 
-    int status = pmm_init(bi);
+    status = pmm_init(bi);
     if (status != 0) {
         printf("[kernel] pmm init failed: %d\n", status);
         halt();
@@ -68,19 +88,19 @@ void kernel_main(BOOT_INFO *bi)
         halt();
     }
 
-    paging_info_t paging;
-    status = paging_takeover(bi, &kernel_vm, &paging);
-    if (status != 0) {
-        printf("[kernel] paging takeover failed: %d\n", status);
+    /*
+     * direct-map VA window 由 VM 统一登记。窗口中的物理 hole 仍然没有 PTE，
+     * 但这些 VA 不再允许其它用途分配。
+     */
+    if (!vm_reserve(&kernel_vm,
+                    VM_DIRECT_MAP_BASE,
+                    paging.direct_span,
+                    VM_REGION_DIRECT_MAP,
+                    VM_ATTR_READ | VM_ATTR_WRITE |
+                    VM_ATTR_PINNED | VM_ATTR_CACHE_WB)) {
+        printf("[kernel] direct-map VM reserve failed\n");
         halt();
     }
-
-    printf("[kernel] paging cr3=%p direct=%lu MiB 1G=%lu 2M=%lu 4K=%lu\n",
-           (void *)(uintptr_t)paging.root_phys,
-           (unsigned long)(paging.direct_span >> 20),
-           (unsigned long)paging.leaf_1g,
-           (unsigned long)paging.leaf_2m,
-           (unsigned long)paging.leaf_4k);
 
     vaddr_t va4k;
     vaddr_t va2m;

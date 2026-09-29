@@ -1,7 +1,7 @@
 # zkernel
 
-最小 x86_64 UEFI 内核实验项目。内核已经开始接管页表：启动早期仍借用 UEFI
-identity mapping 完成 PMM 初始化，随后建立自己的 4-level page tables 并切换 CR3。
+最小 x86_64 UEFI 内核实验项目。kernel entry 后首先建立自己的 4-level page
+tables 并切换 CR3；PMM/VM 初始化都发生在内核自有页表之后。
 
 ## 构建
 
@@ -22,28 +22,31 @@ make clean
 
 `mm/paging.c` 建立内核自己的 4-level page tables，并执行第一次 CR3 takeover。
 
-当前第一阶段布局：
+kernel entry 后立即调用 `paging_early_takeover()`，在 PMM 初始化之前完成：
 
 ```text
-bootstrap identity map
+all usable RAM
   LoaderCode/Data
   BootServicesCode/Data
   Conventional
-  PMM bootstrap metadata
-
-kernel direct map
-  VA = VM_DIRECT_MAP_BASE + PA
-  同样只映射普通 RAM
-  MMIO / framebuffer 不进入 WB direct map
+        │
+        ├─ identity:   VA = PA
+        └─ direct map: VA = VM_DIRECT_MAP_BASE + PA
 ```
 
-每个 RAM range 都按 `1G -> 2M -> 4K` 贪心映射；CPU 不支持 1G page 时自动退化到
-`2M -> 4K`。direct-map window 从高半区起点开始，VM 会先把
-`[VM_DIRECT_MAP_BASE, VM_DIRECT_MAP_BASE + highest_ram_pa)` 登记为
-`VM_REGION_DIRECT_MAP`；其中物理 hole 保持 unmapped。
+页表页从最大的 Conventional descriptor 高端直接切出，descriptor 立即缩短，
+因此之后的 `pmm_init()` 不会把这些页加入空闲池。建图仍使用该 descriptor
+分配前的完整范围，所以页表页自身也同时存在于 identity/direct map。
 
-当前 identity map 是迁移期必需的：kernel ELF、UEFI 遗留 stack 和 PMM 内部指针
-仍是低地址。等这些对象全部切到 high-half/direct-map 指针后再删除 identity map。
+每个 RAM range 都按 `1G -> 2M -> 4K` 贪心映射；CPU 不支持 1G page 时自动退化到
+`2M -> 4K`。MMIO、framebuffer、Runtime Services 不作为普通 WB RAM direct-map。
+
+PMM 初始化之后，VM 再把
+`[VM_DIRECT_MAP_BASE, VM_DIRECT_MAP_BASE + highest_usable_pa)`
+登记为 `VM_REGION_DIRECT_MAP`；其中物理 hole 保持 unmapped，但对应 VA 被保留。
+
+identity map 目前只作为启动迁移层保留；等 kernel/stack/BOOT_INFO/PMM pointer
+全部切到 high-half direct-map 地址后再删除。
 
 ## VM
 
