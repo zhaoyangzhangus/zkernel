@@ -1,7 +1,6 @@
 #include <stdint.h>
 
 #include "../boot/bootinfo.h"
-#include "../graphics/text.h"
 #include "../lib/printf.h"
 #include "../mm/pmm.h"
 #include "../mm/paging.h"
@@ -39,17 +38,9 @@ void kernel_main(BOOT_INFO *bi)
         halt();
     }
 
-    printf("[kernel] entry=%p image=%p+%lu\n",
-           (void *)(uintptr_t)bi->kernel_entry,
-           (void *)(uintptr_t)bi->kernel_base,
-           (unsigned long)bi->kernel_size);
-    printf("[kernel] mmap=%u usable=%lu MiB\n",
-           bi->mmap_desc_count,
-           (unsigned long)(usable_pages(bi) / 256));
-
     /*
-     * 第一件事先接管 CR3，并把所有可用 RAM 同时建立 identity/direct map。
-     * 后面的 PMM/VM 初始化都运行在内核自己的页表上。
+     * BOOT_INFO 基本校验后立即接管 CR3。
+     * framebuffer/MMIO 尚未建立专用映射，接管后不能直接访问 fb_base。
      */
     paging_info_t paging;
     int status = paging_early_takeover(bi, &paging);
@@ -58,6 +49,13 @@ void kernel_main(BOOT_INFO *bi)
         halt();
     }
 
+    printf("[kernel] entry=%p image=%p+%lu\n",
+           (void *)(uintptr_t)bi->kernel_entry,
+           (void *)(uintptr_t)bi->kernel_base,
+           (unsigned long)bi->kernel_size);
+    printf("[kernel] mmap=%u usable=%lu MiB\n",
+           bi->mmap_desc_count,
+           (unsigned long)(usable_pages(bi) / 256));
     printf("[kernel] paging cr3=%p direct=%lu MiB tables=%lu "
            "1G=%lu 2M=%lu 4K=%lu\n",
            (void *)(uintptr_t)paging.root_phys,
@@ -66,14 +64,6 @@ void kernel_main(BOOT_INFO *bi)
            (unsigned long)paging.leaf_1g,
            (unsigned long)paging.leaf_2m,
            (unsigned long)paging.leaf_4k);
-
-    if (fb_text_supported(bi)) {
-        fb_draw_text_a8(bi, 16, 16,
-                        "zkernel 12x24 A8\n"
-                        "ABCDEFGHIJKLMNOPQRSTUVWXYZ\n"
-                        "abcdefghijklmnopqrstuvwxyz 0123456789",
-                        0x00F2F5F7U, 0x00081018U);
-    }
 
     status = pmm_init(bi);
     if (status != 0) {
