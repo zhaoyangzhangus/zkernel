@@ -31,12 +31,78 @@ static uint64_t usable_pages(const BOOT_INFO *bi)
     return pages;
 }
 
+static const char *mem_type_name(uint32_t type)
+{
+    switch (type) {
+    case MEM_RESERVED:              return "Reserved";
+    case MEM_LOADER_CODE:           return "LoaderCode";
+    case MEM_LOADER_DATA:           return "LoaderData";
+    case MEM_BOOT_SERVICES_CODE:    return "BootServicesCode";
+    case MEM_BOOT_SERVICES_DATA:    return "BootServicesData";
+    case MEM_RUNTIME_SERVICES_CODE: return "RuntimeServicesCode";
+    case MEM_RUNTIME_SERVICES_DATA: return "RuntimeServicesData";
+    case MEM_CONVENTIONAL:          return "Conventional";
+    case MEM_UNUSABLE:              return "Unusable";
+    case MEM_ACPI_RECLAIM:          return "ACPIReclaim";
+    case MEM_ACPI_NVS:              return "ACPINVS";
+    case MEM_MMIO:                  return "MMIO";
+    case MEM_MMIO_PORT_SPACE:       return "MMIOPort";
+    case MEM_PAL_CODE:              return "PALCode";
+    case MEM_PERSISTENT:            return "Persistent";
+    default:                        return "Unknown";
+    }
+}
+
+static void dump_uefi_memmap(const BOOT_INFO *bi)
+{
+    const uint8_t *p = (const uint8_t *)(uintptr_t)bi->mmap_addr;
+
+    printf("[uefi-mmap] count=%u desc_size=%lu map_bytes=%lu\n",
+           bi->mmap_desc_count,
+           (unsigned long)bi->mmap_desc_size,
+           (unsigned long)bi->mmap_size);
+
+    for (uint32_t i = 0; i < bi->mmap_desc_count;
+         ++i, p += bi->mmap_desc_size) {
+        const BOOT_MEMORY_DESCRIPTOR *d =
+            (const BOOT_MEMORY_DESCRIPTOR *)(const void *)p;
+
+        uint64_t bytes = 0;
+        uint64_t end = d->physical_start;
+
+        if (d->number_of_pages <= UINT64_MAX / UINT64_C(0x1000)) {
+            bytes = d->number_of_pages * UINT64_C(0x1000);
+            if (d->physical_start <= UINT64_MAX - bytes)
+                end = d->physical_start + bytes;
+        }
+
+        printf("[uefi-mmap] %03u type=%2u %-19s "
+               "phys=%p..%p virt=%p pages=%lu bytes=%lu "
+               "attr=0x%016llx\n",
+               i,
+               d->type,
+               mem_type_name(d->type),
+               (void *)(uintptr_t)d->physical_start,
+               (void *)(uintptr_t)end,
+               (void *)(uintptr_t)d->virtual_start,
+               (unsigned long)d->number_of_pages,
+               (unsigned long)bytes,
+               (unsigned long long)d->attribute);
+    }
+}
+
 void kernel_main(BOOT_INFO *bi)
 {
     if (bi == 0 || bi->magic != BOOTINFO_MAGIC) {
         printf("[kernel] bad bootinfo\n");
         halt();
     }
+
+    /*
+     * 这是 ExitBootServices 后内核收到的最终 UEFI memory map。
+     * 必须在 paging_early_takeover()/boot_alloc_pages() 修改 descriptor 前打印。
+     */
+    dump_uefi_memmap(bi);
 
     /*
      * BOOT_INFO 基本校验后立即接管 CR3。

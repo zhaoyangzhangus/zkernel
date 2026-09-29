@@ -1,7 +1,8 @@
 # 当前状态
 
 - 构建：仅 `build/debug/`；F5 单后台 task，GDB 连接后自动 continue。
-- Early paging：`kernel_main()` 进入后第一阶段即 `paging_early_takeover()`；在 PMM/VM 初始化之前切换到自有 CR3。
+- UEFI map debug：在任何 `boot_alloc_pages()` 修改 descriptor 前，完整打印 ExitBootServices 后传入内核的原始 memory map。
+- Early paging：打印原始 map 后立即 `paging_early_takeover()`；在 PMM/VM 初始化之前切换到自有 CR3。
 - 全部 usable RAM：LoaderCode/Data、BootServicesCode/Data、Conventional 全部同时建立 identity 与 high-half direct map。
 - Page-table bootstrap：先统计页表需求，再用共享 `boot_alloc_pages()` 一次分配连续 bootstrap block；页表从 block 高端向下 bump，未使用前缀在建表后归还 Conventional，只保留实际使用页。
 - Mapping policy：每段 RAM 优先 1G，其次 2M，最后 4K；1G 支持由 CPUID 检测。
