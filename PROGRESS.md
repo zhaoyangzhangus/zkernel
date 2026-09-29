@@ -13,3 +13,6 @@
 - VM used-space：独立 RB-tree，保存 allocated region 的 start/size/type/attrs。
 - kernel VA：完整高 canonical half 128 TiB，由 VM 统一管理。
 - 下一步：把 kernel/stack/BOOT_INFO/PMM 内部 pointer 切换到 high-half direct map，再删除 bootstrap identity map。
+
+- Page fault v1：建立最小 IDT 的 #PF gate；VM_ALLOC 的 LAZY 区域在首次 not-present fault 时通过 vm_query() 校验已分配范围，PMM 分配 4K demand-zero frame，再写当前页表并 iret 重试。
+- Runtime page-table update：PML4[511] 作为 512 GiB recursive mapping window；缺失的 PDPT/PD/PT 可在 #PF 路径中从 PMM 4K pool 动态补齐。当前只生成 PRESENT/WRITE/USER，NX/PAT 尚未接入。

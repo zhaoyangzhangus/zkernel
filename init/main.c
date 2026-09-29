@@ -2,6 +2,8 @@
 
 #include "../boot/bootinfo.h"
 #include "../lib/printf.h"
+#include "../arch/x86_64/idt.h"
+#include "../mm/page_fault.h"
 #include "../mm/pmm.h"
 #include "../mm/paging.h"
 #include "../mm/vm.h"
@@ -159,6 +161,19 @@ void kernel_main(BOOT_INFO *bi)
         halt();
     }
 
+    /*
+     * PML4[511] 是 paging 的 recursive mapping window，不能交给普通
+     * kernel VA allocator。
+     */
+    if (!vm_reserve(&kernel_vm,
+                    PAGING_RECURSIVE_BASE,
+                    PAGING_RECURSIVE_SIZE,
+                    VM_REGION_RESERVED,
+                    VM_ATTR_PINNED)) {
+        printf("[kernel] recursive paging VM reserve failed\n");
+        halt();
+    }
+
     vaddr_t va4k;
     vaddr_t va2m;
 
@@ -214,6 +229,33 @@ void kernel_main(BOOT_INFO *bi)
 
     pmm_free4k(pmm_boot_cpu(), pte);
     pmm_free2m(pde);
+
+    /*
+     * 第一版 demand paging 自测：
+     * VM 只登记一页 LAZY heap，不预先写 PTE。第一次 store 触发 #PF，
+     * handler 查询 used-region，分配 4K frame 并填入当前页表后 iret，
+     * 原 store 自动重试。
+     */
+    page_fault_bind_space(&kernel_vm);
+    idt_init();
+
+    vaddr_t lazy_va;
+    if (!vm_alloc(&kernel_vm, VM_PAGE_SIZE, VM_PAGE_SIZE,
+                  VM_REGION_HEAP,
+                  VM_ATTR_READ | VM_ATTR_WRITE |
+                  VM_ATTR_LAZY | VM_ATTR_CACHE_WB,
+                  &lazy_va)) {
+        printf("[kernel] lazy VM alloc failed\n");
+        halt();
+    }
+
+    volatile uint64_t *lazy =
+        (volatile uint64_t *)(uintptr_t)lazy_va;
+    *lazy = UINT64_C(0x1122334455667788);
+
+    printf("[kernel] page fault mapped va=%p value=0x%llx\n",
+           (void *)(uintptr_t)lazy_va,
+           (unsigned long long)*lazy);
 
     halt();
 }

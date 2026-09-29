@@ -52,6 +52,20 @@ PMM 初始化之后，VM 再把
 identity map 目前只作为启动迁移层保留；等 kernel/stack/BOOT_INFO/PMM pointer
 全部切到 high-half direct-map 地址后再删除。
 
+PML4[511] 保留为 recursive page-table window（512 GiB）。接管 CR3 后，
+paging 可以不依赖页表页本身的 identity/direct 映射而遍历当前 PML4/PDPT/PD/PT，
+并为运行时缺失的中间页表从 PMM 4K pool 补页。
+
+## Page fault
+
+第一版 #PF 只处理 VM 已登记且带 `VM_ATTR_LAZY` 的匿名 RAM region。
+not-present fault 时读取 CR2，用 `vm_query()` 判断 fault VA 是否属于已分配 region，
+检查 RW/USER 等基本权限后，从 PMM 分配一个 4K frame、清零并填入当前页表。
+handler 返回后由 `iretq` 重试原指令。
+
+MMIO/framebuffer/DMA/direct-map/reserved 不走 demand-zero；protection fault、
+reserved-bit fault 也不会被本处理器吞掉。NX/PAT 和 mapped-page 回收后续实现。
+
 ## VM
 
 VM 管理整个 kernel 虚拟地址空间，同时管理 free space 和 allocated region metadata。

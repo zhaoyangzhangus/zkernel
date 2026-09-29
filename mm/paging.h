@@ -6,6 +6,9 @@
 #include "../boot/bootinfo.h"
 #include "vm.h"
 
+#define PAGING_RECURSIVE_BASE UINT64_C(0xFFFFFF8000000000)
+#define PAGING_RECURSIVE_SIZE UINT64_C(0x0000008000000000) /* 512 GiB, PML4[511] */
+
 typedef struct {
     uint64_t root_phys;
     uint64_t direct_span;
@@ -36,5 +39,14 @@ typedef struct {
  * 每段优先使用 1G -> 2M -> 4K。
  */
 int paging_early_takeover(BOOT_INFO *bi, paging_info_t *out_info);
+
+/*
+ * 在当前 CR3 上安装一个 4K 映射。缺失的中间页表从 PMM 4K pool
+ * 动态分配，并通过 PML4[511] recursive mapping 修改。
+ *
+ * 当前第一版只生成 PRESENT/WRITE/USER；NX/PAT 后续补。
+ */
+bool paging_map_4k_current(pmm_cpu_t *cpu, vaddr_t va,
+                           pmm_frame_t frame, uint64_t attrs);
 
 #endif

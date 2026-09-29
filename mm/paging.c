@@ -7,6 +7,7 @@
 
 #define PTE_PRESENT UINT64_C(0x001)
 #define PTE_WRITE   UINT64_C(0x002)
+#define PTE_USER    UINT64_C(0x004)
 #define PTE_LARGE   UINT64_C(0x080)
 #define PTE_ADDR    UINT64_C(0x000FFFFFFFFFF000)
 
@@ -16,6 +17,7 @@
 #define PAGE_512G UINT64_C(0x8000000000)
 
 #define CR4_LA57 (UINT64_C(1) << 12)
+#define RECURSIVE_SLOT 511U
 
 typedef struct {
     BOOT_INFO *bi;
@@ -107,6 +109,119 @@ static bool alloc_table(paging_builder_t *b,
 
     *out_table = table;
     *out_phys = phys;
+    return true;
+}
+
+static inline uint64_t canonical48(uint64_t value)
+{
+    if ((value & (UINT64_C(1) << 47)) != 0)
+        value |= UINT64_C(0xFFFF000000000000);
+    return value;
+}
+
+static inline uint64_t recursive_address(uint32_t i4, uint32_t i3,
+                                         uint32_t i2, uint32_t i1)
+{
+    return canonical48(((uint64_t)i4 << 39) |
+                       ((uint64_t)i3 << 30) |
+                       ((uint64_t)i2 << 21) |
+                       ((uint64_t)i1 << 12));
+}
+
+static inline void invlpg(uint64_t va)
+{
+    __asm__ volatile("invlpg (%0)" :: "r"((void *)(uintptr_t)va) : "memory");
+}
+
+static bool runtime_child(pmm_cpu_t *cpu,
+                          uint64_t *parent, uint32_t index,
+                          uint64_t child_va, bool user,
+                          uint64_t **out)
+{
+    uint64_t entry = parent[index];
+
+    if ((entry & PTE_PRESENT) != 0) {
+        if ((entry & PTE_LARGE) != 0)
+            return false;
+
+        if (user && (entry & PTE_USER) == 0)
+            parent[index] = entry | PTE_USER;
+
+        *out = (uint64_t *)(uintptr_t)child_va;
+        return true;
+    }
+
+    pmm_frame_t frame;
+    if (!pmm_alloc4k(cpu, &frame))
+        return false;
+
+    /*
+     * PMM 只返回已经属于普通 RAM direct-map 的 frame，因此新页表先
+     * 通过 direct map 清零，再挂到当前页表树。
+     */
+    zero_page((void *)(uintptr_t)(VM_DIRECT_MAP_BASE + frame));
+
+    parent[index] = (frame & PTE_ADDR) |
+                    PTE_PRESENT | PTE_WRITE |
+                    (user ? PTE_USER : 0);
+
+    /*
+     * 若 CPU 曾缓存这个 recursive VA 的 not-present 结果，父项更新后
+     * 先失效它，再通过 recursive mapping 访问新页表。
+     */
+    invlpg(child_va);
+
+    *out = (uint64_t *)(uintptr_t)child_va;
+    return true;
+}
+
+bool paging_map_4k_current(pmm_cpu_t *cpu, vaddr_t va,
+                           pmm_frame_t frame, uint64_t attrs)
+{
+    if (cpu == NULL ||
+        (va & (PAGE_4K - 1)) != 0 ||
+        (frame & (PAGE_4K - 1)) != 0)
+        return false;
+
+    uint32_t i4 = (uint32_t)((va >> 39) & 0x1FFU);
+    uint32_t i3 = (uint32_t)((va >> 30) & 0x1FFU);
+    uint32_t i2 = (uint32_t)((va >> 21) & 0x1FFU);
+    uint32_t i1 = (uint32_t)((va >> 12) & 0x1FFU);
+    bool user = (attrs & VM_ATTR_USER) != 0;
+
+    uint64_t pml4_va =
+        recursive_address(RECURSIVE_SLOT, RECURSIVE_SLOT,
+                          RECURSIVE_SLOT, RECURSIVE_SLOT);
+    uint64_t pdpt_va =
+        recursive_address(RECURSIVE_SLOT, RECURSIVE_SLOT,
+                          RECURSIVE_SLOT, i4);
+    uint64_t pd_va =
+        recursive_address(RECURSIVE_SLOT, RECURSIVE_SLOT,
+                          i4, i3);
+    uint64_t pt_va =
+        recursive_address(RECURSIVE_SLOT, i4, i3, i2);
+
+    uint64_t *pml4 = (uint64_t *)(uintptr_t)pml4_va;
+    uint64_t *pdpt;
+    uint64_t *pd;
+    uint64_t *pt;
+
+    if (!runtime_child(cpu, pml4, i4, pdpt_va, user, &pdpt) ||
+        !runtime_child(cpu, pdpt, i3, pd_va, user, &pd) ||
+        !runtime_child(cpu, pd, i2, pt_va, user, &pt))
+        return false;
+
+    if ((pt[i1] & PTE_PRESENT) != 0)
+        return false;
+
+    uint64_t flags = PTE_PRESENT;
+    if ((attrs & VM_ATTR_WRITE) != 0)
+        flags |= PTE_WRITE;
+    if (user)
+        flags |= PTE_USER;
+
+    pt[i1] = (frame & PTE_ADDR) | flags;
+    invlpg(va);
     return true;
 }
 
@@ -338,7 +453,8 @@ static bool find_direct_span(const BOOT_INFO *bi,
             maximum = end;
     }
 
-    if (maximum == 0 || maximum > VM_KERNEL_SIZE)
+    if (maximum == 0 ||
+        maximum > VM_KERNEL_SIZE - PAGING_RECURSIVE_SIZE)
         return false;
 
     *out_span = maximum;
@@ -381,6 +497,13 @@ int paging_early_takeover(BOOT_INFO *bi, paging_info_t *out_info)
         return -4;
 
     b.info.root_phys = b.root_phys;
+
+    /*
+     * PML4[511] 指回 PML4 自身，供接管 CR3 后动态遍历/修改页表。
+     * 该 512 GiB VA slot 会在 VM 初始化时永久保留。
+     */
+    b.pml4[RECURSIVE_SLOT] =
+        (b.root_phys & PTE_ADDR) | PTE_PRESENT | PTE_WRITE;
 
     if (!map_all_usable(&b, bi, false))
         return -5;
