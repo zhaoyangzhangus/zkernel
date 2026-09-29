@@ -2,12 +2,11 @@
  * printf.c —— 内核格式化输出
  *
  * 实现 printf 家族的一个子集，不依赖任何库：
- *   printf / vprintf / putchar / puts    → COM1 串口
+ *   printf / vprintf / putchar / puts    → QEMU debugcon (I/O port 0xE9)
  *   snprintf / vsnprintf                 → 缓冲区
  *   kvprintf                             → 核心，把字符交给任意回调
  *
- * 思路：格式化过程完全不关心最终输出到哪里，只调用 putc_fn 逐字符发出；
- * 于是串口输出和写缓冲区可以共用同一套代码。
+ * QEMU 通过 -debugcon stdio 把 0xE9 的输出直接显示在宿主终端。
  *
  * 与 C 标准的差异（都是内核里更实用的做法）：
  *   - %p 固定输出 16 位十六进制（0x0000000000001234），不是最短表示
@@ -15,8 +14,6 @@
  *   - 不支持 %f / %n
  */
 #include "printf.h"
-#include "../drivers/serial.h"
-
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -352,17 +349,22 @@ int kvprintf(putc_fn out, void *ctx, const char *fmt, va_list ap)
 }
 
 /* ------------------------------------------------------------------ */
-/* 串口输出                                                            */
+/* QEMU debugcon 输出                                                  */
 /* ------------------------------------------------------------------ */
-static void serial_sink(void *ctx, char c)
+static inline void terminal_putc(char c)
+{
+    __asm__ volatile("outb %0, $0xe9" :: "a"((uint8_t)c));
+}
+
+static void terminal_sink(void *ctx, char c)
 {
     (void)ctx;
-    serial_putc(c);
+    terminal_putc(c);
 }
 
 int vprintf(const char *fmt, va_list ap)
 {
-    return kvprintf(serial_sink, NULL, fmt, ap);
+    return kvprintf(terminal_sink, NULL, fmt, ap);
 }
 
 int printf(const char *fmt, ...)
@@ -378,15 +380,15 @@ int printf(const char *fmt, ...)
 
 int putchar(int c)
 {
-    serial_putc((char)c);
+    terminal_putc((char)c);
     return (int)(unsigned char)c;
 }
 
 int puts(const char *str)
 {
     while (*str != '\0')
-        serial_putc(*str++);
-    serial_putc('\n');
+        terminal_putc(*str++);
+    terminal_putc('\n');
     return 0;
 }
 

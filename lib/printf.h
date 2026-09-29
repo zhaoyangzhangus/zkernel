@@ -32,7 +32,7 @@ typedef void (*putc_fn)(void *ctx, char c);
 /* 核心格式化函数，printf / snprintf 都只是它的薄封装 */
 int kvprintf(putc_fn out, void *ctx, const char *fmt, va_list ap) PRINTF_FORMAT(3, 0);
 
-/* ---------------- 输出到 COM1 串口（drivers/serial.c）---------------- */
+/* ---------------- 输出到 QEMU debugcon / 宿主终端 ---------------- */
 int printf(const char *fmt, ...) PRINTF_FORMAT(1, 2);
 int vprintf(const char *fmt, va_list ap) PRINTF_FORMAT(1, 0);
 int putchar(int c);

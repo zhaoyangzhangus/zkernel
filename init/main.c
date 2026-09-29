@@ -1,7 +1,6 @@
 #include <stdint.h>
 
 #include "../boot/bootinfo.h"
-#include "../drivers/serial.h"
 #include "../graphics/text.h"
 #include "../lib/printf.h"
 #include "../mm/pmm.h"
@@ -29,8 +28,6 @@ static uint64_t conventional_pages(const BOOT_INFO *bi)
 
 void kernel_main(BOOT_INFO *bi)
 {
-    serial_init();
-
     if (bi == 0 || bi->magic != BOOTINFO_MAGIC) {
         printf("[kernel] bad bootinfo\n");
         halt();

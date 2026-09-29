@@ -5,29 +5,29 @@
 
 ## 构建
 
-项目只保留调试构建路径：
+只保留调试构建：
 
 ```sh
-make        # build/debug/
-make test   # host 单元测试
-make run    # QEMU + OVMF
+make
+make run
 make clean
 ```
 
-产物：
+产物固定在 `build/debug/`。QEMU 直接把这个目录作为 vvfat 启动盘。
+
+## 终端输出
+
+内核 `printf` 直接写 I/O port `0xE9`。QEMU 使用：
 
 ```text
-build/debug/
-├── EFI/BOOT/BOOTX64.EFI
-├── kernel.elf
-└── OVMF_VARS.fd
+-debugcon stdio -global isa-debugcon.iobase=0xe9
 ```
 
-QEMU 直接把 `build/debug/` 作为 vvfat 启动盘，不生成 ESP 镜像。
+因此内核日志直接出现在启动 QEMU 的终端，不再初始化或维护 16550/COM1 串口驱动。
 
 ## 调试
 
-VS Code 直接按 F5。也可以手动：
+VS Code 直接按 F5。手动调试：
 
 ```sh
 make run-gdb
@@ -35,25 +35,20 @@ gdb build/debug/kernel.elf
 (gdb) target remote :1234
 ```
 
-`run-gdb` 使用 `-S`，CPU 在复位向量暂停。入口断点使用硬件断点，因为
-GDB 连接时 `kernel.elf` 尚未由 loader 写入目标物理地址。
+`run-gdb` 使用 `-S` 暂停 CPU，入口使用硬件断点。
 
 ## 当前内核
 
-- COM1 串口和 freestanding `printf`
-- UEFI memory map
-- `pmm_alloc(size)`：仅从 `MEM_CONVENTIONAL` 分配，size 按 4 KiB 向上取整，不释放
-- LiteOS 移植的 12x24 A8 ASCII framebuffer 字体
-
-目录：
+- debugcon `printf` 终端输出
+- 最终 UEFI memory map
+- `pmm_alloc(size)`：仅从 `MEM_CONVENTIONAL` 分配，按 4 KiB 向上取整，不释放
+- LiteOS 12x24 A8 ASCII framebuffer 字体
 
 ```text
-boot/       UEFI loader、ELF/UEFI/BOOT_INFO 定义
+boot/       UEFI loader 与共享定义
 init/       kernel_main
 mm/         早期物理内存
-graphics/   12x24 A8 字体与 framebuffer 绘制
-drivers/    串口
+graphics/   A8 字体和 framebuffer 绘制
 lib/        printf
-tests/      host 测试
-tools/      QEMU/GDB 辅助脚本
+tools/      QEMU/GDB 调试脚本
 ```
