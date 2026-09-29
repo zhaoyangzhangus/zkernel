@@ -158,48 +158,93 @@ static bool estimate_range(uint64_t va, uint64_t pa, uint64_t bytes,
     return true;
 }
 
+static bool estimate_one_extent(uint64_t start, uint64_t bytes,
+                                bool allow_1g, table_count_t *count)
+{
+    if (!estimate_range(start, start, bytes, allow_1g, count))
+        return false;
+
+    if (start >= VM_KERNEL_SIZE ||
+        bytes > VM_KERNEL_SIZE - start)
+        return false;
+
+    return estimate_range(VM_DIRECT_MAP_BASE + start,
+                          start, bytes, allow_1g, count);
+}
+
 static bool estimate_tables(const BOOT_INFO *bi, bool allow_1g,
                             uint64_t *out_pages)
 {
     table_count_t count = {0};
     const uint8_t *p = (const uint8_t *)(uintptr_t)bi->mmap_addr;
 
+    bool have_extent = false;
+    uint32_t extent_type = 0;
+    uint64_t extent_start = 0;
+    uint64_t extent_bytes = 0;
+
     for (uint32_t i = 0; i < bi->mmap_desc_count;
          ++i, p += bi->mmap_desc_size) {
         const BOOT_MEMORY_DESCRIPTOR *d =
             (const BOOT_MEMORY_DESCRIPTOR *)(const void *)p;
 
-        if (!usable_ram_type(d->type) || d->number_of_pages == 0)
+        if (!usable_ram_type(d->type) || d->number_of_pages == 0) {
+            if (have_extent) {
+                if (!estimate_one_extent(extent_start, extent_bytes,
+                                         allow_1g, &count))
+                    return false;
+                have_extent = false;
+                extent_bytes = 0;
+            }
             continue;
+        }
 
         uint64_t bytes;
         if (!descriptor_bytes(d, &bytes))
             return false;
 
+        if (!have_extent) {
+            have_extent = true;
+            extent_type = d->type;
+            extent_start = d->physical_start;
+            extent_bytes = bytes;
+            continue;
+        }
+
+        uint64_t extent_end = extent_start + extent_bytes;
+
         /*
-         * identity 和 direct-map 的 base 都保持 512G/1G/2M 对齐关系，
-         * 所以 lower-level table 形状相同。分别统计两套映射。
+         * 只合并：
+         *   1. UEFI type 相同；
+         *   2. 物理地址严格连续。
+         *
+         * 不跨 type 合并，即使两个 descriptor 在物理上相邻。
          */
-        if (!estimate_range(d->physical_start,
-                            d->physical_start,
-                            bytes, allow_1g, &count))
+        if (d->type == extent_type &&
+            d->physical_start == extent_end) {
+            if (extent_bytes > UINT64_MAX - bytes)
+                return false;
+            extent_bytes += bytes;
+            continue;
+        }
+
+        if (!estimate_one_extent(extent_start, extent_bytes,
+                                 allow_1g, &count))
             return false;
 
-        if (d->physical_start >= VM_KERNEL_SIZE ||
-            bytes > VM_KERNEL_SIZE - d->physical_start)
-            return false;
-
-        if (!estimate_range(VM_DIRECT_MAP_BASE + d->physical_start,
-                            d->physical_start,
-                            bytes, allow_1g, &count))
-            return false;
+        extent_type = d->type;
+        extent_start = d->physical_start;
+        extent_bytes = bytes;
     }
+
+    if (have_extent &&
+        !estimate_one_extent(extent_start, extent_bytes,
+                             allow_1g, &count))
+        return false;
 
     /*
      * +1 PML4 root。
-     * boot_alloc 会在一个 Conventional range 尾部切出连续页表块，
-     * 这可能把原本可用的大页边界拆开；给 identity/direct 各预留
-     * 一组 PD/PT 以及少量结构余量。
+     * 统计仍采用安全上界，实际未使用页在建表后归还 boot allocator。
      */
     uint64_t total = UINT64_C(1) + count.pdpt + count.pd + count.pt;
     if (total > UINT64_MAX - 16)
@@ -208,6 +253,7 @@ static bool estimate_tables(const BOOT_INFO *bi, bool allow_1g,
     *out_pages = total + 16;
     return true;
 }
+
 
 static bool alloc_table(paging_builder_t *b,
                         uint64_t **out_table, uint64_t *out_phys)
@@ -353,37 +399,84 @@ static bool map_range(paging_builder_t *b,
     return true;
 }
 
+static bool map_one_extent(paging_builder_t *b,
+                           uint64_t start, uint64_t bytes,
+                           bool direct)
+{
+    uint64_t va = start;
+
+    if (direct) {
+        if (start >= VM_KERNEL_SIZE ||
+            bytes > VM_KERNEL_SIZE - start)
+            return false;
+        va = VM_DIRECT_MAP_BASE + start;
+    }
+
+    return map_range(b, va, start, bytes);
+}
+
 static bool map_all_usable(paging_builder_t *b,
                            const BOOT_INFO *bi, bool direct)
 {
     const uint8_t *p = (const uint8_t *)(uintptr_t)bi->mmap_addr;
+
+    bool have_extent = false;
+    uint32_t extent_type = 0;
+    uint64_t extent_start = 0;
+    uint64_t extent_bytes = 0;
 
     for (uint32_t i = 0; i < bi->mmap_desc_count;
          ++i, p += bi->mmap_desc_size) {
         const BOOT_MEMORY_DESCRIPTOR *d =
             (const BOOT_MEMORY_DESCRIPTOR *)(const void *)p;
 
-        if (!usable_ram_type(d->type) || d->number_of_pages == 0)
+        if (!usable_ram_type(d->type) || d->number_of_pages == 0) {
+            if (have_extent) {
+                if (!map_one_extent(b, extent_start, extent_bytes, direct))
+                    return false;
+                have_extent = false;
+                extent_bytes = 0;
+            }
             continue;
+        }
 
         uint64_t bytes;
         if (!descriptor_bytes(d, &bytes))
             return false;
 
-        uint64_t va = d->physical_start;
-        if (direct) {
-            if (d->physical_start >= VM_KERNEL_SIZE ||
-                bytes > VM_KERNEL_SIZE - d->physical_start)
-                return false;
-            va = VM_DIRECT_MAP_BASE + d->physical_start;
+        if (!have_extent) {
+            have_extent = true;
+            extent_type = d->type;
+            extent_start = d->physical_start;
+            extent_bytes = bytes;
+            continue;
         }
 
-        if (!map_range(b, va, d->physical_start, bytes))
+        uint64_t extent_end = extent_start + extent_bytes;
+
+        if (d->type == extent_type &&
+            d->physical_start == extent_end) {
+            if (extent_bytes > UINT64_MAX - bytes)
+                return false;
+            extent_bytes += bytes;
+            continue;
+        }
+
+        if (!map_one_extent(b, extent_start, extent_bytes, direct))
             return false;
+
+        extent_type = d->type;
+        extent_start = d->physical_start;
+        extent_bytes = bytes;
     }
+
+    if (have_extent &&
+        !map_one_extent(b, extent_start, extent_bytes, direct))
+        return false;
 
     return true;
 }
+
 
 static bool map_bootstrap_block(paging_builder_t *b, bool direct)
 {
