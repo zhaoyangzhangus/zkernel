@@ -1,6 +1,7 @@
 #ifndef __KERNEL_MM_PAGING_H__
 #define __KERNEL_MM_PAGING_H__
 
+#include <stdbool.h>
 #include <stdint.h>
 
 #include "../boot/bootinfo.h"
