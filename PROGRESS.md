@@ -1,13 +1,13 @@
 # 当前状态
 
 - 构建：仅 `build/debug/`；F5 单后台 task，GDB 连接后自动 continue。
-- 页表：继续使用 UEFI identity/direct map；不建立新页表、不修改 CR3。
 - PMM：容量统计含 Loader/BootServices/Conventional；当前 seed 仅 Conventional；4K:2M = 1:7。
+- Paging：新增自有 4-level page tables；`paging_takeover()` 建表后执行 `mov cr3`，不再继续使用 UEFI CR3。
+- Mapping policy：RAM range 优先 1G page，其次 2M，最后 4K；1G page 通过 CPUID 检测。
+- Bootstrap identity：暂时保留 Loader/BootServices/Conventional + PMM bootstrap metadata 的低地址映射，保证当前 kernel/UEFI stack/PMM pointers 在 CR3 切换后继续有效。
+- Kernel direct map：`VA = VM_DIRECT_MAP_BASE + PA`；当前只映射普通 RAM，不映射 MMIO/framebuffer。
+- VM：direct-map window 作为 `VM_REGION_DIRECT_MAP` 统一登记；物理 hole 保持页表 unmapped，但 VA window 不再分给其它用途。
 - VM free-space：Linux vmalloc 风格 augmented RB-tree + address-sorted doubly-linked list。
-- VM used-space：新增独立 RB-tree，保存 allocated region 的 start/end/type/attrs。
-- VM region type：generic/kernel/heap/stack/DMA/MMIO/framebuffer/ACPI/direct-map/reserved/user。
-- VM attrs：RWX/user/guard/pinned/lazy + WB/WC/UC cache policy；当前仅保存 metadata，不写页表。
-- VM query：可由 region 内任意 VA 查询所属 region；free 直接由 region metadata 得到 size。
-- VM 是 kernel VA 的统一 owner；固定用途用 reserve 登记，动态用途用 alloc，不设 DMA/MMIO/heap 等独立 VA allocator。
-- kernel VA：管理完整高 canonical half 0xFFFF800000000000..0xFFFFFFFFFFFFFFFF（128 TiB）；tree 内部使用相对 base offset。
-- 下一步：page-table mapping 层读取 VM region attrs，生成实际 PTE/PAT 映射属性。
+- VM used-space：独立 RB-tree，保存 allocated region 的 start/size/type/attrs。
+- kernel VA：完整高 canonical half 128 TiB，由 VM 统一管理。
+- 下一步：迁移 kernel stack/PMM pointers 到 high-half direct map，之后删除 bootstrap identity map；再实现通用 map/unmap/page-fault 层。

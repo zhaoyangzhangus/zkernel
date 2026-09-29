@@ -1,7 +1,7 @@
 # zkernel
 
-最小 x86_64 UEFI 内核实验项目。当前继续使用 UEFI 留下来的页表和 identity/direct
-mapping，不建立新页表，也不切换 CR3。
+最小 x86_64 UEFI 内核实验项目。内核已经开始接管页表：启动早期仍借用 UEFI
+identity mapping 完成 PMM 初始化，随后建立自己的 4-level page tables 并切换 CR3。
 
 ## 构建
 
@@ -18,10 +18,36 @@ make clean
 初始容量统计包含 LoaderCode/Data、BootServicesCode/Data 和 Conventional。
 当前实际 seed 仍只使用 Conventional。4K(PTE) : 2M(PDE) 按物理容量规划为 1:7。
 
+## Paging
+
+`mm/paging.c` 建立内核自己的 4-level page tables，并执行第一次 CR3 takeover。
+
+当前第一阶段布局：
+
+```text
+bootstrap identity map
+  LoaderCode/Data
+  BootServicesCode/Data
+  Conventional
+  PMM bootstrap metadata
+
+kernel direct map
+  VA = VM_DIRECT_MAP_BASE + PA
+  同样只映射普通 RAM
+  MMIO / framebuffer 不进入 WB direct map
+```
+
+每个 RAM range 都按 `1G -> 2M -> 4K` 贪心映射；CPU 不支持 1G page 时自动退化到
+`2M -> 4K`。direct-map window 从高半区起点开始，VM 会先把
+`[VM_DIRECT_MAP_BASE, VM_DIRECT_MAP_BASE + highest_ram_pa)` 登记为
+`VM_REGION_DIRECT_MAP`；其中物理 hole 保持 unmapped。
+
+当前 identity map 是迁移期必需的：kernel ELF、UEFI 遗留 stack 和 PMM 内部指针
+仍是低地址。等这些对象全部切到 high-half/direct-map 指针后再删除 identity map。
+
 ## VM
 
-VM 仍然只管理虚拟地址，不做页表 mapping，但现在同时管理 free space 和
-allocated region metadata。
+VM 管理整个 kernel 虚拟地址空间，同时管理 free space 和 allocated region metadata。
 
 ```text
 free_root
@@ -39,9 +65,8 @@ used_root
 
 region type 当前包含 generic/kernel/heap/stack/DMA/MMIO/framebuffer/ACPI/direct-map/reserved/user。
 
-region attrs 当前保存 RWX、user、guard、pinned、lazy 和 WB/WC/UC cache policy。
-这些属性暂时只作为 metadata；后续 page-table mapping 层根据它们生成真正的
-PTE/PAT 属性。
+region attrs 保存 RWX、user、guard、pinned、lazy 和 WB/WC/UC cache policy。
+当前 direct-map region 已参与页表布局；其它动态 region 的通用 map/unmap 接口仍待实现。
 
 接口：
 

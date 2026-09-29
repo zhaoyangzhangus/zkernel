@@ -23,6 +23,8 @@ typedef struct {
 static pmm_pool3_t *g_pte_pool;
 static pmm_pool3_t *g_pde_pool;
 static pmm_cpu_t *g_boot_cpu;
+static uint64_t g_metadata_phys;
+static uint64_t g_metadata_size;
 
 static inline uint64_t div_up64(uint64_t n, uint64_t d)
 {
@@ -412,6 +414,16 @@ pmm_cpu_t *pmm_boot_cpu(void)
     return g_boot_cpu;
 }
 
+uint64_t pmm_metadata_phys(void)
+{
+    return g_metadata_phys;
+}
+
+uint64_t pmm_metadata_size(void)
+{
+    return g_metadata_size;
+}
+
 static bool seed_range(uint64_t start, uint64_t pages,
                        uint64_t *split_blocks)
 {
@@ -539,6 +551,9 @@ int pmm_init(BOOT_INFO *bi)
     uint64_t metadata_phys;
     if (!boot_alloc_pages(bi, reserve_pages, &metadata_phys))
         return -7;
+
+    g_metadata_phys = metadata_phys;
+    g_metadata_size = reserved_bytes;
 
     uint8_t *metadata = (uint8_t *)(uintptr_t)metadata_phys;
     memory_zero(metadata, reserved_bytes);

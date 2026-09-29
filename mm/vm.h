@@ -7,8 +7,9 @@
 #include "pmm.h"
 
 #define VM_PAGE_SIZE   0x1000ULL
-#define VM_KERNEL_BASE UINT64_C(0xFFFF800000000000)
-#define VM_KERNEL_SIZE UINT64_C(0x0000800000000000) /* full 128 TiB high half */
+#define VM_KERNEL_BASE     UINT64_C(0xFFFF800000000000)
+#define VM_KERNEL_SIZE     UINT64_C(0x0000800000000000) /* full 128 TiB high half */
+#define VM_DIRECT_MAP_BASE VM_KERNEL_BASE
 
 typedef uint64_t vaddr_t;
 

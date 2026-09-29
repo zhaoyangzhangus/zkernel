@@ -4,6 +4,7 @@
 #include "../graphics/text.h"
 #include "../lib/printf.h"
 #include "../mm/pmm.h"
+#include "../mm/paging.h"
 #include "../mm/vm.h"
 
 static void halt(void)
@@ -66,6 +67,20 @@ void kernel_main(BOOT_INFO *bi)
         printf("[kernel] vm init failed\n");
         halt();
     }
+
+    paging_info_t paging;
+    status = paging_takeover(bi, &kernel_vm, &paging);
+    if (status != 0) {
+        printf("[kernel] paging takeover failed: %d\n", status);
+        halt();
+    }
+
+    printf("[kernel] paging cr3=%p direct=%lu MiB 1G=%lu 2M=%lu 4K=%lu\n",
+           (void *)(uintptr_t)paging.root_phys,
+           (unsigned long)(paging.direct_span >> 20),
+           (unsigned long)paging.leaf_1g,
+           (unsigned long)paging.leaf_2m,
+           (unsigned long)paging.leaf_4k);
 
     vaddr_t va4k;
     vaddr_t va2m;
