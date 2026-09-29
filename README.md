@@ -37,9 +37,10 @@ all usable RAM
 Early paging 不再预估页表规模，也不一次预留 bootstrap block。每缺一个
 4K table page 就直接调用 `boot_alloc_pages(bi, 1, ...)`，实际使用多少页就分配多少页。
 
-`boot_alloc_pages()` 始终选择最低物理地址、且能容纳请求的 Conventional descriptor，
-并从其低地址端向上分配；descriptor 的 `physical_start` 随分配前移。因此 early
-页表页永久归 paging 使用，之后的 `pmm_init()` 不会再次看到这些页。
+`boot_alloc_pages()` 利用 UEFI memory map 的物理地址升序，从 map 末尾反向找到
+第一个能容纳请求的 Conventional descriptor，并从其高地址端向下分配；descriptor
+的 `number_of_pages` 随分配缩短。因此 early 页表页永久归 paging 使用，之后的
+`pmm_init()` 不会再次看到这些页。
 
 每个 RAM range 都按 `1G -> 2M -> 4K` 贪心映射；CPU 不支持 1G page 时自动退化到
 `2M -> 4K`。MMIO、framebuffer、Runtime Services 不作为普通 WB RAM direct-map。

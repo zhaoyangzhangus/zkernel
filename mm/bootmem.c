@@ -11,17 +11,14 @@ bool boot_alloc_pages(BOOT_INFO *bi, uint64_t pages, uint64_t *out_phys)
         pages > UINT64_MAX / BOOT_PAGE_SIZE)
         return false;
 
-    uint8_t *p = (uint8_t *)(uintptr_t)bi->mmap_addr;
-
     /*
-     * 始终选择能够容纳请求的最低物理地址 Conventional descriptor，
-     * 并从它的低地址端向上分配。descriptor 的 physical_start 随分配
-     * 前移，因此这些 early pages 会直接从后续 PMM 可见范围中消失。
+     * UEFI memory map 按 physical_start 从低到高排列。
+     * 从末尾反向扫描，找到第一个能容纳请求的 Conventional descriptor，
+     * 再从它的高地址端向下切出 pages。
      */
-    BOOT_MEMORY_DESCRIPTOR *lowest = NULL;
-
-    for (uint32_t i = 0; i < bi->mmap_desc_count;
-         ++i, p += bi->mmap_desc_size) {
+    for (uint32_t i = bi->mmap_desc_count; i != 0; --i) {
+        uint8_t *p = (uint8_t *)(uintptr_t)bi->mmap_addr +
+                     (uint64_t)(i - 1) * bi->mmap_desc_size;
         BOOT_MEMORY_DESCRIPTOR *d =
             (BOOT_MEMORY_DESCRIPTOR *)(void *)p;
 
@@ -29,24 +26,20 @@ bool boot_alloc_pages(BOOT_INFO *bi, uint64_t pages, uint64_t *out_phys)
             d->number_of_pages < pages)
             continue;
 
-        if (lowest == NULL ||
-            d->physical_start < lowest->physical_start)
-            lowest = d;
+        uint64_t remain = d->number_of_pages - pages;
+        uint64_t offset = remain * BOOT_PAGE_SIZE;
+
+        if (d->physical_start > UINT64_MAX - offset)
+            return false;
+
+        uint64_t phys = d->physical_start + offset;
+
+        d->number_of_pages = remain;
+        *out_phys = phys;
+        return true;
     }
 
-    if (lowest == NULL)
-        return false;
-
-    uint64_t bytes = pages * BOOT_PAGE_SIZE;
-    if (lowest->physical_start > UINT64_MAX - bytes)
-        return false;
-
-    uint64_t phys = lowest->physical_start;
-
-    lowest->physical_start += bytes;
-    lowest->number_of_pages -= pages;
-    *out_phys = phys;
-    return true;
+    return false;
 }
 
 bool boot_release_pages(BOOT_INFO *bi, uint64_t phys, uint64_t pages)
@@ -67,14 +60,17 @@ bool boot_release_pages(BOOT_INFO *bi, uint64_t phys, uint64_t pages)
             d->number_of_pages > UINT64_MAX / BOOT_PAGE_SIZE)
             continue;
 
-        if (phys > UINT64_MAX - bytes ||
-            phys + bytes != d->physical_start)
+        uint64_t current_bytes = d->number_of_pages * BOOT_PAGE_SIZE;
+        if (d->physical_start > UINT64_MAX - current_bytes)
+            continue;
+
+        uint64_t end = d->physical_start + current_bytes;
+        if (end != phys)
             continue;
 
         if (d->number_of_pages > UINT64_MAX - pages)
             return false;
 
-        d->physical_start = phys;
         d->number_of_pages += pages;
         return true;
     }

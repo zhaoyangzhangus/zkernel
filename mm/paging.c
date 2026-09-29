@@ -374,7 +374,7 @@ int paging_early_takeover(BOOT_INFO *bi, paging_info_t *out_info)
 
     /*
      * 每缺一个页表页就直接 boot_alloc_pages(1)。
-     * boot allocator 从最低 Conventional 地址向上推进，不做预估、
+     * boot allocator 从最高 Conventional 地址向下分配，不做预估、
      * 不预留大块，也不回收页表页。
      */
     if (!alloc_table(&b, &b.pml4, &b.root_phys))
