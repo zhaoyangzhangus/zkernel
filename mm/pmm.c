@@ -122,43 +122,6 @@ static bool count_range(uint64_t start, uint64_t pages, frame_count_t *count)
 }
 
 /*
- * 模拟 bootstrap allocator 从第一个足够大的 Conventional descriptor
- * 低地址端拿 reserve_pages。这里只计算，不修改 UEFI map。
- */
-static bool count_after_reserve(const BOOT_INFO *bi,
-                                uint64_t reserve_pages,
-                                frame_count_t *count)
-{
-    const uint8_t *p = (const uint8_t *)(uintptr_t)bi->mmap_addr;
-    bool reserved = reserve_pages == 0;
-
-    *count = (frame_count_t){0};
-
-    for (uint32_t i = 0; i < bi->mmap_desc_count;
-         ++i, p += bi->mmap_desc_size) {
-        const BOOT_MEMORY_DESCRIPTOR *d =
-            (const BOOT_MEMORY_DESCRIPTOR *)(const void *)p;
-
-        if (d->type != MEM_CONVENTIONAL || d->number_of_pages == 0)
-            continue;
-
-        uint64_t start = d->physical_start;
-        uint64_t pages = d->number_of_pages;
-
-        if (!reserved && pages >= reserve_pages) {
-            start += reserve_pages * PMM_PAGE_4K;
-            pages -= reserve_pages;
-            reserved = true;
-        }
-
-        if (pages != 0 && !count_range(start, pages, count))
-            return false;
-    }
-
-    return reserved;
-}
-
-/*
  * 真正的 bootstrap allocator。它只在 pmm_init() 内使用一次，
  * 直接收缩 UEFI MEM_CONVENTIONAL descriptor；初始化完成后生命周期结束。
  */
@@ -476,68 +439,58 @@ int pmm_init(BOOT_INFO *bi)
         return -1;
 
     /*
-     * 自举定容：
-     * 先假设预留 1 页 metadata；模拟收缩 memory map 后统计真正的
-     * PTE/PDE frame 数，再计算实际 metadata 页数。只向上增加预留，
-     * 直到当前预留已经足够，因此不会出现“metadata 自己改变 pool 大小”
-     * 导致空间不足的问题。
+     * 一次定容：
+     * 先按原始 MEM_CONVENTIONAL 统计所有 4K/PTE 与 2M/PDE frame。
+     * metadata 随后从一个 descriptor 的低地址端切走，所以最终可用
+     * frame 只会减少。
+     *
+     * 唯一需要留余量的是 PTE：切走 metadata 后 descriptor 的新起点
+     * 可能从 2M 对齐变成非对齐，从而产生新的 4K 前缀。一个 descriptor
+     * 最多新增 511 个 PTE frame，因此直接给 global PTE capacity 加 511
+     * 个 slot 即可，不需要迭代自举。
      */
-    uint64_t reserve_pages = 1;
-    uint64_t previous_pages = UINT64_MAX;
     frame_count_t count = {0};
-    uint64_t used_bytes = 0;
-    uint32_t pte_capacity = 0;
-    uint32_t pde_capacity = 0;
-    uint32_t cpu_capacity = 0;
+    const uint8_t *scan = (const uint8_t *)(uintptr_t)bi->mmap_addr;
 
-    for (unsigned pass = 0; pass < 32U; ++pass) {
-        if (!count_after_reserve(bi, reserve_pages, &count))
+    for (uint32_t i = 0; i < bi->mmap_desc_count;
+         ++i, scan += bi->mmap_desc_size) {
+        const BOOT_MEMORY_DESCRIPTOR *d =
+            (const BOOT_MEMORY_DESCRIPTOR *)(const void *)scan;
+
+        if (d->type == MEM_CONVENTIONAL &&
+            d->number_of_pages != 0 &&
+            !count_range(d->physical_start, d->number_of_pages, &count))
             return -2;
-
-        if (count.pte > PMM_POOL3_MAX || count.pde > PMM_POOL3_MAX)
-            return -3;
-
-        pte_capacity = (uint32_t)count.pte;
-        pde_capacity = (uint32_t)count.pde;
-        cpu_capacity = pte_capacity < PMM_CPU_PTE_MAX ?
-                       pte_capacity : PMM_CPU_PTE_MAX;
-
-        used_bytes = metadata_bytes(pte_capacity, pde_capacity, cpu_capacity);
-        if (used_bytes == UINT64_MAX)
-            return -4;
-
-        uint64_t need = align_up_page(used_bytes);
-        if (need == UINT64_MAX)
-            return -4;
-        need /= PMM_PAGE_4K;
-
-        if (need == reserve_pages)
-            break;
-
-        /*
-         * 一般 2~3 次就收敛。若 2M 边界造成 A<->B 两点振荡，
-         * 取较大的那个预留值；当前容量已经按该 map 状态算好，
-         * 因而仍然安全，而且最多只多留极少页。
-         */
-        if (need == previous_pages) {
-            if (need < reserve_pages)
-                break;
-            previous_pages = UINT64_MAX;
-        } else {
-            previous_pages = reserve_pages;
-        }
-
-        reserve_pages = need;
-
-        if (pass == 31U)
-            return -5;
     }
+
+    if (count.pte > PMM_POOL3_MAX ||
+        count.pde > PMM_POOL3_MAX)
+        return -3;
+
+    uint64_t pte_capacity64 = count.pte + 511U;
+    if (pte_capacity64 > PMM_POOL3_MAX)
+        pte_capacity64 = PMM_POOL3_MAX;
+
+    uint32_t pte_capacity = (uint32_t)pte_capacity64;
+    uint32_t pde_capacity = (uint32_t)count.pde;
+    uint32_t cpu_capacity = pte_capacity < PMM_CPU_PTE_MAX ?
+                            pte_capacity : PMM_CPU_PTE_MAX;
+
+    uint64_t used_bytes =
+        metadata_bytes(pte_capacity, pde_capacity, cpu_capacity);
+    if (used_bytes == UINT64_MAX)
+        return -4;
+
+    uint64_t reserved_bytes = align_up_page(used_bytes);
+    if (reserved_bytes == UINT64_MAX)
+        return -4;
+
+    uint64_t reserve_pages = reserved_bytes / PMM_PAGE_4K;
 
     uint64_t metadata_phys;
     if (!boot_alloc_pages(bi, reserve_pages, &metadata_phys))
         return -6;
 
-    uint64_t reserved_bytes = reserve_pages * PMM_PAGE_4K;
     uint8_t *metadata = (uint8_t *)(uintptr_t)metadata_phys;
     memory_zero(metadata, reserved_bytes);
 
@@ -550,8 +503,9 @@ int pmm_init(BOOT_INFO *bi)
         return -7;
 
     /*
-     * 现在 UEFI map 已经被 bootstrap allocator 原地收缩。
-     * 再扫一次，填入的正好是 metadata 之外真正剩余的 free frames。
+     * boot_alloc 已经原地收缩 UEFI map。现在再扫描一次，
+     * 只把 metadata 之外真正剩余的 free frames 填入 pools。
+     * capacity 是初始化前计算的上限，因此允许尾部 slot 保持空闲未发布。
      */
     const uint8_t *p = (const uint8_t *)(uintptr_t)bi->mmap_addr;
     for (uint32_t i = 0; i < bi->mmap_desc_count;
