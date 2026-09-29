@@ -2,92 +2,34 @@
     "version": "0.2.0",
     "configurations": [
         {
-            // F5 的完整流程：
-            //   1. preLaunchTask 构建调试版内核，后台启动 QEMU（-S 把 CPU 停在复位向量）
-            //   2. cppdbg 启动 gdb，加载 kernel.elf 的符号，用 -target-select remote 连上 gdbstub
-            //   3. postRemoteConnectCommands 在内核入口下硬件断点
-            //   4. 引擎自己 continue：固件 → 引导程序 → 内核，最后停在下图的 kernel_main
-            //
-            // 标了“关键”的几项都是实测踩坑之后定下来的，改动前先看 README 的调试章节。
-            "name": "内核调试（QEMU + GDB）",
+            "name": "zkernel: QEMU + GDB",
             "type": "cppdbg",
             "request": "launch",
-
-            // 带调试信息的 ELF 副本，只用来给 GDB 提供符号；真正跑的是 kernel.bin
             "program": "${workspaceFolder}/build/debug/kernel.elf",
             "cwd": "${workspaceFolder}",
-
             "MIMode": "gdb",
             "miDebuggerPath": "/usr/bin/gdb",
-            "miDebuggerArgs": "-q",
-
-            // QEMU 的 gdbstub（tools/qemu-debug.sh 用 -gdb tcp::1234 启动）
             "miDebuggerServerAddress": "127.0.0.1:1234",
-
-            // 【关键 1】连接 gdbstub 时 QEMU 必然要停一下（GDB 才能接管目标），
-            // 引擎会收到一个“没有 reason 的停顿”。stopAtConnect 必须保持 false，
-            // 让引擎把它当成“gdbserver 连接时的固有停顿”直接放行：
-            // 整条链路里就只会有引擎发出的这一次 continue，而且时机在断点下好之后。
-            // 若设成 true，引擎会把它显示成一次可见停顿（停在 0xfff0，没有源码），
-            // 并且会引入第二次 continue 的竞态——实测会在内核启动期间把入口断点冲掉。
             "stopAtConnect": false,
-
-            // 【关键 2】内核入口这一停会被引擎归类为“入口点(entry point)”，
-            // 而 cpptools 默认会静默越过入口点，界面上根本看不到停住。
-            // 必须打开 stopAtEntry，F5 才会真正停在 kernel_main 上。
             "stopAtEntry": true,
-
-            // 【关键 3】这里只下入口断点，不要自己发 continue（原因见关键 1）。
-            // 必须用硬件断点(-h)：GDB 连过来时内核还没被引导程序读进内存，
-            // 软件断点写进去的 0xCC 会被随后加载内核的写入覆盖掉，永远不命中。
-            // 用符号名而不是地址：入口并不固定在 0x100000（实测发布版在 0x100000、
-            // 调试版在 0x100223，跟优化级别有关），交给 GDB 从符号表解析。
             "postRemoteConnectCommands": [
                 {
-                    "description": "在内核入口下硬件断点（地址由符号表解析）",
                     "text": "-break-insert -h kernel_main",
-                    "ignoreFailures": true
+                    "ignoreFailures": false
                 }
             ],
-
-            // 【关键 4】恢复执行由引擎负责（见关键 1），这里不能再来一次 exec-run
             "launchCompleteCommand": "None",
-
             "setupCommands": [
                 {
-                    "description": "不要分页，避免 MI 输出被卡住",
-                    "text": "-gdb-set pagination off",
-                    "ignoreFailures": true
+                    "text": "-gdb-set pagination off"
                 },
                 {
-                    "description": "反汇编用 Intel 风格，和内核源码里的写法一致",
-                    "text": "-gdb-set disassembly-flavor intel",
-                    "ignoreFailures": true
-                },
-                {
-                    "description": "关掉确认提示（调试裸机目标时容易弹）",
-                    "text": "-gdb-set confirm off",
-                    "ignoreFailures": true
-                },
-                {
-                    "description": "结构体按字段展开显示，看 bootinfo 更直观",
-                    "text": "-gdb-set print pretty on",
-                    "ignoreFailures": true
+                    "text": "-gdb-set disassembly-flavor intel"
                 }
             ],
-
-            "preLaunchTask": "内核：启动 QEMU 并等待 GDB",
-
-            // 调试会话结束后自动收拾 QEMU，避免残留进程占着 gdbstub 端口
-            "postDebugTask": "内核：停止调试用 QEMU",
-
-            "logging": {
-                "engineLogging": false,
-                "moduleLoad": false,
-                "programOutput": true
-            },
-            "internalConsoleOptions": "neverOpen",
-            "externalConsole": false
+            "preLaunchTask": "zkernel: qemu-gdb",
+            "postDebugTask": "zkernel: stop-qemu",
+            "internalConsoleOptions": "neverOpen"
         }
     ]
 }
