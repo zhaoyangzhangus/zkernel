@@ -91,10 +91,18 @@ static void memory_zero(void *ptr, uint64_t bytes)
         *p++ = 0;
 }
 
+static bool usable_type(uint32_t type)
+{
+    return type == MEM_CONVENTIONAL ||
+           type == MEM_LOADER_CODE ||
+           type == MEM_LOADER_DATA ||
+           type == MEM_BOOT_SERVICES_CODE ||
+           type == MEM_BOOT_SERVICES_DATA;
+}
+
 /*
- * 把一个 Conventional range 分成：
- *   两端不满足 2M 对齐的 4K PTE frames
- *   中间完整 2M PDE frames
+ * 把一个 usable range 分成天然的 4K 边缘和 2M 对齐块。
+ * 这里只统计布局，不决定最终 1:7 配额。
  */
 static bool count_range(uint64_t start, uint64_t pages, frame_count_t *count)
 {
@@ -391,12 +399,17 @@ pmm_cpu_t *pmm_boot_cpu(void)
     return g_boot_cpu;
 }
 
-static bool seed_range(uint64_t start, uint64_t pages)
+static bool seed_range(uint64_t start, uint64_t pages,
+                       uint64_t *split_blocks)
 {
     if (pages > UINT64_MAX / PMM_PAGE_4K)
         return false;
 
-    uint64_t end = start + pages * PMM_PAGE_4K;
+    uint64_t bytes = pages * PMM_PAGE_4K;
+    if (start > UINT64_MAX - bytes)
+        return false;
+
+    uint64_t end = start + bytes;
     uint64_t first = (start + PMM_PAGE_2M - 1) & ~(PMM_PAGE_2M - 1);
     uint64_t last = end & ~(PMM_PAGE_2M - 1);
 
@@ -416,8 +429,17 @@ static bool seed_range(uint64_t start, uint64_t pages)
     }
 
     while (start < last) {
-        if (!pool3_push(g_pde_pool, start))
-            return false;
+        if (*split_blocks != 0) {
+            for (unsigned i = 0; i < 512U; ++i) {
+                if (!pool3_push(g_pte_pool,
+                                start + (uint64_t)i * PMM_PAGE_4K))
+                    return false;
+            }
+            --*split_blocks;
+        } else {
+            if (!pool3_push(g_pde_pool, start))
+                return false;
+        }
         start += PMM_PAGE_2M;
     }
 
@@ -439,15 +461,15 @@ int pmm_init(BOOT_INFO *bi)
         return -1;
 
     /*
-     * 一次定容：
-     * 先按原始 MEM_CONVENTIONAL 统计所有 4K/PTE 与 2M/PDE frame。
-     * metadata 随后从一个 descriptor 的低地址端切走，所以最终可用
-     * frame 只会减少。
+     * 第一步统计最终归内核所有的 RAM：
+     * LoaderCode/Data、BootServicesCode/Data、Conventional。
      *
-     * 唯一需要留余量的是 PTE：切走 metadata 后 descriptor 的新起点
-     * 可能从 2M 对齐变成非对齐，从而产生新的 4K 前缀。一个 descriptor
-     * 最多新增 511 个 PTE frame，因此直接给 global PTE capacity 加 511
-     * 个 slot 即可，不需要迭代自举。
+     * 当前只做容量规划。真正 seed pool 暂时仍只使用 Conventional；
+     * Loader/BootServices 等切换自有 stack/page tables 后再回收。
+     *
+     * 目标按物理容量：4K(PTE) : 2M(PDE) = 1 : 7。
+     * 天然不能组成 2M 的边缘先算进 PTE；若仍不足 1/8，
+     * 再把若干完整 2M block 规划为 512 个 4K frame。
      */
     frame_count_t count = {0};
     const uint8_t *scan = (const uint8_t *)(uintptr_t)bi->mmap_addr;
@@ -457,39 +479,53 @@ int pmm_init(BOOT_INFO *bi)
         const BOOT_MEMORY_DESCRIPTOR *d =
             (const BOOT_MEMORY_DESCRIPTOR *)(const void *)scan;
 
-        if (d->type == MEM_CONVENTIONAL &&
+        if (usable_type(d->type) &&
             d->number_of_pages != 0 &&
             !count_range(d->physical_start, d->number_of_pages, &count))
             return -2;
     }
 
-    if (count.pte > PMM_POOL3_MAX ||
-        count.pde > PMM_POOL3_MAX)
+    if (count.pages == 0)
         return -3;
 
-    uint64_t pte_capacity64 = count.pte + 511U;
-    if (pte_capacity64 > PMM_POOL3_MAX)
-        pte_capacity64 = PMM_POOL3_MAX;
+    uint64_t target_pte_pages = div_up64(count.pages, 8U);
+    uint64_t split_blocks = 0;
+
+    if (count.pte < target_pte_pages)
+        split_blocks = div_up64(target_pte_pages - count.pte, 512U);
+    if (split_blocks > count.pde)
+        split_blocks = count.pde;
+
+    uint64_t planned_pte = count.pte + split_blocks * 512U;
+    uint64_t planned_pde = count.pde - split_blocks;
+
+    /* boot_alloc 最多会额外制造 511 个 4K 前缀页。 */
+    if (planned_pte > UINT64_MAX - 511U)
+        return -4;
+
+    uint64_t pte_capacity64 = planned_pte + 511U;
+
+    if (pte_capacity64 > PMM_POOL3_MAX || planned_pde > PMM_POOL3_MAX)
+        return -5;
 
     uint32_t pte_capacity = (uint32_t)pte_capacity64;
-    uint32_t pde_capacity = (uint32_t)count.pde;
+    uint32_t pde_capacity = (uint32_t)planned_pde;
     uint32_t cpu_capacity = pte_capacity < PMM_CPU_PTE_MAX ?
                             pte_capacity : PMM_CPU_PTE_MAX;
 
     uint64_t used_bytes =
         metadata_bytes(pte_capacity, pde_capacity, cpu_capacity);
     if (used_bytes == UINT64_MAX)
-        return -4;
+        return -6;
 
     uint64_t reserved_bytes = align_up_page(used_bytes);
     if (reserved_bytes == UINT64_MAX)
-        return -4;
+        return -6;
 
     uint64_t reserve_pages = reserved_bytes / PMM_PAGE_4K;
-
     uint64_t metadata_phys;
     if (!boot_alloc_pages(bi, reserve_pages, &metadata_phys))
-        return -6;
+        return -7;
 
     uint8_t *metadata = (uint8_t *)(uintptr_t)metadata_phys;
     memory_zero(metadata, reserved_bytes);
@@ -500,14 +536,16 @@ int pmm_init(BOOT_INFO *bi)
     cursor = pool2_layout(cursor, &g_boot_cpu, cpu_capacity);
 
     if ((uint64_t)(cursor - metadata) > reserved_bytes)
-        return -7;
+        return -8;
 
     /*
-     * boot_alloc 已经原地收缩 UEFI map。现在再扫描一次，
-     * 只把 metadata 之外真正剩余的 free frames 填入 pools。
-     * capacity 是初始化前计算的上限，因此允许尾部 slot 保持空闲未发布。
+     * boot_alloc 已经原地收缩 UEFI map。当前阶段只 seed
+     * MEM_CONVENTIONAL；Loader/BootServices 只参与容量规划，等自有
+     * stack/page tables 建立后再回收。
      */
     const uint8_t *p = (const uint8_t *)(uintptr_t)bi->mmap_addr;
+    uint64_t split_remaining = split_blocks;
+
     for (uint32_t i = 0; i < bi->mmap_desc_count;
          ++i, p += bi->mmap_desc_size) {
         const BOOT_MEMORY_DESCRIPTOR *d =
@@ -515,9 +553,10 @@ int pmm_init(BOOT_INFO *bi)
 
         if (d->type == MEM_CONVENTIONAL &&
             d->number_of_pages != 0 &&
-            !seed_range(d->physical_start, d->number_of_pages))
-            return -8;
+            !seed_range(d->physical_start, d->number_of_pages,
+                        &split_remaining))
+            return -9;
     }
 
-    return (g_pte_pool->root != 0 || g_pde_pool->root != 0) ? 0 : -9;
+    return (g_pte_pool->root != 0 || g_pde_pool->root != 0) ? 0 : -10;
 }

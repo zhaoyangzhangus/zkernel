@@ -12,38 +12,42 @@ make clean
 ```
 
 只保留调试构建，产物固定在 `build/debug/`。内核 `printf` 通过
-QEMU debugcon `0xE9` 直接输出到宿主终端。
+QEMU debugcon `0xE9` 直接输出宿主终端。
 
 ## PMM
 
-PMM 只使用 UEFI `MEM_CONVENTIONAL`。
-
-初始化采用一次计算：
-
-1. 扫描所有 ConventionalMemory。
-2. 计算其中能形成的 2 MiB PDE frame 和边缘 4 KiB PTE frame 数。
-3. 用这些数量直接计算 PTE/PDE pool 的 slot、leaf、middle 和 metadata 大小。
-4. PTE capacity 额外预留最多 511 个 slot，用来覆盖 bootstrap allocation
-   破坏一个 2 MiB 对齐边界后可能新产生的 4 KiB 前缀。
-5. bootstrap allocator 从一个 Conventional descriptor 低地址端切出 metadata。
-6. 再扫描已经收缩后的 memory map，把实际剩余 frame 填入 pools。
-
-不再做 metadata 大小的迭代/收敛计算。capacity 是上限，最终没被实际 frame
-占用的尾部 slot 保持空即可。
-
-global PTE/PDE pool 都是动态长度的三层 64 叉：
+初始化第一步统计最终归内核所有的 RAM：
 
 ```text
-slot_count   = 实际需要的 capacity
-leaf_count   = ceil(slot_count / 64)
-middle_count = ceil(leaf_count / 64)
-root         = 1 x uint64_t
+LoaderCode
+LoaderData
+BootServicesCode
+BootServicesData
+Conventional
 ```
 
-单 pool 最大仍为 `64^3 = 262144` slots。
+这些类型共同参与 pool 容量和 4K/2M 配额计算。当前真正填入 pool 的仍只有
+`MEM_CONVENTIONAL`，因为内核还在使用 UEFI 留下的 stack/page tables，
+并且 BOOT_INFO、memory-map、kernel image 仍可能位于 Loader 内存。
+等建立自己的 stack/page tables 后再回收 Loader/BootServices。
 
-per-CPU PTE cache 是两层 64 叉，容量最多 4096 slots；当前只有 bootstrap CPU。
-frame 是 opaque 64-bit 值，不保存 allocated bitmap，也不做 frame→slot 反查。
+目标物理容量比例：
+
+```text
+PTE / 4K = 1/8
+PDE / 2M = 7/8
+```
+
+先统计每个 usable descriptor 的天然 4K 边缘和 2M 对齐块。天然 4K 边缘
+优先计入 PTE 配额；如果还不足总 usable RAM 的 1/8，就把若干完整 2M block
+规划为 512 个 4K PTE frames。PTE 比例按完整 2M block 调整，因此最多只有
+不到 2 MiB 的取整误差。
+
+metadata 仍只计算一次，然后由 bootstrap allocator 从 ConventionalMemory
+切出；不做自举收敛循环。
+
+global PTE/PDE pool 都是动态长度的三层 64 叉；per-CPU PTE cache 是两层
+64 叉。frame 是 opaque 64-bit 值，没有 allocated bitmap，也不做 frame→slot 反查。
 
 ## 调试
 
