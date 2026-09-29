@@ -174,21 +174,35 @@ void kernel_main(BOOT_INFO *bi)
         halt();
     }
 
-    vaddr_t va4k;
-    vaddr_t va2m;
+    /*
+     * 先只验证 demand paging 主链，避免 DMA/MMIO alloc/free 和显式 PMM
+     * 自测干扰定位。
+     */
+    page_fault_bind_space(&kernel_vm);
+    idt_init();
 
-    if (!vm_alloc(&kernel_vm, 3 * VM_PAGE_SIZE, VM_PAGE_SIZE,
-                  VM_REGION_DMA,
-                  VM_ATTR_READ | VM_ATTR_WRITE | VM_ATTR_PINNED |
-                  VM_ATTR_CACHE_WB,
-                  &va4k) ||
-        !vm_alloc(&kernel_vm, 2 * 1024 * 1024ULL,
-                  2 * 1024 * 1024ULL,
-                  VM_REGION_MMIO,
-                  VM_ATTR_READ | VM_ATTR_WRITE | VM_ATTR_CACHE_UC,
-                  &va2m)) {
-        printf("[kernel] vm alloc failed\n");
+    vaddr_t lazy_va;
+    if (!vm_alloc(&kernel_vm, VM_PAGE_SIZE, VM_PAGE_SIZE,
+                  VM_REGION_HEAP,
+                  VM_ATTR_READ | VM_ATTR_WRITE |
+                  VM_ATTR_LAZY | VM_ATTR_CACHE_WB,
+                  &lazy_va)) {
+        printf("[kernel] lazy VM alloc failed\n");
         halt();
+    }
+
+    printf("[kernel] lazy va=%p touch\n",
+           (void *)(uintptr_t)lazy_va);
+
+    volatile uint64_t *lazy =
+        (volatile uint64_t *)(uintptr_t)lazy_va;
+    *lazy = UINT64_C(0x1122334455667788);
+
+    printf("[kernel] page fault mapped va=%p value=0x%llx\n",
+           (void *)(uintptr_t)lazy_va,
+           (unsigned long long)*lazy);
+
+    halt();
     }
 
     vm_region_info_t info;
@@ -230,23 +244,7 @@ void kernel_main(BOOT_INFO *bi)
     pmm_free4k(pmm_boot_cpu(), pte);
     pmm_free2m(pde);
 
-    /*
-     * 第一版 demand paging 自测：
-     * VM 只登记一页 LAZY heap，不预先写 PTE。第一次 store 触发 #PF，
-     * handler 查询 used-region，分配 4K frame 并填入当前页表后 iret，
-     * 原 store 自动重试。
-     */
-    page_fault_bind_space(&kernel_vm);
-    idt_init();
 
-    vaddr_t lazy_va;
-    if (!vm_alloc(&kernel_vm, VM_PAGE_SIZE, VM_PAGE_SIZE,
-                  VM_REGION_HEAP,
-                  VM_ATTR_READ | VM_ATTR_WRITE |
-                  VM_ATTR_LAZY | VM_ATTR_CACHE_WB,
-                  &lazy_va)) {
-        printf("[kernel] lazy VM alloc failed\n");
-        halt();
     }
 
     volatile uint64_t *lazy =
