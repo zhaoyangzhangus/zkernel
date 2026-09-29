@@ -148,16 +148,11 @@ void kernel_main(BOOT_INFO *bi)
     }
 
     /*
-     * direct-map VA window 由 VM 统一登记。窗口中的物理 hole 仍然没有 PTE，
-     * 但这些 VA 不再允许其它用途分配。
+     * 只登记当前页表中真正存在的 direct-map extent。
+     * 没有物理 RAM / 没有 PTE 的 hole 保持为普通可分配 VA。
      */
-    if (!vm_reserve(&kernel_vm,
-                    VM_DIRECT_MAP_BASE,
-                    paging.direct_span,
-                    VM_REGION_DIRECT_MAP,
-                    VM_ATTR_READ | VM_ATTR_WRITE |
-                    VM_ATTR_PINNED | VM_ATTR_CACHE_WB)) {
-        printf("[kernel] direct-map VM reserve failed\n");
+    if (!paging_register_direct_map(&kernel_vm, paging.direct_span)) {
+        printf("[kernel] direct-map VM register failed\n");
         halt();
     }
 

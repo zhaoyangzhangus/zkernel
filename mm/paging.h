@@ -50,4 +50,10 @@ int paging_early_takeover(BOOT_INFO *bi, paging_info_t *out_info);
 bool paging_map_4k_current(pmm_cpu_t *cpu, vaddr_t va,
                            pmm_frame_t frame, uint64_t attrs);
 
+/*
+ * 扫描当前页表中的 direct-map 窗口，只把真正 PRESENT 的连续 VA
+ * extent 登记到 kernel VM。物理 hole 不占用 VMM 地址空间。
+ */
+bool paging_register_direct_map(vm_space_t *space, uint64_t direct_span);
+
 #endif

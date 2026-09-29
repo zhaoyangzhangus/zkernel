@@ -8,7 +8,7 @@
 - Mapping policy：仅合并“UEFI type 相同且物理地址连续”的 descriptor；合并后的每个 extent 再按 1G→2M→4K 映射；不同 type 永不跨边界合并。
 - MMIO/framebuffer/runtime：不进入普通 WB direct map，后续按各自 cache/property 单独映射。
 - PMM：在自有页表生效后初始化；容量统计含 Loader/BootServices/Conventional，当前 seed 仍只 Conventional；4K:2M = 1:7。
-- VM：PMM 后初始化，并把 `[VM_DIRECT_MAP_BASE, highest_usable_pa)` 统一登记为 `VM_REGION_DIRECT_MAP`；物理 hole 保持 unmapped。
+- VM：PMM 后初始化；direct map 不再按 `[base, max_pa)` 整段占用，而是扫描当前页表，只把真正 PRESENT 的连续 direct-map extent 登记为 `VM_REGION_DIRECT_MAP`；物理 hole 对应 VA 保持可分配。
 - VM free-space：Linux vmalloc 风格 augmented RB-tree + address-sorted doubly-linked list。
 - VM used-space：独立 RB-tree，保存 allocated region 的 start/size/type/attrs。
 - kernel VA：完整高 canonical half 128 TiB，由 VM 统一管理。

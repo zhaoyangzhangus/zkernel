@@ -45,9 +45,10 @@ Early paging 不再预估页表规模，也不一次预留 bootstrap block。每
 每个 RAM range 都按 `1G -> 2M -> 4K` 贪心映射；CPU 不支持 1G page 时自动退化到
 `2M -> 4K`。MMIO、framebuffer、Runtime Services 不作为普通 WB RAM direct-map。
 
-PMM 初始化之后，VM 再把
-`[VM_DIRECT_MAP_BASE, VM_DIRECT_MAP_BASE + highest_usable_pa)`
-登记为 `VM_REGION_DIRECT_MAP`；其中物理 hole 保持 unmapped，但对应 VA 被保留。
+PMM 初始化之后，VM 扫描当前页表中的 direct-map 窗口，只把真正
+`PRESENT` 的连续映射登记为 `VM_REGION_DIRECT_MAP`。物理 hole 既没有
+PTE，也不会被 direct-map region 占用，因此这些 VA 仍可供其它 kernel
+映射使用。
 
 identity map 目前只作为启动迁移层保留；等 kernel/stack/BOOT_INFO/PMM pointer
 全部切到 high-half direct-map 地址后再删除。
