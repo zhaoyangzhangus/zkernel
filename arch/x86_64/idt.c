@@ -20,6 +20,20 @@ typedef struct {
     uint64_t base;
 } __attribute__((packed)) idtr_t;
 
+typedef struct {
+    uint16_t limit;
+    uint64_t base;
+} __attribute__((packed)) gdtr_t;
+
+#define GDT_KERNEL_CODE 0x08U
+#define GDT_KERNEL_DATA 0x10U
+
+static uint64_t g_gdt[3] __attribute__((aligned(16))) = {
+    UINT64_C(0x0000000000000000),
+    UINT64_C(0x00AF9A000000FFFF),
+    UINT64_C(0x00CF92000000FFFF),
+};
+
 /*
  * 前三个字段在 ring0->ring0 exception 中总是存在。
  * rsp/ss 只在 privilege level 改变时由 CPU 压栈，本处理器不读取它们。
@@ -34,11 +48,31 @@ typedef struct {
 
 static idt_entry_t g_idt[256] __attribute__((aligned(16)));
 
-static uint16_t read_cs(void)
+static void gdt_init(void)
 {
-    uint16_t cs;
-    __asm__ volatile("mov %%cs, %0" : "=r"(cs));
-    return cs;
+    gdtr_t gdtr = {
+        .limit = (uint16_t)(sizeof(g_gdt) - 1),
+        .base = (uint64_t)(uintptr_t)g_gdt,
+    };
+
+    /*
+     * 不再依赖 UEFI 遗留的 GDT。异常门会重新按 selector 查 GDT；
+     * 接管 CR3 后固件的 GDTR.base 未必仍然映射。
+     */
+    __asm__ volatile(
+        "lgdt %0\n\t"
+        "movw $0x10, %%ax\n\t"
+        "movw %%ax, %%ds\n\t"
+        "movw %%ax, %%es\n\t"
+        "movw %%ax, %%ss\n\t"
+        "pushq $0x08\n\t"
+        "leaq 1f(%%rip), %%rax\n\t"
+        "pushq %%rax\n\t"
+        "lretq\n\t"
+        "1:\n\t"
+        :
+        : "m"(gdtr)
+        : "rax", "memory");
 }
 
 static uint64_t read_cr2(void)
@@ -111,7 +145,7 @@ static void set_gate(uint32_t vector, void (*handler)(void))
     idt_entry_t *gate = &g_idt[vector];
 
     gate->offset_low = (uint16_t)address;
-    gate->selector = read_cs();
+    gate->selector = GDT_KERNEL_CODE;
     gate->ist = 0;
     gate->type_attr = 0x8E; /* present, DPL0, 64-bit interrupt gate */
     gate->offset_mid = (uint16_t)(address >> 16);
@@ -121,6 +155,8 @@ static void set_gate(uint32_t vector, void (*handler)(void))
 
 void idt_init(void)
 {
+    gdt_init();
+
     for (uint32_t i = 0; i < 256; ++i)
         g_idt[i] = (idt_entry_t){0};
 
