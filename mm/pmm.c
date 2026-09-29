@@ -130,11 +130,6 @@ static bool count_range(uint64_t start, uint64_t pages, frame_count_t *count)
     return true;
 }
 
-/*
- * 真正的 bootstrap allocator。它只在 pmm_init() 内使用一次，
- * 直接收缩 UEFI MEM_CONVENTIONAL descriptor；初始化完成后生命周期结束。
- */
-
 static uint8_t *pool3_layout(uint8_t *p, pmm_pool3_t **out,
                              uint32_t capacity)
 {

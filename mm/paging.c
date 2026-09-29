@@ -215,7 +215,8 @@ static bool alloc_table(paging_builder_t *b,
     if (b->used_pages >= b->block_pages)
         return false;
 
-    uint64_t phys = b->block_phys + b->used_pages * PAGE_4K;
+    uint64_t index = b->block_pages - b->used_pages - 1;
+    uint64_t phys = b->block_phys + index * PAGE_4K;
     ++b->used_pages;
 
     uint64_t *table = (uint64_t *)(uintptr_t)phys;
@@ -492,6 +493,16 @@ int paging_early_takeover(BOOT_INFO *bi, paging_info_t *out_info)
         return -8;
 
     b.info.table_pages = b.used_pages;
+
+    /*
+     * estimate_tables() 是安全上界。页表从预留 block 高端向下使用，
+     * 因而未使用的低端前缀正好紧贴原 Conventional descriptor，
+     * 可以在启动 PMM 前无损归还。
+     */
+    uint64_t unused = b.block_pages - b.used_pages;
+    if (unused != 0 &&
+        !boot_release_pages(bi, b.block_phys, unused))
+        return -9;
 
     write_cr3(b.root_phys);
 
