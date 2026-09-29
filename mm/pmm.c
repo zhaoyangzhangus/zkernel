@@ -483,6 +483,7 @@ int pmm_init(BOOT_INFO *bi)
      * 导致空间不足的问题。
      */
     uint64_t reserve_pages = 1;
+    uint64_t previous_pages = UINT64_MAX;
     frame_count_t count = {0};
     uint64_t used_bytes = 0;
     uint32_t pte_capacity = 0;
@@ -510,8 +511,21 @@ int pmm_init(BOOT_INFO *bi)
             return -4;
         need /= PMM_PAGE_4K;
 
-        if (need <= reserve_pages)
+        if (need == reserve_pages)
             break;
+
+        /*
+         * 一般 2~3 次就收敛。若 2M 边界造成 A<->B 两点振荡，
+         * 取较大的那个预留值；当前容量已经按该 map 状态算好，
+         * 因而仍然安全，而且最多只多留极少页。
+         */
+        if (need == previous_pages) {
+            if (need < reserve_pages)
+                break;
+            previous_pages = UINT64_MAX;
+        } else {
+            previous_pages = reserve_pages;
+        }
 
         reserve_pages = need;
 
