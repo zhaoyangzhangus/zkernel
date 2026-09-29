@@ -49,17 +49,31 @@ void kernel_main(BOOT_INFO *bi)
                         0x00F2F5F7U, 0x00081018U);
     }
 
-    if (pmm_init(bi) != 0) {
-        printf("[kernel] pmm init failed\n");
+    int status = pmm_init(bi);
+    if (status != 0) {
+        printf("[kernel] pmm init failed: %d\n", status);
         halt();
     }
 
-    uint64_t p = pmm_alloc(24577);
-    if (p == PMM_ALLOC_FAILED) {
-        printf("[kernel] pmm alloc failed\n");
+    pmm_frame_t pte;
+    pmm_frame_t pde;
+
+    if (!pmm_alloc4k(pmm_boot_cpu(), &pte)) {
+        printf("[kernel] PTE pool empty\n");
         halt();
     }
 
-    printf("[kernel] pmm 24577 bytes -> %p\n", (void *)(uintptr_t)p);
+    if (!pmm_alloc2m(&pde)) {
+        printf("[kernel] PDE pool empty\n");
+        halt();
+    }
+
+    printf("[kernel] PTE frame=%p PDE frame=%p\n",
+           (void *)(uintptr_t)pte,
+           (void *)(uintptr_t)pde);
+
+    pmm_free4k(pmm_boot_cpu(), pte);
+    pmm_free2m(pde);
+
     halt();
 }

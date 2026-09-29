@@ -5,50 +5,37 @@
 
 ## 构建
 
-只保留调试构建：
-
 ```sh
 make
 make run
 make clean
 ```
 
-产物固定在 `build/debug/`。QEMU 直接把这个目录作为 vvfat 启动盘。
+只保留调试构建，产物固定在 `build/debug/`。内核 `printf` 直接通过
+QEMU debugcon `0xE9` 输出到启动 QEMU 的终端。
 
-## 终端输出
+## PMM
 
-内核 `printf` 直接写 I/O port `0xE9`。QEMU 使用：
+PMM 只接受 UEFI `MEM_CONVENTIONAL`。
 
-```text
--debugcon stdio -global isa-debugcon.iobase=0xe9
-```
+运行期不维护 allocated bitmap，也不做 frame→slot 反查。frame 是 opaque
+64-bit 资源值；分配后只由使用者持有，free 时写回任意空 slot。
 
-因此内核日志直接出现在启动 QEMU 的终端，不再初始化或维护 16550/COM1 串口驱动。
+- global PTE pool：三层 64 叉，`64^3 = 262144` slots
+- global PDE pool：三层 64 叉，`64^3 = 262144` slots
+- per-CPU PTE pool：两层 64 叉，`64^2 = 4096` slots
+- CPU PTE pool 与 global PTE pool 每次 refill/drain 64 frames
+- bitmap：`1 = slot/subtree 有可分配 frame`，`0 = 空/耗尽`
+
+初始化阶段把 Conventional range 的 2 MiB 对齐完整块放入 PDE pool，
+两端 4 KiB 页放入 PTE pool。运行期 allocator 不再解析物理地址。
 
 ## 调试
 
-VS Code 直接按 F5。手动调试：
+VS Code 直接按 F5；或：
 
 ```sh
 make run-gdb
 gdb build/debug/kernel.elf
 (gdb) target remote :1234
-```
-
-`run-gdb` 使用 `-S` 暂停 CPU，入口使用硬件断点。
-
-## 当前内核
-
-- debugcon `printf` 终端输出
-- 最终 UEFI memory map
-- `pmm_alloc(size)`：仅从 `MEM_CONVENTIONAL` 分配，按 4 KiB 向上取整，不释放
-- LiteOS 12x24 A8 ASCII framebuffer 字体
-
-```text
-boot/       UEFI loader 与共享定义
-init/       kernel_main
-mm/         早期物理内存
-graphics/   A8 字体和 framebuffer 绘制
-lib/        printf
-tools/      QEMU/GDB 调试脚本
 ```
