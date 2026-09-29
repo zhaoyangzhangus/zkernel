@@ -14,7 +14,14 @@
             },
             "problemMatcher": [
                 "$gcc"
-            ]
+            ],
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared",
+                "focus": false,
+                "clear": false,
+                "showReuseMessage": false
+            }
         },
         {
             "label": "zkernel: run",
@@ -40,6 +47,13 @@
                     "beginsPattern": "^\\[qemu\\] starting",
                     "endsPattern": "^\\[qemu\\] ready"
                 }
+            },
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared",
+                "focus": false,
+                "clear": false,
+                "showReuseMessage": false
             }
         },
         {
@@ -49,7 +63,14 @@
             "args": [
                 "debug-stop"
             ],
-            "problemMatcher": []
+            "problemMatcher": [],
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared",
+                "focus": false,
+                "clear": false,
+                "showReuseMessage": false
+            }
         }
     ]
 }
