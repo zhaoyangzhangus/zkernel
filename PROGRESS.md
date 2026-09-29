@@ -1,6 +1,6 @@
 # 当前状态
 
-- 构建：仅 `build/debug/`；debugcon 0xE9 输出宿主终端。
+- 构建：仅 `build/debug/`；QEMU 启动只保留 `make run` 一条路径，带图形窗口、debugcon 和 GDB stub。
 - 页表：继续使用 UEFI identity/direct map；不建立新页表、不修改 CR3。
 - PMM：容量统计含 Loader/BootServices/Conventional；当前 seed 仅 Conventional；4K:2M = 1:7。
 - VM：独立 VA manager，不分配数据页、不做 mapping。

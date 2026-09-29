@@ -51,4 +51,11 @@ address-sorted doubly-linked list
 
 ## 调试
 
-VS Code 直接按 F5；或使用 `make run-gdb`。
+只保留一条 QEMU 启动路径：
+
+```sh
+make run
+```
+
+它同时开启 QEMU 图形窗口、debugcon 和 GDB stub，并用 `-S` 在启动时暂停等待调试器。
+VS Code F5 的 preLaunchTask 最终也调用同一个 `make run`，不再存在 `run-gdb`。

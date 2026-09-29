@@ -10,7 +10,7 @@ pkill -f "[g]db tcp::${PORT}" 2>/dev/null || true
 make -s all
 
 echo "[qemu] starting on :${PORT}"
-make -s GDB_PORT="${PORT}" run-gdb &
+make -s GDB_PORT="${PORT}" run &
 pid=$!
 
 for _ in $(seq 1 100); do

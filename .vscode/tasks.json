@@ -5,15 +5,19 @@
             "label": "zkernel: build",
             "type": "shell",
             "command": "make",
-            "args": ["all"],
+            "args": [
+                "all"
+            ],
             "group": {
                 "kind": "build",
                 "isDefault": true
             },
-            "problemMatcher": ["$gcc"]
+            "problemMatcher": [
+                "$gcc"
+            ]
         },
         {
-            "label": "zkernel: qemu-gdb",
+            "label": "zkernel: run",
             "type": "shell",
             "command": "${workspaceFolder}/tools/qemu-debug.sh",
             "isBackground": true,
@@ -38,7 +42,9 @@
             "label": "zkernel: stop-qemu",
             "type": "shell",
             "command": "make",
-            "args": ["debug-stop"],
+            "args": [
+                "debug-stop"
+            ],
             "problemMatcher": []
         }
     ]

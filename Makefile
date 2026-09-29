@@ -30,7 +30,7 @@ GDB_PORT  ?= 1234
 BOOTX64 := $(BUILD)/EFI/BOOT/BOOTX64.EFI
 KERNEL_OBJS := $(BUILD)/main.o $(BUILD)/printf.o $(BUILD)/pmm.o $(BUILD)/vm.o $(BUILD)/text.o
 
-.PHONY: all run run-gdb debug-stop clean
+.PHONY: all run debug-stop clean
 
 all: $(BOOTX64) $(BUILD)/kernel.elf
 
@@ -77,10 +77,7 @@ QEMU_TERM = -monitor none -serial none -debugcon stdio \
             -global isa-debugcon.iobase=0xe9
 
 run: all $(BUILD)/OVMF_VARS.fd
-	$(QEMU) -m $(QEMU_MEM) $(QEMU_DRIVES) $(QEMU_TERM)
-
-run-gdb: all $(BUILD)/OVMF_VARS.fd
-	$(QEMU) -m $(QEMU_MEM) -display none $(QEMU_DRIVES) $(QEMU_TERM) \
+	$(QEMU) -m $(QEMU_MEM) $(QEMU_DRIVES) $(QEMU_TERM) \
 	        -gdb tcp::$(GDB_PORT) -S
 
 debug-stop:
