@@ -7,24 +7,22 @@ typedef struct vm_range {
     uint64_t start;
     uint64_t end;
 
-    /* 当前 RB 子树中的最大 free range。 */
+    /* free tree 使用；used tree 中维护但不参与查询。 */
     uint64_t subtree_max;
 
     struct vm_range *left;
     struct vm_range *right;
     struct vm_range *parent;
 
-    /* 地址顺序链表，用于 O(1) 取得前后相邻 free range。 */
+    /* 仅 free range 进入地址有序双链表。 */
     struct vm_range *prev;
     struct vm_range *next;
 
+    uint64_t attrs;
+    uint32_t type;
     bool red;
 } vm_range_t;
 
-/*
- * range metadata node cache。
- * 当前仍使用 UEFI identity map，所以 PMM 返回的 frame 可以直接作为指针。
- */
 static vm_range_t *g_free_nodes;
 
 static inline uint64_t range_size(const vm_range_t *node)
@@ -78,6 +76,21 @@ static bool canonical(uint64_t address)
 static bool power_of_two(uint64_t value)
 {
     return value != 0 && (value & (value - 1)) == 0;
+}
+
+static bool valid_type(vm_region_type_t type)
+{
+    return type >= VM_REGION_GENERIC && type <= VM_REGION_USER;
+}
+
+static bool valid_attrs(uint64_t attrs)
+{
+    uint64_t cache = attrs & VM_ATTR_CACHE_MASK;
+
+    return cache == 0 ||
+           cache == VM_ATTR_CACHE_WB ||
+           cache == VM_ATTR_CACHE_WC ||
+           cache == VM_ATTR_CACHE_UC;
 }
 
 static bool page_round(uint64_t size, uint64_t *out)
@@ -134,7 +147,7 @@ static void node_put(vm_range_t *node)
     g_free_nodes = node;
 }
 
-static void rotate_left(vm_space_t *space, vm_range_t *x)
+static void rotate_left(vm_range_t **root, vm_range_t *x)
 {
     vm_range_t *y = x->right;
 
@@ -145,7 +158,7 @@ static void rotate_left(vm_space_t *space, vm_range_t *x)
     y->parent = x->parent;
 
     if (x->parent == NULL)
-        space->root = y;
+        *root = y;
     else if (x == x->parent->left)
         x->parent->left = y;
     else
@@ -158,7 +171,7 @@ static void rotate_left(vm_space_t *space, vm_range_t *x)
     recalc(y);
 }
 
-static void rotate_right(vm_space_t *space, vm_range_t *y)
+static void rotate_right(vm_range_t **root, vm_range_t *y)
 {
     vm_range_t *x = y->left;
 
@@ -169,7 +182,7 @@ static void rotate_right(vm_space_t *space, vm_range_t *y)
     x->parent = y->parent;
 
     if (y->parent == NULL)
-        space->root = x;
+        *root = x;
     else if (y == y->parent->left)
         y->parent->left = x;
     else
@@ -182,7 +195,7 @@ static void rotate_right(vm_space_t *space, vm_range_t *y)
     recalc(x);
 }
 
-static void insert_fixup(vm_space_t *space, vm_range_t *node)
+static void insert_fixup(vm_range_t **root, vm_range_t *node)
 {
     while (node->parent != NULL && node->parent->red) {
         vm_range_t *parent = node->parent;
@@ -199,14 +212,14 @@ static void insert_fixup(vm_space_t *space, vm_range_t *node)
             } else {
                 if (node == parent->right) {
                     node = parent;
-                    rotate_left(space, node);
+                    rotate_left(root, node);
                     parent = node->parent;
                     grand = parent->parent;
                 }
 
                 parent->red = false;
                 grand->red = true;
-                rotate_right(space, grand);
+                rotate_right(root, grand);
             }
         } else {
             vm_range_t *uncle = grand->left;
@@ -219,25 +232,25 @@ static void insert_fixup(vm_space_t *space, vm_range_t *node)
             } else {
                 if (node == parent->left) {
                     node = parent;
-                    rotate_right(space, node);
+                    rotate_right(root, node);
                     parent = node->parent;
                     grand = parent->parent;
                 }
 
                 parent->red = false;
                 grand->red = true;
-                rotate_left(space, grand);
+                rotate_left(root, grand);
             }
         }
     }
 
-    space->root->red = false;
+    (*root)->red = false;
 }
 
-static void tree_insert(vm_space_t *space, vm_range_t *node)
+static void tree_insert(vm_range_t **root, vm_range_t *node)
 {
     vm_range_t *parent = NULL;
-    vm_range_t *cur = space->root;
+    vm_range_t *cur = *root;
 
     node->left = NULL;
     node->right = NULL;
@@ -253,14 +266,14 @@ static void tree_insert(vm_space_t *space, vm_range_t *node)
     node->parent = parent;
 
     if (parent == NULL)
-        space->root = node;
+        *root = node;
     else if (node->start < parent->start)
         parent->left = node;
     else
         parent->right = node;
 
     update_up(parent);
-    insert_fixup(space, node);
+    insert_fixup(root, node);
 }
 
 static vm_range_t *tree_min(vm_range_t *node)
@@ -270,11 +283,11 @@ static vm_range_t *tree_min(vm_range_t *node)
     return node;
 }
 
-static void transplant(vm_space_t *space, vm_range_t *old_node,
-                       vm_range_t *new_node)
+static void transplant(vm_range_t **root,
+                       vm_range_t *old_node, vm_range_t *new_node)
 {
     if (old_node->parent == NULL)
-        space->root = new_node;
+        *root = new_node;
     else if (old_node == old_node->parent->left)
         old_node->parent->left = new_node;
     else
@@ -284,10 +297,10 @@ static void transplant(vm_space_t *space, vm_range_t *old_node,
         new_node->parent = old_node->parent;
 }
 
-static void delete_fixup(vm_space_t *space, vm_range_t *node,
-                         vm_range_t *parent)
+static void delete_fixup(vm_range_t **root,
+                         vm_range_t *node, vm_range_t *parent)
 {
-    while (node != space->root && is_black(node)) {
+    while (node != *root && is_black(node)) {
         if (parent == NULL)
             break;
 
@@ -297,7 +310,7 @@ static void delete_fixup(vm_space_t *space, vm_range_t *node,
             if (is_red(sibling)) {
                 sibling->red = false;
                 parent->red = true;
-                rotate_left(space, parent);
+                rotate_left(root, parent);
                 sibling = parent->right;
             }
 
@@ -312,7 +325,7 @@ static void delete_fixup(vm_space_t *space, vm_range_t *node,
                     if (sibling->left != NULL)
                         sibling->left->red = false;
                     sibling->red = true;
-                    rotate_right(space, sibling);
+                    rotate_right(root, sibling);
                     sibling = parent->right;
                 }
 
@@ -321,8 +334,8 @@ static void delete_fixup(vm_space_t *space, vm_range_t *node,
                 if (sibling->right != NULL)
                     sibling->right->red = false;
 
-                rotate_left(space, parent);
-                node = space->root;
+                rotate_left(root, parent);
+                node = *root;
                 parent = NULL;
             }
         } else {
@@ -331,7 +344,7 @@ static void delete_fixup(vm_space_t *space, vm_range_t *node,
             if (is_red(sibling)) {
                 sibling->red = false;
                 parent->red = true;
-                rotate_right(space, parent);
+                rotate_right(root, parent);
                 sibling = parent->left;
             }
 
@@ -346,7 +359,7 @@ static void delete_fixup(vm_space_t *space, vm_range_t *node,
                     if (sibling->right != NULL)
                         sibling->right->red = false;
                     sibling->red = true;
-                    rotate_left(space, sibling);
+                    rotate_left(root, sibling);
                     sibling = parent->left;
                 }
 
@@ -355,8 +368,8 @@ static void delete_fixup(vm_space_t *space, vm_range_t *node,
                 if (sibling->left != NULL)
                     sibling->left->red = false;
 
-                rotate_right(space, parent);
-                node = space->root;
+                rotate_right(root, parent);
+                node = *root;
                 parent = NULL;
             }
         }
@@ -366,7 +379,7 @@ static void delete_fixup(vm_space_t *space, vm_range_t *node,
         node->red = false;
 }
 
-static void tree_delete(vm_space_t *space, vm_range_t *node)
+static void tree_delete(vm_range_t **root, vm_range_t *node)
 {
     vm_range_t *moved = node;
     vm_range_t *child;
@@ -376,12 +389,12 @@ static void tree_delete(vm_space_t *space, vm_range_t *node)
     if (node->left == NULL) {
         child = node->right;
         child_parent = node->parent;
-        transplant(space, node, node->right);
+        transplant(root, node, node->right);
         update_up(child_parent);
     } else if (node->right == NULL) {
         child = node->left;
         child_parent = node->parent;
-        transplant(space, node, node->left);
+        transplant(root, node, node->left);
         update_up(child_parent);
     } else {
         moved = tree_min(node->right);
@@ -396,7 +409,7 @@ static void tree_delete(vm_space_t *space, vm_range_t *node)
             vm_range_t *old_parent = moved->parent;
 
             child_parent = old_parent;
-            transplant(space, moved, moved->right);
+            transplant(root, moved, moved->right);
 
             moved->right = node->right;
             moved->right->parent = moved;
@@ -404,7 +417,7 @@ static void tree_delete(vm_space_t *space, vm_range_t *node)
             update_up(old_parent);
         }
 
-        transplant(space, node, moved);
+        transplant(root, node, moved);
 
         moved->left = node->left;
         moved->left->parent = moved;
@@ -415,70 +428,12 @@ static void tree_delete(vm_space_t *space, vm_range_t *node)
     }
 
     if (!moved_red)
-        delete_fixup(space, child, child_parent);
+        delete_fixup(root, child, child_parent);
 }
 
-static void list_insert_before(vm_space_t *space, vm_range_t *next,
-                               vm_range_t *node)
+static vm_range_t *tree_floor(vm_range_t *root, uint64_t key)
 {
-    if (next == NULL) {
-        node->prev = space->tail;
-        node->next = NULL;
-
-        if (space->tail != NULL)
-            space->tail->next = node;
-        else
-            space->head = node;
-
-        space->tail = node;
-        return;
-    }
-
-    node->next = next;
-    node->prev = next->prev;
-
-    if (next->prev != NULL)
-        next->prev->next = node;
-    else
-        space->head = node;
-
-    next->prev = node;
-}
-
-static void list_insert_after(vm_space_t *space, vm_range_t *prev,
-                              vm_range_t *node)
-{
-    if (prev == NULL) {
-        list_insert_before(space, space->head, node);
-        return;
-    }
-
-    list_insert_before(space, prev->next, node);
-}
-
-static void list_remove(vm_space_t *space, vm_range_t *node)
-{
-    if (node->prev != NULL)
-        node->prev->next = node->next;
-    else
-        space->head = node->next;
-
-    if (node->next != NULL)
-        node->next->prev = node->prev;
-    else
-        space->tail = node->prev;
-}
-
-static void remove_free_node(vm_space_t *space, vm_range_t *node)
-{
-    list_remove(space, node);
-    tree_delete(space, node);
-    node_put(node);
-}
-
-static vm_range_t *tree_floor(const vm_space_t *space, uint64_t key)
-{
-    vm_range_t *cur = space->root;
+    vm_range_t *cur = root;
     vm_range_t *best = NULL;
 
     while (cur != NULL) {
@@ -493,9 +448,9 @@ static vm_range_t *tree_floor(const vm_space_t *space, uint64_t key)
     return best;
 }
 
-static vm_range_t *tree_lower_bound(const vm_space_t *space, uint64_t key)
+static vm_range_t *tree_lower_bound(vm_range_t *root, uint64_t key)
 {
-    vm_range_t *cur = space->root;
+    vm_range_t *cur = root;
     vm_range_t *best = NULL;
 
     while (cur != NULL) {
@@ -510,12 +465,64 @@ static vm_range_t *tree_lower_bound(const vm_space_t *space, uint64_t key)
     return best;
 }
 
-/*
- * 找地址最低的可用区间。
- * subtree_max < size 的整棵子树可以直接跳过。
- * alignment 只在候选 node 上计算，所以超大对齐时最坏情况仍可能检查
- * 多个候选；普通 4K/2M 对齐下可快速跳过绝大多数不可能满足的子树。
- */
+static void list_insert_before(vm_space_t *space, vm_range_t *next,
+                               vm_range_t *node)
+{
+    if (next == NULL) {
+        node->prev = space->free_tail;
+        node->next = NULL;
+
+        if (space->free_tail != NULL)
+            space->free_tail->next = node;
+        else
+            space->free_head = node;
+
+        space->free_tail = node;
+        return;
+    }
+
+    node->next = next;
+    node->prev = next->prev;
+
+    if (next->prev != NULL)
+        next->prev->next = node;
+    else
+        space->free_head = node;
+
+    next->prev = node;
+}
+
+static void list_insert_after(vm_space_t *space, vm_range_t *prev,
+                              vm_range_t *node)
+{
+    if (prev == NULL) {
+        list_insert_before(space, space->free_head, node);
+        return;
+    }
+
+    list_insert_before(space, prev->next, node);
+}
+
+static void list_remove(vm_space_t *space, vm_range_t *node)
+{
+    if (node->prev != NULL)
+        node->prev->next = node->next;
+    else
+        space->free_head = node->next;
+
+    if (node->next != NULL)
+        node->next->prev = node->prev;
+    else
+        space->free_tail = node->prev;
+}
+
+static void remove_free_node(vm_space_t *space, vm_range_t *node)
+{
+    list_remove(space, node);
+    tree_delete((vm_range_t **)&space->free_root, node);
+    node_put(node);
+}
+
 static vm_range_t *find_fit(vm_range_t *node, uint64_t size,
                             uint64_t align, uint64_t *out_start)
 {
@@ -562,7 +569,7 @@ static bool normalize_range(const vm_space_t *space,
     return true;
 }
 
-static bool reserve_from_node(vm_space_t *space, vm_range_t *node,
+static bool reserve_from_free(vm_space_t *space, vm_range_t *node,
                               uint64_t start, uint64_t end)
 {
     if (start < node->start || end > node->end || start >= end)
@@ -583,15 +590,91 @@ static bool reserve_from_node(vm_space_t *space, vm_range_t *node,
 
         right->start = end;
         right->end = node->end;
+        right->type = VM_REGION_GENERIC;
+        right->attrs = 0;
 
         node->end = start;
         update_up(node);
 
         list_insert_after(space, node, right);
-        tree_insert(space, right);
+        tree_insert((vm_range_t **)&space->free_root, right);
     }
 
     space->free_bytes -= end - start;
+    return true;
+}
+
+static void region_init(vm_range_t *node, uint64_t start, uint64_t end,
+                        vm_region_type_t type, uint64_t attrs)
+{
+    node->start = start;
+    node->end = end;
+    node->type = (uint32_t)type;
+    node->attrs = attrs;
+    node->prev = NULL;
+    node->next = NULL;
+}
+
+static bool add_used_region(vm_space_t *space, vm_range_t *region)
+{
+    vm_range_t *left =
+        tree_floor((vm_range_t *)space->used_root, region->start);
+    vm_range_t *right =
+        tree_lower_bound((vm_range_t *)space->used_root, region->start);
+
+    if ((left != NULL && region->start < left->end) ||
+        (right != NULL && region->end > right->start))
+        return false;
+
+    tree_insert((vm_range_t **)&space->used_root, region);
+    space->used_bytes += region->end - region->start;
+    ++space->region_count;
+    return true;
+}
+
+static bool free_used_region(vm_space_t *space, vm_range_t *region)
+{
+    uint64_t start = region->start;
+    uint64_t end = region->end;
+
+    vm_range_t *right =
+        tree_lower_bound((vm_range_t *)space->free_root, start);
+    vm_range_t *left =
+        right != NULL ? right->prev : (vm_range_t *)space->free_tail;
+
+    if ((left != NULL && start < left->end) ||
+        (right != NULL && end > right->start))
+        return false;
+
+    tree_delete((vm_range_t **)&space->used_root, region);
+    space->used_bytes -= end - start;
+    --space->region_count;
+
+    bool merge_left = left != NULL && left->end == start;
+    bool merge_right = right != NULL && end == right->start;
+
+    if (merge_left && merge_right) {
+        left->end = right->end;
+        update_up(left);
+        remove_free_node(space, right);
+        node_put(region);
+    } else if (merge_left) {
+        left->end = end;
+        update_up(left);
+        node_put(region);
+    } else if (merge_right) {
+        right->start = start;
+        update_up(right);
+        node_put(region);
+    } else {
+        region->type = VM_REGION_GENERIC;
+        region->attrs = 0;
+
+        list_insert_before(space, right, region);
+        tree_insert((vm_range_t **)&space->free_root, region);
+    }
+
+    space->free_bytes += end - start;
     return true;
 }
 
@@ -617,42 +700,72 @@ bool vm_space_init(vm_space_t *space, pmm_cpu_t *cpu,
 
     initial->start = base;
     initial->end = end;
+    initial->type = VM_REGION_GENERIC;
+    initial->attrs = 0;
     initial->prev = NULL;
     initial->next = NULL;
 
     space->base = base;
     space->end = end;
     space->free_bytes = size;
-    space->root = NULL;
-    space->head = initial;
-    space->tail = initial;
+    space->used_bytes = 0;
+    space->region_count = 0;
+    space->free_root = NULL;
+    space->free_head = initial;
+    space->free_tail = initial;
+    space->used_root = NULL;
     space->cpu = cpu;
 
-    tree_insert(space, initial);
+    tree_insert((vm_range_t **)&space->free_root, initial);
     return true;
 }
 
-bool vm_reserve(vm_space_t *space, vaddr_t addr, uint64_t size)
+bool vm_reserve(vm_space_t *space, vaddr_t addr, uint64_t size,
+                vm_region_type_t type, uint64_t attrs)
 {
     uint64_t end;
 
-    if (!normalize_range(space, addr, size, &end))
+    if (!normalize_range(space, addr, size, &end) ||
+        !valid_type(type) || !valid_attrs(attrs))
         return false;
 
-    vm_range_t *node = tree_floor(space, addr);
+    vm_range_t *free_node =
+        tree_floor((vm_range_t *)space->free_root, addr);
 
-    if (node == NULL || addr < node->start || end > node->end)
+    if (free_node == NULL || addr < free_node->start || end > free_node->end)
         return false;
 
-    return reserve_from_node(space, node, addr, end);
+    vm_range_t *region = node_get(space->cpu);
+    if (region == NULL)
+        return false;
+
+    region_init(region, addr, end, type, attrs);
+
+    if (!reserve_from_free(space, free_node, addr, end)) {
+        node_put(region);
+        return false;
+    }
+
+    if (!add_used_region(space, region)) {
+        /*
+         * free/used 两棵树正常状态下这里不可能失败。
+         * 不尝试隐藏结构损坏。
+         */
+        return false;
+    }
+
+    return true;
 }
 
 bool vm_alloc(vm_space_t *space, uint64_t size, uint64_t align,
+              vm_region_type_t type, uint64_t attrs,
               vaddr_t *out_addr)
 {
     uint64_t bytes;
 
-    if (space == NULL || out_addr == NULL || !page_round(size, &bytes))
+    if (space == NULL || out_addr == NULL ||
+        !page_round(size, &bytes) ||
+        !valid_type(type) || !valid_attrs(attrs))
         return false;
 
     if (align < VM_PAGE_SIZE)
@@ -662,62 +775,61 @@ bool vm_alloc(vm_space_t *space, uint64_t size, uint64_t align,
         return false;
 
     uint64_t start;
-    vm_range_t *node = find_fit(space->root, bytes, align, &start);
+    vm_range_t *free_node =
+        find_fit((vm_range_t *)space->free_root, bytes, align, &start);
 
-    if (node == NULL)
+    if (free_node == NULL)
         return false;
 
-    if (!reserve_from_node(space, node, start, start + bytes))
+    vm_range_t *region = node_get(space->cpu);
+    if (region == NULL)
+        return false;
+
+    region_init(region, start, start + bytes, type, attrs);
+
+    if (!reserve_from_free(space, free_node, start, start + bytes)) {
+        node_put(region);
+        return false;
+    }
+
+    if (!add_used_region(space, region))
         return false;
 
     *out_addr = start;
     return true;
 }
 
-bool vm_free(vm_space_t *space, vaddr_t addr, uint64_t size)
+bool vm_query(const vm_space_t *space, vaddr_t addr,
+              vm_region_info_t *out_info)
 {
-    uint64_t end;
-
-    if (!normalize_range(space, addr, size, &end))
+    if (space == NULL || out_info == NULL ||
+        addr < space->base || addr >= space->end)
         return false;
 
-    vm_range_t *right = tree_lower_bound(space, addr);
-    vm_range_t *left = right != NULL ? right->prev : space->tail;
+    vm_range_t *region =
+        tree_floor((vm_range_t *)space->used_root, addr);
 
-    /* 与现有 free range 重叠：double-free 或错误区间。 */
-    if ((left != NULL && addr < left->end) ||
-        (right != NULL && end > right->start))
+    if (region == NULL || addr >= region->end)
         return false;
 
-    bool merge_left = left != NULL && left->end == addr;
-    bool merge_right = right != NULL && end == right->start;
-
-    if (merge_left && merge_right) {
-        left->end = right->end;
-        update_up(left);
-        remove_free_node(space, right);
-    } else if (merge_left) {
-        left->end = end;
-        update_up(left);
-    } else if (merge_right) {
-        /*
-         * right 是 lower_bound(addr)，addr 与旧 right->start 之间没有
-         * 其他 key，因此把 start 向左扩到 addr 不改变树的全局排序关系。
-         */
-        right->start = addr;
-        update_up(right);
-    } else {
-        vm_range_t *node = node_get(space->cpu);
-        if (node == NULL)
-            return false;
-
-        node->start = addr;
-        node->end = end;
-
-        list_insert_before(space, right, node);
-        tree_insert(space, node);
-    }
-
-    space->free_bytes += end - addr;
+    out_info->start = region->start;
+    out_info->end = region->end;
+    out_info->type = (vm_region_type_t)region->type;
+    out_info->attrs = region->attrs;
     return true;
+}
+
+bool vm_free(vm_space_t *space, vaddr_t addr)
+{
+    if (space == NULL || addr < space->base || addr >= space->end ||
+        (addr & (VM_PAGE_SIZE - 1)) != 0)
+        return false;
+
+    vm_range_t *region =
+        tree_floor((vm_range_t *)space->used_root, addr);
+
+    if (region == NULL || region->start != addr)
+        return false;
+
+    return free_used_region(space, region);
 }

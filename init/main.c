@@ -72,20 +72,35 @@ void kernel_main(BOOT_INFO *bi)
     vaddr_t va4k;
     vaddr_t va2m;
 
-    if (!vm_alloc(&kernel_vm, 3 * VM_PAGE_SIZE, VM_PAGE_SIZE, &va4k) ||
+    if (!vm_alloc(&kernel_vm, 3 * VM_PAGE_SIZE, VM_PAGE_SIZE,
+                  VM_REGION_DMA,
+                  VM_ATTR_READ | VM_ATTR_WRITE | VM_ATTR_PINNED |
+                  VM_ATTR_CACHE_WB,
+                  &va4k) ||
         !vm_alloc(&kernel_vm, 2 * 1024 * 1024ULL,
-                  2 * 1024 * 1024ULL, &va2m)) {
+                  2 * 1024 * 1024ULL,
+                  VM_REGION_MMIO,
+                  VM_ATTR_READ | VM_ATTR_WRITE | VM_ATTR_CACHE_UC,
+                  &va2m)) {
         printf("[kernel] vm alloc failed\n");
         halt();
     }
 
-    printf("[kernel] VA only: %p %p free=%lu MiB\n",
+    vm_region_info_t info;
+    if (!vm_query(&kernel_vm, va2m + VM_PAGE_SIZE, &info)) {
+        printf("[kernel] vm query failed\n");
+        halt();
+    }
+
+    printf("[kernel] VA DMA=%p MMIO=%p type=%u attrs=%p free=%lu MiB\n",
            (void *)(uintptr_t)va4k,
            (void *)(uintptr_t)va2m,
+           (unsigned)info.type,
+           (void *)(uintptr_t)info.attrs,
            (unsigned long)(kernel_vm.free_bytes >> 20));
 
-    if (!vm_free(&kernel_vm, va4k, 3 * VM_PAGE_SIZE) ||
-        !vm_free(&kernel_vm, va2m, 2 * 1024 * 1024ULL)) {
+    if (!vm_free(&kernel_vm, va4k) ||
+        !vm_free(&kernel_vm, va2m)) {
         printf("[kernel] vm free failed\n");
         halt();
     }

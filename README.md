@@ -20,44 +20,44 @@ make clean
 
 ## VM
 
-`mm/vm.c` 仍然只管理虚拟地址范围，不做任何页表映射。
-
-free VA 管理改为 Linux vmalloc 风格的两套索引：
-
-```text
-augmented RB-tree
-  key = range.start
-  subtree_max = 子树中最大的 free range
-
-address-sorted doubly-linked list
-  prev / next = 地址上直接相邻的 free range
-```
-
-因此：
-
-- `vm_alloc()` 用 `subtree_max` 跳过不可能容纳请求的整棵子树，不再从链表头顺序扫描。
-- `vm_reserve()` 用 RB-tree 按地址定位包含指定 VA 的 free range。
-- `vm_free()` 用 RB-tree 找 lower_bound，然后通过 `prev/next` O(1) 取得左右邻居并合并。
-- RB-tree 的插入/删除/旋转同步维护 `subtree_max`。
-- range node 不足时仍从 4K PMM 取一页作为 metadata。
-
-当前 kernel VM arena：
+VM 仍然只管理虚拟地址，不做页表 mapping，但现在同时管理 free space 和
+allocated region metadata。
 
 ```text
-0xFFFF800000000000 .. 0xFFFFC00000000000
+free_root
+  augmented RB-tree
+  subtree_max = 子树最大空洞
+  + address-sorted doubly list
+
+used_root
+  RB-tree
+  保存每个已占用 region：
+    start/end
+    type
+    attrs
 ```
 
-共 64 TiB。这只是 VA ownership；不会写 PTE/PDE，也不会访问返回的 VA。
+region type 当前包含 generic/kernel/heap/stack/DMA/MMIO/framebuffer/ACPI/user。
+
+region attrs 当前保存 RWX、user、guard、pinned、lazy 和 WB/WC/UC cache policy。
+这些属性暂时只作为 metadata；后续 page-table mapping 层根据它们生成真正的
+PTE/PAT 属性。
+
+接口：
+
+```c
+vm_alloc(... type, attrs, &va)
+vm_reserve(... type, attrs)
+vm_query(space, any_va_inside_region, &info)
+vm_free(space, region_start)
+```
+
+`vm_query()` 可以通过 region 内任意 VA 查出它属于哪一个区间以及该区间类型和属性。
+`vm_free()` 不再需要调用者重复传 size，因为 used region 自己保存 end。
+
+当前 kernel VM arena 为
+`0xFFFF800000000000..0xFFFFC00000000000`（64 TiB）。
 
 ## 调试
 
-只保留一条 QEMU 启动路径：
-
-```sh
-make run
-```
-
-它同时开启 QEMU 图形窗口、debugcon 和 GDB stub，并用 `-S` 在启动时暂停等待调试器。
-VS Code F5 的 preLaunchTask 最终也调用同一个 `make run`，不再存在 `run-gdb`。
-
-F5 只有一个后台 task：脚本先完成 `make all`，再启动 QEMU 并等待 GDB stub ready。GDB 连接后自动继续；没有用户断点就不暂停。VS Code Tasks 只能复用 task terminal，不能直接接管用户手工打开的普通终端。
+F5 只有一个后台 task；GDB 连接后自动 continue，没有用户断点就不停。
