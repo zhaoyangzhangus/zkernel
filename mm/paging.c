@@ -18,8 +18,7 @@
 #define CR4_LA57 (UINT64_C(1) << 12)
 
 typedef struct {
-    uint64_t block_phys;
-    uint64_t block_pages;
+    BOOT_INFO *bi;
     uint64_t used_pages;
 
     uint64_t *pml4;
@@ -28,12 +27,6 @@ typedef struct {
     bool allow_1g;
     paging_info_t info;
 } paging_builder_t;
-
-typedef struct {
-    uint64_t pdpt;
-    uint64_t pd;
-    uint64_t pt;
-} table_count_t;
 
 static void zero_page(void *ptr)
 {
@@ -100,169 +93,13 @@ static bool descriptor_bytes(const BOOT_MEMORY_DESCRIPTOR *d,
     return true;
 }
 
-/*
- * 对单个连续 range 按实际 1G->2M->4K 策略做 dry-run。
- * 这里只统计这个 range 独立需要的 lower-level table 数，因此不同
- * descriptor 落在同一个 table 时会略微重复计数；这是安全上界。
- */
-static bool estimate_range(uint64_t va, uint64_t pa, uint64_t bytes,
-                           bool allow_1g, table_count_t *out)
-{
-    uint64_t last_i4 = UINT64_MAX;
-    uint64_t last_pd = UINT64_MAX;
-    uint64_t last_pt = UINT64_MAX;
-
-    while (bytes != 0) {
-        uint64_t i4 = va >> 39;
-        if (i4 != last_i4) {
-            ++out->pdpt;
-            last_i4 = i4;
-        }
-
-        if (allow_1g &&
-            (va & (PAGE_1G - 1)) == 0 &&
-            (pa & (PAGE_1G - 1)) == 0 &&
-            bytes >= PAGE_1G) {
-            va += PAGE_1G;
-            pa += PAGE_1G;
-            bytes -= PAGE_1G;
-            continue;
-        }
-
-        uint64_t pd_key = va >> 30;
-        if (pd_key != last_pd) {
-            ++out->pd;
-            last_pd = pd_key;
-        }
-
-        if ((va & (PAGE_2M - 1)) == 0 &&
-            (pa & (PAGE_2M - 1)) == 0 &&
-            bytes >= PAGE_2M) {
-            va += PAGE_2M;
-            pa += PAGE_2M;
-            bytes -= PAGE_2M;
-            continue;
-        }
-
-        uint64_t pt_key = va >> 21;
-        if (pt_key != last_pt) {
-            ++out->pt;
-            last_pt = pt_key;
-        }
-
-        va += PAGE_4K;
-        pa += PAGE_4K;
-        bytes -= PAGE_4K;
-    }
-
-    return true;
-}
-
-static bool estimate_one_extent(uint64_t start, uint64_t bytes,
-                                bool allow_1g, table_count_t *count)
-{
-    if (!estimate_range(start, start, bytes, allow_1g, count))
-        return false;
-
-    if (start >= VM_KERNEL_SIZE ||
-        bytes > VM_KERNEL_SIZE - start)
-        return false;
-
-    return estimate_range(VM_DIRECT_MAP_BASE + start,
-                          start, bytes, allow_1g, count);
-}
-
-static bool estimate_tables(const BOOT_INFO *bi, bool allow_1g,
-                            uint64_t *out_pages)
-{
-    table_count_t count = {0};
-    const uint8_t *p = (const uint8_t *)(uintptr_t)bi->mmap_addr;
-
-    bool have_extent = false;
-    uint32_t extent_type = 0;
-    uint64_t extent_start = 0;
-    uint64_t extent_bytes = 0;
-
-    for (uint32_t i = 0; i < bi->mmap_desc_count;
-         ++i, p += bi->mmap_desc_size) {
-        const BOOT_MEMORY_DESCRIPTOR *d =
-            (const BOOT_MEMORY_DESCRIPTOR *)(const void *)p;
-
-        if (!usable_ram_type(d->type) || d->number_of_pages == 0) {
-            if (have_extent) {
-                if (!estimate_one_extent(extent_start, extent_bytes,
-                                         allow_1g, &count))
-                    return false;
-                have_extent = false;
-                extent_bytes = 0;
-            }
-            continue;
-        }
-
-        uint64_t bytes;
-        if (!descriptor_bytes(d, &bytes))
-            return false;
-
-        if (!have_extent) {
-            have_extent = true;
-            extent_type = d->type;
-            extent_start = d->physical_start;
-            extent_bytes = bytes;
-            continue;
-        }
-
-        uint64_t extent_end = extent_start + extent_bytes;
-
-        /*
-         * 只合并：
-         *   1. UEFI type 相同；
-         *   2. 物理地址严格连续。
-         *
-         * 不跨 type 合并，即使两个 descriptor 在物理上相邻。
-         */
-        if (d->type == extent_type &&
-            d->physical_start == extent_end) {
-            if (extent_bytes > UINT64_MAX - bytes)
-                return false;
-            extent_bytes += bytes;
-            continue;
-        }
-
-        if (!estimate_one_extent(extent_start, extent_bytes,
-                                 allow_1g, &count))
-            return false;
-
-        extent_type = d->type;
-        extent_start = d->physical_start;
-        extent_bytes = bytes;
-    }
-
-    if (have_extent &&
-        !estimate_one_extent(extent_start, extent_bytes,
-                             allow_1g, &count))
-        return false;
-
-    /*
-     * +1 PML4 root。
-     * 统计仍采用安全上界，实际未使用页在建表后归还 boot allocator。
-     */
-    uint64_t total = UINT64_C(1) + count.pdpt + count.pd + count.pt;
-    if (total > UINT64_MAX - 16)
-        return false;
-
-    *out_pages = total + 16;
-    return true;
-}
-
-
 static bool alloc_table(paging_builder_t *b,
                         uint64_t **out_table, uint64_t *out_phys)
 {
-    if (b->used_pages >= b->block_pages)
+    uint64_t phys;
+    if (!boot_alloc_pages(b->bi, 1, &phys))
         return false;
 
-    uint64_t index = b->block_pages - b->used_pages - 1;
-    uint64_t phys = b->block_phys + index * PAGE_4K;
     ++b->used_pages;
 
     uint64_t *table = (uint64_t *)(uintptr_t)phys;
@@ -478,24 +315,7 @@ static bool map_all_usable(paging_builder_t *b,
 }
 
 
-static bool map_bootstrap_block(paging_builder_t *b, bool direct)
-{
-    uint64_t bytes = b->block_pages * PAGE_4K;
-    uint64_t va = b->block_phys;
-
-    if (direct) {
-        if (b->block_phys >= VM_KERNEL_SIZE ||
-            bytes > VM_KERNEL_SIZE - b->block_phys)
-            return false;
-        va = VM_DIRECT_MAP_BASE + b->block_phys;
-    }
-
-    return map_range(b, va, b->block_phys, bytes);
-}
-
 static bool find_direct_span(const BOOT_INFO *bi,
-                             uint64_t bootstrap_phys,
-                             uint64_t bootstrap_pages,
                              uint64_t *out_span)
 {
     uint64_t maximum = 0;
@@ -514,15 +334,6 @@ static bool find_direct_span(const BOOT_INFO *bi,
             return false;
 
         uint64_t end = d->physical_start + bytes;
-        if (end > maximum)
-            maximum = end;
-    }
-
-    if (bootstrap_pages != 0) {
-        uint64_t bytes = bootstrap_pages * PAGE_4K;
-        if (bootstrap_phys > UINT64_MAX - bytes)
-            return false;
-        uint64_t end = bootstrap_phys + bytes;
         if (end > maximum)
             maximum = end;
     }
@@ -549,53 +360,35 @@ int paging_early_takeover(BOOT_INFO *bi, paging_info_t *out_info)
 
     bool allow_1g = cpu_has_1g_pages();
 
-    uint64_t reserve_pages;
-    if (!estimate_tables(bi, allow_1g, &reserve_pages))
-        return -3;
-
-    uint64_t block_phys;
-    if (!boot_alloc_pages(bi, reserve_pages, &block_phys))
-        return -4;
-
     paging_builder_t b = {0};
-    b.block_phys = block_phys;
-    b.block_pages = reserve_pages;
+    b.bi = bi;
     b.allow_1g = allow_1g;
     b.info.has_1g_pages = allow_1g ? 1U : 0U;
 
-    if (!find_direct_span(bi, block_phys, reserve_pages,
-                          &b.info.direct_span))
-        return -5;
+    /*
+     * direct_span 在任何页表分配修改 Conventional descriptor 之前确定。
+     * 页表本身永久保留，不会进入后续 PMM。
+     */
+    if (!find_direct_span(bi, &b.info.direct_span))
+        return -3;
 
+    /*
+     * 每缺一个页表页就直接 boot_alloc_pages(1)。
+     * boot allocator 从最低 Conventional 地址向上推进，不做预估、
+     * 不预留大块，也不回收页表页。
+     */
     if (!alloc_table(&b, &b.pml4, &b.root_phys))
-        return -6;
+        return -4;
 
     b.info.root_phys = b.root_phys;
 
-    /*
-     * boot_alloc_pages 已从 Conventional memory map 中切走整块页表内存。
-     * 先映射剩余全部 usable RAM，再显式映射 bootstrap page-table block，
-     * 因而切 CR3 后页表自身也仍可通过 identity/direct map 访问。
-     */
-    if (!map_all_usable(&b, bi, false) ||
-        !map_bootstrap_block(&b, false))
-        return -7;
+    if (!map_all_usable(&b, bi, false))
+        return -5;
 
-    if (!map_all_usable(&b, bi, true) ||
-        !map_bootstrap_block(&b, true))
-        return -8;
+    if (!map_all_usable(&b, bi, true))
+        return -6;
 
     b.info.table_pages = b.used_pages;
-
-    /*
-     * estimate_tables() 是安全上界。页表从预留 block 高端向下使用，
-     * 因而未使用的低端前缀正好紧贴原 Conventional descriptor，
-     * 可以在启动 PMM 前无损归还。
-     */
-    uint64_t unused = b.block_pages - b.used_pages;
-    if (unused != 0 &&
-        !boot_release_pages(bi, b.block_phys, unused))
-        return -9;
 
     write_cr3(b.root_phys);
 

@@ -19,8 +19,9 @@ typedef struct {
 /*
  * kernel_main() 的第一阶段。
  *
- * 先统计所有 usable RAM 在 1G->2M->4K 策略下需要的页表结构，
- * 再通过 boot_alloc_pages() 一次分配连续 bootstrap page-table block，
+ * 页表建立过程中每缺一个 4K table page 就直接调用
+ * boot_alloc_pages(bi, 1, ...)。boot allocator 从最低 Conventional
+ * 物理地址向上分配；这些页永久归 paging 使用，不再回收到 PMM。
  * 在 PMM 初始化之前建立并切换到自己的 4-level page tables。
  *
  * 所有最终可归内核使用的 RAM：

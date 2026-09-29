@@ -34,13 +34,12 @@ all usable RAM
         └─ direct map: VA = VM_DIRECT_MAP_BASE + PA
 ```
 
-Early paging 先根据 memory map 和 1G→2M→4K 策略统计页表规模，然后通过共享
-`boot_alloc_pages()` 一次分配连续 bootstrap page-table block。建表过程只在
-这块 block 内 bump allocation，不再边建表边修改 memory map。
+Early paging 不再预估页表规模，也不一次预留 bootstrap block。每缺一个
+4K table page 就直接调用 `boot_alloc_pages(bi, 1, ...)`，实际使用多少页就分配多少页。
 
-`boot_alloc_pages()` 从最大的 Conventional descriptor 高地址端切内存，descriptor
-立即缩短，因此之后的 `pmm_init()` 不会再次使用这些页。页表 block 会被显式加入
-identity/direct map，所以切 CR3 后页表自身仍可访问。
+`boot_alloc_pages()` 始终选择最低物理地址、且能容纳请求的 Conventional descriptor，
+并从其低地址端向上分配；descriptor 的 `physical_start` 随分配前移。因此 early
+页表页永久归 paging 使用，之后的 `pmm_init()` 不会再次看到这些页。
 
 每个 RAM range 都按 `1G -> 2M -> 4K` 贪心映射；CPU 不支持 1G page 时自动退化到
 `2M -> 4K`。MMIO、framebuffer、Runtime Services 不作为普通 WB RAM direct-map。

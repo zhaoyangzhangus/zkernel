@@ -14,11 +14,11 @@ bool boot_alloc_pages(BOOT_INFO *bi, uint64_t pages, uint64_t *out_phys)
     uint8_t *p = (uint8_t *)(uintptr_t)bi->mmap_addr;
 
     /*
-     * 优先选择最大的 Conventional descriptor，减少把很多小 range
-     * 切碎。页从 descriptor 高地址端取，保持 physical_start 不变，
-     * 对后续 1G/2M 大页映射和 PMM seed 更友好。
+     * 始终选择能够容纳请求的最低物理地址 Conventional descriptor，
+     * 并从它的低地址端向上分配。descriptor 的 physical_start 随分配
+     * 前移，因此这些 early pages 会直接从后续 PMM 可见范围中消失。
      */
-    BOOT_MEMORY_DESCRIPTOR *best = NULL;
+    BOOT_MEMORY_DESCRIPTOR *lowest = NULL;
 
     for (uint32_t i = 0; i < bi->mmap_desc_count;
          ++i, p += bi->mmap_desc_size) {
@@ -29,22 +29,22 @@ bool boot_alloc_pages(BOOT_INFO *bi, uint64_t pages, uint64_t *out_phys)
             d->number_of_pages < pages)
             continue;
 
-        if (best == NULL || d->number_of_pages > best->number_of_pages)
-            best = d;
+        if (lowest == NULL ||
+            d->physical_start < lowest->physical_start)
+            lowest = d;
     }
 
-    if (best == NULL)
+    if (lowest == NULL)
         return false;
 
-    uint64_t remain = best->number_of_pages - pages;
-    uint64_t offset = remain * BOOT_PAGE_SIZE;
-
-    if (best->physical_start > UINT64_MAX - offset)
+    uint64_t bytes = pages * BOOT_PAGE_SIZE;
+    if (lowest->physical_start > UINT64_MAX - bytes)
         return false;
 
-    uint64_t phys = best->physical_start + offset;
+    uint64_t phys = lowest->physical_start;
 
-    best->number_of_pages = remain;
+    lowest->physical_start += bytes;
+    lowest->number_of_pages -= pages;
     *out_phys = phys;
     return true;
 }
@@ -67,17 +67,14 @@ bool boot_release_pages(BOOT_INFO *bi, uint64_t phys, uint64_t pages)
             d->number_of_pages > UINT64_MAX / BOOT_PAGE_SIZE)
             continue;
 
-        uint64_t current_bytes = d->number_of_pages * BOOT_PAGE_SIZE;
-        if (d->physical_start > UINT64_MAX - current_bytes)
-            continue;
-
-        uint64_t end = d->physical_start + current_bytes;
-        if (end != phys)
+        if (phys > UINT64_MAX - bytes ||
+            phys + bytes != d->physical_start)
             continue;
 
         if (d->number_of_pages > UINT64_MAX - pages)
             return false;
 
+        d->physical_start = phys;
         d->number_of_pages += pages;
         return true;
     }
