@@ -1,6 +1,6 @@
 # 当前状态
 
-- 构建：仅 `build/debug/`；F5 按 `make all` → QEMU → GDB，连接后自动 continue；没有用户断点不暂停，命中用户断点才停。VS Code tasks 使用 shared terminal，优先复用已有空闲终端。
+- 构建：仅 `build/debug/`；F5 只有一个后台 task，脚本内部顺序执行 `make all` → QEMU → GDB ready。没有用户断点不暂停。VS Code task 只使用一个 shared task terminal；普通手工终端不会被 task 接管。
 - 页表：继续使用 UEFI identity/direct map；不建立新页表、不修改 CR3。
 - PMM：容量统计含 Loader/BootServices/Conventional；当前 seed 仅 Conventional；4K:2M = 1:7。
 - VM：独立 VA manager，不分配数据页、不做 mapping。

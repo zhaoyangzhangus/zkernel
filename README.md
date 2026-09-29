@@ -60,4 +60,4 @@ make run
 它同时开启 QEMU 图形窗口、debugcon 和 GDB stub，并用 `-S` 在启动时暂停等待调试器。
 VS Code F5 的 preLaunchTask 最终也调用同一个 `make run`，不再存在 `run-gdb`。
 
-F5 连接 GDB 后会自动继续执行：没有用户断点就不暂停；如果提前在 VS Code 设置了断点，GDB 会在继续前安装这些断点并在命中时停止。
+F5 只有一个后台 task：脚本先完成 `make all`，再启动 QEMU 并等待 GDB stub ready。GDB 连接后自动继续；没有用户断点就不暂停。VS Code Tasks 只能复用 task terminal，不能直接接管用户手工打开的普通终端。
