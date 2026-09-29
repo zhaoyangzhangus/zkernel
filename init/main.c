@@ -122,11 +122,12 @@ void kernel_main(BOOT_INFO *bi)
     printf("[kernel] mmap=%u usable=%lu MiB\n",
            bi->mmap_desc_count,
            (unsigned long)(usable_pages(bi) / 256));
-    printf("[kernel] paging cr3=%p direct=%lu MiB tables=%lu "
-           "1G=%lu 2M=%lu 4K=%lu\n",
+    printf("[kernel] paging cr3=%p direct=%lu MiB "
+           "tables=%lu pages/%lu KiB 1G=%lu 2M=%lu 4K=%lu\n",
            (void *)(uintptr_t)paging.root_phys,
            (unsigned long)(paging.direct_span >> 20),
            (unsigned long)paging.table_pages,
+           (unsigned long)(paging.table_pages * 4),
            (unsigned long)paging.leaf_1g,
            (unsigned long)paging.leaf_2m,
            (unsigned long)paging.leaf_4k);
