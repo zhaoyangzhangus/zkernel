@@ -1,7 +1,7 @@
 # zkernel
 
-最小 x86_64 UEFI 内核实验项目。UEFI loader 读取 `kernel.elf`，按 PT_LOAD
-装入物理内存，取得 GOP 与最终 memory map，`ExitBootServices()` 后跳入内核。
+最小 x86_64 UEFI 内核实验项目。当前继续使用 UEFI 留下来的页表和 identity/direct
+mapping，不建立新页表，也不切换 CR3。
 
 ## 构建
 
@@ -11,50 +11,38 @@ make run
 make clean
 ```
 
-只保留调试构建，产物固定在 `build/debug/`。内核 `printf` 通过
-QEMU debugcon `0xE9` 直接输出宿主终端。
+只保留调试构建，内核 `printf` 通过 QEMU debugcon `0xE9` 输出宿主终端。
 
 ## PMM
 
-初始化第一步统计最终归内核所有的 RAM：
+初始容量统计包含 LoaderCode/Data、BootServicesCode/Data 和 Conventional。
+当前实际 seed 仍只使用 Conventional。4K(PTE) : 2M(PDE) 按物理容量规划为 1:7。
 
-```text
-LoaderCode
-LoaderData
-BootServicesCode
-BootServicesData
-Conventional
+## VM
+
+`mm/vm.c` 是独立的虚拟地址区间管理器，只管理 VA 所有权。
+
+不会修改页表、不会写 PTE/PDE、不会切 CR3、不会建立映射，也不会访问分配出的 VA。
+
+```c
+vm_space_init()
+vm_alloc()
+vm_reserve()
+vm_free()
 ```
 
-这些类型共同参与 pool 容量和 4K/2M 配额计算。当前真正填入 pool 的仍只有
-`MEM_CONVENTIONAL`，因为内核还在使用 UEFI 留下的 stack/page tables，
-并且 BOOT_INFO、memory-map、kernel image 仍可能位于 Loader 内存。
-等建立自己的 stack/page tables 后再回收 Loader/BootServices。
+第一版使用按地址排序的 free-range list：first-fit 分配，free 自动合并相邻区间。
+range node 不够时，从 4K PMM 取一页作为 VM metadata；这些 metadata 页依靠当前
+UEFI identity map 访问。
 
-目标物理容量比例：
+当前 kernel VM arena：
 
 ```text
-PTE / 4K = 1/8
-PDE / 2M = 7/8
+0xFFFF800000000000 .. 0xFFFFC00000000000
 ```
 
-先统计每个 usable descriptor 的天然 4K 边缘和 2M 对齐块。天然 4K 边缘
-优先计入 PTE 配额；如果还不足总 usable RAM 的 1/8，就把若干完整 2M block
-规划为 512 个 4K PTE frames。PTE 比例按完整 2M block 调整，因此最多只有
-不到 2 MiB 的取整误差。
-
-metadata 仍只计算一次，然后由 bootstrap allocator 从 ConventionalMemory
-切出；不做自举收敛循环。
-
-global PTE/PDE pool 都是动态长度的三层 64 叉；per-CPU PTE cache 是两层
-64 叉。frame 是 opaque 64-bit 值，没有 allocated bitmap，也不做 frame→slot 反查。
+共 64 TiB。这里的地址只是被 reserve，不代表已经可访问。
 
 ## 调试
 
-VS Code 直接按 F5；或：
-
-```sh
-make run-gdb
-gdb build/debug/kernel.elf
-(gdb) target remote :1234
-```
+VS Code 直接按 F5；或使用 `make run-gdb`。

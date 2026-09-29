@@ -4,6 +4,7 @@
 #include "../graphics/text.h"
 #include "../lib/printf.h"
 #include "../mm/pmm.h"
+#include "../mm/vm.h"
 
 static void halt(void)
 {
@@ -56,6 +57,36 @@ void kernel_main(BOOT_INFO *bi)
     int status = pmm_init(bi);
     if (status != 0) {
         printf("[kernel] pmm init failed: %d\n", status);
+        halt();
+    }
+
+    static vm_space_t kernel_vm;
+    const uint64_t vm_base = UINT64_C(0xFFFF800000000000);
+    const uint64_t vm_size = UINT64_C(0x0000400000000000); /* 64 TiB */
+
+    if (!vm_space_init(&kernel_vm, pmm_boot_cpu(), vm_base, vm_size)) {
+        printf("[kernel] vm init failed\n");
+        halt();
+    }
+
+    vaddr_t va4k;
+    vaddr_t va2m;
+
+    if (!vm_alloc(&kernel_vm, 3 * VM_PAGE_SIZE, VM_PAGE_SIZE, &va4k) ||
+        !vm_alloc(&kernel_vm, 2 * 1024 * 1024ULL,
+                  2 * 1024 * 1024ULL, &va2m)) {
+        printf("[kernel] vm alloc failed\n");
+        halt();
+    }
+
+    printf("[kernel] VA only: %p %p free=%lu MiB\n",
+           (void *)(uintptr_t)va4k,
+           (void *)(uintptr_t)va2m,
+           (unsigned long)(kernel_vm.free_bytes >> 20));
+
+    if (!vm_free(&kernel_vm, va4k, 3 * VM_PAGE_SIZE) ||
+        !vm_free(&kernel_vm, va2m, 2 * 1024 * 1024ULL)) {
+        printf("[kernel] vm free failed\n");
         halt();
     }
 

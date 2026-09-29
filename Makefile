@@ -28,7 +28,7 @@ OVMF_VARS ?= /usr/share/OVMF/OVMF_VARS_4M.fd
 GDB_PORT  ?= 1234
 
 BOOTX64 := $(BUILD)/EFI/BOOT/BOOTX64.EFI
-KERNEL_OBJS := $(BUILD)/main.o $(BUILD)/printf.o $(BUILD)/pmm.o $(BUILD)/text.o
+KERNEL_OBJS := $(BUILD)/main.o $(BUILD)/printf.o $(BUILD)/pmm.o $(BUILD)/vm.o $(BUILD)/text.o
 
 .PHONY: all run run-gdb debug-stop clean
 
@@ -42,7 +42,7 @@ $(BOOTX64): $(BUILD)/boot.o
 	@mkdir -p $(dir $@)
 	$(LLD) $(EFI_LDFLAGS) /out:$@ $<
 
-$(BUILD)/main.o: init/main.c boot/bootinfo.h lib/printf.h mm/pmm.h graphics/text.h
+$(BUILD)/main.o: init/main.c boot/bootinfo.h lib/printf.h mm/pmm.h mm/vm.h graphics/text.h
 	@mkdir -p $(BUILD)
 	$(CC) $(KCFLAGS) -c $< -o $@
 
@@ -51,6 +51,10 @@ $(BUILD)/printf.o: lib/printf.c lib/printf.h
 	$(CC) $(KCFLAGS) -c $< -o $@
 
 $(BUILD)/pmm.o: mm/pmm.c mm/pmm.h boot/bootinfo.h
+	@mkdir -p $(BUILD)
+	$(CC) $(KCFLAGS) -c $< -o $@
+
+$(BUILD)/vm.o: mm/vm.c mm/vm.h mm/pmm.h
 	@mkdir -p $(BUILD)
 	$(CC) $(KCFLAGS) -c $< -o $@
 
