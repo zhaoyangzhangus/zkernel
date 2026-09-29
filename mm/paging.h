@@ -51,6 +51,14 @@ bool paging_map_4k_current(pmm_cpu_t *cpu, vaddr_t va,
                            pmm_frame_t frame, uint64_t attrs);
 
 /*
+ * 映射一段已经存在的物理地址。va/pa 必须 4K 对齐，size 会向上取整。
+ * 当前按 4K PTE 建图；适合 framebuffer/MMIO 等设备物理地址。
+ */
+bool paging_map_range_current(pmm_cpu_t *cpu, vaddr_t va,
+                              uint64_t pa, uint64_t size,
+                              uint64_t attrs);
+
+/*
  * 扫描当前页表中的 direct-map 窗口，只把真正 PRESENT 的连续 VA
  * extent 登记到 kernel VM。物理 hole 不占用 VMM 地址空间。
  */

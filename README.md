@@ -111,3 +111,12 @@ kernel VM 管理完整高 canonical half：
 ## 调试
 
 F5 只有一个后台 task；GDB 连接后自动 continue，没有用户断点就不停。
+
+
+### Framebuffer mapping
+
+GOP framebuffer 物理地址保存在 `BOOT_INFO.fb_phys_base`，大小使用
+UEFI GOP 的 `FrameBufferSize`。kernel VM 初始化后为 framebuffer
+分配独立的 `VM_REGION_FRAMEBUFFER` 虚拟区，并用 4K PTE 显式映射；
+映射完成后 `BOOT_INFO.fb_base` 为可直接访问的 kernel VA。第一版使用
+UC cache 属性；WC 留到内核显式初始化 IA32_PAT 后再启用。

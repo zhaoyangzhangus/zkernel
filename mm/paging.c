@@ -8,6 +8,8 @@
 #define PTE_PRESENT UINT64_C(0x001)
 #define PTE_WRITE   UINT64_C(0x002)
 #define PTE_USER    UINT64_C(0x004)
+#define PTE_PWT     UINT64_C(0x008)
+#define PTE_PCD     UINT64_C(0x010)
 #define PTE_LARGE   UINT64_C(0x080)
 #define PTE_ADDR    UINT64_C(0x000FFFFFFFFFF000)
 
@@ -220,8 +222,42 @@ bool paging_map_4k_current(pmm_cpu_t *cpu, vaddr_t va,
     if (user)
         flags |= PTE_USER;
 
+    /*
+     * 先只实现 WB/UC。默认 x86 PAT 下 PCD=1,PWT=1 选择 UC。
+     * WC 需要我们先明确初始化 IA32_PAT，不能把它静默当成 WB。
+     */
+    uint64_t cache = attrs & VM_ATTR_CACHE_MASK;
+    if (cache == VM_ATTR_CACHE_UC)
+        flags |= PTE_PCD | PTE_PWT;
+    else if (cache != 0 && cache != VM_ATTR_CACHE_WB)
+        return false;
+
     pt[i1] = (frame & PTE_ADDR) | flags;
     invlpg(va);
+    return true;
+}
+
+bool paging_map_range_current(pmm_cpu_t *cpu, vaddr_t va,
+                              uint64_t pa, uint64_t size,
+                              uint64_t attrs)
+{
+    if (cpu == NULL || size == 0 ||
+        (va & (PAGE_4K - 1)) != 0 ||
+        (pa & (PAGE_4K - 1)) != 0 ||
+        size > UINT64_MAX - (PAGE_4K - 1))
+        return false;
+
+    uint64_t bytes = (size + PAGE_4K - 1) & ~(PAGE_4K - 1);
+
+    if (va > UINT64_MAX - (bytes - 1) ||
+        pa > UINT64_MAX - (bytes - 1))
+        return false;
+
+    for (uint64_t off = 0; off < bytes; off += PAGE_4K) {
+        if (!paging_map_4k_current(cpu, va + off, pa + off, attrs))
+            return false;
+    }
+
     return true;
 }
 

@@ -14,7 +14,7 @@
 
 /* 'B''O''O''T''I''N''F''O' 按小端解释 */
 #define BOOTINFO_MAGIC 0x4F464E49544F4F42ULL
-#define BOOTINFO_VERSION 2
+#define BOOTINFO_VERSION 3
 
 /*
  * 内存映射里的一项，与 UEFI 的 EFI_MEMORY_DESCRIPTOR 逐字段对应
@@ -54,7 +54,9 @@ typedef struct {
     uint32_t reserved0;
 
     /* ---- 帧缓冲（EFI_GRAPHICS_OUTPUT_PROTOCOL 当前模式）---- */
-    uint64_t fb_base;        /* 物理地址，0 表示没有可用的 GOP */
+    uint64_t fb_phys_base;   /* GOP framebuffer 物理地址 */
+    uint64_t fb_size;        /* GOP 报告的 framebuffer 字节数 */
+    uint64_t fb_base;        /* 内核映射后的虚拟地址；映射前为 0 */
     uint32_t fb_width;
     uint32_t fb_height;
     uint32_t fb_pixels_per_scanline;

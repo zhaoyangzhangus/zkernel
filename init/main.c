@@ -170,6 +170,54 @@ void kernel_main(BOOT_INFO *bi)
     }
 
     /*
+     * GOP framebuffer 不属于普通 RAM direct map。
+     * 给它单独分配 kernel VA，并以 UC 4K PTE 显式映射。
+     * 保留 fb_phys_base；fb_base 从这里开始表示可直接解引用的 kernel VA。
+     */
+    if (bi->fb_phys_base != 0 && bi->fb_size != 0) {
+        uint64_t fb_page = bi->fb_phys_base & ~(VM_PAGE_SIZE - 1);
+        uint64_t fb_offset = bi->fb_phys_base - fb_page;
+
+        if (bi->fb_size > UINT64_MAX - fb_offset) {
+            printf("[kernel] framebuffer range overflow\n");
+            halt();
+        }
+
+        uint64_t fb_map_size = fb_offset + bi->fb_size;
+        if (fb_map_size > UINT64_MAX - (VM_PAGE_SIZE - 1)) {
+            printf("[kernel] framebuffer map size overflow\n");
+            halt();
+        }
+        fb_map_size =
+            (fb_map_size + VM_PAGE_SIZE - 1) & ~(VM_PAGE_SIZE - 1);
+
+        vaddr_t fb_va;
+        uint64_t fb_attrs =
+            VM_ATTR_READ | VM_ATTR_WRITE |
+            VM_ATTR_PINNED | VM_ATTR_CACHE_UC;
+
+        if (!vm_alloc(&kernel_vm, fb_map_size, VM_PAGE_SIZE,
+                      VM_REGION_FRAMEBUFFER, fb_attrs, &fb_va)) {
+            printf("[kernel] framebuffer VA alloc failed\n");
+            halt();
+        }
+
+        if (!paging_map_range_current(pmm_boot_cpu(), fb_va,
+                                      fb_page, fb_map_size,
+                                      fb_attrs)) {
+            printf("[kernel] framebuffer map failed\n");
+            halt();
+        }
+
+        bi->fb_base = fb_va + fb_offset;
+
+        printf("[kernel] framebuffer pa=%p va=%p size=%lu KiB\n",
+               (void *)(uintptr_t)bi->fb_phys_base,
+               (void *)(uintptr_t)bi->fb_base,
+               (unsigned long)(bi->fb_size >> 10));
+    }
+
+    /*
      * 先只验证 demand paging 主链，避免 DMA/MMIO alloc/free 和显式 PMM
      * 自测干扰定位。
      */

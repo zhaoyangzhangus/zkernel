@@ -375,6 +375,8 @@ static void save_framebuffer(BOOT_INFO *bi)
     EFI_GUID guid_gop = EFI_GRAPHICS_OUTPUT_PROTOCOL_GUID;
     EFI_STATUS status;
 
+    bi->fb_phys_base = 0;
+    bi->fb_size = 0;
     bi->fb_base = 0;
 
     status = BS->LocateProtocol(&guid_gop, NULL, (VOID **)&gop);
@@ -384,7 +386,8 @@ static void save_framebuffer(BOOT_INFO *bi)
     }
 
     mode = gop->Mode;
-    bi->fb_base                = mode->FrameBufferBase;
+    bi->fb_phys_base           = mode->FrameBufferBase;
+    bi->fb_size                = mode->FrameBufferSize;
     bi->fb_width               = mode->Info->HorizontalResolution;
     bi->fb_height              = mode->Info->VerticalResolution;
     bi->fb_pixels_per_scanline = mode->Info->PixelsPerScanLine;
@@ -401,7 +404,9 @@ static void save_framebuffer(BOOT_INFO *bi)
     con_puts(L", format=");
     con_dec(bi->fb_pixel_format);
     con_puts(L", base=");
-    con_hex64(bi->fb_base);
+    con_hex64(bi->fb_phys_base);
+    con_puts(L", size=");
+    con_dec(bi->fb_size);
     con_puts(L"\r\n");
 }
 
