@@ -7,7 +7,10 @@ SELF="$ROOT/tools/qemu-debug.sh"
 cd "$ROOT"
 
 pkill -f "[g]db tcp::${PORT}" 2>/dev/null || true
-make -s all
+if [[ ! -f "$ROOT/build/debug/kernel.elf" ]]; then
+    echo "[qemu] $SELF: error: build/debug/kernel.elf is missing" >&2
+    exit 1
+fi
 
 echo "[qemu] starting on :${PORT}"
 make -s GDB_PORT="${PORT}" run &

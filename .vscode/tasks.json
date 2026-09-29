@@ -20,6 +20,10 @@
             "label": "zkernel: run",
             "type": "shell",
             "command": "${workspaceFolder}/tools/qemu-debug.sh",
+            "dependsOn": [
+                "zkernel: build"
+            ],
+            "dependsOrder": "sequence",
             "isBackground": true,
             "problemMatcher": {
                 "owner": "qemu",
