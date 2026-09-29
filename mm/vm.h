@@ -16,7 +16,12 @@ typedef struct {
     vaddr_t base;
     vaddr_t end;
     uint64_t free_bytes;
-    struct vm_range *free;
+
+    /* Linux vmalloc 风格：augmented RB-tree + address-sorted list。 */
+    struct vm_range *root;
+    struct vm_range *head;
+    struct vm_range *tail;
+
     pmm_cpu_t *cpu;
 } vm_space_t;
 

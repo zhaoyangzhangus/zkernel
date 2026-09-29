@@ -20,20 +20,26 @@ make clean
 
 ## VM
 
-`mm/vm.c` 是独立的虚拟地址区间管理器，只管理 VA 所有权。
+`mm/vm.c` 仍然只管理虚拟地址范围，不做任何页表映射。
 
-不会修改页表、不会写 PTE/PDE、不会切 CR3、不会建立映射，也不会访问分配出的 VA。
+free VA 管理改为 Linux vmalloc 风格的两套索引：
 
-```c
-vm_space_init()
-vm_alloc()
-vm_reserve()
-vm_free()
+```text
+augmented RB-tree
+  key = range.start
+  subtree_max = 子树中最大的 free range
+
+address-sorted doubly-linked list
+  prev / next = 地址上直接相邻的 free range
 ```
 
-第一版使用按地址排序的 free-range list：first-fit 分配，free 自动合并相邻区间。
-range node 不够时，从 4K PMM 取一页作为 VM metadata；这些 metadata 页依靠当前
-UEFI identity map 访问。
+因此：
+
+- `vm_alloc()` 用 `subtree_max` 跳过不可能容纳请求的整棵子树，不再从链表头顺序扫描。
+- `vm_reserve()` 用 RB-tree 按地址定位包含指定 VA 的 free range。
+- `vm_free()` 用 RB-tree 找 lower_bound，然后通过 `prev/next` O(1) 取得左右邻居并合并。
+- RB-tree 的插入/删除/旋转同步维护 `subtree_max`。
+- range node 不足时仍从 4K PMM 取一页作为 metadata。
 
 当前 kernel VM arena：
 
@@ -41,7 +47,7 @@ UEFI identity map 访问。
 0xFFFF800000000000 .. 0xFFFFC00000000000
 ```
 
-共 64 TiB。这里的地址只是被 reserve，不代表已经可访问。
+共 64 TiB。这只是 VA ownership；不会写 PTE/PDE，也不会访问返回的 VA。
 
 ## 调试
 
