@@ -315,10 +315,23 @@ static uint32_t pool3_free_slots(const pmm_pool3_t *pool, uint32_t stop_at)
     uint32_t free_slots = 0;
 
     for (uint32_t li = 0; li < pool->leaf_count; ++li) {
-        uint64_t valid = leaf_valid_mask(pool->capacity, li);
-        free_slots += (uint32_t)__builtin_popcountll((~pool->leaf[li]) & valid);
-        if (free_slots >= stop_at)
-            break;
+        uint64_t free_mask =
+            (~pool->leaf[li]) & leaf_valid_mask(pool->capacity, li);
+
+        /*
+         * 不使用 __builtin_popcountll()：在 freestanding 且未启用
+         * -mpopcnt 时 GCC 可能生成 libgcc 的 __popcountdi2。
+         *
+         * 这里 drain 最多只关心 PMM_BATCH 个空 slot，因此逐个清除
+         * 最低 1 bit，并在达到 stop_at 后立即返回。
+         */
+        while (free_mask != 0) {
+            free_mask &= free_mask - 1;
+            ++free_slots;
+
+            if (free_slots >= stop_at)
+                return free_slots;
+        }
     }
 
     return free_slots;
