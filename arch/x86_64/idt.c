@@ -48,6 +48,17 @@ static uint64_t read_cr2(void)
     return value;
 }
 
+static inline void debug_char(char c)
+{
+    __asm__ volatile("outb %0, $0xe9" :: "a"((uint8_t)c));
+}
+
+static void debug_text(const char *s)
+{
+    while (*s != '\0')
+        debug_char(*s++);
+}
+
 static void halt_forever(void)
 {
     __asm__ volatile("cli");
@@ -58,15 +69,39 @@ static void halt_forever(void)
 __attribute__((interrupt))
 static void page_fault_isr(interrupt_frame_t *frame, uint64_t error_code)
 {
+    debug_char('P');
+
     uint64_t address = read_cr2();
 
-    if (page_fault_handle(address, error_code))
+    if (page_fault_handle(address, error_code)) {
+        debug_char('R');
         return;
+    }
 
+    debug_char('U');
     printf("[#PF] unhandled va=%p err=0x%llx rip=%p\n",
            (void *)(uintptr_t)address,
            (unsigned long long)error_code,
            (void *)(uintptr_t)frame->rip);
+    halt_forever();
+}
+
+__attribute__((interrupt))
+static void double_fault_isr(interrupt_frame_t *frame, uint64_t error_code)
+{
+    (void)frame;
+    (void)error_code;
+    debug_text("\n[#DF]\n");
+    halt_forever();
+}
+
+__attribute__((interrupt))
+static void general_protection_isr(interrupt_frame_t *frame,
+                                   uint64_t error_code)
+{
+    (void)frame;
+    (void)error_code;
+    debug_text("\n[#GP]\n");
     halt_forever();
 }
 
@@ -94,6 +129,8 @@ void idt_init(void)
      * 丢弃 #PF 的 error code 后 iretq。KCFLAGS 已启用
      * -mgeneral-regs-only 和 -mno-red-zone。
      */
+    set_gate(8,  (void (*)(void))double_fault_isr);
+    set_gate(13, (void (*)(void))general_protection_isr);
     set_gate(14, (void (*)(void))page_fault_isr);
 
     idtr_t idtr = {

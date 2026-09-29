@@ -14,6 +14,11 @@
 
 static vm_space_t *g_fault_space;
 
+static inline void debug_char(char c)
+{
+    __asm__ volatile("outb %0, $0xe9" :: "a"((uint8_t)c));
+}
+
 static void zero_frame(pmm_frame_t frame)
 {
     uint64_t *p =
@@ -53,6 +58,8 @@ bool page_fault_handle(uint64_t address, uint64_t error_code)
     if (!vm_query(g_fault_space, address, &region))
         return false;
 
+    debug_char('Q');
+
     /*
      * VM 已分配只是第一层判断；真正允许 demand paging 的 region 必须
      * 显式带 LAZY，且只能是匿名 RAM 类 region。
@@ -76,6 +83,8 @@ bool page_fault_handle(uint64_t address, uint64_t error_code)
         (region.attrs & VM_ATTR_USER) == 0)
         return false;
 
+    debug_char('A');
+
     /*
      * MMIO/WC/UC 不走这里；lazy anonymous page 当前只接受普通 WB。
      */
@@ -87,14 +96,19 @@ bool page_fault_handle(uint64_t address, uint64_t error_code)
     if (!pmm_alloc4k(g_fault_space->cpu, &frame))
         return false;
 
+    debug_char('M');
+
     zero_frame(frame);
+    debug_char('Z');
 
     vaddr_t page = address & ~(VM_PAGE_SIZE - 1);
+    debug_char('T');
     if (!paging_map_4k_current(g_fault_space->cpu, page,
                                frame, region.attrs)) {
         pmm_free4k(g_fault_space->cpu, frame);
         return false;
     }
 
+    debug_char('K');
     return true;
 }
