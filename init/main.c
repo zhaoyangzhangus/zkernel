@@ -61,10 +61,8 @@ void kernel_main(BOOT_INFO *bi)
     }
 
     static vm_space_t kernel_vm;
-    const uint64_t vm_base = UINT64_C(0xFFFF800000000000);
-    const uint64_t vm_size = UINT64_C(0x0000400000000000); /* 64 TiB */
-
-    if (!vm_space_init(&kernel_vm, pmm_boot_cpu(), vm_base, vm_size)) {
+    if (!vm_space_init(&kernel_vm, pmm_boot_cpu(),
+                       VM_KERNEL_BASE, VM_KERNEL_SIZE)) {
         printf("[kernel] vm init failed\n");
         halt();
     }
@@ -92,12 +90,12 @@ void kernel_main(BOOT_INFO *bi)
         halt();
     }
 
-    printf("[kernel] VA DMA=%p MMIO=%p type=%u attrs=%p free=%lu MiB\n",
+    printf("[kernel] VA DMA=%p MMIO=%p type=%u attrs=%p free=%lu TiB\n",
            (void *)(uintptr_t)va4k,
            (void *)(uintptr_t)va2m,
            (unsigned)info.type,
            (void *)(uintptr_t)info.attrs,
-           (unsigned long)(kernel_vm.free_bytes >> 20));
+           (unsigned long)(kernel_vm.free_bytes >> 40));
 
     if (!vm_free(&kernel_vm, va4k) ||
         !vm_free(&kernel_vm, va2m)) {

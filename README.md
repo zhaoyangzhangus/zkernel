@@ -37,7 +37,7 @@ used_root
     attrs
 ```
 
-region type 当前包含 generic/kernel/heap/stack/DMA/MMIO/framebuffer/ACPI/user。
+region type 当前包含 generic/kernel/heap/stack/DMA/MMIO/framebuffer/ACPI/direct-map/reserved/user。
 
 region attrs 当前保存 RWX、user、guard、pinned、lazy 和 WB/WC/UC cache policy。
 这些属性暂时只作为 metadata；后续 page-table mapping 层根据它们生成真正的
@@ -53,10 +53,13 @@ vm_free(space, region_start)
 ```
 
 `vm_query()` 可以通过 region 内任意 VA 查出它属于哪一个区间以及该区间类型和属性。
-`vm_free()` 不再需要调用者重复传 size，因为 used region 自己保存 end。
+`vm_free()` 不再需要调用者重复传 size，因为 used region 自己保存范围。
 
-当前 kernel VM arena 为
-`0xFFFF800000000000..0xFFFFC00000000000`（64 TiB）。
+VM 是所有 kernel VA 的统一所有者：固定地址区域（kernel/direct-map/MMIO 等）通过
+`vm_reserve()` 登记，动态区域（heap/stack/DMA 等）通过 `vm_alloc()` 分配，不再为用途建立独立 VA allocator。
+
+kernel VM 管理完整高 canonical half：
+`0xFFFF800000000000..0xFFFFFFFFFFFFFFFF`（128 TiB）。内部 range 使用相对 base 的 offset，避免完整高半区的 exclusive end=2^64 无法用 `uint64_t` 表示。
 
 ## 调试
 

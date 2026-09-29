@@ -83,6 +83,26 @@ static bool valid_type(vm_region_type_t type)
     return type >= VM_REGION_GENERIC && type <= VM_REGION_USER;
 }
 
+static bool address_to_offset(const vm_space_t *space,
+                              uint64_t addr, uint64_t *out)
+{
+    if (space == NULL || out == NULL || addr < space->base)
+        return false;
+
+    uint64_t offset = addr - space->base;
+    if (offset >= space->size)
+        return false;
+
+    *out = offset;
+    return true;
+}
+
+static inline uint64_t offset_to_address(const vm_space_t *space,
+                                         uint64_t offset)
+{
+    return space->base + offset;
+}
+
 static bool valid_attrs(uint64_t attrs)
 {
     uint64_t cache = attrs & VM_ATTR_CACHE_MASK;
@@ -99,17 +119,6 @@ static bool page_round(uint64_t size, uint64_t *out)
         return false;
 
     *out = (size + VM_PAGE_SIZE - 1) & ~(VM_PAGE_SIZE - 1);
-    return true;
-}
-
-static bool align_up(uint64_t value, uint64_t align, uint64_t *out)
-{
-    uint64_t mask = align - 1;
-
-    if (value > UINT64_MAX - mask)
-        return false;
-
-    *out = (value + mask) & ~mask;
     return true;
 }
 
@@ -523,49 +532,50 @@ static void remove_free_node(vm_space_t *space, vm_range_t *node)
     node_put(node);
 }
 
-static vm_range_t *find_fit(vm_range_t *node, uint64_t size,
+static vm_range_t *find_fit(const vm_space_t *space,
+                            vm_range_t *node, uint64_t size,
                             uint64_t align, uint64_t *out_start)
 {
     if (node == NULL || node->subtree_max < size)
         return NULL;
 
     if (node->left != NULL && node->left->subtree_max >= size) {
-        vm_range_t *found = find_fit(node->left, size, align, out_start);
+        vm_range_t *found =
+            find_fit(space, node->left, size, align, out_start);
         if (found != NULL)
             return found;
     }
 
-    uint64_t start;
-    if (range_size(node) >= size &&
-        align_up(node->start, align, &start) &&
-        start >= node->start &&
-        start <= UINT64_MAX - size &&
-        start + size <= node->end) {
-        *out_start = start;
-        return node;
+    uint64_t bytes = range_size(node);
+    if (bytes >= size) {
+        uint64_t va = offset_to_address(space, node->start);
+        uint64_t delta = (UINT64_C(0) - va) & (align - 1);
+
+        if (delta <= bytes - size) {
+            *out_start = node->start + delta;
+            return node;
+        }
     }
 
-    return find_fit(node->right, size, align, out_start);
+    return find_fit(space, node->right, size, align, out_start);
 }
 
 static bool normalize_range(const vm_space_t *space,
                             uint64_t addr, uint64_t size,
-                            uint64_t *out_end)
+                            uint64_t *out_start, uint64_t *out_end)
 {
     uint64_t bytes;
+    uint64_t start;
 
-    if (space == NULL || !page_round(size, &bytes) ||
+    if (space == NULL ||
+        !page_round(size, &bytes) ||
         (addr & (VM_PAGE_SIZE - 1)) != 0 ||
-        addr < space->base ||
-        addr > UINT64_MAX - bytes)
+        !address_to_offset(space, addr, &start) ||
+        bytes > space->size - start)
         return false;
 
-    uint64_t end = addr + bytes;
-
-    if (end > space->end)
-        return false;
-
-    *out_end = end;
+    *out_start = start;
+    *out_end = start + bytes;
     return true;
 }
 
@@ -685,28 +695,36 @@ bool vm_space_init(vm_space_t *space, pmm_cpu_t *cpu,
         size == 0 ||
         (base & (VM_PAGE_SIZE - 1)) != 0 ||
         (size & (VM_PAGE_SIZE - 1)) != 0 ||
-        base > UINT64_MAX - size)
+        !canonical(base))
         return false;
 
-    uint64_t end = base + size;
+    /*
+     * 用最后一个可表示地址验证范围，而不是计算 exclusive end。
+     * 完整高半区的 exclusive end 是 2^64，uint64_t 无法表示。
+     */
+    uint64_t last_offset = size - 1;
+    if (base > UINT64_MAX - last_offset)
+        return false;
 
-    if (!canonical(base) || !canonical(end - 1) ||
-        ((base >> 47) & 1U) != (((end - 1) >> 47) & 1U))
+    uint64_t last = base + last_offset;
+    if (!canonical(last) ||
+        ((base >> 47) & 1U) != ((last >> 47) & 1U))
         return false;
 
     vm_range_t *initial = node_get(cpu);
     if (initial == NULL)
         return false;
 
-    initial->start = base;
-    initial->end = end;
+    /* tree 中保存相对 base 的 offset。 */
+    initial->start = 0;
+    initial->end = size;
     initial->type = VM_REGION_GENERIC;
     initial->attrs = 0;
     initial->prev = NULL;
     initial->next = NULL;
 
     space->base = base;
-    space->end = end;
+    space->size = size;
     space->free_bytes = size;
     space->used_bytes = 0;
     space->region_count = 0;
@@ -723,25 +741,27 @@ bool vm_space_init(vm_space_t *space, pmm_cpu_t *cpu,
 bool vm_reserve(vm_space_t *space, vaddr_t addr, uint64_t size,
                 vm_region_type_t type, uint64_t attrs)
 {
+    uint64_t start;
     uint64_t end;
 
-    if (!normalize_range(space, addr, size, &end) ||
+    if (!normalize_range(space, addr, size, &start, &end) ||
         !valid_type(type) || !valid_attrs(attrs))
         return false;
 
     vm_range_t *free_node =
-        tree_floor((vm_range_t *)space->free_root, addr);
+        tree_floor((vm_range_t *)space->free_root, start);
 
-    if (free_node == NULL || addr < free_node->start || end > free_node->end)
+    if (free_node == NULL ||
+        start < free_node->start || end > free_node->end)
         return false;
 
     vm_range_t *region = node_get(space->cpu);
     if (region == NULL)
         return false;
 
-    region_init(region, addr, end, type, attrs);
+    region_init(region, start, end, type, attrs);
 
-    if (!reserve_from_free(space, free_node, addr, end)) {
+    if (!reserve_from_free(space, free_node, start, end)) {
         node_put(region);
         return false;
     }
@@ -776,7 +796,8 @@ bool vm_alloc(vm_space_t *space, uint64_t size, uint64_t align,
 
     uint64_t start;
     vm_range_t *free_node =
-        find_fit((vm_range_t *)space->free_root, bytes, align, &start);
+        find_fit(space, (vm_range_t *)space->free_root,
+                 bytes, align, &start);
 
     if (free_node == NULL)
         return false;
@@ -795,25 +816,27 @@ bool vm_alloc(vm_space_t *space, uint64_t size, uint64_t align,
     if (!add_used_region(space, region))
         return false;
 
-    *out_addr = start;
+    *out_addr = offset_to_address(space, start);
     return true;
 }
 
 bool vm_query(const vm_space_t *space, vaddr_t addr,
               vm_region_info_t *out_info)
 {
+    uint64_t offset;
+
     if (space == NULL || out_info == NULL ||
-        addr < space->base || addr >= space->end)
+        !address_to_offset(space, addr, &offset))
         return false;
 
     vm_range_t *region =
-        tree_floor((vm_range_t *)space->used_root, addr);
+        tree_floor((vm_range_t *)space->used_root, offset);
 
-    if (region == NULL || addr >= region->end)
+    if (region == NULL || offset >= region->end)
         return false;
 
-    out_info->start = region->start;
-    out_info->end = region->end;
+    out_info->start = offset_to_address(space, region->start);
+    out_info->size = range_size(region);
     out_info->type = (vm_region_type_t)region->type;
     out_info->attrs = region->attrs;
     return true;
@@ -821,14 +844,17 @@ bool vm_query(const vm_space_t *space, vaddr_t addr,
 
 bool vm_free(vm_space_t *space, vaddr_t addr)
 {
-    if (space == NULL || addr < space->base || addr >= space->end ||
-        (addr & (VM_PAGE_SIZE - 1)) != 0)
+    uint64_t offset;
+
+    if (space == NULL ||
+        (addr & (VM_PAGE_SIZE - 1)) != 0 ||
+        !address_to_offset(space, addr, &offset))
         return false;
 
     vm_range_t *region =
-        tree_floor((vm_range_t *)space->used_root, addr);
+        tree_floor((vm_range_t *)space->used_root, offset);
 
-    if (region == NULL || region->start != addr)
+    if (region == NULL || region->start != offset)
         return false;
 
     return free_used_region(space, region);

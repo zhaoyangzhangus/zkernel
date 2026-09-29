@@ -6,7 +6,9 @@
 
 #include "pmm.h"
 
-#define VM_PAGE_SIZE 0x1000ULL
+#define VM_PAGE_SIZE   0x1000ULL
+#define VM_KERNEL_BASE UINT64_C(0xFFFF800000000000)
+#define VM_KERNEL_SIZE UINT64_C(0x0000800000000000) /* full 128 TiB high half */
 
 typedef uint64_t vaddr_t;
 
@@ -19,6 +21,8 @@ typedef enum {
     VM_REGION_MMIO,
     VM_REGION_FRAMEBUFFER,
     VM_REGION_ACPI,
+    VM_REGION_DIRECT_MAP,
+    VM_REGION_RESERVED,
     VM_REGION_USER
 } vm_region_type_t;
 
@@ -41,7 +45,7 @@ typedef enum {
 
 typedef struct {
     vaddr_t start;
-    vaddr_t end;
+    uint64_t size;
     vm_region_type_t type;
     uint64_t attrs;
 } vm_region_info_t;
@@ -50,7 +54,7 @@ struct vm_range;
 
 typedef struct {
     vaddr_t base;
-    vaddr_t end;
+    uint64_t size;
 
     uint64_t free_bytes;
     uint64_t used_bytes;
@@ -65,6 +69,9 @@ typedef struct {
      *
      * used_root:
      *   已占用 region RB-tree；保存 type/attrs，并支持按任意 VA 查询。
+     *
+     * tree 内部 key/range 都使用相对 base 的 offset，这样完整高半区
+     * [0xFFFF800000000000, 2^64) 也能用 uint64_t 的 [0, size) 表示。
      */
     struct vm_range *free_root;
     struct vm_range *free_head;
