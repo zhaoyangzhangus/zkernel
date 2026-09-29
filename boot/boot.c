@@ -2,7 +2,7 @@
  * boot.c —— 一个最小的 x86_64 UEFI 引导程序
  *
  * 流程：
- *   1. 关掉固件看门狗、打印固件信息
+ *   1. 关掉固件看门狗
  *   2. 通过 LoadedImage → DeviceHandle → SimpleFileSystem 打开 ESP 根目录
  *   3. 读出 \kernel.elf，按它的程序头（PT_LOAD 段）装载到各自的物理地址
  *   4. 记录 GOP 帧缓冲信息
@@ -199,18 +199,6 @@ static void mem_set(void *dst, UINT8 value, UINTN count)
         *d++ = value;
 }
 
-/* 以 "R-X"/"RW-" 的形式打印段权限，方便和 readelf -l 的输出对照 */
-static void con_segment_flags(UINT32 flags)
-{
-    CHAR16 buf[4];
-
-    buf[0] = (flags & PF_R) ? L'R' : L'-';
-    buf[1] = (flags & PF_W) ? L'W' : L'-';
-    buf[2] = (flags & PF_X) ? L'X' : L'-';
-    buf[3] = L'\0';
-    con_puts(buf);
-}
-
 /*
  * 读出 \kernel.elf 并按它的程序头装载：
  *   - 只处理 PT_LOAD 段（其它类型如 GNU_STACK 装载时忽略）
@@ -332,14 +320,7 @@ static EFI_STATUS load_kernel(EFI_HANDLE image, BOOT_INFO *bi)
         goto fail;
     }
 
-    /*
-     * 先把整段内存填成 0xAA 再装载。这样如果内核发现自己的 .bss 是 0，
-     * 就能确定是下面第 5 步按 p_memsz 清出来的，而不是"内存凑巧本来是 0"。
-     * 只是为了这个自检，去掉也不影响功能。
-     */
-    mem_set((VOID *)(UINTN)addr, 0xAA, (UINTN)pages * PAGE_SIZE);
-
-    con_puts(L"[BOOT] ELF64 x86-64, entry = ");
+        con_puts(L"[BOOT] ELF64 x86-64, entry = ");
     con_hex64(ehdr->e_entry);
     con_puts(L", ");
     con_dec(ehdr->e_phnum);
@@ -359,15 +340,6 @@ static EFI_STATUS load_kernel(EFI_HANDLE image, BOOT_INFO *bi)
         mem_set((VOID *)(UINTN)(ph->p_paddr + ph->p_filesz), 0,
                 (UINTN)(ph->p_memsz - ph->p_filesz));
 
-        con_puts(L"[BOOT]   LOAD paddr=");
-        con_hex64(ph->p_paddr);
-        con_puts(L" filesz=");
-        con_dec(ph->p_filesz);
-        con_puts(L" memsz=");
-        con_dec(ph->p_memsz);
-        con_puts(L" ");
-        con_segment_flags(ph->p_flags);
-        con_puts(L"\r\n");
     }
 
     /* ---- 6. 收尾：文件缓冲还给固件，把结果记进 BOOT_INFO ---- */
@@ -494,42 +466,6 @@ static EFI_STATUS leave_boot_services(EFI_HANDLE image, BOOT_INFO *bi)
 }
 
 /* ================================================================== */
-/* 打印内存统计（必须在退出 Boot Services 之前调用）                   */
-/* ================================================================== */
-static void summarize_memory(EFI_MEMORY_DESCRIPTOR *mmap, UINTN count, UINTN desc_size)
-{
-    UINT64 usable_pages = 0;
-    UINT64 total_pages  = 0;
-    UINTN  i;
-    UINT8 *p = (UINT8 *)mmap;
-
-    for (i = 0; i < count; i++) {
-        EFI_MEMORY_DESCRIPTOR *d = (EFI_MEMORY_DESCRIPTOR *)(VOID *)(p + i * desc_size);
-
-        total_pages += d->NumberOfPages;
-        switch (d->Type) {
-        case EfiLoaderCode:
-        case EfiLoaderData:
-        case EfiBootServicesCode:
-        case EfiBootServicesData:
-        case EfiConventionalMemory:
-            usable_pages += d->NumberOfPages;
-            break;
-        default:
-            break;
-        }
-    }
-
-    con_puts(L"[BOOT] memory map: ");
-    con_dec(count);
-    con_puts(L" descriptors, usable ");
-    con_dec(usable_pages / 256);        /* 页 -> MiB */
-    con_puts(L" MiB of ");
-    con_dec(total_pages / 256);
-    con_puts(L" MiB\r\n");
-}
-
-/* ================================================================== */
 /* 入口                                                                */
 /* ================================================================== */
 EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_table)
@@ -552,28 +488,9 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
     con_hex64(ST->FirmwareRevision);
     con_puts(L"\r\n");
 
-    /* 整个 BOOT_INFO 显式初始化，不依赖 .bss 是否被固件清零 */
-    g_bootinfo.magic                  = BOOTINFO_MAGIC;
-    g_bootinfo.version                = BOOTINFO_VERSION;
-    g_bootinfo.reserved0              = 0;
-    g_bootinfo.fb_base                = 0;
-    g_bootinfo.fb_width               = 0;
-    g_bootinfo.fb_height              = 0;
-    g_bootinfo.fb_pixels_per_scanline = 0;
-    g_bootinfo.fb_pixel_format        = 0;
-    g_bootinfo.fb_red_mask            = 0;
-    g_bootinfo.fb_green_mask          = 0;
-    g_bootinfo.fb_blue_mask           = 0;
-    g_bootinfo.fb_reserved_mask       = 0;
-    g_bootinfo.mmap_addr              = 0;
-    g_bootinfo.mmap_size              = 0;
-    g_bootinfo.mmap_desc_size         = 0;
-    g_bootinfo.mmap_desc_version      = 0;
-    g_bootinfo.mmap_desc_count        = 0;
-    g_bootinfo.runtime_services       = (UINT64)(UINTN)ST->RuntimeServices;
-    g_bootinfo.kernel_base            = 0;
-    g_bootinfo.kernel_size            = 0;
-    g_bootinfo.kernel_entry           = 0;
+    g_bootinfo.magic = BOOTINFO_MAGIC;
+    g_bootinfo.version = BOOTINFO_VERSION;
+    g_bootinfo.runtime_services = (UINT64)(UINTN)ST->RuntimeServices;
 
     status = load_kernel(image_handle, &g_bootinfo);
     if (EFI_ERROR(status))
@@ -584,22 +501,6 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
 
     save_framebuffer(&g_bootinfo);
 
-    /* 退出 Boot Services 之后就没有控制台了，所以内存统计要现在打印 */
-    {
-        EFI_MEMORY_DESCRIPTOR *probe = NULL;
-        UINTN  probe_size = MMAP_BUF_SIZE, key = 0, probe_desc_size = 0;
-        UINT32 desc_version = 0;
-
-        status = BS->AllocatePool(EfiLoaderData, probe_size, (VOID **)&probe);
-        if (EFI_ERROR(status)) {
-            report_error(L"AllocatePool failed", status);
-            return status;
-        }
-        status = BS->GetMemoryMap(&probe_size, probe, &key, &probe_desc_size, &desc_version);
-        if (!EFI_ERROR(status) && probe_desc_size != 0)
-            summarize_memory(probe, probe_size / probe_desc_size, probe_desc_size);
-        BS->FreePool(probe);
-    }
 
     status = leave_boot_services(image_handle, &g_bootinfo);
     if (EFI_ERROR(status))
