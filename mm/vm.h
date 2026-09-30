@@ -39,10 +39,15 @@ typedef enum {
 #define VM_ATTR_PINNED    (UINT64_C(1) << 5)
 #define VM_ATTR_LAZY      (UINT64_C(1) << 6)
 
-#define VM_ATTR_CACHE_WB  (UINT64_C(1) << 8)
-#define VM_ATTR_CACHE_WC  (UINT64_C(1) << 9)
-#define VM_ATTR_CACHE_UC  (UINT64_C(1) << 10)
-#define VM_ATTR_CACHE_MASK     (VM_ATTR_CACHE_WB | VM_ATTR_CACHE_WC | VM_ATTR_CACHE_UC)
+#define VM_ATTR_CACHE_WB       (UINT64_C(1) << 8)
+#define VM_ATTR_CACHE_WC       (UINT64_C(1) << 9)
+#define VM_ATTR_CACHE_UC       (UINT64_C(1) << 10)
+#define VM_ATTR_CACHE_WT       (UINT64_C(1) << 11)
+#define VM_ATTR_CACHE_WP       (UINT64_C(1) << 12)
+#define VM_ATTR_CACHE_UC_MINUS (UINT64_C(1) << 13)
+#define VM_ATTR_CACHE_MASK \
+    (VM_ATTR_CACHE_WB | VM_ATTR_CACHE_WC | VM_ATTR_CACHE_UC | \
+     VM_ATTR_CACHE_WT | VM_ATTR_CACHE_WP | VM_ATTR_CACHE_UC_MINUS)
 
 typedef struct {
     vaddr_t start;

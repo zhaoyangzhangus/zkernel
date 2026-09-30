@@ -110,7 +110,10 @@ static bool valid_attrs(uint64_t attrs)
     return cache == 0 ||
            cache == VM_ATTR_CACHE_WB ||
            cache == VM_ATTR_CACHE_WC ||
-           cache == VM_ATTR_CACHE_UC;
+           cache == VM_ATTR_CACHE_UC ||
+           cache == VM_ATTR_CACHE_WT ||
+           cache == VM_ATTR_CACHE_WP ||
+           cache == VM_ATTR_CACHE_UC_MINUS;
 }
 
 static bool page_round(uint64_t size, uint64_t *out)
