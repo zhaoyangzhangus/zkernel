@@ -15,6 +15,7 @@
 - 下一步：把 kernel/stack/BOOT_INFO/PMM 内部 pointer 切换到 high-half direct map，再删除 bootstrap identity map。
 
 - Page fault v1：建立最小 IDT 的 #PF gate；VM_ALLOC 的 LAZY 区域在首次 not-present fault 时通过 vm_query() 校验已分配范围，PMM 分配 4K demand-zero frame，再写当前页表并 iret 重试。
-- Runtime page-table update：PML4[511] 作为 512 GiB recursive mapping window；缺失的 PDPT/PD/PT 可在 #PF 路径中从 PMM 4K pool 动态补齐。当前只生成 PRESENT/WRITE/USER，NX/PAT 尚未接入。
+- Runtime page-table update：PML4[511] 作为 512 GiB recursive mapping window；缺失的 PDPT/PD/PT 可在 #PF 路径中从 PMM 4K pool 动态补齐。当前生成 PRESENT/WRITE/USER，并按 VM cache attrs 编码 PAT；NX 尚未接入。
 
-- Framebuffer：GOP 传递物理 base + FrameBufferSize；kernel VM 为其分配独立 VA，按 4K 显式映射为 UC，并将可访问 VA 写入 fb_base。
+- PAT：IA32_PAT 采用固定布局，完整支持 WB/WC/UC-/UC/WT/WP；4K 使用 PAT bit7，2M/1G 使用 PAT bit12；每个 CPU 单独初始化。
+- Framebuffer：GOP 传递物理 base + FrameBufferSize；kernel VM 为其分配独立 VA，按 4K 显式映射为 WC，并将可访问 VA 写入 fb_base。

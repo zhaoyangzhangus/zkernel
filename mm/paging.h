@@ -45,7 +45,8 @@ int paging_early_takeover(BOOT_INFO *bi, paging_info_t *out_info);
  * 在当前 CR3 上安装一个 4K 映射。缺失的中间页表从 PMM 4K pool
  * 动态分配，并通过 PML4[511] recursive mapping 修改。
  *
- * 当前第一版只生成 PRESENT/WRITE/USER；NX/PAT 后续补。
+ * 当前生成 PRESENT/WRITE/USER，并按 VM_ATTR_CACHE_* 编码 PAT。
+ * NX 后续补。
  */
 bool paging_map_4k_current(pmm_cpu_t *cpu, vaddr_t va,
                            pmm_frame_t frame, uint64_t attrs);

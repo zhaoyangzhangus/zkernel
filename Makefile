@@ -42,7 +42,7 @@ $(BOOTX64): $(BUILD)/boot.o
 	@mkdir -p $(dir $@)
 	$(LLD) $(EFI_LDFLAGS) /out:$@ $<
 
-$(BUILD)/main.o: init/main.c boot/bootinfo.h lib/printf.h arch/x86_64/idt.h mm/page_fault.h mm/pmm.h mm/paging.h mm/vm.h
+$(BUILD)/main.o: init/main.c boot/bootinfo.h lib/printf.h arch/x86_64/idt.h arch/x86_64/pat.h mm/page_fault.h mm/pmm.h mm/paging.h mm/vm.h
 	@mkdir -p $(BUILD)
 	$(CC) $(KCFLAGS) -c $< -o $@
 
@@ -58,7 +58,7 @@ $(BUILD)/pmm.o: mm/pmm.c mm/pmm.h mm/bootmem.h boot/bootinfo.h
 	@mkdir -p $(BUILD)
 	$(CC) $(KCFLAGS) -c $< -o $@
 
-$(BUILD)/paging.o: mm/paging.c mm/paging.h mm/bootmem.h mm/vm.h boot/bootinfo.h
+$(BUILD)/paging.o: mm/paging.c mm/paging.h mm/bootmem.h mm/vm.h arch/x86_64/pat.h boot/bootinfo.h
 	@mkdir -p $(BUILD)
 	$(CC) $(KCFLAGS) -c $< -o $@
 

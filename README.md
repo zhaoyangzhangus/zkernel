@@ -65,7 +65,7 @@ not-present fault 时读取 CR2，用 `vm_query()` 判断 fault VA 是否属于�
 handler 返回后由 `iretq` 重试原指令。
 
 MMIO/framebuffer/DMA/direct-map/reserved 不走 demand-zero；protection fault、
-reserved-bit fault 也不会被本处理器吞掉。NX/PAT 和 mapped-page 回收后续实现。
+reserved-bit fault 也不会被本处理器吞掉。NX 和 mapped-page 回收后续实现。
 
 ## VM
 
@@ -87,7 +87,7 @@ used_root
 
 region type 当前包含 generic/kernel/heap/stack/DMA/MMIO/framebuffer/ACPI/direct-map/reserved/user。
 
-region attrs 保存 RWX、user、guard、pinned、lazy 和 WB/WC/UC cache policy。
+region attrs 保存 RWX、user、guard、pinned、lazy，以及 WB/WC/UC/WT/WP/UC- cache policy。
 当前 direct-map region 已参与页表布局；其它动态 region 的通用 map/unmap 接口仍待实现。
 
 接口：
@@ -118,5 +118,26 @@ F5 只有一个后台 task；GDB 连接后自动 continue，没有用户断点�
 GOP framebuffer 物理地址保存在 `BOOT_INFO.fb_phys_base`，大小使用
 UEFI GOP 的 `FrameBufferSize`。kernel VM 初始化后为 framebuffer
 分配独立的 `VM_REGION_FRAMEBUFFER` 虚拟区，并用 4K PTE 显式映射；
-映射完成后 `BOOT_INFO.fb_base` 为可直接访问的 kernel VA。第一版使用
-UC cache 属性；WC 留到内核显式初始化 IA32_PAT 后再启用。
+映射完成后 `BOOT_INFO.fb_base` 为可直接访问的 kernel VA。内核先初始化
+IA32_PAT，再把 framebuffer 映射为 WC。
+
+
+## PAT
+
+每个 x86_64 CPU 都调用 `pat_init_cpu()` 安装统一 IA32_PAT：
+
+```text
+0 WB
+1 WC
+2 UC-
+3 UC
+4 WT
+5 WP
+6 WB
+7 UC
+```
+
+VM 支持 `VM_ATTR_CACHE_WB/WC/UC/WT/WP/UC_MINUS`。paging 层把它们编码成
+PAT/PCD/PWT；4K PTE 的 PAT 位是 bit 7，2M/1G leaf 的 PAT 位是 bit 12。
+`pat_page_flags()` 已同时支持两种页大小编码。IA32_PAT 是 per-CPU MSR，
+以后 AP bring-up 时每个 AP 都必须执行 `pat_init_cpu()`。

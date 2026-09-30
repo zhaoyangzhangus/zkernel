@@ -1,5 +1,6 @@
 #include "paging.h"
 #include "bootmem.h"
+#include "../arch/x86_64/pat.h"
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -8,8 +9,6 @@
 #define PTE_PRESENT UINT64_C(0x001)
 #define PTE_WRITE   UINT64_C(0x002)
 #define PTE_USER    UINT64_C(0x004)
-#define PTE_PWT     UINT64_C(0x008)
-#define PTE_PCD     UINT64_C(0x010)
 #define PTE_LARGE   UINT64_C(0x080)
 #define PTE_ADDR    UINT64_C(0x000FFFFFFFFFF000)
 
@@ -222,16 +221,38 @@ bool paging_map_4k_current(pmm_cpu_t *cpu, vaddr_t va,
     if (user)
         flags |= PTE_USER;
 
-    /*
-     * 先只实现 WB/UC。默认 x86 PAT 下 PCD=1,PWT=1 选择 UC。
-     * WC 需要我们先明确初始化 IA32_PAT，不能把它静默当成 WB。
-     */
     uint64_t cache = attrs & VM_ATTR_CACHE_MASK;
-    if (cache == VM_ATTR_CACHE_UC)
-        flags |= PTE_PCD | PTE_PWT;
-    else if (cache != 0 && cache != VM_ATTR_CACHE_WB)
+    pat_memory_type_t pat_type;
+
+    switch (cache) {
+    case 0:
+    case VM_ATTR_CACHE_WB:
+        pat_type = PAT_MEMORY_WB;
+        break;
+    case VM_ATTR_CACHE_WC:
+        pat_type = PAT_MEMORY_WC;
+        break;
+    case VM_ATTR_CACHE_UC:
+        pat_type = PAT_MEMORY_UC;
+        break;
+    case VM_ATTR_CACHE_WT:
+        pat_type = PAT_MEMORY_WT;
+        break;
+    case VM_ATTR_CACHE_WP:
+        pat_type = PAT_MEMORY_WP;
+        break;
+    case VM_ATTR_CACHE_UC_MINUS:
+        pat_type = PAT_MEMORY_UC_MINUS;
+        break;
+    default:
+        return false;
+    }
+
+    uint64_t cache_flags;
+    if (!pat_page_flags(pat_type, false, &cache_flags))
         return false;
 
+    flags |= cache_flags;
     pt[i1] = (frame & PTE_ADDR) | flags;
     invlpg(va);
     return true;

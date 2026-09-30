@@ -3,6 +3,7 @@
 #include "../boot/bootinfo.h"
 #include "../lib/printf.h"
 #include "../arch/x86_64/idt.h"
+#include "../arch/x86_64/pat.h"
 #include "../mm/page_fault.h"
 #include "../mm/pmm.h"
 #include "../mm/paging.h"
@@ -134,6 +135,14 @@ void kernel_main(BOOT_INFO *bi)
            (unsigned long)paging.leaf_2m,
            (unsigned long)paging.leaf_4k);
 
+    if (!pat_init_cpu()) {
+        printf("[kernel] PAT init failed\n");
+        halt();
+    }
+
+    printf("[kernel] PAT=0x%016llx\n",
+           (unsigned long long)pat_read());
+
     status = pmm_init(bi);
     if (status != 0) {
         printf("[kernel] pmm init failed: %d\n", status);
@@ -171,7 +180,7 @@ void kernel_main(BOOT_INFO *bi)
 
     /*
      * GOP framebuffer 不属于普通 RAM direct map。
-     * 给它单独分配 kernel VA，并以 UC 4K PTE 显式映射。
+     * 给它单独分配 kernel VA，并以 WC 4K PTE 显式映射。
      * 保留 fb_phys_base；fb_base 从这里开始表示可直接解引用的 kernel VA。
      */
     if (bi->fb_phys_base != 0 && bi->fb_size != 0) {
@@ -194,7 +203,7 @@ void kernel_main(BOOT_INFO *bi)
         vaddr_t fb_va;
         uint64_t fb_attrs =
             VM_ATTR_READ | VM_ATTR_WRITE |
-            VM_ATTR_PINNED | VM_ATTR_CACHE_UC;
+            VM_ATTR_PINNED | VM_ATTR_CACHE_WC;
 
         if (!vm_alloc(&kernel_vm, fb_map_size, VM_PAGE_SIZE,
                       VM_REGION_FRAMEBUFFER, fb_attrs, &fb_va)) {
