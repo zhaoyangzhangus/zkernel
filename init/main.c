@@ -116,12 +116,12 @@ static bool dump_vm_region(const vm_region_info_t *region, void *context)
 {
     (void)context;
 
-    uint64_t end = region->start + region->size;
+    uint64_t last = region->start + region->size - 1;
 
     printf("[vm] %-11s %p..%p size=%lu KiB attrs=0x%llx\n",
            vm_type_name(region->type),
            (void *)(uintptr_t)region->start,
-           (void *)(uintptr_t)end,
+           (void *)(uintptr_t)last,
            (unsigned long)(region->size >> 10),
            (unsigned long long)region->attrs);
     return true;
