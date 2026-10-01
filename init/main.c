@@ -94,6 +94,50 @@ static void dump_uefi_memmap(const BOOT_INFO *bi)
     }
 }
 
+static const char *vm_type_name(vm_region_type_t type)
+{
+    switch (type) {
+    case VM_REGION_GENERIC:     return "GENERIC";
+    case VM_REGION_KERNEL:      return "KERNEL";
+    case VM_REGION_HEAP:        return "HEAP";
+    case VM_REGION_STACK:       return "STACK";
+    case VM_REGION_DMA:         return "DMA";
+    case VM_REGION_MMIO:        return "MMIO";
+    case VM_REGION_FRAMEBUFFER: return "FRAMEBUFFER";
+    case VM_REGION_ACPI:        return "ACPI";
+    case VM_REGION_DIRECT_MAP:  return "DIRECT_MAP";
+    case VM_REGION_RESERVED:    return "RESERVED";
+    case VM_REGION_USER:        return "USER";
+    default:                    return "UNKNOWN";
+    }
+}
+
+static bool dump_vm_region(const vm_region_info_t *region, void *context)
+{
+    (void)context;
+
+    uint64_t end = region->start + region->size;
+
+    printf("[vm] %-11s %p..%p size=%lu KiB attrs=0x%llx\n",
+           vm_type_name(region->type),
+           (void *)(uintptr_t)region->start,
+           (void *)(uintptr_t)end,
+           (unsigned long)(region->size >> 10),
+           (unsigned long long)region->attrs);
+    return true;
+}
+
+static void dump_vm_layout(const vm_space_t *space)
+{
+    printf("[vm] used=%lu KiB free=%lu MiB regions=%lu\n",
+           (unsigned long)(space->used_bytes >> 10),
+           (unsigned long)(space->free_bytes >> 20),
+           (unsigned long)space->region_count);
+
+    if (!vm_for_each_region(space, dump_vm_region, NULL))
+        printf("[vm] layout walk failed\n");
+}
+
 void kernel_main(BOOT_INFO *bi)
 {
     if (bi == 0 || bi->magic != BOOTINFO_MAGIC) {
@@ -245,6 +289,12 @@ void kernel_main(BOOT_INFO *bi)
 
     printf("[kernel] lazy va=%p touch\n",
            (void *)(uintptr_t)lazy_va);
+
+    /*
+     * 把 VMM 当前已占用的高半区虚拟地址完整打印出来，方便直接检查
+     * direct-map / recursive / framebuffer / lazy region 的实际布局。
+     */
+    dump_vm_layout(&kernel_vm);
 
     volatile uint64_t *lazy =
         (volatile uint64_t *)(uintptr_t)lazy_va;

@@ -104,4 +104,15 @@ bool vm_free(vm_space_t *space, vaddr_t addr);
 bool vm_query(const vm_space_t *space, vaddr_t addr,
               vm_region_info_t *out_info);
 
+typedef bool (*vm_region_visit_t)(const vm_region_info_t *region,
+                                  void *context);
+
+/*
+ * 按虚拟地址从低到高遍历当前所有 used region。
+ * visitor 返回 false 时提前停止。
+ */
+bool vm_for_each_region(const vm_space_t *space,
+                        vm_region_visit_t visitor,
+                        void *context);
+
 #endif

@@ -36,6 +36,7 @@ all usable RAM
 
 Early paging 不再预估页表规模，也不一次预留 bootstrap block。每缺一个
 4K table page 就直接调用 `boot_alloc_pages(bi, 1, ...)`，实际使用多少页就分配多少页。
+bootstrap allocator 只分配、不回收；未使用的 `boot_release_pages()` 已删除。
 
 `boot_alloc_pages()` 利用 UEFI memory map 的物理地址升序，从 map 末尾反向找到
 第一个能容纳请求的 Conventional descriptor，并从其高地址端向下分配；descriptor
@@ -101,6 +102,8 @@ vm_free(space, region_start)
 
 `vm_query()` 可以通过 region 内任意 VA 查出它属于哪一个区间以及该区间类型和属性。
 `vm_free()` 不再需要调用者重复传 size，因为 used region 自己保存范围。
+`vm_for_each_region()` 按虚拟地址顺序遍历 used region；当前启动自测会打印完整 VMM
+布局，直接显示 direct-map、recursive、framebuffer 和 lazy heap 的实际 VA。
 
 VM 是所有 kernel VA 的统一所有者：固定地址区域（kernel/direct-map/MMIO 等）通过
 `vm_reserve()` 登记，动态区域（heap/stack/DMA 等）通过 `vm_alloc()` 分配，不再为用途建立独立 VA allocator。

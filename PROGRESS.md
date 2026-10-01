@@ -23,3 +23,6 @@
 - IDT：完整安装 256 个 vector stub；统一汇编入口保存 GPR、规范 exception error-code 并进入 C dispatcher。
 - Interrupt vectors：0x20..0xEF 为动态设备向量池，支持 alloc/alloc_at/free；0xF0..0xFF 预留 kernel timer/IPI/spurious。
 - IRQ handler registry：支持每向量注册一个 handler + context；注册/分配状态使用原子操作；#PF 继续走 demand paging。
+
+- bootmem：删除未使用的 boot_release_pages()；bootstrap allocator 现在明确为只分配、不回收。
+- VM debug：新增 vm_for_each_region()，启动时按地址顺序打印所有已占用虚拟区间及 type/attrs。

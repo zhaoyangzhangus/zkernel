@@ -862,3 +862,39 @@ bool vm_free(vm_space_t *space, vaddr_t addr)
 
     return free_used_region(space, region);
 }
+
+static bool visit_used_in_order(const vm_space_t *space,
+                                const vm_range_t *node,
+                                vm_region_visit_t visitor,
+                                void *context)
+{
+    if (node == NULL)
+        return true;
+
+    if (!visit_used_in_order(space, node->left, visitor, context))
+        return false;
+
+    vm_region_info_t info = {
+        .start = offset_to_address(space, node->start),
+        .size = node->end - node->start,
+        .type = (vm_region_type_t)node->type,
+        .attrs = node->attrs,
+    };
+
+    if (!visitor(&info, context))
+        return false;
+
+    return visit_used_in_order(space, node->right, visitor, context);
+}
+
+bool vm_for_each_region(const vm_space_t *space,
+                        vm_region_visit_t visitor,
+                        void *context)
+{
+    if (space == NULL || visitor == NULL)
+        return false;
+
+    return visit_used_in_order(
+        space, (const vm_range_t *)space->used_root,
+        visitor, context);
+}

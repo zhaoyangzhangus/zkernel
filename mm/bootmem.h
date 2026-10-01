@@ -16,10 +16,4 @@
  */
 bool boot_alloc_pages(BOOT_INFO *bi, uint64_t pages, uint64_t *out_phys);
 
-/*
- * 归还紧贴某个 Conventional descriptor 高端的连续页。
- * 仅供尚未启动 PMM 的 early 阶段使用。
- */
-bool boot_release_pages(BOOT_INFO *bi, uint64_t phys, uint64_t pages);
-
 #endif
