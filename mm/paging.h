@@ -69,6 +69,7 @@ typedef struct {
  * 解除当前 CR3 中 va 对应的实际 leaf mapping。
  *
  * 支持 4K PTE 和 2M PDE leaf；返回实际 page_size 和 physical frame。
+ * max_size 限制本次允许解除的最大 leaf。
  * 路径不存在时返回 true 且 mapped=false。1G leaf 当前不由 PMM 管理，
  * 因此保持不动并返回 false。
  *
@@ -76,6 +77,7 @@ typedef struct {
  * software ownership 标记的页表页才会归还 PMM；bootstrap 页表不回收。
  */
 bool paging_unmap_current(pmm_cpu_t *cpu, vaddr_t va,
+                          uint64_t max_size,
                           paging_unmap_info_t *out_info);
 
 /*

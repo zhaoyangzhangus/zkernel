@@ -50,6 +50,13 @@ static bool usable_ram_type(uint32_t type)
            type == MEM_CONVENTIONAL;
 }
 
+static uint64_t read_cr3(void)
+{
+    uint64_t value;
+    __asm__ volatile("mov %%cr3, %0" : "=r"(value));
+    return value;
+}
+
 static uint64_t read_cr4(void)
 {
     uint64_t value;
@@ -317,13 +324,16 @@ static bool release_owned_table(pmm_cpu_t *cpu,
      */
     parent[index] = 0;
     invlpg(child_va);
+    write_cr3(read_cr3());
     return pmm_free4k(cpu, frame);
 }
 
 bool paging_unmap_current(pmm_cpu_t *cpu, vaddr_t va,
+                          uint64_t max_size,
                           paging_unmap_info_t *out_info)
 {
     if (cpu == NULL || out_info == NULL ||
+        max_size < PAGE_4K ||
         (va & (PAGE_4K - 1)) != 0)
         return false;
 
@@ -372,7 +382,8 @@ bool paging_unmap_current(pmm_cpu_t *cpu, vaddr_t va,
          * vm_free 必须从 2M leaf 的起点释放整个 leaf；不允许从中间
          * 地址把完整 2M 映射误释放。
          */
-        if ((va & (PAGE_2M - 1)) != 0)
+        if ((va & (PAGE_2M - 1)) != 0 ||
+            max_size < PAGE_2M)
             return false;
 
         out_info->frame = e2 & PDE_2M_ADDR;
