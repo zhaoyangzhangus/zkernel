@@ -282,7 +282,8 @@ void kernel_main(BOOT_INFO *bi)
     if (!vm_alloc(&kernel_vm, VM_PAGE_SIZE, VM_PAGE_SIZE,
                   VM_REGION_HEAP,
                   VM_ATTR_READ | VM_ATTR_WRITE |
-                  VM_ATTR_LAZY | VM_ATTR_CACHE_WB,
+                  VM_ATTR_LAZY | VM_ATTR_PMM_OWNED |
+                  VM_ATTR_CACHE_WB,
                   &lazy_va)) {
         printf("[kernel] lazy VM alloc failed\n");
         halt();
@@ -304,6 +305,18 @@ void kernel_main(BOOT_INFO *bi)
     printf("[kernel] page fault mapped va=%p value=0x%llx\n",
            (void *)(uintptr_t)lazy_va,
            (unsigned long long)*lazy);
+
+    /*
+     * 验证完整释放链：
+     * PTE -> physical frame -> PMM -> free VA region。
+     */
+    if (!vm_free(&kernel_vm, lazy_va)) {
+        printf("[kernel] vm_free failed\n");
+        halt();
+    }
+
+    printf("[kernel] vm_free reclaimed lazy region\n");
+    dump_vm_layout(&kernel_vm);
 
     halt();
 }

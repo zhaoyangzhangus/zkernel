@@ -62,7 +62,7 @@ $(BUILD)/paging.o: mm/paging.c mm/paging.h mm/bootmem.h mm/vm.h arch/x86_64/pat.
 	@mkdir -p $(BUILD)
 	$(CC) $(KCFLAGS) -c $< -o $@
 
-$(BUILD)/vm.o: mm/vm.c mm/vm.h mm/pmm.h
+$(BUILD)/vm.o: mm/vm.c mm/vm.h mm/pmm.h mm/paging.h
 	@mkdir -p $(BUILD)
 	$(CC) $(KCFLAGS) -c $< -o $@
 

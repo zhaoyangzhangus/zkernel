@@ -28,3 +28,8 @@
 - VM debug：新增 vm_for_each_region()，启动时按地址顺序打印所有已占用虚拟区间及 type/attrs。
 
 - VM region naming：PML4[511] 的 512 GiB recursive page-table window 改为专用 VM_REGION_RECURSIVE，不再标记为 RESERVED。
+
+- VM free：vm_free() 现在逐页解除 PRESENT 4K PTE 并 invlpg；VM_ATTR_PMM_OWNED region 的 leaf frame 会归还 PMM，未 fault 的 LAZY 页直接跳过。
+- Mapping ownership：新增 VM_ATTR_PMM_OWNED，区分由 VM/PMM 拥有的 RAM frame 与 framebuffer/MMIO 等外部物理映射。
+- Runtime unmap：新增 paging_unmap_4k_current()；当前不拆 2M/1G large leaf，也暂不回收空 PT/PD/PDPT。
+- Free self-test：lazy heap fault 成功后执行 vm_free()，启动日志会打印回收成功并再次输出 VMM layout。
