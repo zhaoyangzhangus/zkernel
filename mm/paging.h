@@ -60,6 +60,15 @@ bool paging_map_range_current(pmm_cpu_t *cpu, vaddr_t va,
                               uint64_t attrs);
 
 /*
+ * 解除当前 CR3 中一个 4K leaf 映射。
+ * 中间项或 PTE 不存在时返回 true 且 *out_mapped=false；
+ * 遇到 1G/2M large leaf 返回 false。当前不回收空 PT/PD/PDPT。
+ */
+bool paging_unmap_4k_current(vaddr_t va,
+                             pmm_frame_t *out_frame,
+                             bool *out_mapped);
+
+/*
  * 扫描当前页表中的 direct-map 窗口，只把真正 PRESENT 的连续 VA
  * extent 登记到 kernel VM。物理 hole 不占用 VMM 地址空间。
  */

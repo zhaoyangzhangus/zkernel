@@ -39,6 +39,8 @@ typedef enum {
 #define VM_ATTR_GUARD     (UINT64_C(1) << 4)
 #define VM_ATTR_PINNED    (UINT64_C(1) << 5)
 #define VM_ATTR_LAZY      (UINT64_C(1) << 6)
+/* VM 拥有该 region 的普通 RAM frame；vm_free() 会归还 PMM。 */
+#define VM_ATTR_PMM_OWNED (UINT64_C(1) << 7)
 
 #define VM_ATTR_CACHE_WB       (UINT64_C(1) << 8)
 #define VM_ATTR_CACHE_WC       (UINT64_C(1) << 9)
@@ -98,7 +100,12 @@ bool vm_alloc(vm_space_t *space, uint64_t size, uint64_t align,
 bool vm_reserve(vm_space_t *space, vaddr_t addr, uint64_t size,
                 vm_region_type_t type, uint64_t attrs);
 
-/* addr 必须是 region 的起始地址；大小由 used region metadata 保存。 */
+/*
+ * addr 必须是 region 的起始地址；大小由 used region metadata 保存。
+ * PINNED region 拒绝释放。PRESENT 4K PTE 会被解除映射；
+ * 若带 VM_ATTR_PMM_OWNED，对应 physical frame 会归还 PMM。
+ * 当前不拆 2M/1G large leaf，也暂不回收空页表页。
+ */
 bool vm_free(vm_space_t *space, vaddr_t addr);
 
 /* addr 可以是 region 内任意地址。 */

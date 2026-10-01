@@ -65,6 +65,7 @@ bool page_fault_handle(uint64_t address, uint64_t error_code)
      * 显式带 LAZY，且只能是匿名 RAM 类 region。
      */
     if ((region.attrs & VM_ATTR_LAZY) == 0 ||
+        (region.attrs & VM_ATTR_PMM_OWNED) == 0 ||
         (region.attrs & VM_ATTR_GUARD) != 0 ||
         !anonymous_region(region.type))
         return false;

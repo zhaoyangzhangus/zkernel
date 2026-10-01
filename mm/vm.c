@@ -1,4 +1,5 @@
 #include "vm.h"
+#include "paging.h"
 
 #include <stddef.h>
 #include <stdint.h>
@@ -859,6 +860,25 @@ bool vm_free(vm_space_t *space, vaddr_t addr)
 
     if (region == NULL || region->start != offset)
         return false;
+
+    if ((region->attrs & VM_ATTR_PINNED) != 0)
+        return false;
+
+    bool pmm_owned = (region->attrs & VM_ATTR_PMM_OWNED) != 0;
+    vaddr_t start = offset_to_address(space, region->start);
+    uint64_t bytes = range_size(region);
+
+    for (uint64_t off = 0; off < bytes; off += VM_PAGE_SIZE) {
+        pmm_frame_t frame;
+        bool mapped;
+
+        if (!paging_unmap_4k_current(start + off, &frame, &mapped))
+            return false;
+
+        if (mapped && pmm_owned &&
+            !pmm_free4k(space->cpu, frame))
+            return false;
+    }
 
     return free_used_region(space, region);
 }

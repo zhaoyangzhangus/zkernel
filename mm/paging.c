@@ -282,6 +282,60 @@ bool paging_map_range_current(pmm_cpu_t *cpu, vaddr_t va,
     return true;
 }
 
+bool paging_unmap_4k_current(vaddr_t va,
+                             pmm_frame_t *out_frame,
+                             bool *out_mapped)
+{
+    if (out_frame == NULL || out_mapped == NULL ||
+        (va & (PAGE_4K - 1)) != 0)
+        return false;
+
+    *out_frame = 0;
+    *out_mapped = false;
+
+    uint32_t i4 = (uint32_t)((va >> 39) & 0x1FFU);
+    uint32_t i3 = (uint32_t)((va >> 30) & 0x1FFU);
+    uint32_t i2 = (uint32_t)((va >> 21) & 0x1FFU);
+    uint32_t i1 = (uint32_t)((va >> 12) & 0x1FFU);
+
+    uint64_t *pml4 = (uint64_t *)(uintptr_t)
+        recursive_address(RECURSIVE_SLOT, RECURSIVE_SLOT,
+                          RECURSIVE_SLOT, RECURSIVE_SLOT);
+    uint64_t e4 = pml4[i4];
+    if ((e4 & PTE_PRESENT) == 0)
+        return true;
+
+    uint64_t *pdpt = (uint64_t *)(uintptr_t)
+        recursive_address(RECURSIVE_SLOT, RECURSIVE_SLOT,
+                          RECURSIVE_SLOT, i4);
+    uint64_t e3 = pdpt[i3];
+    if ((e3 & PTE_PRESENT) == 0)
+        return true;
+    if ((e3 & PTE_LARGE) != 0)
+        return false;
+
+    uint64_t *pd = (uint64_t *)(uintptr_t)
+        recursive_address(RECURSIVE_SLOT, RECURSIVE_SLOT,
+                          i4, i3);
+    uint64_t e2 = pd[i2];
+    if ((e2 & PTE_PRESENT) == 0)
+        return true;
+    if ((e2 & PTE_LARGE) != 0)
+        return false;
+
+    uint64_t *pt = (uint64_t *)(uintptr_t)
+        recursive_address(RECURSIVE_SLOT, i4, i3, i2);
+    uint64_t pte = pt[i1];
+    if ((pte & PTE_PRESENT) == 0)
+        return true;
+
+    *out_frame = pte & PTE_ADDR;
+    pt[i1] = 0;
+    invlpg(va);
+    *out_mapped = true;
+    return true;
+}
+
 static bool reserve_direct_run(vm_space_t *space,
                                uint64_t start_pa, uint64_t end_pa)
 {
