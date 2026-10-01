@@ -26,3 +26,5 @@
 
 - bootmem：删除未使用的 boot_release_pages()；bootstrap allocator 现在明确为只分配、不回收。
 - VM debug：新增 vm_for_each_region()，启动时按地址顺序打印所有已占用虚拟区间及 type/attrs。
+
+- VM region naming：PML4[511] 的 512 GiB recursive page-table window 改为专用 VM_REGION_RECURSIVE，不再标记为 RESERVED。

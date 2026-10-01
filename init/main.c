@@ -106,6 +106,7 @@ static const char *vm_type_name(vm_region_type_t type)
     case VM_REGION_FRAMEBUFFER: return "FRAMEBUFFER";
     case VM_REGION_ACPI:        return "ACPI";
     case VM_REGION_DIRECT_MAP:  return "DIRECT_MAP";
+    case VM_REGION_RECURSIVE:   return "RECURSIVE";
     case VM_REGION_RESERVED:    return "RESERVED";
     case VM_REGION_USER:        return "USER";
     default:                    return "UNKNOWN";
@@ -216,7 +217,7 @@ void kernel_main(BOOT_INFO *bi)
     if (!vm_reserve(&kernel_vm,
                     PAGING_RECURSIVE_BASE,
                     PAGING_RECURSIVE_SIZE,
-                    VM_REGION_RESERVED,
+                    VM_REGION_RECURSIVE,
                     VM_ATTR_PINNED)) {
         printf("[kernel] recursive paging VM reserve failed\n");
         halt();

@@ -54,7 +54,7 @@ PTE，也不会被 direct-map region 占用，因此这些 VA 仍可供其它 ke
 identity map 目前只作为启动迁移层保留；等 kernel/stack/BOOT_INFO/PMM pointer
 全部切到 high-half direct-map 地址后再删除。
 
-PML4[511] 保留为 recursive page-table window（512 GiB）。接管 CR3 后，
+PML4[511] 作为 `VM_REGION_RECURSIVE` 的 recursive page-table window（512 GiB）。接管 CR3 后，
 paging 可以不依赖页表页本身的 identity/direct 映射而遍历当前 PML4/PDPT/PD/PT，
 并为运行时缺失的中间页表从 PMM 4K pool 补页。
 
@@ -86,7 +86,7 @@ used_root
     attrs
 ```
 
-region type 当前包含 generic/kernel/heap/stack/DMA/MMIO/framebuffer/ACPI/direct-map/reserved/user。
+region type 当前包含 generic/kernel/heap/stack/DMA/MMIO/framebuffer/ACPI/direct-map/recursive/reserved/user。
 
 region attrs 保存 RWX、user、guard、pinned、lazy，以及 WB/WC/UC/WT/WP/UC- cache policy。
 当前 direct-map region 已参与页表布局；其它动态 region 的通用 map/unmap 接口仍待实现。

@@ -23,6 +23,7 @@ typedef enum {
     VM_REGION_FRAMEBUFFER,
     VM_REGION_ACPI,
     VM_REGION_DIRECT_MAP,
+    VM_REGION_RECURSIVE,
     VM_REGION_RESERVED,
     VM_REGION_USER
 } vm_region_type_t;
