@@ -141,3 +141,28 @@ VM 支持 `VM_ATTR_CACHE_WB/WC/UC/WT/WP/UC_MINUS`。paging 层把它们编码成
 PAT/PCD/PWT；4K PTE 的 PAT 位是 bit 7，2M/1G leaf 的 PAT 位是 bit 12。
 `pat_page_flags()` 已同时支持两种页大小编码。IA32_PAT 是 per-CPU MSR，
 以后 AP bring-up 时每个 AP 都必须执行 `pat_init_cpu()`。
+
+
+## IDT / interrupt vectors
+
+IDT 现在安装完整 256 个 gate。每个 vector 都有独立汇编 stub，统一保存 15 个
+通用寄存器，并把 CPU exception 的 error code 规范成同一 frame 后进入
+`idt_dispatch()`。#PF 继续接到 demand-paging handler；其它未处理 exception
+会打印 vector/error/RIP 后停机。
+
+设备中断向量采用统一分配器：
+
+```c
+uint8_t vector;
+idt_vector_alloc(&vector);             /* 0x20..0xEF */
+idt_handler_register(vector, fn, ctx);
+
+/* teardown */
+idt_handler_unregister(vector);
+idt_vector_free(vector);
+```
+
+`0x00..0x1F` 固定给 CPU exceptions；`0xF0..0xFF` 预留给 kernel
+timer/IPI/spurious，其中 `0xFF` 作为 spurious vector。驱动也可以用
+`idt_vector_alloc_at()` 在动态池内申请指定向量。handler 注册表按 acquire/release
+发布，向量 bitmap 使用原子 CAS，后续 SMP 可继续沿用。

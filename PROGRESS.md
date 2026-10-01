@@ -19,3 +19,7 @@
 
 - PAT：IA32_PAT 采用固定布局，完整支持 WB/WC/UC-/UC/WT/WP；4K 使用 PAT bit7，2M/1G 使用 PAT bit12；每个 CPU 单独初始化。
 - Framebuffer：GOP 传递物理 base + FrameBufferSize；kernel VM 为其分配独立 VA，按 4K 显式映射为 WC，并将可访问 VA 写入 fb_base。
+
+- IDT：完整安装 256 个 vector stub；统一汇编入口保存 GPR、规范 exception error-code 并进入 C dispatcher。
+- Interrupt vectors：0x20..0xEF 为动态设备向量池，支持 alloc/alloc_at/free；0xF0..0xFF 预留 kernel timer/IPI/spurious。
+- IRQ handler registry：支持每向量注册一个 handler + context；注册/分配状态使用原子操作；#PF 继续走 demand paging。
