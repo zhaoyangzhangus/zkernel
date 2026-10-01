@@ -60,9 +60,9 @@ paging 可以不依赖页表页本身的 identity/direct 映射而遍历当前 P
 
 ## Page fault
 
-第一版 #PF 只处理 VM 已登记且同时带 `VM_ATTR_LAZY | VM_ATTR_PMM_OWNED` 的匿名 RAM region。
-not-present fault 时读取 CR2，用 `vm_query()` 判断 fault VA 是否属于已分配 region，
-检查 RW/USER 等基本权限后，从 PMM 分配一个 4K frame、清零并填入当前页表。
+#PF 对已经由 VM 登记的地址先用 `vm_query()` 校验 region 和 RW/USER 等权限。
+若该 region 带 `VM_ATTR_PMM_OWNED`，not-present fault 就从 PMM 分配一个 4K frame、
+清零并填入当前页表；不再需要单独的 LAZY 属性。
 handler 返回后由 `iretq` 重试原指令。
 
 MMIO/framebuffer/DMA/direct-map/reserved 不走 demand-zero；protection fault、
@@ -88,7 +88,7 @@ used_root
 
 region type 当前包含 generic/kernel/heap/stack/DMA/MMIO/framebuffer/ACPI/direct-map/recursive/reserved/user。
 
-region attrs 保存 RWX、user、guard、pinned、lazy、PMM-owned，以及 WB/WC/UC/WT/WP/UC- cache policy。
+region attrs 保存 RWX、user、guard、pinned、PMM-owned，以及 WB/WC/UC/WT/WP/UC- cache policy。
 当前 direct-map region 已参与页表布局；其它动态 region 的通用 map/unmap 接口仍待实现。
 
 接口：
@@ -104,10 +104,10 @@ vm_free(space, region_start)
 `vm_free()` 不再需要调用者重复传 size，因为 used region 自己保存范围。
 释放时会逐页清除 PRESENT 4K PTE 并失效对应 TLB；带
 `VM_ATTR_PMM_OWNED` 的 region 会把 leaf PTE 中的 physical frame
-归还 PMM。LAZY 尚未 fault 的页没有 PTE，会直接跳过。PINNED region
+归还 PMM。尚未 fault 的页没有 PTE，会直接跳过。PINNED region
 拒绝释放。当前尚不拆 2M/1G large leaf，也不回收空 PT/PD/PDPT。
 `vm_for_each_region()` 按虚拟地址顺序遍历 used region；当前启动自测会打印完整 VMM
-布局，直接显示 direct-map、recursive、framebuffer 和 lazy heap 的实际 VA。
+布局，直接显示 direct-map、recursive、framebuffer 和 demand-paged heap 的实际 VA。
 
 VM 是所有 kernel VA 的统一所有者：固定地址区域（kernel/direct-map/MMIO 等）通过
 `vm_reserve()` 登记，动态区域（heap/stack/DMA 等）通过 `vm_alloc()` 分配，不再为用途建立独立 VA allocator。

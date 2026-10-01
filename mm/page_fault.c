@@ -61,11 +61,11 @@ bool page_fault_handle(uint64_t address, uint64_t error_code)
     debug_char('Q');
 
     /*
-     * VM 已分配只是第一层判断；真正允许 demand paging 的 region 必须
-     * 显式带 LAZY，且只能是匿名 RAM 类 region。
+     * VM region 本身就是“该 VA 合法”的声明。
+     * PMM_OWNED 表示它的普通 RAM backing 由 PMM 按需提供；
+     * 因此任何合法的 PMM-owned not-present page 都直接 demand-zero。
      */
-    if ((region.attrs & VM_ATTR_LAZY) == 0 ||
-        (region.attrs & VM_ATTR_PMM_OWNED) == 0 ||
+    if ((region.attrs & VM_ATTR_PMM_OWNED) == 0 ||
         (region.attrs & VM_ATTR_GUARD) != 0 ||
         !anonymous_region(region.type))
         return false;

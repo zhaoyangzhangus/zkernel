@@ -108,14 +108,6 @@ static bool valid_attrs(uint64_t attrs)
 {
     uint64_t cache = attrs & VM_ATTR_CACHE_MASK;
 
-    /*
-     * LAZY fault 会从 PMM 分配 frame，因此 ownership 必须显式归 VM。
-     * 这样 vm_free() 才能无歧义地把已 fault 的页归还 PMM。
-     */
-    if ((attrs & VM_ATTR_LAZY) != 0 &&
-        (attrs & VM_ATTR_PMM_OWNED) == 0)
-        return false;
-
     return cache == 0 ||
            cache == VM_ATTR_CACHE_WB ||
            cache == VM_ATTR_CACHE_WC ||

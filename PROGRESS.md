@@ -14,7 +14,7 @@
 - kernel VA：完整高 canonical half 128 TiB，由 VM 统一管理。
 - 下一步：把 kernel/stack/BOOT_INFO/PMM 内部 pointer 切换到 high-half direct map，再删除 bootstrap identity map。
 
-- Page fault v1：建立最小 IDT 的 #PF gate；VM_ALLOC 的 LAZY 区域在首次 not-present fault 时通过 vm_query() 校验已分配范围，PMM 分配 4K demand-zero frame，再写当前页表并 iret 重试。
+- Page fault：VM 已登记的 PMM-owned 区域在首次 not-present fault 时通过 vm_query() 校验范围/权限，PMM 分配 4K demand-zero frame，再写当前页表并 iret 重试；不再使用 VM_ATTR_LAZY。
 - Runtime page-table update：PML4[511] 作为 512 GiB recursive mapping window；缺失的 PDPT/PD/PT 可在 #PF 路径中从 PMM 4K pool 动态补齐。当前生成 PRESENT/WRITE/USER，并按 VM cache attrs 编码 PAT；NX 尚未接入。
 
 - PAT：IA32_PAT 采用固定布局，完整支持 WB/WC/UC-/UC/WT/WP；4K 使用 PAT bit7，2M/1G 使用 PAT bit12；每个 CPU 单独初始化。
@@ -29,7 +29,9 @@
 
 - VM region naming：PML4[511] 的 512 GiB recursive page-table window 改为专用 VM_REGION_RECURSIVE，不再标记为 RESERVED。
 
-- VM free：vm_free() 现在逐页解除 PRESENT 4K PTE 并 invlpg；VM_ATTR_PMM_OWNED region 的 leaf frame 会归还 PMM，未 fault 的 LAZY 页直接跳过。
+- VM free：vm_free() 现在逐页解除 PRESENT 4K PTE 并 invlpg；VM_ATTR_PMM_OWNED region 的 leaf frame 会归还 PMM，尚未 fault 的页直接跳过。
 - Mapping ownership：新增 VM_ATTR_PMM_OWNED，区分由 VM/PMM 拥有的 RAM frame 与 framebuffer/MMIO 等外部物理映射。
 - Runtime unmap：新增 paging_unmap_4k_current()；当前不拆 2M/1G large leaf，也暂不回收空 PT/PD/PDPT。
-- Free self-test：lazy heap fault 成功后执行 vm_free()，启动日志会打印回收成功并再次输出 VMM layout。
+- Free self-test：PMM-owned heap 首次访问 fault 成功后执行 vm_free()，启动日志会打印回收成功并再次输出 VMM layout。
+
+- VM attrs：删除 VM_ATTR_LAZY；VM region 是否有效由 VMM 分配状态决定，VM_ATTR_PMM_OWNED 同时表示 not-present #PF 的 PMM demand-zero backing 与 vm_free() 的 frame ownership。

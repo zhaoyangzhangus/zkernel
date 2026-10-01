@@ -38,9 +38,11 @@ typedef enum {
 #define VM_ATTR_USER      (UINT64_C(1) << 3)
 #define VM_ATTR_GUARD     (UINT64_C(1) << 4)
 #define VM_ATTR_PINNED    (UINT64_C(1) << 5)
-#define VM_ATTR_LAZY      (UINT64_C(1) << 6)
-/* VM 拥有该 region 的普通 RAM frame；vm_free() 会归还 PMM。 */
-#define VM_ATTR_PMM_OWNED (UINT64_C(1) << 7)
+/*
+ * VM 拥有该 region 的普通 RAM backing。
+ * not-present #PF 会从 PMM demand-zero；vm_free() 会归还 PMM。
+ */
+#define VM_ATTR_PMM_OWNED (UINT64_C(1) << 6)
 
 #define VM_ATTR_CACHE_WB       (UINT64_C(1) << 8)
 #define VM_ATTR_CACHE_WC       (UINT64_C(1) << 9)

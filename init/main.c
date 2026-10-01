@@ -278,44 +278,43 @@ void kernel_main(BOOT_INFO *bi)
     page_fault_bind_space(&kernel_vm);
     idt_init();
 
-    vaddr_t lazy_va;
+    vaddr_t demand_va;
     if (!vm_alloc(&kernel_vm, VM_PAGE_SIZE, VM_PAGE_SIZE,
                   VM_REGION_HEAP,
                   VM_ATTR_READ | VM_ATTR_WRITE |
-                  VM_ATTR_LAZY | VM_ATTR_PMM_OWNED |
-                  VM_ATTR_CACHE_WB,
-                  &lazy_va)) {
-        printf("[kernel] lazy VM alloc failed\n");
+                  VM_ATTR_PMM_OWNED | VM_ATTR_CACHE_WB,
+                  &demand_va)) {
+        printf("[kernel] demand VM alloc failed\n");
         halt();
     }
 
-    printf("[kernel] lazy va=%p touch\n",
-           (void *)(uintptr_t)lazy_va);
+    printf("[kernel] demand va=%p touch\n",
+           (void *)(uintptr_t)demand_va);
 
     /*
      * 把 VMM 当前已占用的高半区虚拟地址完整打印出来，方便直接检查
-     * direct-map / recursive / framebuffer / lazy region 的实际布局。
+     * direct-map / recursive / framebuffer / demand region 的实际布局。
      */
     dump_vm_layout(&kernel_vm);
 
-    volatile uint64_t *lazy =
-        (volatile uint64_t *)(uintptr_t)lazy_va;
-    *lazy = UINT64_C(0x1122334455667788);
+    volatile uint64_t *demand =
+        (volatile uint64_t *)(uintptr_t)demand_va;
+    *demand = UINT64_C(0x1122334455667788);
 
     printf("[kernel] page fault mapped va=%p value=0x%llx\n",
-           (void *)(uintptr_t)lazy_va,
-           (unsigned long long)*lazy);
+           (void *)(uintptr_t)demand_va,
+           (unsigned long long)*demand);
 
     /*
      * 验证完整释放链：
      * PTE -> physical frame -> PMM -> free VA region。
      */
-    if (!vm_free(&kernel_vm, lazy_va)) {
+    if (!vm_free(&kernel_vm, demand_va)) {
         printf("[kernel] vm_free failed\n");
         halt();
     }
 
-    printf("[kernel] vm_free reclaimed lazy region\n");
+    printf("[kernel] vm_free reclaimed demand region\n");
     dump_vm_layout(&kernel_vm);
 
     halt();
