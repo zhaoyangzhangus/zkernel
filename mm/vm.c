@@ -868,16 +868,39 @@ bool vm_free(vm_space_t *space, vaddr_t addr)
     vaddr_t start = offset_to_address(space, region->start);
     uint64_t bytes = range_size(region);
 
-    for (uint64_t off = 0; off < bytes; off += VM_PAGE_SIZE) {
-        pmm_frame_t frame;
-        bool mapped;
+    for (uint64_t off = 0; off < bytes;) {
+        paging_unmap_info_t unmap;
 
-        if (!paging_unmap_4k_current(start + off, &frame, &mapped))
+        if (!paging_unmap_current(space->cpu, start + off, &unmap))
             return false;
 
-        if (mapped && pmm_owned &&
-            !pmm_free4k(space->cpu, frame))
+        if (!unmap.mapped) {
+            off += VM_PAGE_SIZE;
+            continue;
+        }
+
+        /*
+         * 2M leaf 必须完整落在当前 region 内；不允许部分 region
+         * 释放一个跨界的大页。
+         */
+        if (unmap.page_size > bytes - off)
             return false;
+
+        if (pmm_owned) {
+            bool ok;
+
+            if (unmap.page_size == PMM_PAGE_4K)
+                ok = pmm_free4k(space->cpu, unmap.frame);
+            else if (unmap.page_size == PMM_PAGE_2M)
+                ok = pmm_free2m(unmap.frame);
+            else
+                return false;
+
+            if (!ok)
+                return false;
+        }
+
+        off += unmap.page_size;
     }
 
     return free_used_region(space, region);

@@ -104,9 +104,10 @@ bool vm_reserve(vm_space_t *space, vaddr_t addr, uint64_t size,
 
 /*
  * addr 必须是 region 的起始地址；大小由 used region metadata 保存。
- * PINNED region 拒绝释放。PRESENT 4K PTE 会被解除映射；
- * 若带 VM_ATTR_PMM_OWNED，对应 physical frame 会归还 PMM。
- * 当前不拆 2M/1G large leaf，也暂不回收空页表页。
+ * PINNED region 拒绝释放。按实际 leaf 大小解除 4K/2M 映射；
+ * 若带 VM_ATTR_PMM_OWNED，4K 调 pmm_free4k()，2M 调 pmm_free2m()。
+ * leaf 清除后会回收变空且由运行时 PMM 分配的 PT/PD/PDPT。
+ * 当前不支持释放 1G leaf。
  */
 bool vm_free(vm_space_t *space, vaddr_t addr);
 

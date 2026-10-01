@@ -59,14 +59,24 @@ bool paging_map_range_current(pmm_cpu_t *cpu, vaddr_t va,
                               uint64_t pa, uint64_t size,
                               uint64_t attrs);
 
+typedef struct {
+    pmm_frame_t frame;
+    uint64_t page_size;
+    bool mapped;
+} paging_unmap_info_t;
+
 /*
- * 解除当前 CR3 中一个 4K leaf 映射。
- * 中间项或 PTE 不存在时返回 true 且 *out_mapped=false；
- * 遇到 1G/2M large leaf 返回 false。当前不回收空 PT/PD/PDPT。
+ * 解除当前 CR3 中 va 对应的实际 leaf mapping。
+ *
+ * 支持 4K PTE 和 2M PDE leaf；返回实际 page_size 和 physical frame。
+ * 路径不存在时返回 true 且 mapped=false。1G leaf 当前不由 PMM 管理，
+ * 因此保持不动并返回 false。
+ *
+ * leaf 清除后会向上检查空 PT/PD/PDPT。只有运行时从 PMM 分配并带
+ * software ownership 标记的页表页才会归还 PMM；bootstrap 页表不回收。
  */
-bool paging_unmap_4k_current(vaddr_t va,
-                             pmm_frame_t *out_frame,
-                             bool *out_mapped);
+bool paging_unmap_current(pmm_cpu_t *cpu, vaddr_t va,
+                          paging_unmap_info_t *out_info);
 
 /*
  * 扫描当前页表中的 direct-map 窗口，只把真正 PRESENT 的连续 VA

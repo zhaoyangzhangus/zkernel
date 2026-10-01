@@ -10,7 +10,10 @@
 #define PTE_WRITE   UINT64_C(0x002)
 #define PTE_USER    UINT64_C(0x004)
 #define PTE_LARGE   UINT64_C(0x080)
+/* software-owned bit: only meaningful on non-leaf table entries */
+#define PTE_TABLE_PMM_OWNED (UINT64_C(1) << 9)
 #define PTE_ADDR    UINT64_C(0x000FFFFFFFFFF000)
+#define PDE_2M_ADDR UINT64_C(0x000FFFFFFFE00000)
 
 #define PAGE_4K UINT64_C(0x1000)
 #define PAGE_2M UINT64_C(0x200000)
@@ -162,8 +165,13 @@ static bool runtime_child(pmm_cpu_t *cpu,
      */
     zero_page((void *)(uintptr_t)(VM_DIRECT_MAP_BASE + frame));
 
+    /*
+     * 这个 child table 来自运行时 PMM，software bit 9 记录 ownership。
+     * early/bootstrap 页表不会带这个 bit，因此 unmap 只会回收真正属于
+     * PMM 的运行时页表页。
+     */
     parent[index] = (frame & PTE_ADDR) |
-                    PTE_PRESENT | PTE_WRITE |
+                    PTE_PRESENT | PTE_WRITE | PTE_TABLE_PMM_OWNED |
                     (user ? PTE_USER : 0);
 
     /*
@@ -282,57 +290,151 @@ bool paging_map_range_current(pmm_cpu_t *cpu, vaddr_t va,
     return true;
 }
 
-bool paging_unmap_4k_current(vaddr_t va,
-                             pmm_frame_t *out_frame,
-                             bool *out_mapped)
+static bool table_empty(const uint64_t *table)
 {
-    if (out_frame == NULL || out_mapped == NULL ||
+    for (uint32_t i = 0; i < 512U; ++i) {
+        if ((table[i] & PTE_PRESENT) != 0)
+            return false;
+    }
+    return true;
+}
+
+static bool release_owned_table(pmm_cpu_t *cpu,
+                                uint64_t *parent, uint32_t index,
+                                uint64_t child_va)
+{
+    uint64_t entry = parent[index];
+
+    if ((entry & (PTE_PRESENT | PTE_TABLE_PMM_OWNED)) !=
+        (PTE_PRESENT | PTE_TABLE_PMM_OWNED))
+        return true;
+
+    pmm_frame_t frame = entry & PTE_ADDR;
+
+    /*
+     * 先从页表树断开，再失效 recursive alias，最后归还 PMM。
+     * 调用者必须在断开前已经确认 child table 为空。
+     */
+    parent[index] = 0;
+    invlpg(child_va);
+    return pmm_free4k(cpu, frame);
+}
+
+bool paging_unmap_current(pmm_cpu_t *cpu, vaddr_t va,
+                          paging_unmap_info_t *out_info)
+{
+    if (cpu == NULL || out_info == NULL ||
         (va & (PAGE_4K - 1)) != 0)
         return false;
 
-    *out_frame = 0;
-    *out_mapped = false;
+    out_info->frame = 0;
+    out_info->page_size = PAGE_4K;
+    out_info->mapped = false;
 
     uint32_t i4 = (uint32_t)((va >> 39) & 0x1FFU);
     uint32_t i3 = (uint32_t)((va >> 30) & 0x1FFU);
     uint32_t i2 = (uint32_t)((va >> 21) & 0x1FFU);
     uint32_t i1 = (uint32_t)((va >> 12) & 0x1FFU);
 
-    uint64_t *pml4 = (uint64_t *)(uintptr_t)
+    uint64_t pml4_va =
         recursive_address(RECURSIVE_SLOT, RECURSIVE_SLOT,
                           RECURSIVE_SLOT, RECURSIVE_SLOT);
+    uint64_t pdpt_va =
+        recursive_address(RECURSIVE_SLOT, RECURSIVE_SLOT,
+                          RECURSIVE_SLOT, i4);
+    uint64_t pd_va =
+        recursive_address(RECURSIVE_SLOT, RECURSIVE_SLOT,
+                          i4, i3);
+    uint64_t pt_va =
+        recursive_address(RECURSIVE_SLOT, i4, i3, i2);
+
+    uint64_t *pml4 = (uint64_t *)(uintptr_t)pml4_va;
     uint64_t e4 = pml4[i4];
     if ((e4 & PTE_PRESENT) == 0)
         return true;
 
-    uint64_t *pdpt = (uint64_t *)(uintptr_t)
-        recursive_address(RECURSIVE_SLOT, RECURSIVE_SLOT,
-                          RECURSIVE_SLOT, i4);
+    uint64_t *pdpt = (uint64_t *)(uintptr_t)pdpt_va;
     uint64_t e3 = pdpt[i3];
     if ((e3 & PTE_PRESENT) == 0)
         return true;
+
+    /* PMM 当前没有 1G frame pool；绝不部分拆除 1G leaf。 */
     if ((e3 & PTE_LARGE) != 0)
         return false;
 
-    uint64_t *pd = (uint64_t *)(uintptr_t)
-        recursive_address(RECURSIVE_SLOT, RECURSIVE_SLOT,
-                          i4, i3);
+    uint64_t *pd = (uint64_t *)(uintptr_t)pd_va;
     uint64_t e2 = pd[i2];
     if ((e2 & PTE_PRESENT) == 0)
         return true;
-    if ((e2 & PTE_LARGE) != 0)
-        return false;
 
-    uint64_t *pt = (uint64_t *)(uintptr_t)
-        recursive_address(RECURSIVE_SLOT, i4, i3, i2);
+    if ((e2 & PTE_LARGE) != 0) {
+        /*
+         * vm_free 必须从 2M leaf 的起点释放整个 leaf；不允许从中间
+         * 地址把完整 2M 映射误释放。
+         */
+        if ((va & (PAGE_2M - 1)) != 0)
+            return false;
+
+        out_info->frame = e2 & PDE_2M_ADDR;
+        out_info->page_size = PAGE_2M;
+        out_info->mapped = true;
+
+        pd[i2] = 0;
+        invlpg(va);
+
+        /*
+         * 清掉 2M leaf 后，PD 可能已经空。若它本身来自运行时 PMM，
+         * 继续向上回收；bootstrap table 没有 ownership bit，会保留。
+         */
+        if (table_empty(pd) &&
+            (e3 & PTE_TABLE_PMM_OWNED) != 0) {
+            if (!release_owned_table(cpu, pdpt, i3, pd_va))
+                return false;
+
+            if (table_empty(pdpt) &&
+                (e4 & PTE_TABLE_PMM_OWNED) != 0) {
+                if (!release_owned_table(cpu, pml4, i4, pdpt_va))
+                    return false;
+            }
+        }
+
+        return true;
+    }
+
+    uint64_t *pt = (uint64_t *)(uintptr_t)pt_va;
     uint64_t pte = pt[i1];
     if ((pte & PTE_PRESENT) == 0)
         return true;
 
-    *out_frame = pte & PTE_ADDR;
+    out_info->frame = pte & PTE_ADDR;
+    out_info->page_size = PAGE_4K;
+    out_info->mapped = true;
+
     pt[i1] = 0;
     invlpg(va);
-    *out_mapped = true;
+
+    /*
+     * 从 PT 开始逐层回收空的运行时页表。每层 parent entry 上的
+     * PTE_TABLE_PMM_OWNED 说明 child frame 来自 PMM，可安全归还。
+     */
+    if (table_empty(pt) &&
+        (e2 & PTE_TABLE_PMM_OWNED) != 0) {
+        if (!release_owned_table(cpu, pd, i2, pt_va))
+            return false;
+
+        if (table_empty(pd) &&
+            (e3 & PTE_TABLE_PMM_OWNED) != 0) {
+            if (!release_owned_table(cpu, pdpt, i3, pd_va))
+                return false;
+
+            if (table_empty(pdpt) &&
+                (e4 & PTE_TABLE_PMM_OWNED) != 0) {
+                if (!release_owned_table(cpu, pml4, i4, pdpt_va))
+                    return false;
+            }
+        }
+    }
+
     return true;
 }
 
