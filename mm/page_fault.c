@@ -94,19 +94,56 @@ bool page_fault_handle(uint64_t address, uint64_t error_code)
         return false;
 
     pmm_frame_t frame;
-    if (!pmm_alloc4k(g_fault_space->cpu, &frame))
+
+
+    /*
+     * 优先尝试 2M huge page。
+     */
+    uint64_t huge_va =
+        address & ~(PMM_PAGE_2M - 1);
+
+
+    if (huge_va >= region.start &&
+        huge_va + PMM_PAGE_2M <= region.start + region.size &&
+        paging_can_map_2m_current(huge_va) &&
+        pmm_alloc2m(&frame)) {
+
+
+        zero_frame(frame);
+
+
+        if (paging_map_2m_current(g_fault_space->cpu,
+                                  huge_va,
+                                  frame,
+                                  region.attrs))
+            return true;
+
+
+        pmm_free2m(frame);
+    }
+
+
+
+    if (!pmm_alloc4k(g_fault_space->cpu,
+                     &frame))
         return false;
 
-    debug_char('M');
 
     zero_frame(frame);
-    debug_char('Z');
 
-    vaddr_t page = address & ~(VM_PAGE_SIZE - 1);
-    debug_char('T');
-    if (!paging_map_4k_current(g_fault_space->cpu, page,
-                               frame, region.attrs)) {
-        pmm_free4k(g_fault_space->cpu, frame);
+
+    vaddr_t page =
+        address & ~(VM_PAGE_SIZE - 1);
+
+
+    if (!paging_map_4k_current(g_fault_space->cpu,
+                               page,
+                               frame,
+                               region.attrs)) {
+
+        pmm_free4k(g_fault_space->cpu,
+                   frame);
+
         return false;
     }
 

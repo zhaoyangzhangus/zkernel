@@ -273,6 +273,190 @@ bool paging_map_4k_current(pmm_cpu_t *cpu, vaddr_t va,
     return true;
 }
 
+
+
+
+
+bool paging_can_map_2m_current(vaddr_t va)
+{
+    if ((va & (PAGE_2M - 1)) != 0)
+        return false;
+
+
+    uint32_t i4 = (uint32_t)((va >> 39) & 0x1ffU);
+    uint32_t i3 = (uint32_t)((va >> 30) & 0x1ffU);
+    uint32_t i2 = (uint32_t)((va >> 21) & 0x1ffU);
+
+
+    uint64_t pml4_va =
+        recursive_address(RECURSIVE_SLOT,
+                          RECURSIVE_SLOT,
+                          RECURSIVE_SLOT,
+                          RECURSIVE_SLOT);
+
+    uint64_t pdpt_va =
+        recursive_address(RECURSIVE_SLOT,
+                          RECURSIVE_SLOT,
+                          RECURSIVE_SLOT,
+                          i4);
+
+    uint64_t pd_va =
+        recursive_address(RECURSIVE_SLOT,
+                          RECURSIVE_SLOT,
+                          i4,
+                          i3);
+
+
+    uint64_t *pml4 =
+        (uint64_t *)(uintptr_t)pml4_va;
+
+
+    uint64_t e4 = pml4[i4];
+
+    if ((e4 & PTE_PRESENT) == 0)
+        return true;
+
+
+    uint64_t *pdpt =
+        (uint64_t *)(uintptr_t)pdpt_va;
+
+
+    uint64_t e3 = pdpt[i3];
+
+    if ((e3 & PTE_PRESENT) == 0)
+        return true;
+
+
+    if (e3 & PTE_LARGE)
+        return false;
+
+
+    uint64_t *pd =
+        (uint64_t *)(uintptr_t)pd_va;
+
+
+    return (pd[i2] & PTE_PRESENT) == 0;
+}
+
+
+bool paging_map_2m_current(pmm_cpu_t *cpu, vaddr_t va,
+                           pmm_frame_t frame, uint64_t attrs)
+{
+    if (cpu == NULL ||
+        (va & (PAGE_2M - 1)) != 0 ||
+        (frame & (PAGE_2M - 1)) != 0)
+        return false;
+
+
+    uint32_t i4 = (uint32_t)((va >> 39) & 0x1ffU);
+    uint32_t i3 = (uint32_t)((va >> 30) & 0x1ffU);
+    uint32_t i2 = (uint32_t)((va >> 21) & 0x1ffU);
+
+
+    uint64_t pml4_va =
+        recursive_address(RECURSIVE_SLOT,
+                          RECURSIVE_SLOT,
+                          RECURSIVE_SLOT,
+                          RECURSIVE_SLOT);
+
+    uint64_t pdpt_va =
+        recursive_address(RECURSIVE_SLOT,
+                          RECURSIVE_SLOT,
+                          RECURSIVE_SLOT,
+                          i4);
+
+    uint64_t pd_va =
+        recursive_address(RECURSIVE_SLOT,
+                          RECURSIVE_SLOT,
+                          i4,
+                          i3);
+
+
+    uint64_t *pml4 =
+        (uint64_t *)(uintptr_t)pml4_va;
+
+    uint64_t *pdpt;
+    uint64_t *pd;
+
+
+    bool user = (attrs & VM_ATTR_USER) != 0;
+
+
+    if (!runtime_child(cpu, pml4, i4,
+                       pdpt_va, user, &pdpt))
+        return false;
+
+
+    if (!runtime_child(cpu, pdpt, i3,
+                       pd_va, user, &pd))
+        return false;
+
+
+    if (pd[i2] & PTE_PRESENT)
+        return false;
+
+
+    uint64_t flags =
+        PTE_PRESENT |
+        PTE_LARGE;
+
+
+    if (attrs & VM_ATTR_WRITE)
+        flags |= PTE_WRITE;
+
+
+    if (user)
+        flags |= PTE_USER;
+
+
+    uint64_t cache =
+        attrs & VM_ATTR_CACHE_MASK;
+
+
+    pat_memory_type_t pat_type;
+
+
+    switch(cache) {
+    case 0:
+    case VM_ATTR_CACHE_WB:
+        pat_type = PAT_MEMORY_WB;
+        break;
+
+    case VM_ATTR_CACHE_WC:
+        pat_type = PAT_MEMORY_WC;
+        break;
+
+    case VM_ATTR_CACHE_UC:
+        pat_type = PAT_MEMORY_UC;
+        break;
+
+    default:
+        return false;
+    }
+
+
+    uint64_t cache_flags;
+
+    if (!pat_page_flags(pat_type,
+                        true,
+                        &cache_flags))
+        return false;
+
+
+    flags |= cache_flags;
+
+
+    pd[i2] =
+        (frame & PDE_2M_ADDR) |
+        flags;
+
+
+    invlpg(va);
+
+    return true;
+}
+
+
 bool paging_map_range_current(pmm_cpu_t *cpu, vaddr_t va,
                               uint64_t pa, uint64_t size,
                               uint64_t attrs)

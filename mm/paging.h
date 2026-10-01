@@ -52,6 +52,19 @@ bool paging_map_4k_current(pmm_cpu_t *cpu, vaddr_t va,
                            pmm_frame_t frame, uint64_t attrs);
 
 /*
+ * 在当前 CR3 上安装一个 2M huge page 映射。
+ * va/frame 必须 2M 对齐。
+ */
+bool paging_map_2m_current(pmm_cpu_t *cpu, vaddr_t va,
+                           pmm_frame_t frame, uint64_t attrs);
+
+/*
+ * 检查 2M huge page 是否可以建立。
+ * 只检查当前页表中对应 PDE 是否为空。
+ */
+bool paging_can_map_2m_current(vaddr_t va);
+
+/*
  * 映射一段已经存在的物理地址。va/pa 必须 4K 对齐，size 会向上取整。
  * 当前按 4K PTE 建图；适合 framebuffer/MMIO 等设备物理地址。
  */
