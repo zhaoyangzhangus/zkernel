@@ -87,7 +87,7 @@ bool page_fault_handle(uint64_t address, uint64_t error_code)
     debug_char('A');
 
     /*
-     * MMIO/WC/UC 不走这里；lazy anonymous page 当前只接受普通 WB。
+     * MMIO/WC/UC 不走这里；PMM-owned anonymous page 当前只接受普通 WB。
      */
     uint64_t cache = region.attrs & VM_ATTR_CACHE_MASK;
     if (cache != 0 && cache != VM_ATTR_CACHE_WB)
