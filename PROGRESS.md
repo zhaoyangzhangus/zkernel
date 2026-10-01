@@ -35,3 +35,6 @@
 - Free self-test：PMM-owned heap 首次访问 fault 成功后执行 vm_free()，启动日志会打印回收成功并再次输出 VMM layout。
 
 - VM attrs：删除 VM_ATTR_LAZY；VM region 是否有效由 VMM 分配状态决定，VM_ATTR_PMM_OWNED 同时表示 not-present #PF 的 PMM demand-zero backing 与 vm_free() 的 frame ownership。
+
+- VM free leaf size：释放时读取实际页表 leaf；4K frame 调 pmm_free4k()，2M frame 调 pmm_free2m()，未映射页按 4K 跳过，1G leaf 当前保持不动并返回失败。
+- Page-table reclaim：runtime_child() 在中间页表 entry 的 software bit 9 标记 PMM ownership；leaf 删除后逐层检查 PT/PD/PDPT，空且 PMM-owned 的页表页断开后刷新当前 CR3，再归还 pmm_free4k()。bootstrap 页表不带该标记，不会被误回收。

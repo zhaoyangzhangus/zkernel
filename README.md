@@ -102,10 +102,11 @@ vm_free(space, region_start)
 
 `vm_query()` 可以通过 region 内任意 VA 查出它属于哪一个区间以及该区间类型和属性。
 `vm_free()` 不再需要调用者重复传 size，因为 used region 自己保存范围。
-释放时会逐页清除 PRESENT 4K PTE 并失效对应 TLB；带
-`VM_ATTR_PMM_OWNED` 的 region 会把 leaf PTE 中的 physical frame
-归还 PMM。尚未 fault 的页没有 PTE，会直接跳过。PINNED region
-拒绝释放。当前尚不拆 2M/1G large leaf，也不回收空 PT/PD/PDPT。
+释放时按页表中的实际 leaf 大小处理：4K leaf 归还 `pmm_free4k()`，
+2M leaf 归还 `pmm_free2m()`；尚未 fault 的地址没有 leaf，会直接跳过。
+leaf 清除后继续向上检查 PT/PD/PDPT，运行时由 PMM 创建且已经变空的页表页
+会一并归还 PMM。bootstrap 页表没有 runtime ownership 标记，因此不会误回收。
+PINNED region 拒绝释放；1G leaf 当前不支持释放。
 `vm_for_each_region()` 按虚拟地址顺序遍历 used region；当前启动自测会打印完整 VMM
 布局，直接显示 direct-map、recursive、framebuffer 和 demand-paged heap 的实际 VA。
 

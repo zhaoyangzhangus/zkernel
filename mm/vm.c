@@ -871,20 +871,14 @@ bool vm_free(vm_space_t *space, vaddr_t addr)
     for (uint64_t off = 0; off < bytes;) {
         paging_unmap_info_t unmap;
 
-        if (!paging_unmap_current(space->cpu, start + off, &unmap))
+        if (!paging_unmap_current(space->cpu, start + off,
+                                  bytes - off, &unmap))
             return false;
 
         if (!unmap.mapped) {
             off += VM_PAGE_SIZE;
             continue;
         }
-
-        /*
-         * 2M leaf 必须完整落在当前 region 内；不允许部分 region
-         * 释放一个跨界的大页。
-         */
-        if (unmap.page_size > bytes - off)
-            return false;
 
         if (pmm_owned) {
             bool ok;
