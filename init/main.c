@@ -141,6 +141,9 @@ static void dump_vm_layout(const vm_space_t *space)
 
 void kernel_main(BOOT_INFO *bi)
 {
+    /* debugcon: 已经真正执行到高半区 kernel_main。 */
+    __asm__ volatile("outb %0, $0xe9" :: "a"((uint8_t)'K'));
+
     if (bi == 0 ||
         bi->magic != BOOTINFO_MAGIC ||
         bi->version != BOOTINFO_VERSION) {
