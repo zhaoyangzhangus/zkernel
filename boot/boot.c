@@ -85,6 +85,11 @@ static EFI_PHYSICAL_ADDRESS g_boot_pt_arena;
 static UINTN g_boot_pt_used;
 static EFI_PHYSICAL_ADDRESS g_boot_root;
 
+/* ExitBootServices 前最后一刻记录的固件页表状态，仅用于诊断。 */
+static UINT64 g_fw_cr3_before;
+static UINT64 g_fw_pml4_0_before;
+static UINT64 g_fw_pml4_511_before;
+
 /* ================================================================== */
 /* 控制台输出辅助                                                      */
 /* ================================================================== */
@@ -136,6 +141,21 @@ static void con_dec(UINT64 value)
 static inline void debug_char(UINT8 c)
 {
     __asm__ volatile("outb %0, $0xe9" :: "a"(c));
+}
+
+static void debug_puts(const char *s)
+{
+    while (*s != '\0')
+        debug_char((UINT8)*s++);
+}
+
+static void debug_hex64(UINT64 value)
+{
+    static const char hex[] = "0123456789ABCDEF";
+
+    debug_puts("0x");
+    for (int shift = 60; shift >= 0; shift -= 4)
+        debug_char((UINT8)hex[(value >> shift) & 0xFULL]);
 }
 
 static void report_error(const CHAR16 *what, EFI_STATUS status)
@@ -901,6 +921,19 @@ static EFI_STATUS leave_boot_services(EFI_HANDLE image, BOOT_INFO *bi)
             return status;
         }
 
+        /*
+         * 紧挨 ExitBootServices 前保存固件页表状态。这里不调用任何
+         * Boot Services，不会使 map_key 失效。
+         */
+        g_fw_cr3_before = read_cr3();
+        {
+            UINT64 root = g_fw_cr3_before & X86_PTE_ADDR;
+            volatile const UINT64 *pml4 =
+                (volatile const UINT64 *)(UINTN)root;
+            g_fw_pml4_0_before = pml4[0];
+            g_fw_pml4_511_before = pml4[511];
+        }
+
         /* map_key 必须来自最近一次 GetMemoryMap，且两次调用之间不能有任何内存分配 */
         status = BS->ExitBootServices(image, map_key);
         if (!EFI_ERROR(status))
@@ -963,6 +996,47 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
     status = leave_boot_services(image_handle, &g_bootinfo);
     if (EFI_ERROR(status))
         return status;      /* ExitBootServices 失败时控制台还能用，直接返回固件 */
+
+    /*
+     * ExitBootServices 前后固件页表对照。
+     * 全部直接走 0xE9，不调用已经失效的 UEFI 服务。
+     */
+    {
+        UINT64 cr3_after = read_cr3();
+        UINT64 root_after = cr3_after & X86_PTE_ADDR;
+
+        debug_puts("\n[CR3] B=");
+        debug_hex64(g_fw_cr3_before);
+        debug_puts(" A=");
+        debug_hex64(cr3_after);
+        debug_puts("\n[PML4-before] [0]=");
+        debug_hex64(g_fw_pml4_0_before);
+        debug_puts(" [511]=");
+        debug_hex64(g_fw_pml4_511_before);
+        debug_puts("\n");
+
+        /* X: 即将按 VA=PA 解引用 EBS 返回后的 CR3 根页。 */
+        debug_char('X');
+
+        volatile const UINT64 *pml4_after =
+            (volatile const UINT64 *)(UINTN)root_after;
+
+        UINT64 p0_after = pml4_after[0];
+
+        /* Y: PML4[0] 读取成功。 */
+        debug_char('Y');
+
+        UINT64 p511_after = pml4_after[511];
+
+        /* Z: PML4[511] 读取成功。 */
+        debug_char('Z');
+
+        debug_puts("\n[PML4-after ] [0]=");
+        debug_hex64(p0_after);
+        debug_puts(" [511]=");
+        debug_hex64(p511_after);
+        debug_puts("\n");
+    }
 
     /* E: ExitBootServices 已成功返回。 */
     debug_char('E');
