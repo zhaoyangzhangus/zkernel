@@ -434,6 +434,13 @@ fail:
 /* ================================================================== */
 /* loader 自己的 bootstrap 页表                                        */
 /* ================================================================== */
+static UINT64 read_cr3(void)
+{
+    UINT64 value;
+    __asm__ volatile("mov %%cr3, %0" : "=r"(value));
+    return value;
+}
+
 static UINT64 read_cr4(void)
 {
     UINT64 value;
@@ -744,6 +751,79 @@ static void save_framebuffer(BOOT_INFO *bi)
     con_puts(L"\r\n");
 }
 
+static void dump_firmware_cr3(const BOOT_INFO *bi)
+{
+    UINT64 cr3 = read_cr3();
+    UINT64 root = cr3 & X86_PTE_ADDR;
+
+    con_puts(L"[BOOT] firmware CR3 raw = ");
+    con_hex64(cr3);
+    con_puts(L", root = ");
+    con_hex64(root);
+    con_puts(L"\r\n");
+
+    const UINT8 *p = (const UINT8 *)(UINTN)bi->mmap_addr;
+    BOOLEAN found = EFI_FALSE;
+
+    for (UINT32 i = 0; i < bi->mmap_desc_count;
+         ++i, p += bi->mmap_desc_size) {
+        const EFI_MEMORY_DESCRIPTOR *d =
+            (const EFI_MEMORY_DESCRIPTOR *)(const VOID *)p;
+
+        if (d->NumberOfPages > UINT64_MAX / PAGE_SIZE)
+            continue;
+
+        UINT64 bytes = d->NumberOfPages * PAGE_SIZE;
+        if (d->PhysicalStart > UINT64_MAX - bytes)
+            continue;
+
+        UINT64 end = d->PhysicalStart + bytes;
+
+        if (root >= d->PhysicalStart && root < end) {
+            con_puts(L"[BOOT] firmware CR3 descriptor: index=");
+            con_dec(i);
+            con_puts(L" type=");
+            con_dec(d->Type);
+            con_puts(L" phys=");
+            con_hex64(d->PhysicalStart);
+            con_puts(L"..");
+            con_hex64(end);
+            con_puts(L" pages=");
+            con_dec(d->NumberOfPages);
+            con_puts(L"\r\n");
+            found = EFI_TRUE;
+            break;
+        }
+    }
+
+    if (!found)
+        con_puts(L"[BOOT] firmware CR3 descriptor: NOT FOUND\r\n");
+
+    /*
+     * 关键测试：在 Boot Services 仍有效时，把 CR3 的物理根页直接按
+     * 同值虚拟地址解引用。如果 UEFI x64 identity mapping 覆盖该页，
+     * 这里应能安全读出 PML4[0]/[256]/[510]/[511]。
+     */
+    volatile const UINT64 *pml4 =
+        (volatile const UINT64 *)(UINTN)root;
+
+    con_puts(L"[BOOT] firmware PML4[0]   = ");
+    con_hex64(pml4[0]);
+    con_puts(L"\r\n");
+
+    con_puts(L"[BOOT] firmware PML4[256] = ");
+    con_hex64(pml4[256]);
+    con_puts(L"\r\n");
+
+    con_puts(L"[BOOT] firmware PML4[510] = ");
+    con_hex64(pml4[510]);
+    con_puts(L"\r\n");
+
+    con_puts(L"[BOOT] firmware PML4[511] = ");
+    con_hex64(pml4[511]);
+    con_puts(L"\r\n");
+}
+
 /* ================================================================== */
 /* 取内存映射并退出 Boot Services                                      */
 /* ================================================================== */
@@ -790,6 +870,12 @@ static EFI_STATUS leave_boot_services(EFI_HANDLE image, BOOT_INFO *bi)
         bi->mmap_desc_version = desc_version;
         bi->mmap_desc_count   =
             (desc_size != 0) ? (UINT32)(map_size / desc_size) : 0;
+
+        /*
+         * Boot Services 尚未退出：直接验证 firmware CR3 根页是否真的
+         * 处于 identity mapping 中，并打印 PML4 关键槽位。
+         */
+        dump_firmware_cr3(bi);
 
         /*
          * 不再修改固件页表。使用最终 memory map，在预留 arena 内构建
