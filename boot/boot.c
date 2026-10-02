@@ -834,6 +834,7 @@ static EFI_STATUS leave_boot_services(EFI_HANDLE image, BOOT_INFO *bi)
     UINTN  map_size = 0, map_key = 0, desc_size = 0;
     UINT32 desc_version = 0;
     EFI_STATUS status;
+    BOOLEAN dumped_cr3 = EFI_FALSE;
 
     status = BS->AllocatePool(EfiLoaderData, mmap_buf_size, (VOID **)&mmap);
     if (EFI_ERROR(status)) {
@@ -864,6 +865,23 @@ static EFI_STATUS leave_boot_services(EFI_HANDLE image, BOOT_INFO *bi)
             return status;
         }
 
+        /*
+         * CR3/PML4 诊断只做一次。这里的固件控制台输出可能改变 memory map，
+         * 所以打印完后必须立刻重新 GetMemoryMap，绝不能拿当前 map_key 去 EBS。
+         */
+        if (!dumped_cr3) {
+            bi->mmap_addr         = (UINT64)(UINTN)mmap;
+            bi->mmap_size         = (UINT64)map_size;
+            bi->mmap_desc_size    = (UINT64)desc_size;
+            bi->mmap_desc_version = desc_version;
+            bi->mmap_desc_count   =
+                (desc_size != 0) ? (UINT32)(map_size / desc_size) : 0;
+
+            dump_firmware_cr3(bi);
+            dumped_cr3 = EFI_TRUE;
+            continue;
+        }
+
         bi->mmap_addr         = (UINT64)(UINTN)mmap;
         bi->mmap_size         = (UINT64)map_size;
         bi->mmap_desc_size    = (UINT64)desc_size;
@@ -872,13 +890,8 @@ static EFI_STATUS leave_boot_services(EFI_HANDLE image, BOOT_INFO *bi)
             (desc_size != 0) ? (UINT32)(map_size / desc_size) : 0;
 
         /*
-         * Boot Services 尚未退出：直接验证 firmware CR3 根页是否真的
-         * 处于 identity mapping 中，并打印 PML4 关键槽位。
-         */
-        dump_firmware_cr3(bi);
-
-        /*
-         * 不再修改固件页表。使用最终 memory map，在预留 arena 内构建
+         * 不再调用任何固件输出或其它 Boot Services。
+         * 使用最终 memory map，在预留 arena 内构建
          * loader 自己的 bootstrap CR3。该过程不调用 Boot Services，
          * 所以 map_key 仍然有效。
          */
