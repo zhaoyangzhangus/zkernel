@@ -1,5 +1,6 @@
 #include "pmm.h"
 #include "bootmem.h"
+#include "vm.h"
 
 #include <stddef.h>
 #include <stdint.h>
@@ -508,7 +509,12 @@ int pmm_init(BOOT_INFO *bi)
     if (!boot_alloc_pages(bi, reserve_pages, &metadata_phys))
         return -7;
 
-    uint8_t *metadata = (uint8_t *)(uintptr_t)metadata_phys;
+    /*
+     * boot_alloc_pages() 返回的是物理地址。final kernel CR3 已经删除
+     * identity mapping，因此所有普通 RAM 必须通过 direct map 访问。
+     */
+    uint8_t *metadata =
+        (uint8_t *)(uintptr_t)(VM_DIRECT_MAP_BASE + metadata_phys);
     memory_zero(metadata, reserved_bytes);
 
     uint8_t *cursor = metadata;
