@@ -1101,6 +1101,29 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
         debug_puts(" [511]=");
         debug_hex64(p511_after);
         debug_puts("\n");
+
+        /*
+         * 精确复现旧实现失败区间：
+         * 从 loader 自己已构造完成的 bootstrap PML4 复制 [511] entry，
+         * 尝试写入 firmware PML4[511]，然后 reload 同一个 firmware CR3。
+         *
+         * W = 写之前
+         * V = 写成功
+         * T = reload CR3 成功
+         */
+        volatile UINT64 *fw_pml4 =
+            (volatile UINT64 *)(UINTN)root_after;
+        volatile const UINT64 *boot_pml4 =
+            (volatile const UINT64 *)(UINTN)g_boot_root;
+        UINT64 test_entry = boot_pml4[511];
+
+        debug_char('W');
+        fw_pml4[511] = test_entry;
+        debug_char('V');
+
+        write_cr3(cr3_after);
+        debug_char('T');
+        debug_char('\n');
     }
 
     /* E: ExitBootServices 已成功返回。 */
