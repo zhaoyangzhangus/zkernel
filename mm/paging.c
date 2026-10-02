@@ -190,6 +190,24 @@ static bool runtime_child(pmm_cpu_t *cpu,
     return true;
 }
 
+void paging_drop_low_half_current(void)
+{
+    uint64_t *pml4 = (uint64_t *)(uintptr_t)
+        recursive_address(PAGING_RECURSIVE_SLOT,
+                          PAGING_RECURSIVE_SLOT,
+                          PAGING_RECURSIVE_SLOT,
+                          PAGING_RECURSIVE_SLOT);
+
+    /*
+     * PML4[0..255] 是低 canonical half。early takeover 只在这里建立
+     * 过渡 identity mapping；现在所有仍需访问的对象都已切到 direct map。
+     */
+    for (uint32_t i = 0; i < 256U; ++i)
+        pml4[i] = 0;
+
+    write_cr3(read_cr3());
+}
+
 bool paging_map_4k_current(pmm_cpu_t *cpu, vaddr_t va,
                            pmm_frame_t frame, uint64_t attrs)
 {

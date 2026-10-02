@@ -15,6 +15,55 @@ static void halt(void)
         __asm__ volatile("hlt");
 }
 
+static paging_info_t boot_paging;
+
+__attribute__((noreturn))
+void kernel_high_continue(BOOT_INFO *bi);
+
+__attribute__((noreturn))
+void arch_rebase_stack_and_jump(uint64_t direct_base,
+                                BOOT_INFO *bootinfo,
+                                void (*continuation)(BOOT_INFO *));
+
+static uint64_t current_rsp(void)
+{
+    uint64_t rsp;
+    __asm__ volatile("mov %%rsp, %0" : "=r"(rsp));
+    return rsp;
+}
+
+static bool boot_direct_mapped_address(const BOOT_INFO *bi, uint64_t pa)
+{
+    const uint8_t *p = (const uint8_t *)(uintptr_t)bi->mmap_addr;
+
+    for (uint32_t i = 0; i < bi->mmap_desc_count;
+         ++i, p += bi->mmap_desc_size) {
+        const BOOT_MEMORY_DESCRIPTOR *d =
+            (const BOOT_MEMORY_DESCRIPTOR *)(const void *)p;
+
+        if (d->type != MEM_LOADER_CODE &&
+            d->type != MEM_LOADER_DATA &&
+            d->type != MEM_BOOT_SERVICES_CODE &&
+            d->type != MEM_BOOT_SERVICES_DATA &&
+            d->type != MEM_CONVENTIONAL)
+            continue;
+
+        if (d->number_of_pages == 0 ||
+            d->number_of_pages > UINT64_MAX / VM_PAGE_SIZE)
+            continue;
+
+        uint64_t bytes = d->number_of_pages * VM_PAGE_SIZE;
+        if (d->physical_start > UINT64_MAX - bytes)
+            continue;
+
+        if (pa >= d->physical_start &&
+            pa < d->physical_start + bytes)
+            return true;
+    }
+
+    return false;
+}
+
 static uint64_t usable_pages(const BOOT_INFO *bi)
 {
     uint64_t pages = 0;
@@ -161,12 +210,56 @@ void kernel_main(BOOT_INFO *bi)
      * BOOT_INFO 基本校验后立即接管 CR3。
      * framebuffer/MMIO 尚未建立专用映射，接管后不能直接访问 fb_base。
      */
-    paging_info_t paging;
-    int status = paging_early_takeover(bi, &paging);
+    int status = paging_early_takeover(bi, &boot_paging);
     if (status != 0) {
         printf("[kernel] early paging takeover failed: %d\n", status);
         halt();
     }
+
+    /*
+     * final CR3 暂时同时存在 identity/direct alias。
+     * BOOT_INFO、mmap 和当前 loader stack 必须都在 direct map 覆盖的 RAM 中。
+     */
+    uint64_t bi_phys = (uint64_t)(uintptr_t)bi;
+    uint64_t mmap_phys = bi->mmap_addr;
+    uint64_t rsp_phys = current_rsp();
+
+    if (!boot_direct_mapped_address(bi, bi_phys) ||
+        !boot_direct_mapped_address(bi, mmap_phys) ||
+        !boot_direct_mapped_address(bi, rsp_phys)) {
+        printf("[kernel] boot pointers are outside direct map\n");
+        halt();
+    }
+
+    BOOT_INFO *high_bi =
+        (BOOT_INFO *)(uintptr_t)(VM_DIRECT_MAP_BASE + bi_phys);
+
+    /* BOOT_INFO/mmap 不复制，只切到同一物理页的 direct-map alias。 */
+    high_bi->mmap_addr = VM_DIRECT_MAP_BASE + mmap_phys;
+
+    if (high_bi->magic != BOOTINFO_MAGIC ||
+        high_bi->version != BOOTINFO_VERSION) {
+        printf("[kernel] direct-map bootinfo validation failed\n");
+        halt();
+    }
+
+    /*
+     * trampoline 将当前 RSP 切到同一物理栈的 direct-map alias，
+     * 然后直接跳到新的 C continuation，不再返回旧低地址 frame。
+     */
+    arch_rebase_stack_and_jump(VM_DIRECT_MAP_BASE,
+                               high_bi,
+                               kernel_high_continue);
+}
+
+__attribute__((noreturn))
+void kernel_high_continue(BOOT_INFO *bi)
+{
+    /*
+     * RIP/RSP/BOOT_INFO/mmap 都已经在高半区。
+     * 删除 PML4[0..255]，彻底去掉 final kernel CR3 的 identity map。
+     */
+    paging_drop_low_half_current();
 
     printf("[kernel] entry=%p image pa=%p va=%p size=%lu\n",
            (void *)(uintptr_t)bi->kernel_entry,
@@ -178,13 +271,15 @@ void kernel_main(BOOT_INFO *bi)
            (unsigned long)(usable_pages(bi) / 256));
     printf("[kernel] paging cr3=%p direct=%lu MiB "
            "tables=%lu pages/%lu KiB 1G=%lu 2M=%lu 4K=%lu\n",
-           (void *)(uintptr_t)paging.root_phys,
-           (unsigned long)(paging.direct_span >> 20),
-           (unsigned long)paging.table_pages,
-           (unsigned long)(paging.table_pages * 4),
-           (unsigned long)paging.leaf_1g,
-           (unsigned long)paging.leaf_2m,
-           (unsigned long)paging.leaf_4k);
+           (void *)(uintptr_t)boot_paging.root_phys,
+           (unsigned long)(boot_paging.direct_span >> 20),
+           (unsigned long)boot_paging.table_pages,
+           (unsigned long)(boot_paging.table_pages * 4),
+           (unsigned long)boot_paging.leaf_1g,
+           (unsigned long)boot_paging.leaf_2m,
+           (unsigned long)boot_paging.leaf_4k);
+
+    int status;
 
     if (!pat_init_cpu()) {
         printf("[kernel] PAT init failed\n");
@@ -211,7 +306,7 @@ void kernel_main(BOOT_INFO *bi)
      * 只登记当前页表中真正存在的 direct-map extent。
      * 没有物理 RAM / 没有 PTE 的 hole 保持为普通可分配 VA。
      */
-    if (!paging_register_direct_map(&kernel_vm, paging.direct_span)) {
+    if (!paging_register_direct_map(&kernel_vm, boot_paging.direct_span)) {
         printf("[kernel] direct-map VM register failed\n");
         halt();
     }

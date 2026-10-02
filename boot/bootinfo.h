@@ -72,7 +72,7 @@ typedef struct {
      * 类型常量见 efi.h 的 EFI_MEMORY_TYPE。退出 Boot Services 后，
      * EfiBootServicesCode/Data 也归操作系统所有。
      */
-    uint64_t mmap_addr;
+    uint64_t mmap_addr;       /* loader: identity VA；kernel: direct-map VA */
     uint64_t mmap_size;       /* 字节数 */
     uint64_t mmap_desc_size;  /* 每个描述符字节数 */
     uint32_t mmap_desc_version;

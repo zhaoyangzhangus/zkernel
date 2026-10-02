@@ -39,12 +39,20 @@ typedef struct {
  *   Conventional
  *
  * 都同时建立：
- *   bootstrap identity: VA = PA
+ *   temporary identity: VA = PA
  *   kernel direct map:  VA = VM_DIRECT_MAP_BASE + PA
  *
+ * identity 只用于 final CR3 切换后的短暂过渡；RSP/BOOT_INFO/mmap
+ * 切到 direct-map alias 后立即删除。
  * 每段优先使用 1G -> 2M -> 4K。
  */
 int paging_early_takeover(BOOT_INFO *bi, paging_info_t *out_info);
+
+/*
+ * RSP、BOOT_INFO 和 mmap 已切到 direct-map alias 后调用。
+ * 清空 PML4[0..255] 并 reload CR3，删除全部低半区 identity mapping。
+ */
+void paging_drop_low_half_current(void);
 
 /*
  * 在当前 CR3 上安装一个 4K 映射。缺失的中间页表从 PMM 4K pool
