@@ -20,11 +20,6 @@ static paging_info_t boot_paging;
 __attribute__((noreturn))
 void kernel_high_continue(BOOT_INFO *bi);
 
-__attribute__((noreturn))
-void arch_rebase_stack_and_jump(uint64_t direct_base,
-                                BOOT_INFO *bootinfo,
-                                void (*continuation)(BOOT_INFO *));
-
 static uint64_t current_rsp(void)
 {
     uint64_t rsp;
@@ -244,12 +239,27 @@ void kernel_main(BOOT_INFO *bi)
     }
 
     /*
-     * trampoline 将当前 RSP 切到同一物理栈的 direct-map alias，
-     * 然后直接跳到新的 C continuation，不再返回旧低地址 frame。
+     * 当前 kernel_main 的 C frame 仍建立在低地址 stack alias 上。
+     * 直接在这里把 RSP 改成同一物理栈的 direct-map alias，然后丢弃
+     * 旧 frame chain。之后绝不能再返回本函数，因此直接跳到新的
+     * C continuation。
+     *
+     * jmp 前把 RSP 调整成 SysV 函数入口要求的 16n+8，continuation
+     * 是 noreturn，不需要真实 return address。
      */
-    arch_rebase_stack_and_jump(VM_DIRECT_MAP_BASE,
-                               high_bi,
-                               kernel_high_continue);
+    __asm__ volatile(
+        "addq %[base], %%rsp\n\t"
+        "andq $-16, %%rsp\n\t"
+        "subq $8, %%rsp\n\t"
+        "xorl %%ebp, %%ebp\n\t"
+        "jmp *%%rax"
+        :
+        : [base] "r"(VM_DIRECT_MAP_BASE),
+          "D"(high_bi),
+          "a"(kernel_high_continue)
+        : "memory");
+
+    __builtin_unreachable();
 }
 
 __attribute__((noreturn))

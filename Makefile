@@ -31,7 +31,7 @@ OVMF_VARS ?= /usr/share/OVMF/OVMF_VARS_4M.fd
 GDB_PORT  ?= 1234
 
 BOOTX64 := $(BUILD)/EFI/BOOT/BOOTX64.EFI
-KERNEL_OBJS := $(BUILD)/main.o $(BUILD)/entry.o $(BUILD)/printf.o $(BUILD)/bootmem.o $(BUILD)/pmm.o $(BUILD)/paging.o $(BUILD)/vm.o $(BUILD)/page_fault.o $(BUILD)/idt.o $(BUILD)/interrupt_stubs.o $(BUILD)/pat.o $(BUILD)/text.o
+KERNEL_OBJS := $(BUILD)/main.o $(BUILD)/printf.o $(BUILD)/bootmem.o $(BUILD)/pmm.o $(BUILD)/paging.o $(BUILD)/vm.o $(BUILD)/page_fault.o $(BUILD)/idt.o $(BUILD)/interrupt_stubs.o $(BUILD)/pat.o $(BUILD)/text.o
 
 .PHONY: all run debug debug-stop clean
 
@@ -48,10 +48,6 @@ $(BOOTX64): $(BUILD)/boot.o
 $(BUILD)/main.o: init/main.c boot/bootinfo.h lib/printf.h arch/x86_64/idt.h arch/x86_64/pat.h mm/page_fault.h mm/pmm.h mm/paging.h mm/vm.h
 	@mkdir -p $(BUILD)
 	$(CC) $(KCFLAGS) -c $< -o $@
-
-$(BUILD)/entry.o: arch/x86_64/entry.S
-	@mkdir -p $(BUILD)
-	$(CC) -g -c $< -o $@
 
 $(BUILD)/printf.o: lib/printf.c lib/printf.h
 	@mkdir -p $(BUILD)
