@@ -72,11 +72,10 @@ static BOOT_INFO          g_bootinfo;
 
 /*
  * ExitBootServices 后、进入高半区内核前使用的两级临时映射。
- * 固件原有 PML4 保持不变，只在最后挂入一个新的高半区分支。
+ * 下级页表提前分配；PML4 必须在 EBS 成功后读取“当前 CR3”再挂接。
  */
 static EFI_PHYSICAL_ADDRESS g_kernel_pdpt;
 static EFI_PHYSICAL_ADDRESS g_kernel_pd;
-static EFI_PHYSICAL_ADDRESS g_boot_pml4;
 static UINT32 g_kernel_pml4_index;
 
 /* ================================================================== */
@@ -494,15 +493,12 @@ static EFI_STATUS prepare_kernel_high_mapping(const BOOT_INFO *bi)
         return EFI_LOAD_ERROR;
     }
 
-    g_boot_pml4 =
-        (EFI_PHYSICAL_ADDRESS)(read_cr3() & X86_PTE_ADDR);
-
-    UINT64 *pml4 = (UINT64 *)(UINTN)g_boot_pml4;
-    if ((pml4[i4] & X86_PTE_PRESENT) != 0) {
-        report_error(L"kernel high PML4 slot is already occupied", EFI_UNSUPPORTED);
-        return EFI_UNSUPPORTED;
-    }
-
+    /*
+     * 此处故意不缓存/修改当前 CR3。
+     * prepare() 后还会进入固件执行 GetMemoryMap/ExitBootServices，
+     * 固件没有义务保持 CR3 不变。只预先分配并填好下级页表，
+     * 真正的 PML4 挂接放到 ExitBootServices 成功之后完成。
+     */
     EFI_PHYSICAL_ADDRESS page = 0;
     EFI_STATUS status =
         BS->AllocatePages(AllocateAnyPages, EfiLoaderData, 1, &page);
@@ -550,19 +546,42 @@ static EFI_STATUS prepare_kernel_high_mapping(const BOOT_INFO *bi)
     return EFI_SUCCESS;
 }
 
-static void activate_kernel_high_mapping(void)
+static EFI_STATUS activate_kernel_high_mapping(const BOOT_INFO *bi)
 {
-    UINT64 *pml4 = (UINT64 *)(UINTN)g_boot_pml4;
+    /*
+     * 关键：必须在 ExitBootServices 返回后重新读取 CR3。
+     * prepare_kernel_high_mapping() 到这里之间执行过固件代码，不能假设
+     * 固件一直沿用 prepare 阶段看到的页表根。
+     */
+    UINT64 root = read_cr3() & X86_PTE_ADDR;
+    UINT64 *pml4 = (UINT64 *)(UINTN)root;
+
+    if ((pml4[g_kernel_pml4_index] & X86_PTE_PRESENT) != 0)
+        return EFI_UNSUPPORTED;
 
     pml4[g_kernel_pml4_index] =
         ((UINT64)g_kernel_pdpt & X86_PTE_ADDR) |
         X86_PTE_PRESENT | X86_PTE_WRITE;
 
     /*
-     * 重载 CR3 让刚挂入的高半区分支立即生效；低地址固件映射保持原样，
-     * 因而当前 loader 代码、栈和 BOOT_INFO 在跳转前仍可继续使用。
+     * 重载当前 CR3，使新挂入的分支立即对本 CPU 生效。
+     * 当前低地址 loader/stack 映射完全继承自 EBS 返回时的页表。
      */
-    write_cr3((UINT64)g_boot_pml4);
+    write_cr3(root);
+
+    /*
+     * 在仍运行于 loader 低地址代码时，直接读取高地址 alias 做硬校验。
+     * 第一个字节应与物理内核映像完全一致；失败就不要跳到未知状态。
+     */
+    volatile const UINT8 *high =
+        (volatile const UINT8 *)(UINTN)bi->kernel_virt_base;
+    volatile const UINT8 *phys =
+        (volatile const UINT8 *)(UINTN)bi->kernel_base;
+
+    if (*high != *phys)
+        return EFI_DEVICE_ERROR;
+
+    return EFI_SUCCESS;
 }
 
 /* ================================================================== */
@@ -725,7 +744,20 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
 
     /* 关中断，挂入临时高半区映射，然后直接进入高地址 e_entry。 */
     __asm__ volatile("cli");
-    activate_kernel_high_mapping();
+
+    status = activate_kernel_high_mapping(&g_bootinfo);
+    if (EFI_ERROR(status)) {
+        /*
+         * 已经 ExitBootServices，不能再调用固件控制台。
+         * debugcon: 'M' = 临时高地址映射挂接/校验失败。
+         */
+        __asm__ volatile("outb %0, $0xe9" :: "a"((UINT8)'M'));
+        for (;;)
+            __asm__ volatile("hlt");
+    }
+
+    /* debugcon: 'J' = 即将 jump/call 到高半区 kernel_entry。 */
+    __asm__ volatile("outb %0, $0xe9" :: "a"((UINT8)'J'));
 
     entry(&g_bootinfo);
 
