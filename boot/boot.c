@@ -454,6 +454,13 @@ fail:
 /* ================================================================== */
 /* loader 自己的 bootstrap 页表                                        */
 /* ================================================================== */
+static UINT64 read_cr0(void)
+{
+    UINT64 value;
+    __asm__ volatile("mov %%cr0, %0" : "=r"(value));
+    return value;
+}
+
 static UINT64 read_cr3(void)
 {
     UINT64 value;
@@ -826,6 +833,64 @@ static void dump_firmware_cr3(const BOOT_INFO *bi)
      */
     volatile const UINT64 *pml4 =
         (volatile const UINT64 *)(UINTN)root;
+
+    UINT64 cr0 = read_cr0();
+    con_puts(L"[BOOT] firmware CR0 = ");
+    con_hex64(cr0);
+    con_puts(L", WP=");
+    con_dec((cr0 >> 16) & 1U);
+    con_puts(L"\r\n");
+
+    /*
+     * 查出“PML4 根页自身”的 identity mapping 最终由哪一级 entry 覆盖。
+     * 如果该 leaf 的 RW=0 且 CR0.WP=1，那么 ring0 对该 PML4 页写入也会 #PF。
+     */
+    {
+        UINT64 va = root;
+        UINT32 i4 = (UINT32)((va >> 39) & 0x1FFU);
+        UINT32 i3 = (UINT32)((va >> 30) & 0x1FFU);
+        UINT32 i2 = (UINT32)((va >> 21) & 0x1FFU);
+        UINT32 i1 = (UINT32)((va >> 12) & 0x1FFU);
+
+        UINT64 e4 = pml4[i4];
+        UINT64 leaf = e4;
+        UINT32 level = 4;
+
+        if ((e4 & X86_PTE_PRESENT) != 0) {
+            volatile const UINT64 *pdpt =
+                (volatile const UINT64 *)(UINTN)(e4 & X86_PTE_ADDR);
+            UINT64 e3 = pdpt[i3];
+            leaf = e3;
+            level = 3;
+
+            if ((e3 & X86_PTE_PRESENT) != 0 &&
+                (e3 & X86_PTE_LARGE) == 0) {
+                volatile const UINT64 *pd =
+                    (volatile const UINT64 *)(UINTN)(e3 & X86_PTE_ADDR);
+                UINT64 e2 = pd[i2];
+                leaf = e2;
+                level = 2;
+
+                if ((e2 & X86_PTE_PRESENT) != 0 &&
+                    (e2 & X86_PTE_LARGE) == 0) {
+                    volatile const UINT64 *pt =
+                        (volatile const UINT64 *)(UINTN)(e2 & X86_PTE_ADDR);
+                    leaf = pt[i1];
+                    level = 1;
+                }
+            }
+        }
+
+        con_puts(L"[BOOT] firmware CR3 self-map leaf: L");
+        con_dec(level);
+        con_puts(L" entry=");
+        con_hex64(leaf);
+        con_puts(L" RW=");
+        con_dec((leaf >> 1) & 1U);
+        con_puts(L" PS=");
+        con_dec((leaf >> 7) & 1U);
+        con_puts(L"\r\n");
+    }
 
     con_puts(L"[BOOT] firmware PML4[0]   = ");
     con_hex64(pml4[0]);
