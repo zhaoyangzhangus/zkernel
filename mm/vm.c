@@ -133,7 +133,9 @@ static bool node_refill(pmm_cpu_t *cpu)
     if (!pmm_alloc4k(cpu, &frame))
         return false;
 
-    vm_range_t *nodes = (vm_range_t *)(uintptr_t)frame;
+    /* PMM 返回 physical frame；运行时只通过 kernel direct map 解引用。 */
+    vm_range_t *nodes =
+        (vm_range_t *)(uintptr_t)(VM_DIRECT_MAP_BASE + frame);
     uint32_t count = (uint32_t)(VM_PAGE_SIZE / sizeof(vm_range_t));
 
     for (uint32_t i = 0; i < count; ++i) {
