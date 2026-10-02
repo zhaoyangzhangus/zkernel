@@ -256,7 +256,13 @@ __attribute__((noreturn))
 void kernel_high_continue(BOOT_INFO *bi)
 {
     /*
-     * RIP/RSP/BOOT_INFO/mmap 都已经在高半区。
+     * 先把 GDTR/IDTR 切到 kernel 自己的高地址表。
+     * 这样删除低半区后，即使随后发生异常也不会再依赖 firmware IDT/GDT。
+     */
+    idt_init();
+
+    /*
+     * RIP/RSP/BOOT_INFO/mmap/GDT/IDT 都已经在高半区。
      * 删除 PML4[0..255]，彻底去掉 final kernel CR3 的 identity map。
      */
     paging_drop_low_half_current();
@@ -399,7 +405,6 @@ void kernel_high_continue(BOOT_INFO *bi)
      * 自测干扰定位。
      */
     page_fault_bind_space(&kernel_vm);
-    idt_init();
 
     vaddr_t demand_va;
     if (!vm_alloc(&kernel_vm, VM_PAGE_SIZE, VM_PAGE_SIZE,
