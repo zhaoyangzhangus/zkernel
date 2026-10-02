@@ -7,8 +7,13 @@
 #include "../boot/bootinfo.h"
 #include "vm.h"
 
-#define PAGING_RECURSIVE_BASE UINT64_C(0xFFFFFF8000000000)
-#define PAGING_RECURSIVE_SIZE UINT64_C(0x0000008000000000) /* 512 GiB, PML4[511] */
+/*
+ * PML4[511] 留给高半区内核（0xFFFFFFFF80000000）。
+ * 递归页表窗口因此固定使用 PML4[510]。
+ */
+#define PAGING_RECURSIVE_SLOT 510U
+#define PAGING_RECURSIVE_BASE UINT64_C(0xFFFFFF0000000000)
+#define PAGING_RECURSIVE_SIZE UINT64_C(0x0000008000000000) /* 512 GiB, PML4[510] */
 
 typedef struct {
     uint64_t root_phys;
@@ -43,7 +48,7 @@ int paging_early_takeover(BOOT_INFO *bi, paging_info_t *out_info);
 
 /*
  * 在当前 CR3 上安装一个 4K 映射。缺失的中间页表从 PMM 4K pool
- * 动态分配，并通过 PML4[511] recursive mapping 修改。
+ * 动态分配，并通过 PML4[510] recursive mapping 修改。
  *
  * 当前生成 PRESENT/WRITE/USER，并按 VM_ATTR_CACHE_* 编码 PAT。
  * NX 后续补。

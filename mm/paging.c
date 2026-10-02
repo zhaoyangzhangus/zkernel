@@ -21,7 +21,6 @@
 #define PAGE_512G UINT64_C(0x8000000000)
 
 #define CR4_LA57 (UINT64_C(1) << 12)
-#define RECURSIVE_SLOT 511U
 
 typedef struct {
     BOOT_INFO *bi;
@@ -206,16 +205,16 @@ bool paging_map_4k_current(pmm_cpu_t *cpu, vaddr_t va,
     bool user = (attrs & VM_ATTR_USER) != 0;
 
     uint64_t pml4_va =
-        recursive_address(RECURSIVE_SLOT, RECURSIVE_SLOT,
-                          RECURSIVE_SLOT, RECURSIVE_SLOT);
+        recursive_address(PAGING_RECURSIVE_SLOT, PAGING_RECURSIVE_SLOT,
+                          PAGING_RECURSIVE_SLOT, PAGING_RECURSIVE_SLOT);
     uint64_t pdpt_va =
-        recursive_address(RECURSIVE_SLOT, RECURSIVE_SLOT,
-                          RECURSIVE_SLOT, i4);
+        recursive_address(PAGING_RECURSIVE_SLOT, PAGING_RECURSIVE_SLOT,
+                          PAGING_RECURSIVE_SLOT, i4);
     uint64_t pd_va =
-        recursive_address(RECURSIVE_SLOT, RECURSIVE_SLOT,
+        recursive_address(PAGING_RECURSIVE_SLOT, PAGING_RECURSIVE_SLOT,
                           i4, i3);
     uint64_t pt_va =
-        recursive_address(RECURSIVE_SLOT, i4, i3, i2);
+        recursive_address(PAGING_RECURSIVE_SLOT, i4, i3, i2);
 
     uint64_t *pml4 = (uint64_t *)(uintptr_t)pml4_va;
     uint64_t *pdpt;
@@ -289,20 +288,20 @@ bool paging_can_map_2m_current(vaddr_t va)
 
 
     uint64_t pml4_va =
-        recursive_address(RECURSIVE_SLOT,
-                          RECURSIVE_SLOT,
-                          RECURSIVE_SLOT,
-                          RECURSIVE_SLOT);
+        recursive_address(PAGING_RECURSIVE_SLOT,
+                          PAGING_RECURSIVE_SLOT,
+                          PAGING_RECURSIVE_SLOT,
+                          PAGING_RECURSIVE_SLOT);
 
     uint64_t pdpt_va =
-        recursive_address(RECURSIVE_SLOT,
-                          RECURSIVE_SLOT,
-                          RECURSIVE_SLOT,
+        recursive_address(PAGING_RECURSIVE_SLOT,
+                          PAGING_RECURSIVE_SLOT,
+                          PAGING_RECURSIVE_SLOT,
                           i4);
 
     uint64_t pd_va =
-        recursive_address(RECURSIVE_SLOT,
-                          RECURSIVE_SLOT,
+        recursive_address(PAGING_RECURSIVE_SLOT,
+                          PAGING_RECURSIVE_SLOT,
                           i4,
                           i3);
 
@@ -354,20 +353,20 @@ bool paging_map_2m_current(pmm_cpu_t *cpu, vaddr_t va,
 
 
     uint64_t pml4_va =
-        recursive_address(RECURSIVE_SLOT,
-                          RECURSIVE_SLOT,
-                          RECURSIVE_SLOT,
-                          RECURSIVE_SLOT);
+        recursive_address(PAGING_RECURSIVE_SLOT,
+                          PAGING_RECURSIVE_SLOT,
+                          PAGING_RECURSIVE_SLOT,
+                          PAGING_RECURSIVE_SLOT);
 
     uint64_t pdpt_va =
-        recursive_address(RECURSIVE_SLOT,
-                          RECURSIVE_SLOT,
-                          RECURSIVE_SLOT,
+        recursive_address(PAGING_RECURSIVE_SLOT,
+                          PAGING_RECURSIVE_SLOT,
+                          PAGING_RECURSIVE_SLOT,
                           i4);
 
     uint64_t pd_va =
-        recursive_address(RECURSIVE_SLOT,
-                          RECURSIVE_SLOT,
+        recursive_address(PAGING_RECURSIVE_SLOT,
+                          PAGING_RECURSIVE_SLOT,
                           i4,
                           i3);
 
@@ -531,16 +530,16 @@ bool paging_unmap_current(pmm_cpu_t *cpu, vaddr_t va,
     uint32_t i1 = (uint32_t)((va >> 12) & 0x1FFU);
 
     uint64_t pml4_va =
-        recursive_address(RECURSIVE_SLOT, RECURSIVE_SLOT,
-                          RECURSIVE_SLOT, RECURSIVE_SLOT);
+        recursive_address(PAGING_RECURSIVE_SLOT, PAGING_RECURSIVE_SLOT,
+                          PAGING_RECURSIVE_SLOT, PAGING_RECURSIVE_SLOT);
     uint64_t pdpt_va =
-        recursive_address(RECURSIVE_SLOT, RECURSIVE_SLOT,
-                          RECURSIVE_SLOT, i4);
+        recursive_address(PAGING_RECURSIVE_SLOT, PAGING_RECURSIVE_SLOT,
+                          PAGING_RECURSIVE_SLOT, i4);
     uint64_t pd_va =
-        recursive_address(RECURSIVE_SLOT, RECURSIVE_SLOT,
+        recursive_address(PAGING_RECURSIVE_SLOT, PAGING_RECURSIVE_SLOT,
                           i4, i3);
     uint64_t pt_va =
-        recursive_address(RECURSIVE_SLOT, i4, i3, i2);
+        recursive_address(PAGING_RECURSIVE_SLOT, i4, i3, i2);
 
     uint64_t *pml4 = (uint64_t *)(uintptr_t)pml4_va;
     uint64_t e4 = pml4[i4];
@@ -651,12 +650,12 @@ bool paging_register_direct_map(vm_space_t *space, uint64_t direct_span)
 {
     if (space == NULL ||
         direct_span == 0 ||
-        direct_span > VM_KERNEL_SIZE - PAGING_RECURSIVE_SIZE)
+        direct_span > PAGING_RECURSIVE_BASE - VM_DIRECT_MAP_BASE)
         return false;
 
     uint64_t *pml4 = (uint64_t *)(uintptr_t)
-        recursive_address(RECURSIVE_SLOT, RECURSIVE_SLOT,
-                          RECURSIVE_SLOT, RECURSIVE_SLOT);
+        recursive_address(PAGING_RECURSIVE_SLOT, PAGING_RECURSIVE_SLOT,
+                          PAGING_RECURSIVE_SLOT, PAGING_RECURSIVE_SLOT);
 
     uint64_t pa = 0;
     uint64_t run_start = 0;
@@ -678,8 +677,8 @@ bool paging_register_direct_map(vm_space_t *space, uint64_t direct_span)
             step = PAGE_512G - (va & (PAGE_512G - 1));
         } else {
             uint64_t *pdpt = (uint64_t *)(uintptr_t)
-                recursive_address(RECURSIVE_SLOT, RECURSIVE_SLOT,
-                                  RECURSIVE_SLOT, i4);
+                recursive_address(PAGING_RECURSIVE_SLOT, PAGING_RECURSIVE_SLOT,
+                                  PAGING_RECURSIVE_SLOT, i4);
             uint64_t e3 = pdpt[i3];
 
             if ((e3 & PTE_PRESENT) == 0) {
@@ -689,7 +688,7 @@ bool paging_register_direct_map(vm_space_t *space, uint64_t direct_span)
                 present = true;
             } else {
                 uint64_t *pd = (uint64_t *)(uintptr_t)
-                    recursive_address(RECURSIVE_SLOT, RECURSIVE_SLOT,
+                    recursive_address(PAGING_RECURSIVE_SLOT, PAGING_RECURSIVE_SLOT,
                                       i4, i3);
                 uint64_t e2 = pd[i2];
 
@@ -700,7 +699,7 @@ bool paging_register_direct_map(vm_space_t *space, uint64_t direct_span)
                     present = true;
                 } else {
                     uint64_t *pt = (uint64_t *)(uintptr_t)
-                        recursive_address(RECURSIVE_SLOT, i4, i3, i2);
+                        recursive_address(PAGING_RECURSIVE_SLOT, i4, i3, i2);
 
                     step = PAGE_4K;
                     present = (pt[i1] & PTE_PRESENT) != 0;
@@ -961,12 +960,56 @@ static bool find_direct_span(const BOOT_INFO *bi,
             maximum = end;
     }
 
+    /*
+     * direct map 只能占用 PML4[256..509]。
+     * [510] 是 recursive window，[511] 留给高半区内核。
+     */
     if (maximum == 0 ||
-        maximum > VM_KERNEL_SIZE - PAGING_RECURSIVE_SIZE)
+        maximum > PAGING_RECURSIVE_BASE - VM_DIRECT_MAP_BASE)
         return false;
 
     *out_span = maximum;
     return true;
+}
+
+static bool map_kernel_image(paging_builder_t *b,
+                             const BOOT_INFO *bi)
+{
+    if (bi->kernel_base == 0 ||
+        bi->kernel_virt_base == 0 ||
+        bi->kernel_size == 0 ||
+        (bi->kernel_base & (PAGE_4K - 1)) != 0 ||
+        (bi->kernel_virt_base & (PAGE_4K - 1)) != 0 ||
+        (bi->kernel_virt_base >> 48) != UINT64_C(0xFFFF) ||
+        bi->kernel_size > UINT64_MAX - (PAGE_4K - 1))
+        return false;
+
+    uint64_t bytes =
+        (bi->kernel_size + PAGE_4K - 1) & ~(PAGE_4K - 1);
+
+    /*
+     * kernel_end 是 exclusive end，因此这里要求加 bytes 本身不溢出。
+     * 当前固定 VMA 还有完整 2 GiB 空间，正常内核远小于这个上限。
+     */
+    if (bi->kernel_base > UINT64_MAX - (bytes - 1) ||
+        bi->kernel_virt_base > UINT64_MAX - bytes)
+        return false;
+
+    uint64_t kernel_end = bi->kernel_virt_base + bytes;
+
+    /*
+     * 高半区内核位于 PML4[511]，recursive window 固定在 [510]。
+     * 两者必须完全分离。
+     */
+    uint64_t recursive_end =
+        PAGING_RECURSIVE_BASE + PAGING_RECURSIVE_SIZE;
+
+    if (bi->kernel_virt_base < recursive_end &&
+        PAGING_RECURSIVE_BASE < kernel_end)
+        return false;
+
+    return map_range(b, bi->kernel_virt_base,
+                     bi->kernel_base, bytes);
 }
 
 int paging_early_takeover(BOOT_INFO *bi, paging_info_t *out_info)
@@ -1007,10 +1050,10 @@ int paging_early_takeover(BOOT_INFO *bi, paging_info_t *out_info)
     b.info.root_phys = b.root_phys;
 
     /*
-     * PML4[511] 指回 PML4 自身，供接管 CR3 后动态遍历/修改页表。
+     * PML4[510] 指回 PML4 自身，供接管 CR3 后动态遍历/修改页表。
      * 该 512 GiB VA slot 会在 VM 初始化时永久保留。
      */
-    b.pml4[RECURSIVE_SLOT] =
+    b.pml4[PAGING_RECURSIVE_SLOT] =
         (b.root_phys & PTE_ADDR) | PTE_PRESENT | PTE_WRITE;
 
     if (!map_all_usable(&b, bi, false))
@@ -1018,6 +1061,13 @@ int paging_early_takeover(BOOT_INFO *bi, paging_info_t *out_info)
 
     if (!map_all_usable(&b, bi, true))
         return -6;
+
+    /*
+     * 内核映像自身使用独立的高半区 VMA；direct map 只是物理内存别名，
+     * 不能代替真正的链接地址映射。
+     */
+    if (!map_kernel_image(&b, bi))
+        return -7;
 
     b.info.table_pages = b.used_pages;
 

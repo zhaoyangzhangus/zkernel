@@ -141,7 +141,9 @@ static void dump_vm_layout(const vm_space_t *space)
 
 void kernel_main(BOOT_INFO *bi)
 {
-    if (bi == 0 || bi->magic != BOOTINFO_MAGIC) {
+    if (bi == 0 ||
+        bi->magic != BOOTINFO_MAGIC ||
+        bi->version != BOOTINFO_VERSION) {
         printf("[kernel] bad bootinfo\n");
         halt();
     }
@@ -163,9 +165,10 @@ void kernel_main(BOOT_INFO *bi)
         halt();
     }
 
-    printf("[kernel] entry=%p image=%p+%lu\n",
+    printf("[kernel] entry=%p image pa=%p va=%p size=%lu\n",
            (void *)(uintptr_t)bi->kernel_entry,
            (void *)(uintptr_t)bi->kernel_base,
+           (void *)(uintptr_t)bi->kernel_virt_base,
            (unsigned long)bi->kernel_size);
     printf("[kernel] mmap=%u usable=%lu MiB\n",
            bi->mmap_desc_count,
@@ -220,6 +223,28 @@ void kernel_main(BOOT_INFO *bi)
                     VM_REGION_RECURSIVE,
                     VM_ATTR_PINNED)) {
         printf("[kernel] recursive paging VM reserve failed\n");
+        halt();
+    }
+
+    /*
+     * 内核本体已经由 paging_early_takeover() 映射到高半区；
+     * VMM 也必须登记这段地址，避免后续 vm_alloc() 再次分配。
+     */
+    if (bi->kernel_size > UINT64_MAX - (VM_PAGE_SIZE - 1)) {
+        printf("[kernel] kernel image size overflow\n");
+        halt();
+    }
+
+    uint64_t kernel_vm_size =
+        (bi->kernel_size + VM_PAGE_SIZE - 1) & ~(VM_PAGE_SIZE - 1);
+
+    if (!vm_reserve(&kernel_vm,
+                    bi->kernel_virt_base,
+                    kernel_vm_size,
+                    VM_REGION_KERNEL,
+                    VM_ATTR_READ | VM_ATTR_WRITE | VM_ATTR_EXEC |
+                    VM_ATTR_PINNED | VM_ATTR_CACHE_WB)) {
+        printf("[kernel] kernel image VM reserve failed\n");
         halt();
     }
 

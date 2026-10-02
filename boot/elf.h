@@ -49,8 +49,8 @@ typedef struct {
     uint32_t p_type;         /* PT_LOAD 表示这一段要装进内存 */
     uint32_t p_flags;
     uint64_t p_offset;       /* 数据在文件里的偏移 */
-    uint64_t p_vaddr;        /* 链接时的虚拟地址 */
-    uint64_t p_paddr;        /* 物理地址；本内核没有分页偏移，等于 p_vaddr */
+    uint64_t p_vaddr;        /* 链接时的虚拟地址（内核为高半区地址） */
+    uint64_t p_paddr;        /* loader 实际装载的物理地址，可与 p_vaddr 不同 */
     uint64_t p_filesz;       /* 文件里有多少字节（可能为 0） */
     uint64_t p_memsz;        /* 内存里占多少字节；多出 p_filesz 的部分要清零（.bss） */
     uint64_t p_align;

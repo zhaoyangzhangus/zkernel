@@ -6,16 +6,17 @@
  *   2. 通过 LoadedImage → DeviceHandle → SimpleFileSystem 打开 ESP 根目录
  *   3. 读出 \kernel.elf，按它的程序头（PT_LOAD 段）装载到各自的物理地址
  *   4. 记录 GOP 帧缓冲信息
- *   5. 获取 UEFI 内存映射，调用 ExitBootServices 离开 Boot Services
- *   6. 跳到 ELF 的入口点（e_entry），唯一参数是 BOOT_INFO*
+ *   5. 为内核高半区 VMA 准备最小临时页表
+ *   6. 获取 UEFI 内存映射，调用 ExitBootServices 离开 Boot Services
+ *   7. 挂入高半区映射并跳到 ELF e_entry，唯一参数是 BOOT_INFO*
  *
  * 编译（见 Makefile）：
  *   clang --target=x86_64-unknown-windows -ffreestanding ... -c boot.c
  *   lld-link /subsystem:efi_application /entry:efi_main ...
  *
- * 装载地址由 ELF 自己决定（p_paddr，由 kernel.lds 的 KERNEL_LOAD_ADDR 指定）。
- * UEFI 的页表是恒等映射（identity map），退出 Boot Services 后依然有效，
- * 所以 p_paddr == p_vaddr 的内核可以直接执行。
+ * ELF 明确区分物理装载地址 p_paddr 与高半区链接地址 p_vaddr。
+ * loader 按 p_paddr 拷贝映像；退出 Boot Services 后在固件 PML4 上挂入
+ * 一个最小的 2M huge-page 高半区分支，再跳到高地址 e_entry。
  *
  * 相比读扁平二进制（objcopy -O binary），按 ELF 装载多了两件事：
  *   - 段的地址和权限来自程序头，不用在两边硬编码同一个常量
@@ -33,6 +34,13 @@
 
 #define KERNEL_FILE_NAME L"\\kernel.elf"
 #define PAGE_SIZE        0x1000ULL
+#define PAGE_2M          0x200000ULL
+
+#define X86_PTE_PRESENT  0x001ULL
+#define X86_PTE_WRITE    0x002ULL
+#define X86_PTE_LARGE    0x080ULL
+#define X86_PTE_ADDR     0x000FFFFFFFFFF000ULL
+#define X86_CR4_LA57     (1ULL << 12)
 
 /* ELF 头/程序头的大小是规范定死的，写错说明结构体没对齐 */
 _Static_assert(sizeof(elf64_ehdr_t) == 64, "unexpected ELF64 header size");
@@ -61,6 +69,15 @@ typedef void (__attribute__((sysv_abi)) *kernel_entry_t)(BOOT_INFO *bootinfo);
 static EFI_SYSTEM_TABLE  *ST;
 static EFI_BOOT_SERVICES *BS;
 static BOOT_INFO          g_bootinfo;
+
+/*
+ * ExitBootServices 后、进入高半区内核前使用的两级临时映射。
+ * 固件原有 PML4 保持不变，只在最后挂入一个新的高半区分支。
+ */
+static EFI_PHYSICAL_ADDRESS g_kernel_pdpt;
+static EFI_PHYSICAL_ADDRESS g_kernel_pd;
+static EFI_PHYSICAL_ADDRESS g_boot_pml4;
+static UINT32 g_kernel_pml4_index;
 
 /* ================================================================== */
 /* 控制台输出辅助                                                      */
@@ -213,8 +230,10 @@ static EFI_STATUS load_kernel(EFI_HANDLE image, BOOT_INFO *bi)
     EFI_FILE_PROTOCOL *file = NULL;
     VOID          *file_buf = NULL;
     elf64_ehdr_t  *ehdr;
-    UINT64  file_size, span_start, span_end;
-    UINTN   read_size, pages, i;
+    UINT64 file_size, span_start, span_end;
+    UINT64 virt_span_start, virt_span_end, load_delta = 0;
+    UINTN read_size, pages, i;
+    BOOLEAN have_load_delta = EFI_FALSE;
     EFI_PHYSICAL_ADDRESS addr;
     EFI_STATUS status;
 
@@ -296,13 +315,44 @@ static EFI_STATUS load_kernel(EFI_HANDLE image, BOOT_INFO *bi)
             goto fail;
         }
 
+        /*
+         * 高半区内核要求所有 PT_LOAD 保持同一个 VMA-LMA delta。
+         * 这样最终页表可以把连续物理映像整体映射到连续高地址。
+         */
+        UINT64 delta = ph->p_vaddr - ph->p_paddr;
+        if (!have_load_delta) {
+            load_delta = delta;
+            have_load_delta = EFI_TRUE;
+        } else if (delta != load_delta) {
+            report_error(L"kernel.elf: inconsistent VMA/LMA delta", EFI_LOAD_ERROR);
+            status = EFI_LOAD_ERROR;
+            goto fail;
+        }
+
         if (ph->p_paddr < span_start)
             span_start = ph->p_paddr;
         if (ph->p_paddr + ph->p_memsz > span_end)
             span_end = ph->p_paddr + ph->p_memsz;
     }
-    if (span_end <= span_start) {
+    if (!have_load_delta || span_end <= span_start) {
         report_error(L"kernel.elf: no loadable segment", EFI_LOAD_ERROR);
+        status = EFI_LOAD_ERROR;
+        goto fail;
+    }
+
+    if (span_start > UINT64_MAX - load_delta ||
+        span_end > UINT64_MAX - load_delta) {
+        report_error(L"kernel.elf: virtual span overflow", EFI_LOAD_ERROR);
+        status = EFI_LOAD_ERROR;
+        goto fail;
+    }
+
+    virt_span_start = span_start + load_delta;
+    virt_span_end = span_end + load_delta;
+
+    if (ehdr->e_entry < virt_span_start ||
+        ehdr->e_entry >= virt_span_end) {
+        report_error(L"kernel.elf: entry outside PT_LOAD span", EFI_LOAD_ERROR);
         status = EFI_LOAD_ERROR;
         goto fail;
     }
@@ -343,17 +393,22 @@ static EFI_STATUS load_kernel(EFI_HANDLE image, BOOT_INFO *bi)
     }
 
     /* ---- 6. 收尾：文件缓冲还给固件，把结果记进 BOOT_INFO ---- */
-    bi->kernel_base  = span_start;
-    bi->kernel_size  = span_end - span_start;
-    bi->kernel_entry = ehdr->e_entry;    /* 必须在 FreePool 之前读出来 */
+    bi->kernel_base      = span_start;
+    bi->kernel_virt_base = virt_span_start;
+    bi->kernel_size      = span_end - span_start;
+    bi->kernel_entry     = ehdr->e_entry; /* 必须在 FreePool 之前读出来 */
 
     BS->FreePool(file_buf);
     file_buf = NULL;
 
-    con_puts(L"[BOOT] image span ");
+    con_puts(L"[BOOT] image phys ");
     con_hex64(span_start);
     con_puts(L"..");
     con_hex64(span_end);
+    con_puts(L", virt ");
+    con_hex64(virt_span_start);
+    con_puts(L"..");
+    con_hex64(virt_span_end);
     con_puts(L" (");
     con_dec(pages);
     con_puts(L" pages reserved)\r\n");
@@ -363,6 +418,151 @@ fail:
     if (file_buf != NULL)
         BS->FreePool(file_buf);
     return status;
+}
+
+/* ================================================================== */
+/* 进入高半区前的临时页表                                              */
+/* ================================================================== */
+static UINT64 read_cr3(void)
+{
+    UINT64 value;
+    __asm__ volatile("mov %%cr3, %0" : "=r"(value));
+    return value;
+}
+
+static UINT64 read_cr4(void)
+{
+    UINT64 value;
+    __asm__ volatile("mov %%cr4, %0" : "=r"(value));
+    return value;
+}
+
+static void write_cr3(UINT64 value)
+{
+    __asm__ volatile("mov %0, %%cr3" :: "r"(value) : "memory");
+}
+
+static EFI_STATUS prepare_kernel_high_mapping(const BOOT_INFO *bi)
+{
+    if (bi == NULL ||
+        bi->kernel_base == 0 ||
+        bi->kernel_virt_base == 0 ||
+        bi->kernel_size == 0)
+        return EFI_INVALID_PARAMETER;
+
+    /*
+     * 内核自己的 paging_early_takeover() 当前也是 4-level only；
+     * loader 与内核在这里保持相同约束。
+     */
+    if ((read_cr4() & X86_CR4_LA57) != 0) {
+        report_error(L"5-level paging is not supported", EFI_UNSUPPORTED);
+        return EFI_UNSUPPORTED;
+    }
+
+    /*
+     * 临时映射只使用 2M PDE，因而物理/虚拟起点都必须 2M 对齐。
+     * 默认链接配置是 PA=2MiB、VA=0xFFFFFFFF80000000。
+     */
+    if ((bi->kernel_base & (PAGE_2M - 1)) != 0 ||
+        (bi->kernel_virt_base & (PAGE_2M - 1)) != 0) {
+        report_error(L"kernel high mapping is not 2M aligned", EFI_LOAD_ERROR);
+        return EFI_LOAD_ERROR;
+    }
+
+    if ((bi->kernel_virt_base >> 48) != 0xFFFFULL) {
+        report_error(L"kernel VMA is not in canonical high half", EFI_LOAD_ERROR);
+        return EFI_LOAD_ERROR;
+    }
+
+    UINTN huge_pages =
+        (UINTN)DIV_ROUND_UP(bi->kernel_size, PAGE_2M);
+
+    UINT32 i4 = (UINT32)((bi->kernel_virt_base >> 39) & 0x1FFU);
+    UINT32 i3 = (UINT32)((bi->kernel_virt_base >> 30) & 0x1FFU);
+    UINT32 i2 = (UINT32)((bi->kernel_virt_base >> 21) & 0x1FFU);
+
+    /*
+     * 第一阶段只需要一个 PD（1 GiB 覆盖范围）。这已经远大于当前内核，
+     * 同时让 loader 的临时映射保持最小。
+     */
+    if (huge_pages == 0 || huge_pages > 512U - i2 ||
+        bi->kernel_base >
+            UINT64_MAX - ((UINT64)huge_pages * PAGE_2M - 1) ||
+        bi->kernel_virt_base >
+            UINT64_MAX - ((UINT64)huge_pages * PAGE_2M - 1)) {
+        report_error(L"kernel image exceeds bootstrap high mapping", EFI_LOAD_ERROR);
+        return EFI_LOAD_ERROR;
+    }
+
+    g_boot_pml4 =
+        (EFI_PHYSICAL_ADDRESS)(read_cr3() & X86_PTE_ADDR);
+
+    UINT64 *pml4 = (UINT64 *)(UINTN)g_boot_pml4;
+    if ((pml4[i4] & X86_PTE_PRESENT) != 0) {
+        report_error(L"kernel high PML4 slot is already occupied", EFI_UNSUPPORTED);
+        return EFI_UNSUPPORTED;
+    }
+
+    EFI_PHYSICAL_ADDRESS page = 0;
+    EFI_STATUS status =
+        BS->AllocatePages(AllocateAnyPages, EfiLoaderData, 1, &page);
+    if (EFI_ERROR(status)) {
+        report_error(L"AllocatePages(kernel PDPT) failed", status);
+        return status;
+    }
+    g_kernel_pdpt = page;
+
+    page = 0;
+    status = BS->AllocatePages(AllocateAnyPages, EfiLoaderData, 1, &page);
+    if (EFI_ERROR(status)) {
+        BS->FreePages(g_kernel_pdpt, 1);
+        g_kernel_pdpt = 0;
+        report_error(L"AllocatePages(kernel PD) failed", status);
+        return status;
+    }
+    g_kernel_pd = page;
+
+    mem_set((VOID *)(UINTN)g_kernel_pdpt, 0, PAGE_SIZE);
+    mem_set((VOID *)(UINTN)g_kernel_pd, 0, PAGE_SIZE);
+
+    UINT64 *pdpt = (UINT64 *)(UINTN)g_kernel_pdpt;
+    UINT64 *pd = (UINT64 *)(UINTN)g_kernel_pd;
+
+    pdpt[i3] =
+        ((UINT64)g_kernel_pd & X86_PTE_ADDR) |
+        X86_PTE_PRESENT | X86_PTE_WRITE;
+
+    for (UINTN i = 0; i < huge_pages; ++i) {
+        UINT64 pa = bi->kernel_base + (UINT64)i * PAGE_2M;
+        pd[i2 + i] =
+            (pa & ~(PAGE_2M - 1)) |
+            X86_PTE_PRESENT | X86_PTE_WRITE | X86_PTE_LARGE;
+    }
+
+    g_kernel_pml4_index = i4;
+
+    con_puts(L"[BOOT] high-half map ready: ");
+    con_hex64(bi->kernel_virt_base);
+    con_puts(L" -> ");
+    con_hex64(bi->kernel_base);
+    con_puts(L"\r\n");
+
+    return EFI_SUCCESS;
+}
+
+static void activate_kernel_high_mapping(void)
+{
+    UINT64 *pml4 = (UINT64 *)(UINTN)g_boot_pml4;
+
+    pml4[g_kernel_pml4_index] =
+        ((UINT64)g_kernel_pdpt & X86_PTE_ADDR) |
+        X86_PTE_PRESENT | X86_PTE_WRITE;
+
+    /*
+     * 重载 CR3 让刚挂入的高半区分支立即生效；低地址固件映射保持原样，
+     * 因而当前 loader 代码、栈和 BOOT_INFO 在跳转前仍可继续使用。
+     */
+    write_cr3((UINT64)g_boot_pml4);
 }
 
 /* ================================================================== */
@@ -506,6 +706,13 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
 
     save_framebuffer(&g_bootinfo);
 
+    /*
+     * 必须在最后一次 GetMemoryMap 之前完成页表页分配，
+     * 否则会让 ExitBootServices 的 map_key 失效。
+     */
+    status = prepare_kernel_high_mapping(&g_bootinfo);
+    if (EFI_ERROR(status))
+        return status;
 
     status = leave_boot_services(image_handle, &g_bootinfo);
     if (EFI_ERROR(status))
@@ -516,8 +723,9 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
      * 内存映射缓冲区已经记录在 BOOT_INFO 里，内存布局也不会再变化。
      */
 
-    /* 关中断，剩下的交给内核（内核应尽快建立自己的 IDT 和中断控制器） */
+    /* 关中断，挂入临时高半区映射，然后直接进入高地址 e_entry。 */
     __asm__ volatile("cli");
+    activate_kernel_high_mapping();
 
     entry(&g_bootinfo);
 

@@ -5,7 +5,9 @@ LLD   ?= lld-link
 CC    := gcc
 LD    ?= ld
 
-KERNEL_LOAD_ADDR ?= 0x100000
+# -mcmodel=kernel 要求内核符号位于最高 2 GiB；物理装载地址独立。
+KERNEL_LOAD_ADDR ?= 0x200000
+KERNEL_VIRT_ADDR ?= 0xFFFFFFFF80000000
 
 EFI_CFLAGS := --target=x86_64-unknown-windows -std=c11 -Og -g \
               -Wall -Wextra -ffreestanding -fno-builtin \
@@ -15,10 +17,11 @@ EFI_LDFLAGS := /nologo /subsystem:efi_application /entry:efi_main /nodefaultlib
 
 KCFLAGS := -std=c11 -Og -g3 -fno-omit-frame-pointer -Wall -Wextra \
            -ffreestanding -fno-builtin -fno-stack-protector \
-           -fno-pic -fno-pie -mno-red-zone -mgeneral-regs-only \
+           -fno-pic -fno-pie -mcmodel=kernel -mno-red-zone -mgeneral-regs-only \
            -fno-asynchronous-unwind-tables -ffunction-sections -fdata-sections
 KERNEL_LDFLAGS := -nostdlib -T kernel.lds -z max-page-size=0x1000 \
                   --defsym=_kernel_load_addr=$(KERNEL_LOAD_ADDR) \
+                  --defsym=_kernel_virt_addr=$(KERNEL_VIRT_ADDR) \
                   --no-warn-rwx-segments
 
 QEMU      ?= qemu-system-x86_64

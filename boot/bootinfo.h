@@ -14,7 +14,7 @@
 
 /* 'B''O''O''T''I''N''F''O' 按小端解释 */
 #define BOOTINFO_MAGIC 0x4F464E49544F4F42ULL
-#define BOOTINFO_VERSION 3
+#define BOOTINFO_VERSION 4
 
 /*
  * 内存映射里的一项，与 UEFI 的 EFI_MEMORY_DESCRIPTOR 逐字段对应
@@ -82,9 +82,10 @@ typedef struct {
     uint64_t runtime_services;
 
     /* ---- 内核映像（ELF）被装载到的位置 ---- */
-    uint64_t kernel_base;     /* 所有 PT_LOAD 段覆盖到的最低物理地址 */
-    uint64_t kernel_size;     /* 段覆盖的总跨度（字节） */
-    uint64_t kernel_entry;    /* ELF 的 e_entry，也就是引导程序跳过去的地址 */
+    uint64_t kernel_base;      /* 所有 PT_LOAD 段覆盖到的最低物理地址 */
+    uint64_t kernel_virt_base; /* 同一映像对应的最低高半区虚拟地址 */
+    uint64_t kernel_size;      /* 段覆盖的总跨度（字节） */
+    uint64_t kernel_entry;     /* ELF e_entry：高半区入口地址 */
 } BOOT_INFO;
 
 #endif /* __KERNEL_BOOTINFO_H__ */
