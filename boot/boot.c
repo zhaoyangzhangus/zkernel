@@ -42,6 +42,13 @@
 #define X86_PTE_ADDR     0x000FFFFFFFFFF000ULL
 #define X86_CR4_LA57     (1ULL << 12)
 
+/*
+ * loader 自己的 bootstrap 页表 arena。
+ * 512 页 = 2 MiB；对当前 QEMU/早期内核足够宽裕，而且所有页都在
+ * 最终 UEFI memory map 中标记为 EfiLoaderData。
+ */
+#define BOOT_PT_ARENA_PAGES 512ULL
+
 /* ELF 头/程序头的大小是规范定死的，写错说明结构体没对齐 */
 _Static_assert(sizeof(elf64_ehdr_t) == 64, "unexpected ELF64 header size");
 _Static_assert(sizeof(elf64_phdr_t) == 56, "unexpected ELF64 program header size");
@@ -71,12 +78,12 @@ static EFI_BOOT_SERVICES *BS;
 static BOOT_INFO          g_bootinfo;
 
 /*
- * ExitBootServices 后、进入高半区内核前使用的两级临时映射。
- * 下级页表提前分配；PML4 必须在 EBS 成功后读取“当前 CR3”再挂接。
+ * loader 自己持有的 bootstrap 页表。
+ * 不读取、不修改固件 CR3；ExitBootServices 后直接切到 g_boot_root。
  */
-static EFI_PHYSICAL_ADDRESS g_kernel_pdpt;
-static EFI_PHYSICAL_ADDRESS g_kernel_pd;
-static UINT32 g_kernel_pml4_index;
+static EFI_PHYSICAL_ADDRESS g_boot_pt_arena;
+static UINTN g_boot_pt_used;
+static EFI_PHYSICAL_ADDRESS g_boot_root;
 
 /* ================================================================== */
 /* 控制台输出辅助                                                      */
@@ -425,15 +432,8 @@ fail:
 }
 
 /* ================================================================== */
-/* 进入高半区前的临时页表                                              */
+/* loader 自己的 bootstrap 页表                                        */
 /* ================================================================== */
-static UINT64 read_cr3(void)
-{
-    UINT64 value;
-    __asm__ volatile("mov %%cr3, %0" : "=r"(value));
-    return value;
-}
-
 static UINT64 read_cr4(void)
 {
     UINT64 value;
@@ -446,147 +446,246 @@ static void write_cr3(UINT64 value)
     __asm__ volatile("mov %0, %%cr3" :: "r"(value) : "memory");
 }
 
-static EFI_STATUS prepare_kernel_high_mapping(const BOOT_INFO *bi)
+static BOOLEAN bootstrap_usable_type(UINT32 type)
 {
-    if (bi == NULL ||
-        bi->kernel_base == 0 ||
-        bi->kernel_virt_base == 0 ||
-        bi->kernel_size == 0)
-        return EFI_INVALID_PARAMETER;
+    return type == EfiLoaderCode ||
+           type == EfiLoaderData ||
+           type == EfiBootServicesCode ||
+           type == EfiBootServicesData ||
+           type == EfiConventionalMemory;
+}
 
-    /*
-     * 内核自己的 paging_early_takeover() 当前也是 4-level only；
-     * loader 与内核在这里保持相同约束。
-     */
+static UINT64 *boot_pt_alloc(EFI_PHYSICAL_ADDRESS *out_phys)
+{
+    if (g_boot_pt_arena == 0 ||
+        g_boot_pt_used >= BOOT_PT_ARENA_PAGES)
+        return NULL;
+
+    EFI_PHYSICAL_ADDRESS phys =
+        g_boot_pt_arena + (EFI_PHYSICAL_ADDRESS)g_boot_pt_used * PAGE_SIZE;
+    ++g_boot_pt_used;
+
+    mem_set((VOID *)(UINTN)phys, 0, PAGE_SIZE);
+
+    if (out_phys != NULL)
+        *out_phys = phys;
+    return (UINT64 *)(UINTN)phys;
+}
+
+static BOOLEAN boot_child(UINT64 *parent, UINT32 index, UINT64 **out)
+{
+    UINT64 entry = parent[index];
+
+    if ((entry & X86_PTE_PRESENT) != 0) {
+        if ((entry & X86_PTE_LARGE) != 0)
+            return EFI_FALSE;
+        *out = (UINT64 *)(UINTN)(entry & X86_PTE_ADDR);
+        return EFI_TRUE;
+    }
+
+    EFI_PHYSICAL_ADDRESS phys;
+    UINT64 *child = boot_pt_alloc(&phys);
+    if (child == NULL)
+        return EFI_FALSE;
+
+    parent[index] =
+        ((UINT64)phys & X86_PTE_ADDR) |
+        X86_PTE_PRESENT | X86_PTE_WRITE;
+
+    *out = child;
+    return EFI_TRUE;
+}
+
+static BOOLEAN boot_map_4k(UINT64 *pml4, UINT64 va, UINT64 pa)
+{
+    UINT32 i4 = (UINT32)((va >> 39) & 0x1FFU);
+    UINT32 i3 = (UINT32)((va >> 30) & 0x1FFU);
+    UINT32 i2 = (UINT32)((va >> 21) & 0x1FFU);
+    UINT32 i1 = (UINT32)((va >> 12) & 0x1FFU);
+
+    UINT64 *pdpt;
+    UINT64 *pd;
+    UINT64 *pt;
+
+    if (!boot_child(pml4, i4, &pdpt) ||
+        !boot_child(pdpt, i3, &pd) ||
+        !boot_child(pd, i2, &pt))
+        return EFI_FALSE;
+
+    if ((pt[i1] & X86_PTE_PRESENT) != 0)
+        return EFI_FALSE;
+
+    pt[i1] =
+        (pa & X86_PTE_ADDR) |
+        X86_PTE_PRESENT | X86_PTE_WRITE;
+    return EFI_TRUE;
+}
+
+static BOOLEAN boot_map_2m(UINT64 *pml4, UINT64 va, UINT64 pa)
+{
+    UINT32 i4 = (UINT32)((va >> 39) & 0x1FFU);
+    UINT32 i3 = (UINT32)((va >> 30) & 0x1FFU);
+    UINT32 i2 = (UINT32)((va >> 21) & 0x1FFU);
+
+    UINT64 *pdpt;
+    UINT64 *pd;
+
+    if (!boot_child(pml4, i4, &pdpt) ||
+        !boot_child(pdpt, i3, &pd))
+        return EFI_FALSE;
+
+    if ((pd[i2] & X86_PTE_PRESENT) != 0)
+        return EFI_FALSE;
+
+    pd[i2] =
+        (pa & ~(PAGE_2M - 1)) |
+        X86_PTE_PRESENT | X86_PTE_WRITE | X86_PTE_LARGE;
+    return EFI_TRUE;
+}
+
+static BOOLEAN boot_map_range(UINT64 *pml4,
+                              UINT64 va, UINT64 pa, UINT64 bytes)
+{
+    if ((va & (PAGE_SIZE - 1)) != 0 ||
+        (pa & (PAGE_SIZE - 1)) != 0 ||
+        (bytes & (PAGE_SIZE - 1)) != 0)
+        return EFI_FALSE;
+
+    while (bytes != 0) {
+        if ((va & (PAGE_2M - 1)) == 0 &&
+            (pa & (PAGE_2M - 1)) == 0 &&
+            bytes >= PAGE_2M) {
+            if (!boot_map_2m(pml4, va, pa))
+                return EFI_FALSE;
+            va += PAGE_2M;
+            pa += PAGE_2M;
+            bytes -= PAGE_2M;
+            continue;
+        }
+
+        if (!boot_map_4k(pml4, va, pa))
+            return EFI_FALSE;
+
+        va += PAGE_SIZE;
+        pa += PAGE_SIZE;
+        bytes -= PAGE_SIZE;
+    }
+
+    return EFI_TRUE;
+}
+
+static EFI_STATUS prepare_bootstrap_page_tables(void)
+{
     if ((read_cr4() & X86_CR4_LA57) != 0) {
         report_error(L"5-level paging is not supported", EFI_UNSUPPORTED);
         return EFI_UNSUPPORTED;
     }
 
-    /*
-     * 临时映射只使用 2M PDE，因而物理/虚拟起点都必须 2M 对齐。
-     * 默认链接配置是 PA=2MiB、VA=0xFFFFFFFF80000000。
-     */
-    if ((bi->kernel_base & (PAGE_2M - 1)) != 0 ||
-        (bi->kernel_virt_base & (PAGE_2M - 1)) != 0) {
-        report_error(L"kernel high mapping is not 2M aligned", EFI_LOAD_ERROR);
-        return EFI_LOAD_ERROR;
-    }
-
-    if ((bi->kernel_virt_base >> 48) != 0xFFFFULL) {
-        report_error(L"kernel VMA is not in canonical high half", EFI_LOAD_ERROR);
-        return EFI_LOAD_ERROR;
-    }
-
-    UINTN huge_pages =
-        (UINTN)DIV_ROUND_UP(bi->kernel_size, PAGE_2M);
-
-    UINT32 i4 = (UINT32)((bi->kernel_virt_base >> 39) & 0x1FFU);
-    UINT32 i3 = (UINT32)((bi->kernel_virt_base >> 30) & 0x1FFU);
-    UINT32 i2 = (UINT32)((bi->kernel_virt_base >> 21) & 0x1FFU);
-
-    /*
-     * 第一阶段只需要一个 PD（1 GiB 覆盖范围）。这已经远大于当前内核，
-     * 同时让 loader 的临时映射保持最小。
-     */
-    if (huge_pages == 0 || huge_pages > 512U - i2 ||
-        bi->kernel_base >
-            UINT64_MAX - ((UINT64)huge_pages * PAGE_2M - 1) ||
-        bi->kernel_virt_base >
-            UINT64_MAX - ((UINT64)huge_pages * PAGE_2M - 1)) {
-        report_error(L"kernel image exceeds bootstrap high mapping", EFI_LOAD_ERROR);
-        return EFI_LOAD_ERROR;
-    }
-
-    /*
-     * 此处故意不缓存/修改当前 CR3。
-     * prepare() 后还会进入固件执行 GetMemoryMap/ExitBootServices，
-     * 固件没有义务保持 CR3 不变。只预先分配并填好下级页表，
-     * 真正的 PML4 挂接放到 ExitBootServices 成功之后完成。
-     */
-    EFI_PHYSICAL_ADDRESS page = 0;
+    EFI_PHYSICAL_ADDRESS arena = 0;
     EFI_STATUS status =
-        BS->AllocatePages(AllocateAnyPages, EfiLoaderData, 1, &page);
+        BS->AllocatePages(AllocateAnyPages, EfiLoaderData,
+                          BOOT_PT_ARENA_PAGES, &arena);
     if (EFI_ERROR(status)) {
-        report_error(L"AllocatePages(kernel PDPT) failed", status);
+        report_error(L"AllocatePages(bootstrap page tables) failed", status);
         return status;
     }
-    g_kernel_pdpt = page;
 
-    page = 0;
-    status = BS->AllocatePages(AllocateAnyPages, EfiLoaderData, 1, &page);
-    if (EFI_ERROR(status)) {
-        BS->FreePages(g_kernel_pdpt, 1);
-        g_kernel_pdpt = 0;
-        report_error(L"AllocatePages(kernel PD) failed", status);
-        return status;
-    }
-    g_kernel_pd = page;
+    g_boot_pt_arena = arena;
+    g_boot_pt_used = 0;
+    g_boot_root = 0;
 
-    mem_set((VOID *)(UINTN)g_kernel_pdpt, 0, PAGE_SIZE);
-    mem_set((VOID *)(UINTN)g_kernel_pd, 0, PAGE_SIZE);
-
-    UINT64 *pdpt = (UINT64 *)(UINTN)g_kernel_pdpt;
-    UINT64 *pd = (UINT64 *)(UINTN)g_kernel_pd;
-
-    pdpt[i3] =
-        ((UINT64)g_kernel_pd & X86_PTE_ADDR) |
-        X86_PTE_PRESENT | X86_PTE_WRITE;
-
-    for (UINTN i = 0; i < huge_pages; ++i) {
-        UINT64 pa = bi->kernel_base + (UINT64)i * PAGE_2M;
-        pd[i2 + i] =
-            (pa & ~(PAGE_2M - 1)) |
-            X86_PTE_PRESENT | X86_PTE_WRITE | X86_PTE_LARGE;
-    }
-
-    g_kernel_pml4_index = i4;
-
-    con_puts(L"[BOOT] high-half map ready: ");
-    con_hex64(bi->kernel_virt_base);
-    con_puts(L" -> ");
-    con_hex64(bi->kernel_base);
+    con_puts(L"[BOOT] bootstrap page-table arena = ");
+    con_hex64((UINT64)arena);
     con_puts(L"\r\n");
-
     return EFI_SUCCESS;
 }
 
-static EFI_STATUS activate_kernel_high_mapping(const BOOT_INFO *bi)
+/*
+ * 必须在最后一次 GetMemoryMap() 之后调用：
+ * 这里只消耗已经预留的 g_boot_pt_arena，不再调用任何 Boot Services，
+ * 因而不会改变 map_key。
+ */
+static EFI_STATUS build_bootstrap_page_tables(const BOOT_INFO *bi)
 {
-    /* R: 开始处理 EBS 返回后的当前 CR3。 */
+    if (bi == NULL ||
+        bi->mmap_addr == 0 ||
+        bi->mmap_desc_size < sizeof(EFI_MEMORY_DESCRIPTOR) ||
+        bi->mmap_desc_count == 0 ||
+        bi->kernel_base == 0 ||
+        bi->kernel_virt_base == 0 ||
+        bi->kernel_size == 0)
+        return EFI_INVALID_PARAMETER;
+
+    g_boot_pt_used = 0;
+
+    EFI_PHYSICAL_ADDRESS root_phys;
+    UINT64 *pml4 = boot_pt_alloc(&root_phys);
+    if (pml4 == NULL)
+        return EFI_OUT_OF_RESOURCES;
+
+    /*
+     * 先建立所有 loader/boot-services/普通 RAM 的 identity mapping。
+     * 切 CR3 的瞬间 loader RIP、RSP、BOOT_INFO、memory map buffer 都仍然
+     * 使用原来的低地址，因此必须在新 CR3 下继续可访问。
+     */
+    const UINT8 *p = (const UINT8 *)(UINTN)bi->mmap_addr;
+
+    for (UINT32 i = 0; i < bi->mmap_desc_count;
+         ++i, p += bi->mmap_desc_size) {
+        const EFI_MEMORY_DESCRIPTOR *d =
+            (const EFI_MEMORY_DESCRIPTOR *)(const VOID *)p;
+
+        if (!bootstrap_usable_type(d->Type) ||
+            d->NumberOfPages == 0)
+            continue;
+
+        if (d->NumberOfPages > UINT64_MAX / PAGE_SIZE)
+            return EFI_LOAD_ERROR;
+
+        UINT64 bytes = d->NumberOfPages * PAGE_SIZE;
+        if (d->PhysicalStart > UINT64_MAX - bytes)
+            return EFI_LOAD_ERROR;
+
+        if (!boot_map_range(pml4,
+                            d->PhysicalStart,
+                            d->PhysicalStart,
+                            bytes))
+            return EFI_OUT_OF_RESOURCES;
+    }
+
+    /*
+     * 再给同一物理内核映像建立最终高半区别名。
+     * identity alias 暂时保留，等 kernel 自己接管 CR3 后再自然消失。
+     */
+    if (bi->kernel_size > UINT64_MAX - (PAGE_SIZE - 1))
+        return EFI_LOAD_ERROR;
+
+    UINT64 kernel_bytes =
+        (bi->kernel_size + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+
+    if (!boot_map_range(pml4,
+                        bi->kernel_virt_base,
+                        bi->kernel_base,
+                        kernel_bytes))
+        return EFI_OUT_OF_RESOURCES;
+
+    g_boot_root = root_phys;
+    return EFI_SUCCESS;
+}
+
+static EFI_STATUS activate_bootstrap_page_tables(const BOOT_INFO *bi)
+{
+    if (g_boot_root == 0)
+        return EFI_INVALID_PARAMETER;
+
+    /* R: 即将离开固件页表，切换到 loader 自己的 bootstrap CR3。 */
     debug_char('R');
 
-    /*
-     * 关键：必须在 ExitBootServices 返回后重新读取 CR3。
-     * prepare_kernel_high_mapping() 到这里之间执行过固件代码，不能假设
-     * 固件一直沿用 prepare 阶段看到的页表根。
-     */
-    UINT64 root = read_cr3() & X86_PTE_ADDR;
-    UINT64 *pml4 = (UINT64 *)(UINTN)root;
+    write_cr3((UINT64)g_boot_root);
 
-    /* P: CR3 根页可以通过当前固件映射直接访问。 */
-    debug_char('P');
-
-    if ((pml4[g_kernel_pml4_index] & X86_PTE_PRESENT) != 0)
-        return EFI_UNSUPPORTED;
-
-    pml4[g_kernel_pml4_index] =
-        ((UINT64)g_kernel_pdpt & X86_PTE_ADDR) |
-        X86_PTE_PRESENT | X86_PTE_WRITE;
-
-    /*
-     * 重载当前 CR3，使新挂入的分支立即对本 CPU 生效。
-     * 当前低地址 loader/stack 映射完全继承自 EBS 返回时的页表。
-     */
-    write_cr3(root);
-
-    /* C: 新的 PML4 项已经生效，CR3 reload 后仍能继续执行 loader。 */
+    /* C: 新 CR3 下 loader 的低地址 RIP/RSP identity mapping 正常。 */
     debug_char('C');
 
-    /*
-     * 在仍运行于 loader 低地址代码时，直接读取高地址 alias 做硬校验。
-     * 第一个字节应与物理内核映像完全一致；失败就不要跳到未知状态。
-     */
     volatile const UINT8 *high =
         (volatile const UINT8 *)(UINTN)bi->kernel_virt_base;
     volatile const UINT8 *phys =
@@ -595,7 +694,7 @@ static EFI_STATUS activate_kernel_high_mapping(const BOOT_INFO *bi)
     if (*high != *phys)
         return EFI_DEVICE_ERROR;
 
-    /* H: 高地址 alias 已经可以正确读取内核物理映像。 */
+    /* H: kernel 高地址 alias 与物理映像一致。 */
     debug_char('H');
     return EFI_SUCCESS;
 }
@@ -685,6 +784,24 @@ static EFI_STATUS leave_boot_services(EFI_HANDLE image, BOOT_INFO *bi)
             return status;
         }
 
+        bi->mmap_addr         = (UINT64)(UINTN)mmap;
+        bi->mmap_size         = (UINT64)map_size;
+        bi->mmap_desc_size    = (UINT64)desc_size;
+        bi->mmap_desc_version = desc_version;
+        bi->mmap_desc_count   =
+            (desc_size != 0) ? (UINT32)(map_size / desc_size) : 0;
+
+        /*
+         * 不再修改固件页表。使用最终 memory map，在预留 arena 内构建
+         * loader 自己的 bootstrap CR3。该过程不调用 Boot Services，
+         * 所以 map_key 仍然有效。
+         */
+        status = build_bootstrap_page_tables(bi);
+        if (EFI_ERROR(status)) {
+            report_error(L"build bootstrap page tables failed", status);
+            return status;
+        }
+
         /* map_key 必须来自最近一次 GetMemoryMap，且两次调用之间不能有任何内存分配 */
         status = BS->ExitBootServices(image, map_key);
         if (!EFI_ERROR(status))
@@ -697,11 +814,6 @@ static EFI_STATUS leave_boot_services(EFI_HANDLE image, BOOT_INFO *bi)
         /* 内存映射变了，重新取一次再试 */
     }
 
-    bi->mmap_addr         = (UINT64)(UINTN)mmap;
-    bi->mmap_size         = (UINT64)map_size;
-    bi->mmap_desc_size    = (UINT64)desc_size;
-    bi->mmap_desc_version = desc_version;
-    bi->mmap_desc_count   = (desc_size != 0) ? (uint32_t)(map_size / desc_size) : 0;
     return EFI_SUCCESS;
 }
 
@@ -742,10 +854,10 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
     save_framebuffer(&g_bootinfo);
 
     /*
-     * 必须在最后一次 GetMemoryMap 之前完成页表页分配，
-     * 否则会让 ExitBootServices 的 map_key 失效。
+     * EBS 前只预留 bootstrap 页表 arena；真正页表内容在最后一次
+     * GetMemoryMap 之后构建，因此既能覆盖最终内存布局，也不会改变 map_key。
      */
-    status = prepare_kernel_high_mapping(&g_bootinfo);
+    status = prepare_bootstrap_page_tables();
     if (EFI_ERROR(status))
         return status;
 
@@ -764,11 +876,11 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
     /* 关中断，挂入临时高半区映射，然后直接进入高地址 e_entry。 */
     __asm__ volatile("cli");
 
-    status = activate_kernel_high_mapping(&g_bootinfo);
+    status = activate_bootstrap_page_tables(&g_bootinfo);
     if (EFI_ERROR(status)) {
         /*
          * 已经 ExitBootServices，不能再调用固件控制台。
-         * debugcon: 'M' = 临时高地址映射挂接/校验失败。
+         * debugcon: 'M' = bootstrap CR3 切换/高地址校验失败。
          */
         debug_char('M');
         for (;;)
