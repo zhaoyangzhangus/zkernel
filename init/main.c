@@ -244,13 +244,11 @@ void kernel_main(BOOT_INFO *bi)
      * 旧 frame chain。之后绝不能再返回本函数，因此直接跳到新的
      * C continuation。
      *
-     * jmp 前把 RSP 调整成 SysV 函数入口要求的 16n+8，continuation
-     * 是 noreturn，不需要真实 return address。
+     * VM_DIRECT_MAP_BASE 本身按 16 字节对齐，因此只改变 RSP 的地址别名，
+     * 不改变原栈的 ABI 对齐关系。
      */
     __asm__ volatile(
         "addq %[base], %%rsp\n\t"
-        "andq $-16, %%rsp\n\t"
-        "subq $8, %%rsp\n\t"
         "xorl %%ebp, %%ebp\n\t"
         "jmp *%%rax"
         :
