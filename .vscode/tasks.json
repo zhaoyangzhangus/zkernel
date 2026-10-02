@@ -27,6 +27,7 @@
                 "panel": "shared",
                 "focus": false,
                 "clear": false,
+                "close": true,
                 "showReuseMessage": false
             }
         },
@@ -43,6 +44,7 @@
                 "panel": "shared",
                 "focus": false,
                 "clear": false,
+                "close": true,
                 "showReuseMessage": false
             }
         }
