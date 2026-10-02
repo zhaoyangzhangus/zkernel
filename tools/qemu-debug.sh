@@ -14,7 +14,7 @@ if [[ ! -f "$ROOT/build/debug/kernel.elf" ]]; then
 fi
 
 echo "[qemu] starting on :${PORT}"
-make -s GDB_PORT="${PORT}" run &
+make -s GDB_PORT="${PORT}" debug &
 pid=$!
 
 for _ in $(seq 1 100); do

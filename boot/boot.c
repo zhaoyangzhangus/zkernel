@@ -126,6 +126,11 @@ static void con_dec(UINT64 value)
     con_puts(&buf[i]);
 }
 
+static inline void debug_char(UINT8 c)
+{
+    __asm__ volatile("outb %0, $0xe9" :: "a"(c));
+}
+
 static void report_error(const CHAR16 *what, EFI_STATUS status)
 {
     con_puts(L"\r\n[BOOT] ERROR: ");
@@ -548,6 +553,9 @@ static EFI_STATUS prepare_kernel_high_mapping(const BOOT_INFO *bi)
 
 static EFI_STATUS activate_kernel_high_mapping(const BOOT_INFO *bi)
 {
+    /* R: 开始处理 EBS 返回后的当前 CR3。 */
+    debug_char('R');
+
     /*
      * 关键：必须在 ExitBootServices 返回后重新读取 CR3。
      * prepare_kernel_high_mapping() 到这里之间执行过固件代码，不能假设
@@ -555,6 +563,9 @@ static EFI_STATUS activate_kernel_high_mapping(const BOOT_INFO *bi)
      */
     UINT64 root = read_cr3() & X86_PTE_ADDR;
     UINT64 *pml4 = (UINT64 *)(UINTN)root;
+
+    /* P: CR3 根页可以通过当前固件映射直接访问。 */
+    debug_char('P');
 
     if ((pml4[g_kernel_pml4_index] & X86_PTE_PRESENT) != 0)
         return EFI_UNSUPPORTED;
@@ -569,6 +580,9 @@ static EFI_STATUS activate_kernel_high_mapping(const BOOT_INFO *bi)
      */
     write_cr3(root);
 
+    /* C: 新的 PML4 项已经生效，CR3 reload 后仍能继续执行 loader。 */
+    debug_char('C');
+
     /*
      * 在仍运行于 loader 低地址代码时，直接读取高地址 alias 做硬校验。
      * 第一个字节应与物理内核映像完全一致；失败就不要跳到未知状态。
@@ -581,6 +595,8 @@ static EFI_STATUS activate_kernel_high_mapping(const BOOT_INFO *bi)
     if (*high != *phys)
         return EFI_DEVICE_ERROR;
 
+    /* H: 高地址 alias 已经可以正确读取内核物理映像。 */
+    debug_char('H');
     return EFI_SUCCESS;
 }
 
@@ -737,6 +753,9 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
     if (EFI_ERROR(status))
         return status;      /* ExitBootServices 失败时控制台还能用，直接返回固件 */
 
+    /* E: ExitBootServices 已成功返回。 */
+    debug_char('E');
+
     /*
      * 从此不能再调用任何 Boot Services（ConOut / AllocatePool 都失效）。
      * 内存映射缓冲区已经记录在 BOOT_INFO 里，内存布局也不会再变化。
@@ -751,13 +770,13 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
          * 已经 ExitBootServices，不能再调用固件控制台。
          * debugcon: 'M' = 临时高地址映射挂接/校验失败。
          */
-        __asm__ volatile("outb %0, $0xe9" :: "a"((UINT8)'M'));
+        debug_char('M');
         for (;;)
             __asm__ volatile("hlt");
     }
 
     /* debugcon: 'J' = 即将 jump/call 到高半区 kernel_entry。 */
-    __asm__ volatile("outb %0, $0xe9" :: "a"((UINT8)'J'));
+    debug_char('J');
 
     entry(&g_bootinfo);
 
