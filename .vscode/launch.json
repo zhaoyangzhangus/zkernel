@@ -21,8 +21,7 @@
                     "text": "-gdb-set disassembly-flavor intel"
                 }
             ],
-            "preLaunchTask": "zkernel: run",
-            "postDebugTask": "zkernel: stop-qemu",
+            "preLaunchTask": "zkernel: debug",
             "internalConsoleOptions": "neverOpen"
         }
     ]
