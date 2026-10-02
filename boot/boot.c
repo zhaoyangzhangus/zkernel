@@ -1103,27 +1103,73 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
         debug_puts("\n");
 
         /*
-         * 精确复现旧实现失败区间：
-         * 从 loader 自己已构造完成的 bootstrap PML4 复制 [511] entry，
-         * 尝试写入 firmware PML4[511]，然后 reload 同一个 firmware CR3。
-         *
-         * W = 写之前
-         * V = 写成功
-         * T = reload CR3 成功
+         * 已确认旧实现死在 firmware PML4[511] 写入。
+         * 现在只读地检查 CR3 根页自身 identity mapping 的完整权限链：
+         * supervisor write 只有在 CR0.WP=1 且任一级 RW=0 时会 #PF。
          */
-        volatile UINT64 *fw_pml4 =
-            (volatile UINT64 *)(UINTN)root_after;
-        volatile const UINT64 *boot_pml4 =
-            (volatile const UINT64 *)(UINTN)g_boot_root;
-        UINT64 test_entry = boot_pml4[511];
+        {
+            UINT64 cr0 = read_cr0();
+            UINT64 va = root_after;
+            UINT32 i4 = (UINT32)((va >> 39) & 0x1FFU);
+            UINT32 i3 = (UINT32)((va >> 30) & 0x1FFU);
+            UINT32 i2 = (UINT32)((va >> 21) & 0x1FFU);
+            UINT32 i1 = (UINT32)((va >> 12) & 0x1FFU);
 
-        debug_char('W');
-        fw_pml4[511] = test_entry;
-        debug_char('V');
+            UINT64 e4 = pml4_after[i4];
+            UINT64 e3 = 0, e2 = 0, e1 = 0;
+            UINT64 leaf = e4;
+            UINT32 leaf_level = 4;
+            UINT32 effective_rw = (UINT32)((e4 >> 1) & 1U);
 
-        write_cr3(cr3_after);
-        debug_char('T');
-        debug_char('\n');
+            if ((e4 & X86_PTE_PRESENT) != 0) {
+                volatile const UINT64 *pdpt =
+                    (volatile const UINT64 *)(UINTN)(e4 & X86_PTE_ADDR);
+                e3 = pdpt[i3];
+                effective_rw &= (UINT32)((e3 >> 1) & 1U);
+                leaf = e3;
+                leaf_level = 3;
+
+                if ((e3 & X86_PTE_PRESENT) != 0 &&
+                    (e3 & X86_PTE_LARGE) == 0) {
+                    volatile const UINT64 *pd =
+                        (volatile const UINT64 *)(UINTN)(e3 & X86_PTE_ADDR);
+                    e2 = pd[i2];
+                    effective_rw &= (UINT32)((e2 >> 1) & 1U);
+                    leaf = e2;
+                    leaf_level = 2;
+
+                    if ((e2 & X86_PTE_PRESENT) != 0 &&
+                        (e2 & X86_PTE_LARGE) == 0) {
+                        volatile const UINT64 *pt =
+                            (volatile const UINT64 *)(UINTN)(e2 & X86_PTE_ADDR);
+                        e1 = pt[i1];
+                        effective_rw &= (UINT32)((e1 >> 1) & 1U);
+                        leaf = e1;
+                        leaf_level = 1;
+                    }
+                }
+            }
+
+            debug_puts("[CR0] ");
+            debug_hex64(cr0);
+            debug_puts(" WP=");
+            debug_char((UINT8)('0' + ((cr0 >> 16) & 1U)));
+            debug_puts("\n[SELF] e4=");
+            debug_hex64(e4);
+            debug_puts(" e3=");
+            debug_hex64(e3);
+            debug_puts(" e2=");
+            debug_hex64(e2);
+            debug_puts(" e1=");
+            debug_hex64(e1);
+            debug_puts("\n[SELF] leaf=L");
+            debug_char((UINT8)('0' + leaf_level));
+            debug_puts(" ");
+            debug_hex64(leaf);
+            debug_puts(" effective_RW=");
+            debug_char((UINT8)('0' + effective_rw));
+            debug_puts("\n");
+        }
     }
 
     /* E: ExitBootServices 已成功返回。 */
