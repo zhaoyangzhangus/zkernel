@@ -32,9 +32,9 @@ with tempfile.TemporaryDirectory(prefix='system-qemu-prepare-') as directory:
                QEMU_IMG=str(converter), OVMF_CODE=str(firmware),
                LAUNCH_MARKER=str(marker))
 
-    def run(**changes):
+    def run(extra=(), **changes):
         return subprocess.run(['bash', str(fixture/'run-qemu.sh'),
-                               '--no-build', '--prepare-only'],
+                               '--no-build', '--prepare-only', *extra],
                               env=dict(env, **changes), text=True,
                               capture_output=True, timeout=30)
 
@@ -57,5 +57,38 @@ with tempfile.TemporaryDirectory(prefix='system-qemu-prepare-') as directory:
         assert result.returncode != 0 and '正在使用' in result.stderr
     assert image.read_bytes() == b'previous-good-image'
     assert not marker.exists()
+    # Explicit reuse must neither invoke the converter nor require staging.
+    kernel.unlink()
+    identity = (image.stat().st_ino, image.stat().st_mtime_ns)
+    result = run(('--reuse-image',), FAIL_CONVERT='1')
+    assert result.returncode == 0, result.stderr
+    assert (image.stat().st_ino, image.stat().st_mtime_ns) == identity
+    assert image.read_bytes() == b'previous-good-image'
+    with image.open('rb'):
+        result = run(('--reuse-image',))
+        assert result.returncode != 0 and '正在使用' in result.stderr
+    with (build/'qemu-run.lock').open('a') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        result = run(('--reuse-image',))
+        assert result.returncode != 0 and '已有 QEMU' in result.stderr
+    result = run(('--reuse-image','--all-disks'))
+    assert result.returncode != 0 and '无法复用' in result.stderr
+    secondary = build/'qemu-nvme-data.img'
+    secondary.write_bytes(b'preserved-secondary-data')
+    result = run(('--reuse-image','--all-disks'), FAIL_CONVERT='1')
+    assert result.returncode == 0, result.stderr
+    with secondary.open('rb'):
+        result = run(('--reuse-image','--all-disks'))
+        assert result.returncode != 0 and '正在使用' in result.stderr
+    assert secondary.read_bytes() == b'preserved-secondary-data'
+    result = subprocess.run(['bash',str(fixture/'run-qemu.sh'),
+                             '--reuse-image','--prepare-only'],env=env,
+                            text=True,capture_output=True,timeout=30)
+    assert result.returncode == 2 and '--no-build' in result.stderr
+    image.unlink()
+    result = run(('--reuse-image',))
+    assert result.returncode != 0 and '无法复用' in result.stderr
+    assert not image.exists() and not marker.exists()
 print('QEMU prepare-only: real launcher, no guest, atomic replacement, '
-      'conversion failure preservation, run lock and active image rejection passed')
+      'conversion failure preservation, run lock and active image rejection; '
+      'reuse preserves inode/data without staging, rejects missing/in-use primary/secondary disks passed')

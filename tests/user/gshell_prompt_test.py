@@ -80,7 +80,7 @@ draw = source[source.index('static uint32_t shell_scroll_maximum('):
               source.index('static void update_window(void)')]
 mouse_start = source.index('static bool handle_shell_mouse(')
 offsets = source[source.index('static size_t shell_mouse_text_offset('):mouse_start]
-mouse = source[mouse_start:source.index('static bool handle_event(', mouse_start)]
+mouse = source[mouse_start:source.index('static bool shell_control_event_valid(', mouse_start)]
 code = r'''
 #include <assert.h>
 #include <stdint.h>
@@ -113,7 +113,7 @@ static size_t g_input_anchor=SIZE_MAX,g_command_cursor;
 static uint32_t g_input_view_start,g_prompt_length;
 static size_t g_command_length;
 static char g_display_line[SHELL_DISPLAY_CAPACITY];
-static unsigned damages,renders;
+static unsigned renders;
 static unsigned caption_height,line_height,metric_queries;
 static uint32_t line_metric(void){++metric_queries;return line_height;}
 static void fill_rect(uint32_t x,uint32_t y,uint32_t w,uint32_t h,uint32_t c){(void)x;(void)y;(void)w;(void)h;(void)c;}
@@ -121,7 +121,6 @@ static void draw_text(uint32_t x,uint32_t y,const char *t,uint32_t c){(void)x;(v
 static uint32_t shell_text_width(const char *t,size_t n){(void)t;return n*8;}
 static size_t text_length(const char *t){return strlen(t);}
 static void draw_input_line(void){assert(!g_foreground_wait);++prompts;}
-static void shell_damage_all(void){++damages;}
 ''' + source[source.index('static char *shell_output_line('):
              source.index('static void append_output(')] + draw + r'''
 static void render_window(void){++renders;draw_terminal();}
@@ -164,15 +163,15 @@ int main(void){
   }
   os_window_event_t event={0};
   event.input.type=OS_INPUT_EVENT_RELATIVE;event.input.code=OS_INPUT_REL_WHEEL;
-  event.input.value=1;g_output_scroll=maximum;damages=renders=0;
-  assert(handle_shell_mouse(&event)&&!damages&&!renders);
+  event.input.value=1;g_output_scroll=maximum;renders=0;
+  assert(handle_shell_mouse(&event)&&!renders);
   event.input.value=-1;g_output_scroll=0;
-  assert(handle_shell_mouse(&event)&&!damages&&!renders);
+  assert(handle_shell_mouse(&event)&&!renders);
   event.input.value=1;g_output_scroll=0;
   assert(handle_shell_mouse(&event));
-  assert(renders==(maximum&&visible?1U:0U)&&damages==renders);
-  g_ctrl=true;damages=renders=0;
-  assert(!handle_shell_mouse(&event)&&!damages&&!renders);g_ctrl=false;
+  assert(renders==(maximum&&visible?1U:0U));
+  g_ctrl=true;renders=0;
+  assert(!handle_shell_mouse(&event)&&!renders);g_ctrl=false;
   ++cases;
  }
  }
@@ -185,8 +184,8 @@ int main(void){
   os_window_event_t event={0};
   event.input.type=OS_INPUT_EVENT_BUTTON;event.input.code=OS_INPUT_BUTTON_LEFT;
   event.input.value=OS_INPUT_VALUE_PRESS;event.pointer_y=76;g_shell.height=height;
-  damages=renders=0;
-  assert(!handle_shell_mouse(&event)&&!g_mouse_selecting&&!damages&&!renders);
+  renders=0;
+  assert(!handle_shell_mouse(&event)&&!g_mouse_selecting&&!renders);
  }
  line_height=0;g_target_height=800;g_output_scroll=0;prompts=output_rows=0;
  draw_terminal();assert(g_view_lines==0&&!prompts&&!output_rows&&g_input_y==0);

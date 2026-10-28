@@ -3,6 +3,23 @@
 #include <kernel/sched.h>
 #include <kernel/device.h>
 #include <arch/x86_64/acpi.h>
+#include <arch/x86_64/reboot.h>
+#include <kernel/vfs.h>
+#include <kernel/e1000.h>
+
+kstatus_t power_system_request(uint32_t action) {
+    static atomic_bool busy;
+    if (action > 1U) return K_EINVAL;
+    if (atomic_exchange_explicit(&busy, true, memory_order_acq_rel)) return K_EBUSY;
+    kstatus_t status = vfs_sync_all();
+    if (status == K_OK) status = e1000_shutdown();
+    if (status == K_OK) {
+        if (action == 0U) x86_system_reboot();
+        status = x86_acpi_poweroff();
+    }
+    atomic_store_explicit(&busy, false, memory_order_release);
+    return status == K_OK ? K_EIO : status; /* 固件返回时设备仍未关机。 */
+}
 
 static struct {
     spinlock_t lock;

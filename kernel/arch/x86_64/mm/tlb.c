@@ -22,9 +22,8 @@ static paddr_t g_tlb_root;
 static uint16_t g_tlb_pcid;
 static bool g_tlb_full_root;
 
-/* Keep rare shootdown failures visible even in normal boots where routine
- * COM1 tracing is disabled.  Chrome turns MADV_DONTNEED failures into a hard
- * allocator CHECK, so the target CPU and address are needed to diagnose them. */
+/* 即使普通启动关闭了常规 COM1 跟踪，也要保留罕见 shootdown 故障的信息。Chrome 会将
+ * MADV_DONTNEED 故障转成分配器硬性 CHECK，因此需要记录目标 CPU 和地址以供诊断。 */
 static void tlb_failure_putc(char value) {
     for (uint32_t attempt = 0U; attempt < 100000U; ++attempt) {
         uint8_t status;
@@ -101,11 +100,9 @@ static void shootdown_lock(void) {
     uint64_t saved_flags = 0;
     bool enabled_delivery = false;
     /*
-     * The owner publishes g_tlb_waiting while it waits for remote
-     * acknowledgements.  A timer tick must not switch this CPU to another
-     * thread with the global shootdown lock still held; that would leave the
-     * new thread observing a stale TLB-wait state and make every later VM
-     * operation look permanently blocked.
+    * 所有者等待远端确认时会发布 g_tlb_waiting。持有全局 shootdown 锁期间，定时器节拍
+    * 不得将此 CPU 切换到其他线程；否则新线程会观察到过期的 TLB 等待状态，导致之后的
+    * 每次 VM 操作都像是永久阻塞。
      */
     sched_preempt_disable();
     while (atomic_exchange_explicit(&g_tlb_shootdown_lock.state, 1U,
@@ -152,8 +149,8 @@ static uint16_t root_pcid(paddr_t root) {
 }
 
 static void invalidate_target_page(paddr_t root, uint16_t pcid, vaddr_t address) {
-    /* INVLPG targets the active address space directly and also invalidates
-     * global translations.  INVPCID is only needed for an inactive user root. */
+    /* INVLPG 可直接作用于活动地址空间，并使全局转换失效。仅当用户根页表未激活时才
+     * 需要 INVPCID。 */
     if ((uint64_t)address > X86_64_USER_TOP ||
         x86_current_root_table().value == root.value) {
         invalidate_local_page(address);
@@ -174,14 +171,14 @@ static void invalidate_target_root(paddr_t root, uint16_t pcid) {
     if (x86_current_root_table().value == root.value) {
         uint64_t cr3;
         __asm__ volatile ("mov %%cr3, %0" : "=r"(cr3));
-        cr3 &= ~(1ULL << 63); /* Do not request PCID no-flush. */
+        cr3 &= ~(1ULL << 63); /* 不请求 PCID 无刷新切换。 */
         __asm__ volatile ("mov %0, %%cr3" : : "r"(cr3) : "memory");
     } else if (x86_boot_cpu_features.pcid && x86_boot_cpu_features.invpcid) {
         invpcid_descriptor_t descriptor = {(uint64_t)pcid, 0U};
         __asm__ volatile ("invpcid %0, %1" : : "m"(descriptor), "r"(1ULL)
                           : "memory");
     }
-    /* Without PCID, switching back to an inactive root flushes its entries. */
+    /* 未启用 PCID 时，切回未活动的根页表会刷新其页表项。 */
 }
 
 static bool send_tlb_ipi_with_retry(uint32_t apic_id) {

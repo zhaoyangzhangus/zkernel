@@ -1,6 +1,7 @@
 #include "internal.h"
+#include <uapi/window_theme.h>
 
-/* REFACTOR_P7E_RASTER_OWNER: direct framebuffer fill primitives. */
+/* REFACTOR_P7E_RASTER_OWNER：直接帧缓冲填充原语。 */
 
 void compositor_fill_span_wb(
     volatile uint32_t *destination,
@@ -60,6 +61,7 @@ void compositor_fill_locked(int32_t x, int32_t y,
 void compositor_fill_rounded_locked(int32_t x, int32_t y,
                                     uint32_t width, uint32_t height,
                                     uint32_t radius, uint32_t color) {
+    color=os_theme_resolve(color,g_compositor_snapshot.theme);
     int32_t left = x < 0 ? 0 : x;
     int32_t top = y < 0 ? 0 : y;
     int64_t right = (int64_t)x + width;
@@ -90,6 +92,17 @@ void compositor_fill_rounded_locked(int32_t x, int32_t y,
     }
 
     if (left >= right || top >= bottom) return;
+
+    /* 完整覆盖行跨度时像素连续，合并为一次填充；保留长度上限和非连续路径。 */
+    if (!radius && left == 0 && right == g_window_server.display_stride) {
+        uint64_t pixels = (uint64_t)(bottom - top) * g_window_server.display_stride;
+        if (pixels <= UINT32_MAX) {
+            compositor_fill_span_wb(g_window_server.composite_framebuffer +
+                (uint64_t)(uint32_t)top * g_window_server.display_stride,
+                (uint32_t)pixels, color);
+            return;
+        }
+    }
 
     for (int32_t row = top; row < bottom; ++row) {
         uint32_t inset = 0U;

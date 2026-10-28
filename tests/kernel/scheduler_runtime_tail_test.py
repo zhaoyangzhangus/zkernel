@@ -13,6 +13,16 @@ program += r'''
 void scheduler_update_min_vruntime(run_queue_t *queue) { (void)queue; }
 ''' + source[begin:end] + r'''
 int main(void) {
+    uint64_t seed=41;
+    for(unsigned i=0;i<1000000;++i) {
+        seed=seed*UINT64_C(6364136223846793005)+1;
+        uint64_t runtime=seed;
+        uint32_t weight=i%11==0?1024:(uint32_t)(seed>>32);
+        uint32_t effective=weight?weight:1;
+        __uint128_t expected=(__uint128_t)runtime*1024/effective;
+        uint64_t bounded=expected>UINT64_MAX?UINT64_MAX:(uint64_t)expected;
+        assert(scheduler_fair_vruntime_delta(runtime,weight)==bounded);
+    }
     run_queue_t queue={0}; thread_t idle={0}, thread={0};
     queue.current=&thread; queue.idle=&idle; queue.clock_ns=100;
     thread.sched_class=SCHED_CLASS_FAIR; thread.sched.weight=1024;

@@ -3,7 +3,7 @@
 #include <stdbool.h>
 #include <uapi/abi.h>
 
-/* Private interface shared by the PNG container and pixel-decoder units. */
+/* PNG 容器模块和像素解码模块共用的私有接口。 */
 #define PNG_SIGNATURE_SIZE 8U
 
 typedef struct png_image_info {

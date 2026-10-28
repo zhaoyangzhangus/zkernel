@@ -7,8 +7,8 @@ root = Path(__file__).resolve().parents[2]
 source = (root / 'kernel/fs/vfs/core.c').read_text()
 start = source.index('    vnode_t *existing = vfs_find_fat_node_locked(path);')
 branch = source[start:source.index('    uint32_t slot =', start)]
-start = source.index('    /* Cached-open fast path:')
-fast = source[start:source.index('    /* Cached-open fast path end. */', start)]
+start = source.index('    vfs_initialize();', source.index('static kstatus_t vfs_create_fat32_vnode('))
+fast = source[start:source.index('    backend = (vfs_backend_node_t *)kzalloc(', start)]
 code = r'''
 #include <assert.h>
 #include <stdbool.h>

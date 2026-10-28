@@ -42,13 +42,11 @@ static UINT32 g_timer_initial_count;
 #define LAPIC_SCHED_PERIOD_NS 2000000ULL
 #define LAPIC_CALIBRATION_NS 5000000ULL
 /*
- * Timer expiry, wait-queue expiry and watchdog expiry all take ordinary
- * kernel locks and can wake threads.  They must not run from the LAPIC hard
- * IRQ: an interrupt that arrives while its CPU owns one of those locks would
- * otherwise try to take the same lock recursively and spin forever.
+ * 定时器到期、等待队列超时和看门狗超时都会获取普通内核锁，并可能唤醒线程。它们不得
+ * 在 LAPIC 硬中断中运行：否则中断若在 CPU 持有此类锁时到达，就会递归获取同一把锁并
+ * 永久自旋。
  *
- * This is deliberately one coalesced maintenance item.  It is unrelated to
- * device polling: xHCI remains driven exclusively by its MSI-X handler.
+ * 此处有意使用单个合并式维护项。它与设备轮询无关：xHCI 仍完全由其 MSI-X 处理程序驱动。
  */
 static atomic_bool g_timer_maintenance_pending;
 static atomic_bool g_timer_maintenance_queued;
@@ -59,7 +57,7 @@ static void lapic_timer_maintenance_work(void *argument) {
     uint64_t now_tsc;
     (void)argument;
 
-    /* Consume the tick(s) which caused this work before examining deadlines. */
+    /* 检查截止时间前，先消费触发此工作的时钟节拍。 */
     (void)atomic_exchange_explicit(&g_timer_maintenance_pending, false,
                                    memory_order_acq_rel);
     now_tsc = x86_read_tsc();
@@ -68,9 +66,8 @@ static void lapic_timer_maintenance_work(void *argument) {
     wait_poll_timeouts(now_tsc);
 
     /*
-     * Publish completion before testing pending.  If an IRQ races here it
-     * either queues a successor itself, or leaves pending set for the call
-     * below; no timeout tick is lost.
+    * 检查 pending 前先发布完成状态。若此处发生中断竞争，它要么自行排入后继工作，
+    * 要么保留 pending 标志供下方调用处理；不会丢失超时节拍。
      */
     atomic_store_explicit(&g_timer_maintenance_queued, false,
                           memory_order_release);
@@ -91,7 +88,7 @@ static void lapic_schedule_timer_maintenance(void) {
         return;
     }
     if (!deferred_try_schedule(lapic_timer_maintenance_work, 0)) {
-        /* Keep pending set; the next periodic timer IRQ will retry. */
+        /* 保持 pending 标志；下一个周期性定时器中断会重试。 */
         atomic_store_explicit(&g_timer_maintenance_queued, false,
                               memory_order_release);
     }
@@ -132,12 +129,10 @@ static BOOLEAN lapic_send_ipi(UINT32 apic_id, UINT32 command) {
     if (!g_initialized || apic_id > 0xFFU) return 0;
 
     /*
-     * ICR_HIGH and ICR_LOW are a single logical transaction.  In particular,
-     * a timer IRQ may queue deferred work which sends a reschedule IPI while
-     * this CPU is in a TLB shootdown.  Do not let a local interrupt overwrite
-     * the destination between these two MMIO writes.  Keep the potentially
-     * long delivery waits outside the IRQ-disabled window and recheck after
-     * acquiring it in case an interrupt sent another IPI in the meantime.
+    * ICR_HIGH 与 ICR_LOW 构成一个逻辑事务。特别是，当此 CPU 正在执行 TLB shootdown 时，
+    * 定时器中断可能排入延迟工作，并由其发送重新调度 IPI。不得让本地中断在两次 MMIO
+    * 写入之间覆盖目标地址。可能耗时的投递等待应放在关闭中断的临界区之外；获取该区后
+    * 还需重新检查，以防等待期间中断发送了另一条 IPI。
      */
     UINT64 interrupt_flags;
     for (;;) {
@@ -180,9 +175,8 @@ BOOLEAN lapic_send_fixed(UINT32 apic_id, UINT8 vector) {
     return lapic_send_ipi(apic_id, vector);
 }
 
-/* Calibrate the divided APIC clock against the already initialized TSC.
- * Fixed counts have no portable time unit (1,000,000 means 16ms in QEMU).
- * A masked one-shot prevents calibration from publishing timer work. */
+/* 使用已初始化的 TSC 校准分频后的 APIC 时钟。固定计数没有可移植的时间单位
+ *（在 QEMU 中 1,000,000 表示 16 ms）。屏蔽的一次性定时器可避免校准过程发布定时器工作。 */
 static UINT32 lapic_calibrate_timer(UINT8 timer_vector, UINT32 fallback) {
     uint64_t window = x86_timeout_ns_to_tsc(LAPIC_CALIBRATION_NS);
     if (window == 0U) return fallback;
@@ -203,7 +197,7 @@ static UINT32 lapic_calibrate_timer(UINT8 timer_vector, UINT32 fallback) {
     uint64_t elapsed_ns = x86_tsc_to_ns(ended - started);
     if (elapsed_ns < LAPIC_CALIBRATION_NS || elapsed_ns > 100000000ULL)
         return fallback;
-    /* A 32-bit APIC delta times 2ms cannot overflow uint64_t. */
+    /* 32 位 APIC 时间差乘以 2 ms 不会导致 uint64_t 溢出。 */
     uint64_t count = (uint64_t)(first - last) * LAPIC_SCHED_PERIOD_NS / elapsed_ns;
     if (count == 0U || count > UINT32_MAX) return fallback;
     return (UINT32)count;
@@ -244,7 +238,7 @@ BOOLEAN lapic_init_secondary(UINT32 expected_apic_id, UINT8 timer_vector,
     lapic_write(LAPIC_LVT_TIMER_REGISTER,
                 ((UINT32)timer_vector & 0xFFU) | LAPIC_TIMER_PERIODIC_BIT |
                 LAPIC_TIMER_MASKED_BIT);
-    /* All APs use the BSP's calibrated period, not the fallback argument. */
+    /* 所有 AP 都使用 BSP 校准出的周期，而非回退参数。 */
     lapic_write(LAPIC_TIMER_INITIAL_REGISTER, g_timer_initial_count);
     lapic_write(LAPIC_EOI_REGISTER, 0);
     return 1;
@@ -285,13 +279,13 @@ UINT64 lapic_timer_interrupt(OS_INTERRUPT_CONTEXT *context) {
     (void)context;
     __atomic_add_fetch(&g_tick_count, 1ULL, __ATOMIC_RELAXED);
     /* 设备硬中断只排队；USB 事件和网络包在普通内核上下文处理。 */
-    /* xHCI and E1000 input are interrupt-driven; timer IRQs never poll devices. */
+    /* xHCI 和 E1000 输入由中断驱动；定时器中断绝不轮询设备。 */
     (void)nvme_schedule_deferred_poll();
     lapic_schedule_timer_maintenance();
     lapic_end_of_interrupt();
     uint64_t now_tsc = x86_read_tsc();
     sched_trace_wake_stall(now_tsc);
-    /* deadline.S saves 15 GPRs before the hardware RIP/CS/RFLAGS frame. */
+    /* deadline.S 在硬件 RIP/CS/RFLAGS 帧之前保存 15 个 GPR。 */
     const uint64_t *saved = (const uint64_t *)context;
     sched_trace_inbox_stall(now_tsc, saved != 0 ? saved[15] : 0U,
                             saved != 0 ? saved[17] : 0U);
@@ -300,14 +294,13 @@ UINT64 lapic_timer_interrupt(OS_INTERRUPT_CONTEXT *context) {
     /* 页表锁与 vmalloc 锁持有期间只接收 TLB IPI，不能在此重入调度。 */
     if (x86_tlb_shootdown_active()) return 0;
     /*
-     * SYSCALL C code runs with IF=1 so it can receive TLB IPIs.  A timer
-     * must not preempt that C call chain: its return frame lives on the
-     * current thread's syscall stack and is resumed by the syscall stub.
+    * SYSCALL 的 C 代码以 IF=1 运行，以便接收 TLB IPI。定时器不得抢占该 C 调用链：
+    * 它的返回帧位于当前线程的系统调用栈上，并由系统调用存根恢复。
      */
     if (x86_syscall_active_fast()) return 0;
     sched_tick(x86_tsc_to_ns(now_tsc));
-    /* EOI is complete and CPL3 interrupted no kernel critical section.
-     * Consume SIGKILL here too: a hung user loop may never make a syscall. */
+    /* EOI 已完成，且 CPL3 中断发生时没有内核临界区处于活动状态。
+     * 此处也要处理 SIGKILL：卡住的用户循环可能永远不会发起系统调用。 */
     if (saved != 0 && (saved[16] & 3U) == 3U && !sched_preempt_disabled()) {
         thread_t *thread = sched_current_thread();
         if (thread != 0 && (__atomic_load_n(&thread->flags, __ATOMIC_ACQUIRE) & THREAD_FLAG_TERMINATE_REQUEST))
@@ -318,11 +311,9 @@ UINT64 lapic_timer_interrupt(OS_INTERRUPT_CONTEXT *context) {
             process_exit_signal(OS_SIGKILL);
         }
     }
-    /* An IPI received in a syscall leaves its request pending. Remote
-     * wakeups are still in the inbox, not nr_running, so the ordinary
-     * timeslice test alone cannot discover them after syscall return.
-     * Consume only at a safe boundary; never lose the request while a
-     * map/allocator critical section has disabled preemption. */
+    /* 在系统调用期间收到的 IPI 会保留待处理请求。远端唤醒仍在收件箱中，尚未计入
+     * nr_running，因此系统调用返回后的普通时间片检查无法发现它们。仅在安全边界消费
+     * 请求；映射/分配器临界区禁用抢占期间不得丢失请求。 */
     if (!sched_preempt_disabled() && x86_smp_take_reschedule_request()) {
         sched_handle_reschedule_request();
         return 0;

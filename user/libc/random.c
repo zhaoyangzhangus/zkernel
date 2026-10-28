@@ -25,8 +25,8 @@ static bool random_rdrand64(uint64_t *value) {
     return success != 0U;
 }
 
-/* OpenSSL's System seed hook. Keep the source fail-closed when hardware
- * randomness is unavailable instead of pretending that TSC jitter is entropy. */
+/* OpenSSL 在 System 上使用的种子钩子。硬件随机源不可用时应报告失败，
+ * 不能将 TSC 抖动伪装成熵。 */
 int getentropy(void *buffer, size_t length) {
     uint8_t *output = (uint8_t *)buffer;
     if (buffer == 0 && length != 0U) {

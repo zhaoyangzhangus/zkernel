@@ -2,9 +2,8 @@
 
 #include <math.h>
 
-/* GCC exposes the C99 complex representation directly.  Keep construction in
- * macros so each argument is evaluated exactly once and retains its declared
- * precision. */
+/* GCC 直接公开 C99 复数表示。使用宏构造复数，使每个参数恰好求值一次，
+ * 并保留其声明精度。 */
 #define complex _Complex
 #define _Complex_I (__extension__ 1.0fi)
 #define I _Complex_I

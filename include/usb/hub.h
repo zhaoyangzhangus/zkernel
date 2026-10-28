@@ -5,7 +5,7 @@
 
 #define USB_HUB_MAX_PORTS 32U
 
-/* USB 2.0 hub class feature selectors used by the xHCI Hub Owner. */
+/* xHCI Hub 所有者使用的 USB 2.0 Hub 类特性选择器。 */
 #define USB_HUB_FEATURE_PORT_RESET 4U
 #define USB_HUB_FEATURE_PORT_POWER 8U
 #define USB_HUB_FEATURE_C_PORT_CONNECTION 16U

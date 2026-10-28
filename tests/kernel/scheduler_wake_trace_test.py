@@ -37,6 +37,8 @@ int main(void) {
     g_sched_wake_trace_threshold_ns=10000000ULL;
     thread_t thread={0}, other={0}; scheduler_cpu_t cpu={0};
     arch_trap_frame_t frame={0};
+    process_t process={0}; process.pid=91;
+    thread.process=&process;
     /* Boot self-tests may use tid zero without any real saved user frame. */
     atomic_init(&thread.state,THREAD_BLOCKED);
     scheduler_trace_notify(&thread);
@@ -75,7 +77,6 @@ int main(void) {
     now=800;scheduler_trace_reschedule_interrupt(0);
     assert(g_sched_wake_trace.interrupt==700); /* Preserve the first deferral. */
     now=1000100; scheduler_trace_ready(&cpu,&thread);
-    process_t process={0}; process.pid=91;
     other.process=&process; other.sched_class=SCHED_CLASS_FAIR;
     other.kernel_stack_top=(uintptr_t)&frame+sizeof(frame);
     current_cpu=2; sched_trace_wake_stall(20000100);
@@ -199,6 +200,8 @@ int main(void) {
     scheduler_trace_reschedule_send(0,0,false,4);assert(g_sched_ipi_send[0]==2000);
     atomic_flag_clear(&g_sched_wake_trace_guard);
     scheduler_trace_reschedule_send(0,0,false,4);
+    assert(g_sched_ipi_send[0]==2000); /* Probe enabled after this send began. */
+    now=4001;scheduler_trace_reschedule_send(0,1,false,4);
     assert(g_sched_ipi_send[0]==4000 && g_sched_ipi_send[5]==0 && g_sched_ipi_send[6]==4);
     /* Finer opt-in sampling captures short waits without changing ownership,
        epoch handling, or the historical default threshold. */
@@ -222,6 +225,55 @@ int main(void) {
     g_sched_inbox_stall[0]=0;
     sched_trace_inbox_stall(1001000,0xabcdef,0x202);
     assert(g_sched_inbox_stall[0]==1000000);
+    /* 内核线程即使保留了非零栈地址，也不能读取用户系统调用参数。
+       地址 1 在宿主测试中不可访问，能直接检出原来的无条件解引用。 */
+    thread.process=0;
+    g_sched_wake_delays[0]=(sched_wake_delay_t){0};
+    for (unsigned invalid=0;invalid<3;++invalid) {
+        thread.kernel_stack_top=invalid==0 ? 0 : invalid==1 ? 1 :
+            (uintptr_t)&frame+sizeof(frame);
+        atomic_store(&thread.block_epoch,20+invalid);
+        now=200000000+invalid*30000000;
+        scheduler_trace_notify(&thread);
+        assert(g_sched_wake_trace.tid==126);
+        assert(!g_sched_wake_trace.number && !g_sched_wake_trace.argument0);
+        now+=100;scheduler_trace_publish(&thread);
+        now+=100;scheduler_trace_ready(&cpu,&thread);
+        now+=20000000;scheduler_trace_run(&thread);
+        assert(g_sched_wake_delays[0].tid==126);
+        assert(!g_sched_wake_delays[0].number && !g_sched_wake_delays[0].argument0);
+    }
+    /* 用户线程的不足长栈同样不能解引用，正常帧仍保留准确参数。 */
+    thread.process=&process;thread.kernel_stack_top=1;
+    atomic_store(&thread.block_epoch,30);now+=1;
+    scheduler_trace_notify(&thread);
+    assert(!g_sched_wake_trace.number && !g_sched_wake_trace.argument0);
+    thread.kernel_stack_top=(uintptr_t)&frame+sizeof(frame);
+    atomic_store(&thread.block_epoch,31);now+=1;
+    scheduler_trace_notify(&thread);
+    assert(g_sched_wake_trace.number==frame.rax &&
+           g_sched_wake_trace.argument0==frame.rdi);
+    assert(!scheduler_trace_user_frame(0));
+    /* READY 和邮箱停滞采样复用同一校验，不能在当前线程是内核工作线程时
+       读取伪造的用户帧；延迟和线程身份仍须保留。 */
+    current_cpu=0;other.process=0;
+    for (unsigned invalid=0;invalid<3;++invalid) {
+        other.kernel_stack_top=invalid==0 ? 0 : invalid==1 ? 1 :
+            (uintptr_t)&frame+sizeof(frame);
+        g_sched_wake_trace=(sched_wake_trace_t){.tid=126,.epoch=32+invalid,
+            .published=1000,.ready=2000,.source_cpu=3,.target_cpu=0};
+        g_sched_wake_stall[0]=0;
+        sched_trace_wake_stall(20002000);
+        assert(g_sched_wake_stall[0]==20000000 && g_sched_wake_stall[1]==531);
+        assert(!g_sched_wake_stall[11] && !g_sched_wake_stall[12] &&
+               !g_sched_wake_stall[13]);
+        g_sched_wake_trace.ready=0;g_sched_inbox_stall[0]=0;
+        sched_trace_inbox_stall(20001000,0xabcdef,0x202);
+        assert(g_sched_inbox_stall[0]==20000000 && g_sched_inbox_stall[1]==531);
+        assert(!g_sched_inbox_stall[11] && !g_sched_inbox_stall[12] &&
+               !g_sched_inbox_stall[13]);
+        assert(g_sched_inbox_stall[14]==0xabcdef);
+    }
     g_sched_wake_trace_threshold_ns=10000000;
 }
 '''
@@ -231,4 +283,4 @@ with tempfile.TemporaryDirectory(prefix='liteos-wake-trace-') as directory:
                     '-fsanitize=address,undefined','-fno-pie','-no-pie',
                     '-I'+str(root/'include'),str(path/'test.c'),'-o',str(path/'test')],check=True)
     subprocess.run([str(path/'test')],check=True)
-print('scheduler wake trace: selector, phases, duplicate wake, epoch race, busy guard and nonblocked safety passed')
+print('scheduler wake trace: selector, phases, duplicate wake, epoch race, busy guard, kernel-worker frame safety and nonblocked safety passed')

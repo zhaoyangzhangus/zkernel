@@ -42,3 +42,22 @@ typedef struct os_gpu_submit {
 } os_gpu_submit_t;
 
 /* GPU_SUBMIT 在 signal_fence 为无效句柄时创建 fence 并原位写回句柄。 */
+
+enum os_gpu_device_state {
+    OS_GPU_DEVICE_DISCOVERED,
+    OS_GPU_DEVICE_ACTIVE,
+    OS_GPU_DEVICE_SUSPENDED,
+    OS_GPU_DEVICE_RECOVERING,
+    OS_GPU_DEVICE_REMOVED,
+    OS_GPU_DEVICE_FAILED,
+};
+
+/* 枚举已发现的 PCI 显示设备；不触发驱动初始化，也不暴露 BAR 地址。 */
+typedef struct os_gpu_info {
+    os_versioned_header_t hdr;
+    uint32_t index,count;
+    uint32_t vendor_id,device_id;
+    uint32_t segment,bus,slot,function;
+    uint32_t state,reserved;
+    uint64_t vram_bytes; /* 驱动确认的物理显存字节数；零表示尚不可用。 */
+} os_gpu_info_t;

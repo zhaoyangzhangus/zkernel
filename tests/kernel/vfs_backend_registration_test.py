@@ -25,6 +25,10 @@ program=r'''
 #define K_ENOMEM -12
 typedef int kstatus_t;
 typedef struct {atomic_uint state;} spinlock_t;
+typedef int kmutex_t;
+typedef int io_mutex_t;
+typedef struct vnode vnode_t;
+static void io_mutex_init(io_mutex_t *m,bool pi){assert(pi);*m=0;}
 typedef struct fat_file OS_FAT32_FILE;
 typedef int (*vfs_backend_read_t)(void);
 typedef vfs_backend_read_t vfs_backend_write_t;

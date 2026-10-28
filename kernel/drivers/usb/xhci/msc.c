@@ -1,11 +1,12 @@
 #include <arch/x86_64/paging.h>
 #include <kernel/console.h>
 #include <kernel/realtest.h>
+#include <kernel/kmem.h>
 #include <kernel/xhci.h>
 #include <usb/storage.h>
 #include "internal.h"
 
-/* REFACTOR_P8_XHCI_MSC_OWNER: bulk-only transport and session ownership. */
+/* REFACTOR_P8_XHCI_MSC_OWNER：bulk-only 传输和会话所有权。 */
 
 #ifndef OS_XHCI_DIAGNOSTIC_BOT
 #define OS_XHCI_DIAGNOSTIC_BOT 0
@@ -20,6 +21,7 @@
 #define XHCI_TRB_CYCLE (1U << 0)
 #define XHCI_TRB_INTERRUPT_ON_SHORT_PACKET (1U << 2)
 #define XHCI_TRB_INTERRUPT_ON_COMPLETION (1U << 5)
+#define XHCI_TRB_CHAIN (1U << 4)
 #define XHCI_TRB_LINK_TOGGLE_CYCLE (1U << 1)
 #define XHCI_TRB_TYPE_SHIFT 10U
 #define XHCI_NORMAL_TRB_TYPE 1U
@@ -41,7 +43,7 @@
 #define XHCI_UAS_READ_READY_IU 0x06U
 #define XHCI_UAS_WRITE_READY_IU 0x07U
 #define XHCI_UAS_COMMAND_LENGTH 32U
-/* Linux' sense_iu is 16 bytes plus the 96-byte SCSI sense buffer. */
+/* Linux 的 sense_iu 为 16 字节，另加 96 字节 SCSI sense 缓冲区。 */
 #define XHCI_UAS_STATUS_LENGTH 112U
 #define XHCI_UAS_REQUESTED_STREAM_IDS 256U
 #define XHCI_UAS_STREAM_CONTEXT_BYTES 16U
@@ -58,7 +60,10 @@ typedef struct xhci_msc_transport {
     uint16_t bulk_out_max_packet;
     xhci_dma_region_t bulk_in_ring;
     xhci_dma_region_t bulk_out_ring;
-    xhci_dma_page_t data_buffer;
+    xhci_dma_region_t data_buffer;
+    dma_mapping_t direct_mapping;
+    void *direct_cpu;
+    uint32_t direct_offset;
     uint32_t bulk_in_enqueue;
     uint32_t bulk_out_enqueue;
     uint8_t bulk_in_cycle;
@@ -67,13 +72,13 @@ typedef struct xhci_msc_transport {
     xhci_dma_region_t uas_status_ring;
     xhci_dma_region_t uas_data_in_ring;
     xhci_dma_region_t uas_data_out_ring;
-    /* Stream 1 uses its own two-segment ring; stream 0 remains reserved. */
+    /* Stream 1 使用独立的双段环；Stream 0 保留不用。 */
     xhci_dma_region_t uas_status_stream_ring;
     xhci_dma_region_t uas_data_in_stream_ring;
     xhci_dma_region_t uas_data_out_stream_ring;
-    xhci_dma_page_t uas_command_buffer;
-    xhci_dma_page_t uas_status_buffer;
-    xhci_dma_page_t uas_data_buffer;
+    xhci_dma_region_t uas_command_buffer;
+    xhci_dma_region_t uas_status_buffer;
+    xhci_dma_region_t uas_data_buffer;
     xhci_dma_region_t uas_status_streams;
     xhci_dma_region_t uas_data_in_streams;
     xhci_dma_region_t uas_data_out_streams;
@@ -107,6 +112,35 @@ static xhci_msc_transport_t
 g_xhci_msc_transports[XHCI_MAX_SLOT_TABLE];
 
 static bool g_xhci_usb_msc;
+/* 仅供调试器读取的计数器；不按传输逐次写串口或磁盘日志。 */
+static volatile uint64_t g_xhci_msc_direct_bytes;
+static volatile uint64_t g_xhci_msc_bounce_bytes;
+
+/* 仅在命令之间扩容。绝不复制正在使用的 dma_mapping_t：DMA Core 按地址注册映射，
+ * 替换时必须显式转移其所有权。 */
+static bool xhci_msc_reserve(xhci_state_t *state, xhci_dma_region_t *buffer,
+                              uint32_t length) {
+    if (length == 0U || length > XHCI_MSC_MAX_TRANSFER) return false;
+    if (buffer->cpu != 0 && (uint64_t)buffer->page_count * PAGE_SIZE >= length)
+        return true;
+    xhci_dma_region_t replacement = {0};
+    uint32_t pages = (length + PAGE_SIZE - 1U) / PAGE_SIZE;
+    if (!xhci_alloc_dma_region(state, &replacement, pages)) return false;
+    if (!xhci_free_dma_region(buffer)) {
+        (void)xhci_free_dma_region(&replacement);
+        return false;
+    }
+    if (dma_mapping_move(&buffer->mapping, &replacement.mapping) != K_OK) {
+        (void)xhci_free_dma_region(&replacement);
+        return false;
+    }
+    buffer->head = replacement.head;
+    buffer->pages = replacement.pages;
+    buffer->page_count = replacement.page_count;
+    buffer->allocation_order = replacement.allocation_order;
+    buffer->cpu = replacement.cpu;
+    return true;
+}
 
 static bool xhci_msc_control_no_data(xhci_state_t *state,
                                      xhci_device_context_t *device,
@@ -150,9 +184,14 @@ void xhci_msc_transport_release(uint8_t slot) {
     if (transport->configured || usb_msc_present(slot)) {
         usb_msc_detach(slot);
     }
+    if (dma_mapping_active(&transport->direct_mapping)) {
+        /* 解映射失败后仍保留已注册映射及其固定引用。 */
+        realtest_mark("USB_MSC_DMA_MAPPING_QUARANTINED");
+        return;
+    }
     (void)xhci_free_dma_region(&transport->bulk_in_ring);
     (void)xhci_free_dma_region(&transport->bulk_out_ring);
-    (void)xhci_free_page(&transport->data_buffer);
+    (void)xhci_free_dma_region(&transport->data_buffer);
     (void)xhci_free_dma_region(&transport->uas_command_ring);
     (void)xhci_free_dma_region(&transport->uas_status_ring);
     (void)xhci_free_dma_region(&transport->uas_data_in_ring);
@@ -160,9 +199,9 @@ void xhci_msc_transport_release(uint8_t slot) {
     (void)xhci_free_dma_region(&transport->uas_status_stream_ring);
     (void)xhci_free_dma_region(&transport->uas_data_in_stream_ring);
     (void)xhci_free_dma_region(&transport->uas_data_out_stream_ring);
-    (void)xhci_free_page(&transport->uas_command_buffer);
-    (void)xhci_free_page(&transport->uas_status_buffer);
-    (void)xhci_free_page(&transport->uas_data_buffer);
+    (void)xhci_free_dma_region(&transport->uas_command_buffer);
+    (void)xhci_free_dma_region(&transport->uas_status_buffer);
+    (void)xhci_free_dma_region(&transport->uas_data_buffer);
     (void)xhci_free_dma_region(&transport->uas_status_streams);
     (void)xhci_free_dma_region(&transport->uas_data_in_streams);
     (void)xhci_free_dma_region(&transport->uas_data_out_streams);
@@ -251,6 +290,125 @@ static bool xhci_msc_ring_advance(xhci_dma_region_t *ring,
     return true;
 }
 
+/* 一个 TD 可以跨越物理上不连续的页面，但 Normal TRB 不得跨越 64 KiB DMA 边界。
+ * 仅最后一个 TRB 请求完成通知。 */
+static bool xhci_msc_queue_data(xhci_dma_region_t *ring, uint32_t *enqueue,
+                               uint8_t *cycle, dma_mapping_t *mapping,
+                               uint32_t offset, uint32_t length,
+                               uint16_t max_packet, bool direction_in,
+                               uint64_t *last_trb) {
+    if (!xhci_msc_ring_valid(ring) || enqueue == 0 || cycle == 0 ||
+        mapping == 0 || mapping->segments == 0 || length == 0U ||
+        length > XHCI_MSC_MAX_TRANSFER || max_packet == 0U ||
+        *enqueue >= XHCI_RING_TOTAL_TRB_COUNT ||
+        *enqueue % XHCI_RING_TRB_COUNT == XHCI_RING_TRB_COUNT - 1U)
+        return false;
+    uint32_t pieces = 0U;
+    uint32_t first_index = *enqueue;
+    uint8_t first_cycle = *cycle;
+    uint64_t skip = offset;
+    uint32_t remaining = length;
+    /* 修改环之前先预检：映射字节数和槽位数必须足够。 */
+    for (unsigned pass = 0U; pass < 2U; ++pass) {
+        skip = offset; remaining = length;
+        for (uint32_t s = 0U; s < mapping->segment_count && remaining != 0U; ++s) {
+            dma_segment_t *segment = &mapping->segments[s];
+            if (skip >= segment->length) { skip -= segment->length; continue; }
+            uint64_t address = segment->addr.value + skip;
+            uint64_t available = segment->length - skip;
+            skip = 0U;
+            while (available != 0U && remaining != 0U) {
+                uint32_t chunk = 0x10000U - (uint32_t)(address & 0xffffU);
+                if (chunk > available) chunk = (uint32_t)available;
+                if (chunk > remaining) chunk = remaining;
+                if (pass == 0U) {
+                    if (++pieces >= XHCI_RING_SEGMENT_COUNT * (XHCI_RING_TRB_COUNT - 1U))
+                        return false;
+                } else {
+                    xhci_trb_t *trbs = ring->cpu;
+                    uint32_t index = *enqueue;
+                    uint32_t packets = (remaining - chunk + max_packet - 1U) / max_packet;
+                    if (packets > 31U) packets = 31U;
+                    trbs[index].parameter = address;
+                    trbs[index].status = chunk | (packets << 17);
+                    bool more = remaining != chunk;
+                    trbs[index].control = (XHCI_NORMAL_TRB_TYPE << XHCI_TRB_TYPE_SHIFT) |
+                        (index == first_index ? (first_cycle ^ 1U) : *cycle) |
+                        (more ? XHCI_TRB_CHAIN : XHCI_TRB_INTERRUPT_ON_COMPLETION) |
+                        (direction_in ? XHCI_TRB_INTERRUPT_ON_SHORT_PACKET : 0U);
+                    if (last_trb != 0) *last_trb = xhci_dma_address(&ring->mapping) +
+                                                  (uint64_t)index * sizeof(xhci_trb_t);
+                    if (!xhci_msc_ring_advance(ring, enqueue, cycle)) return false;
+                    if (index % XHCI_RING_TRB_COUNT == XHCI_RING_TRB_COUNT - 2U && more)
+                        trbs[index + 1U].control |= XHCI_TRB_CHAIN;
+                }
+                remaining -= chunk; available -= chunk; address += chunk;
+            }
+        }
+        if (remaining != 0U) return false;
+    }
+    /* 完整链构造完成后才发布第一个 cycle。 */
+    dma_wmb();
+    xhci_trb_t *trbs = ring->cpu;
+    trbs[first_index].control = (trbs[first_index].control & ~XHCI_TRB_CYCLE) | first_cycle;
+    return true;
+}
+
+static bool xhci_msc_direct_map(xhci_state_t *state,
+                               xhci_msc_transport_t *transport, void *buffer,
+                               uint32_t length, bool direction_in) {
+    uintptr_t start = (uintptr_t)buffer;
+    if (length < PAGE_SIZE || length > XHCI_MSC_MAX_TRANSFER ||
+        start < X86_64_DIRECT_MAP_BASE || start > UINTPTR_MAX - length ||
+        dma_mapping_active(&transport->direct_mapping)) return false;
+    uint32_t offset = (uint32_t)(start & (PAGE_SIZE - 1U));
+    uint32_t count = (offset + length + PAGE_SIZE - 1U) / PAGE_SIZE;
+    page_t **pages = kmalloc((size_t)count * sizeof(*pages), 0U);
+    if (pages == 0) return false;
+    bool ok = true;
+    paddr_t root = x86_current_root_table();
+    for (uint32_t i = 0U; i < count; ++i) {
+        paddr_t physical;
+        uint64_t flags;
+        if (x86_translate_page(root, (start & ~(uintptr_t)(PAGE_SIZE - 1U)) +
+                               (uint64_t)i * PAGE_SIZE, &physical, &flags) != K_OK ||
+            (direction_in && !x86_page_entry_writable(flags)) ||
+            (pages[i] = phys_to_page(paddr_make(physical.value & ~(uint64_t)(PAGE_SIZE - 1U)))) == 0) {
+            ok = false; break;
+        }
+    }
+    if (ok) ok = dma_map_pages((device_t *)&state->pci->device, pages, count,
+        direction_in ? DMA_FROM_DEVICE : DMA_TO_DEVICE, &transport->direct_mapping) == K_OK;
+    kfree(pages);
+    if (ok) { transport->direct_cpu = buffer; transport->direct_offset = offset; }
+    return ok;
+}
+
+static bool xhci_msc_direct_finish(xhci_state_t *state,
+                                  xhci_msc_transport_t *transport,
+                                  uint8_t endpoint, bool complete) {
+    if (!dma_mapping_active(&transport->direct_mapping)) return true;
+    /* 超时 TD 不得继续 DMA 到调用方重新使用的缓冲区。先停止端点，再解除固定；
+     * 若无法停止，则禁用总线主控。 */
+    if (!complete && !xhci_submit_command_ex(state, XHCI_STOP_ENDPOINT_TYPE,
+                                             transport->slot, endpoint, 0U, 0)) {
+        uint32_t command;
+        if (pci_read_config32(state->pci, 4U, &command) != K_OK ||
+            pci_write_config32(state->pci, 4U, (command & 0xffffU) & ~(1U << 2)) != K_OK ||
+            pci_read_config32(state->pci, 4U, &command) != K_OK || (command & (1U << 2)) != 0U) {
+            /* DMA 可能仍在运行时不能安全地归还所有权。 */
+            kernel_serial_write_serial_only("OS_USB_DMA_QUIESCE_FAILED\r\n");
+            printf("USB DMA could not be stopped; halting to protect memory.\n");
+            for (;;) __asm__ volatile ("cli; hlt" : : : "memory");
+        }
+        state->initialized = false;
+    }
+    dma_sync_for_cpu(&transport->direct_mapping);
+    if (dma_unmap_checked(&transport->direct_mapping) != K_OK) return false;
+    transport->direct_cpu = 0;
+    return true;
+}
+
 static bool xhci_msc_init_stream_contexts(
     xhci_dma_region_t *streams, const xhci_dma_region_t *ring,
     uint32_t context_count) {
@@ -265,7 +423,7 @@ static bool xhci_msc_init_stream_contexts(
     entry_count = (uint64_t)streams->page_count * PAGE_SIZE / sizeof(uint64_t);
     for (uint64_t index = 0U; index < entry_count; ++index)
         entries[index] = 0U;
-    /* Stream 0 is reserved.  Stream 1 starts at the first TRB with DCS=1. */
+    /* Stream 0 保留不用。Stream 1 从 DCS=1 的首个 TRB 开始。 */
     entries[XHCI_UAS_STREAM_ID * 2U] =
         xhci_dma_address(&ring->mapping) | 3ULL;
     dma_sync_for_device(&streams->mapping);
@@ -573,8 +731,7 @@ static bool xhci_configure_uas_endpoints(xhci_state_t *state) {
                                 transport->uas_data_in_max_burst);
     realtest_mark_number("USB_MSC_UAS_DATA_OUT_BURST",
                                 transport->uas_data_out_max_burst);
-    /* USB 2.x UAS has no xHCI streams.  SuperSpeed UAS uses streams when
-     * the companion descriptors advertise a usable depth. */
+    /* USB 2.x UAS 不使用 xHCI 流。SuperSpeed UAS 会在伴随描述符声明了可用深度时使用流。 */
     stream_depth = xhci_msc_uas_stream_depth(transport);
     transport->uas_streams = state->device_speed >= 4U &&
                              state->max_primary_stream_array_size >= 4U;
@@ -626,12 +783,9 @@ static bool xhci_configure_uas_endpoints(xhci_state_t *state) {
                                XHCI_RING_SEGMENT_COUNT) ||
         !xhci_alloc_dma_region(state, &transport->uas_data_out_ring,
                                XHCI_RING_SEGMENT_COUNT) ||
-        !xhci_alloc_page(state, &transport->uas_command_buffer,
-                         DMA_BIDIRECTIONAL) ||
-        !xhci_alloc_page(state, &transport->uas_status_buffer,
-                         DMA_FROM_DEVICE) ||
-        !xhci_alloc_page(state, &transport->uas_data_buffer,
-                         DMA_BIDIRECTIONAL)) {
+        !xhci_alloc_dma_region(state, &transport->uas_command_buffer, 1U) ||
+        !xhci_alloc_dma_region(state, &transport->uas_status_buffer, 1U) ||
+        !xhci_alloc_dma_region(state, &transport->uas_data_buffer, 1U)) {
         xhci_msc_transport_release(slot);
         return false;
     }
@@ -680,10 +834,8 @@ static bool xhci_configure_uas_endpoints(xhci_state_t *state) {
     input = (uint32_t *)state->input_context.cpu;
     control = input;
 
-    /* usb_set_interface() first installs the ordinary endpoint contexts.  The
-     * UAS driver then allocates streams by changing only the status/data
-     * contexts.  Keep those two xHCI Configure Endpoint transactions
-     * separate; a stream context is not a replacement for a new endpoint. */
+    /* usb_set_interface() 会先安装常规端点上下文。随后 UAS 驱动只修改状态/数据上下文来分配流。两个
+     * xHCI Configure Endpoint 事务必须分开执行；流上下文不能替代新端点。 */
     xhci_msc_prepare_input_context(state, max_id, 0U, 0U);
     for (uint32_t index = 0U; index < 4U; ++index)
         control[1] |= 1U << ids[index];
@@ -740,10 +892,8 @@ static bool xhci_configure_uas_endpoints(xhci_state_t *state) {
     kernel_serial_printf_serial_only(
         "OS_UAS_CONFIGURE_OK SLOT=%u PHASE=BASE\r\n", slot);
     realtest_mark("USB_MSC_UAS_BASE_CONFIGURED");
-    /* xHCI owns endpoint context activation.  Configure the host endpoints
-     * first, then select the USB UAS alternate setting.  This is the order
-     * used by the xHCI HCD during usb_set_interface(): bandwidth/endpoint
-     * state is established before the device receives SET_INTERFACE. */
+    /* 端点上下文的激活由 xHCI 管理。先配置主机端点，再选择 USB UAS 备用设置。这与 xHCI HCD 执行
+     * usb_set_interface() 时的顺序一致：先建立带宽/端点状态，再向设备发送 SET_INTERFACE。 */
     if (!xhci_msc_control_no_data(state, &state->device, 0x01U, 0x0BU,
                                   uas_alternate,
                                   transport->interface_number)) {
@@ -894,8 +1044,7 @@ static bool xhci_configure_msc_bot_endpoints(xhci_state_t *state) {
         return false;
     }
 
-    /* Some UAS devices expose BOT as alternate setting 0 and leave the
-     * firmware-selected UAS setting active across the loader handoff. */
+    /* 部分 UAS 设备将 BOT 作为备用设置 0，并在加载器交接期间保留固件选定的 UAS 设置。 */
     if (!xhci_msc_control_no_data(state, &state->device, 0x01U, 0x0BU, 0U,
                                   state->msc_interface)) {
         realtest_mark("USB_MSC_SET_INTERFACE_FAIL");
@@ -926,7 +1075,7 @@ static bool xhci_configure_msc_bot_endpoints(xhci_state_t *state) {
                                XHCI_RING_SEGMENT_COUNT) ||
         !xhci_alloc_dma_region(state, &transport->bulk_out_ring,
                                XHCI_RING_SEGMENT_COUNT) ||
-        !xhci_alloc_page(state, &transport->data_buffer, DMA_BIDIRECTIONAL)) {
+        !xhci_alloc_dma_region(state, &transport->data_buffer, 1U)) {
         xhci_msc_transport_release(slot);
         return false;
     }
@@ -992,10 +1141,8 @@ static bool xhci_configure_msc_bot_endpoints(xhci_state_t *state) {
     transport->bulk_out_cycle = 1U;
     state->msc_configured = true;
     g_xhci_usb_msc = true;
-    /* Linux enters BOT reset recovery only after a transport failure.  A
-     * freshly selected alternate setting starts with clean endpoints and can
-     * accept its first CBW directly; resetting it here would require a device
-     * recovery interval and can make the first bulk transaction time out. */
+    /* Linux 仅在传输失败后才进入 BOT 复位恢复流程。刚选中的备用设置拥有干净端点，可直接接收首个 CBW；
+     * 此处复位会触发设备恢复等待，还可能导致首个批量事务超时。 */
     realtest_mark("USB_MSC_BOT_CONFIGURED");
     return true;
 }
@@ -1010,10 +1157,8 @@ bool xhci_configure_msc_endpoints(xhci_state_t *state) {
         state->msc_uas_data_out_endpoint != 0U) {
         if (state->device_speed >= 4U &&
             state->max_primary_stream_array_size < 4U) {
-            /* Linux does not expose SuperSpeed UAS without at least four
-             * primary stream-context entries.  Prefer the device's BOT
-             * alternate setting when it is available instead of leaving a
-             * storage device unusable. */
+            /* Linux 要求至少有四个主流上下文项才会启用 SuperSpeed UAS。设备支持 BOT 备用设置时，优先选择
+             * BOT，避免存储设备无法使用。 */
             realtest_mark_number(
                 "USB_MSC_UAS_HOST_STREAMS_UNSUPPORTED",
                 state->max_primary_stream_array_size);
@@ -1123,7 +1268,7 @@ static void xhci_msc_log_bulk_error(
     }
 }
 
-static kstatus_t xhci_msc_transfer_locked(
+static kstatus_t xhci_msc_transfer_prepared(
     xhci_state_t *state, xhci_msc_transport_t *transport,
     uint8_t endpoint, bool direction_in, void *buffer,
     uint32_t length, uint32_t *actual) {
@@ -1131,11 +1276,14 @@ static kstatus_t xhci_msc_transfer_locked(
     uint32_t *enqueue;
     uint8_t *cycle;
     uint32_t endpoint_id;
-    xhci_trb_t *ring;
+    bool direct = dma_mapping_active(&transport->direct_mapping);
+    dma_mapping_t *data_mapping = direct ? &transport->direct_mapping :
+                                          &transport->data_buffer.mapping;
 
     if (state == 0 || transport == 0 || !transport->configured ||
-        buffer == 0 || length == 0U || length > PAGE_SIZE ||
-        transport->data_buffer.cpu == 0) return K_EINVAL;
+        buffer == 0 || length == 0U || length > XHCI_MSC_MAX_TRANSFER ||
+        (!direct && (transport->data_buffer.cpu == 0 ||
+         length > transport->data_buffer.page_count * PAGE_SIZE))) return K_EINVAL;
 
     if (direction_in) {
         if (endpoint != transport->bulk_in_endpoint) return K_EINVAL;
@@ -1175,38 +1323,33 @@ static kstatus_t xhci_msc_transfer_locked(
         }
     }
 
-    if (!direction_in) {
+    if (!direction_in && !direct) {
         for (uint32_t i = 0U; i < length; ++i)
             ((uint8_t *)transport->data_buffer.cpu)[i] =
                 ((const uint8_t *)buffer)[i];
-    } else {
+    } else if (!direct) {
         for (uint32_t i = 0U; i < length; ++i)
             ((uint8_t *)transport->data_buffer.cpu)[i] = 0U;
     }
 
-    ring = (xhci_trb_t *)ring_page->cpu;
     uint32_t index = *enqueue;
-    ring[index].parameter = xhci_dma_address(&transport->data_buffer.mapping);
-    ring[index].status = length;
-    ring[index].control =
-        (XHCI_NORMAL_TRB_TYPE << XHCI_TRB_TYPE_SHIFT) |
-        XHCI_TRB_INTERRUPT_ON_COMPLETION | *cycle;
-    if (direction_in) {
-        /* Inquiry, TUR sense data, and CSW are normally short packets. */
-        ring[index].control |= XHCI_TRB_INTERRUPT_ON_SHORT_PACKET;
-    }
-
-    if (!xhci_msc_ring_advance(ring_page, enqueue, cycle)) return K_EIO;
+    if (!xhci_msc_queue_data(ring_page, enqueue, cycle, data_mapping,
+             direct ? transport->direct_offset : 0U, length,
+             direction_in ? transport->bulk_in_max_packet : transport->bulk_out_max_packet,
+             direction_in, 0)) return K_EIO;
 
     dma_sync_for_device(&ring_page->mapping);
-    dma_sync_for_device(&transport->data_buffer.mapping);
+    dma_sync_for_device(data_mapping);
     dma_wmb();
     *(volatile uint32_t *)(state->mmio + state->doorbell_offset +
                            (uint32_t)transport->slot * sizeof(uint32_t)) =
         endpoint_id;
     __asm__ volatile ("mfence" : : : "memory");
 
-    for (uint32_t spin = 0U; spin < 5000000U; ++spin) {
+    /* 慢速实体 USB 存储设备的大块顺序读取，超时机制不得依赖 CPU 速度对应的自旋次数。 */
+    uint64_t deadline = xhci_controller_timeout_deadline(5000000000ULL);
+    for (;;) {
+        if (xhci_controller_timeout_reached(deadline)) break;
         xhci_trb_t event;
         if (!xhci_next_ring_event(state, &event)) {
             __asm__ volatile ("pause");
@@ -1219,7 +1362,8 @@ static kstatus_t xhci_msc_transfer_locked(
             (event.control >> XHCI_TRB_ENDPOINT_SHIFT) & 0x1FU;
         if (type != XHCI_TRANSFER_EVENT_TYPE ||
             event_slot != transport->slot || event_endpoint != endpoint_id) {
-            if (!xhci_defer_event(state, &event)) {
+            if (!xhci_handle_hid_io_event(state, &event) &&
+                !xhci_defer_event(state, &event)) {
                 realtest_mark_number("USB_MSC_BULK_FAIL_STAGE", 5U);
                 return K_EIO;
             }
@@ -1244,17 +1388,36 @@ static kstatus_t xhci_msc_transfer_locked(
         }
 
         uint32_t completed = length - residual;
-        if (direction_in) {
+        if (direction_in && !direct) {
             dma_sync_for_cpu(&transport->data_buffer.mapping);
             for (uint32_t i = 0U; i < completed; ++i)
                 ((uint8_t *)buffer)[i] =
                     ((const uint8_t *)transport->data_buffer.cpu)[i];
         }
         if (actual != 0) *actual = completed;
+        __atomic_add_fetch(direct ? &g_xhci_msc_direct_bytes : &g_xhci_msc_bounce_bytes,
+                           completed, __ATOMIC_RELAXED);
         return K_OK;
     }
     realtest_mark_number("USB_MSC_BULK_FAIL_STAGE", 8U);
     return K_ETIMEDOUT;
+}
+
+static kstatus_t xhci_msc_transfer_locked(
+    xhci_state_t *state, xhci_msc_transport_t *transport,
+    uint8_t endpoint, bool direction_in, void *buffer,
+    uint32_t length, uint32_t *actual) {
+    if (state == 0 || transport == 0 || !transport->configured || buffer == 0 ||
+        length == 0U || length > XHCI_MSC_MAX_TRANSFER) return K_EINVAL;
+    if (dma_mapping_active(&transport->direct_mapping)) return K_EIO;
+    bool direct = xhci_msc_direct_map(state, transport, buffer, length, direction_in);
+    if (!direct && !xhci_msc_reserve(state, &transport->data_buffer, length)) return K_ENOMEM;
+    kstatus_t status = xhci_msc_transfer_prepared(state, transport, endpoint,
+                                                direction_in, buffer, length, actual);
+    uint8_t endpoint_id = (uint8_t)((uint32_t)endpoint * 2U + (direction_in ? 1U : 0U));
+    if (direct && !xhci_msc_direct_finish(state, transport, endpoint_id, status == K_OK))
+        return K_EIO;
+    return status;
 }
 
 static bool xhci_uas_queue_transfer(
@@ -1263,20 +1426,19 @@ static bool xhci_uas_queue_transfer(
     xhci_dma_region_t *ring_page,
     uint32_t *enqueue,
     uint8_t *cycle,
-    xhci_dma_page_t *buffer_page,
+    xhci_dma_region_t *buffer_page,
     const void *source,
     uint32_t length,
     uint8_t endpoint,
     bool direction_in,
     uint16_t stream_id,
     uint64_t *trb_address) {
-    xhci_trb_t *ring;
-    uint32_t index;
     uint32_t endpoint_id;
 
     if (state == 0 || transport == 0 || ring_page == 0 || enqueue == 0 ||
         cycle == 0 || buffer_page == 0 || buffer_page->cpu == 0 ||
-        length == 0U || length > PAGE_SIZE || endpoint == 0U ||
+        length == 0U || length > XHCI_MSC_MAX_TRANSFER ||
+        length > buffer_page->page_count * PAGE_SIZE || endpoint == 0U ||
         *enqueue >= XHCI_RING_TOTAL_TRB_COUNT ||
         (*enqueue % XHCI_RING_TRB_COUNT) == XHCI_RING_TRB_COUNT - 1U ||
         !xhci_msc_ring_valid(ring_page)) {
@@ -1298,36 +1460,31 @@ static bool xhci_uas_queue_transfer(
         return false;
     }
 
-    if (direction_in) {
+    bool direct = buffer_page == &transport->uas_data_buffer &&
+                  dma_mapping_active(&transport->direct_mapping);
+    dma_mapping_t *data_mapping = direct ? &transport->direct_mapping : &buffer_page->mapping;
+    if (direction_in && !direct) {
         for (uint32_t offset = 0U; offset < length; ++offset)
             ((uint8_t *)buffer_page->cpu)[offset] = 0U;
-    } else if (source != 0 && source != buffer_page->cpu) {
+    } else if (!direct && source != 0 && source != buffer_page->cpu) {
         for (uint32_t offset = 0U; offset < length; ++offset)
             ((uint8_t *)buffer_page->cpu)[offset] =
                 ((const uint8_t *)source)[offset];
     }
 
-    ring = (xhci_trb_t *)ring_page->cpu;
-    index = *enqueue;
-    ring[index].parameter = xhci_dma_address(&buffer_page->mapping);
-    ring[index].status = length;
-    ring[index].control =
-        (XHCI_NORMAL_TRB_TYPE << XHCI_TRB_TYPE_SHIFT) |
-        XHCI_TRB_INTERRUPT_ON_COMPLETION | *cycle;
-    if (direction_in) ring[index].control |= XHCI_TRB_INTERRUPT_ON_SHORT_PACKET;
-    if (trb_address != 0)
-        *trb_address = xhci_dma_address(&ring_page->mapping) +
-                       (uint64_t)index * sizeof(xhci_trb_t);
-
-    if (!xhci_msc_ring_advance(ring_page, enqueue, cycle)) {
+    if (!xhci_msc_queue_data(ring_page, enqueue, cycle, data_mapping,
+                             direct ? transport->direct_offset : 0U,
+                             length, direction_in ? transport->uas_data_in_max_packet :
+                                                    transport->uas_data_out_max_packet,
+                             direction_in, trb_address)) {
         kernel_serial_printf_serial_only(
             "OS_UAS_QUEUE_FAIL STAGE=3 EP=%u IN=%u STREAM=%u LEN=%u ENQ=%u\r\n",
-            endpoint, direction_in ? 1U : 0U, stream_id, length, index);
+            endpoint, direction_in ? 1U : 0U, stream_id, length, *enqueue);
         return false;
     }
 
     dma_sync_for_device(&ring_page->mapping);
-    dma_sync_for_device(&buffer_page->mapping);
+    dma_sync_for_device(data_mapping);
     dma_wmb();
     (void)stream_id;
     return true;
@@ -1382,7 +1539,7 @@ static kstatus_t xhci_uas_scsi_command_locked(
     if (state == 0 || transport == 0 || !transport->configured ||
         !transport->uas || command == 0 || command_length == 0U ||
         command_length > 16U || (length != 0U && buffer == 0) ||
-        length > PAGE_SIZE) {
+        length > XHCI_MSC_MAX_TRANSFER) {
         return K_EINVAL;
     }
 
@@ -1430,19 +1587,19 @@ static kstatus_t xhci_uas_scsi_command_locked(
     for (uint32_t offset = 0U; offset < XHCI_UAS_COMMAND_LENGTH; ++offset)
         command_iu[offset] = 0U;
     command_iu[0] = XHCI_UAS_COMMAND_IU;
-    /* The UAS tag is a big-endian 16-bit field shared by all IUs. */
+    /* UAS 标签是供所有 IU 共用的 16 位大端字段。 */
     command_iu[2] = (uint8_t)(XHCI_UAS_TASK_TAG >> 8);
     command_iu[3] = (uint8_t)XHCI_UAS_TASK_TAG;
-    command_iu[4] = 0U; /* UAS_SIMPLE_TAG */
+    command_iu[4] = 0U; /* UAS_SIMPLE_TAG：简单标签 */
     command_iu[5] = 0U;
-    command_iu[6] = 0U; /* no CDB bytes beyond the 16-byte CDB field */
+    command_iu[6] = 0U; /* 16 字节 CDB 字段之后没有额外 CDB 字节 */
     command_iu[7] = 0U;
     for (uint32_t offset = 0U; offset < command_length; ++offset)
         command_iu[16U + offset] = command[offset];
     for (uint32_t offset = 0U; offset < XHCI_UAS_STATUS_LENGTH; ++offset)
         status_iu[offset] = 0U;
 
-    /* UAS posts Status first, then the data stream, and Command last. */
+    /* UAS 按状态、数据流、命令的顺序提交。 */
     if (!xhci_uas_queue_transfer(
             state, transport, status_ring, status_enqueue, status_cycle,
             &transport->uas_status_buffer, 0, XHCI_UAS_STATUS_LENGTH,
@@ -1541,7 +1698,8 @@ static kstatus_t xhci_uas_scsi_command_locked(
         if (type != XHCI_TRANSFER_EVENT_TYPE || event_slot != transport->slot ||
             (event_endpoint != command_id && event_endpoint != status_id &&
              (length == 0U || event_endpoint != data_id))) {
-            if (!xhci_defer_event(state, &event)) {
+            if (!xhci_handle_hid_io_event(state, &event) &&
+                !xhci_defer_event(state, &event)) {
                 kernel_serial_printf_serial_only(
                     "OS_UAS_EVENT_QUEUE_FAIL SLOT=%u TYPE=%u CTRL=%u\r\n",
                     transport->slot, type, event.control);
@@ -1663,13 +1821,16 @@ static kstatus_t xhci_uas_scsi_command_locked(
             if (!data_submitted || event.parameter != data_trb ||
                 residual > length) continue;
             uint32_t completed = length - residual;
-            if (direction_in) {
+            if (direction_in && !dma_mapping_active(&transport->direct_mapping)) {
                 dma_sync_for_cpu(&transport->uas_data_buffer.mapping);
                 for (uint32_t offset = 0U; offset < completed; ++offset)
                     ((uint8_t *)buffer)[offset] =
                         ((const uint8_t *)transport->uas_data_buffer.cpu)[offset];
             }
             if (actual != 0) *actual = completed;
+            __atomic_add_fetch(dma_mapping_active(&transport->direct_mapping) ?
+                &g_xhci_msc_direct_bytes : &g_xhci_msc_bounce_bytes,
+                completed, __ATOMIC_RELAXED);
             data_done = true;
             continue;
         }
@@ -1696,8 +1857,7 @@ static kstatus_t xhci_uas_scsi_command_locked(
                 result = K_EIO;
                 goto out;
             }
-            /* The data stream was posted before Command.  The Ready IU only
-             * consumes this Status TD, so arm the next Status TD. */
+            /* 数据流在命令前提交。Ready IU 只会消费此状态 TD，因此要布置下一个状态 TD。 */
             for (uint32_t offset = 0U;
                  offset < XHCI_UAS_STATUS_LENGTH; ++offset)
                 status_iu[offset] = 0U;
@@ -1784,6 +1944,28 @@ bool xhci_usb_msc_is_uas(uint8_t slot) {
            g_xhci_msc_transports[slot].uas;
 }
 
+uint32_t xhci_usb_msc_prepare_buffer(uint8_t slot, uint32_t requested) {
+    if (slot == 0U || requested == 0U) return 0U;
+    xhci_state_t *state = xhci_controller_state();
+    if (state == 0 || !state->initialized) return 0U;
+    xhci_event_lock(state);
+    xhci_msc_transport_t *transport = &g_xhci_msc_transports[slot];
+    xhci_dma_region_t *buffer = transport->uas ? &transport->uas_data_buffer :
+                                               &transport->data_buffer;
+    uint32_t capacity = 0U;
+    if (transport->configured && !dma_mapping_active(&transport->direct_mapping)) {
+        if (requested > XHCI_MSC_MAX_TRANSFER) requested = XHCI_MSC_MAX_TRANSFER;
+        while (requested >= PAGE_SIZE) {
+            if (xhci_msc_reserve(state, buffer, requested)) break;
+            requested /= 2U;
+        }
+        capacity = buffer->page_count * PAGE_SIZE;
+    }
+    xhci_event_unlock(state);
+    if (xhci_event_pending(state)) (void)xhci_schedule_deferred_work();
+    return capacity;
+}
+
 bool xhci_usb_msc_recover_uas(uint8_t slot) {
     xhci_state_t *state = xhci_controller_state();
     xhci_msc_transport_t *transport;
@@ -1799,9 +1981,8 @@ bool xhci_usb_msc_recover_uas(uint8_t slot) {
     ok = xhci_stop_uas_transport(state, transport);
     if (!xhci_drop_uas_endpoint_contexts(state, transport)) ok = false;
     if (ok) {
-        /* The controller no longer references these rings after STOP and
-         * Configure Endpoint.  Rebuild the complete UAS transport so every
-         * ring, stream context, and dequeue cycle starts from a known state. */
+        /* STOP 和 Configure Endpoint 完成后，控制器不再引用这些环。重建完整 UAS 传输，使每个环、流上下文
+         * 和取出周期都从已知状态开始。 */
         xhci_msc_transport_release(slot);
         ok = xhci_configure_uas_endpoints(state);
     }
@@ -1840,9 +2021,25 @@ kstatus_t xhci_usb_msc_scsi_command(uint8_t slot, const uint8_t *command,
     state = xhci_controller_state();
     transport = &g_xhci_msc_transports[slot];
     xhci_event_lock(state);
+    if (dma_mapping_active(&transport->direct_mapping)) {
+        xhci_event_unlock(state);
+        return K_EIO;
+    }
+    if (length != 0U && !xhci_msc_reserve(state, &transport->uas_data_buffer, length)) {
+        xhci_event_unlock(state);
+        return K_ENOMEM;
+    }
+    bool direct = length != 0U &&
+                  xhci_msc_direct_map(state, transport, buffer, length, direction_in);
     status = xhci_uas_scsi_command_locked(
         state, transport, command, command_length, buffer, length,
         direction_in, actual);
+    if (direct) {
+        bool stopped = status == K_OK || xhci_stop_uas_transport(state, transport);
+        if (!xhci_msc_direct_finish(state, transport,
+                (uint8_t)xhci_msc_endpoint_id(direction_in ? transport->uas_data_in_endpoint :
+                    transport->uas_data_out_endpoint, direction_in), stopped)) status = K_EIO;
+    }
     xhci_event_unlock(state);
     if (xhci_event_pending(state)) (void)xhci_schedule_deferred_work();
     return status;
@@ -1875,6 +2072,9 @@ kstatus_t xhci_usb_bulk_session_begin(uint8_t slot) {
 
 void xhci_usb_bulk_session_end(uint8_t slot) {
     (void)slot;
+    /* 同步 CBW/DATA/CSW 消费者推进 ERDP 时，不会逐个 TRB 清除 EHB。仍持有事件环时先结束当前批次，再恢复
+     * 延迟 HID/Hub 处理；BOT 错误路径也适用此规则。 */
+    xhci_event_handler_complete(xhci_controller_state());
     xhci_event_unlock(xhci_controller_state());
     if (xhci_event_pending(xhci_controller_state())) (void)xhci_schedule_deferred_work();
 }

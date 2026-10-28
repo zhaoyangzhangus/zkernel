@@ -2,7 +2,7 @@
 
 #include "abi.h"
 
-/* Stable clock identifiers shared by the kernel and freestanding libc. */
+/* 由内核和 freestanding libc 共用的稳定时钟标识。 */
 #define OS_CLOCK_REALTIME  0U
 #define OS_CLOCK_MONOTONIC 1U
 

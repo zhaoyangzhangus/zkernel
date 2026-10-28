@@ -24,7 +24,7 @@ typedef struct node {struct node *next,*prev;} list_head_t;
 typedef struct {
  pthread_mutex_t lock;atomic_uint state;unsigned thread_count,flags;
  int64_t exit_code;unsigned exit_signal;uint64_t retired_cpu_ns;
- list_head_t *monitor_thread_cursor;
+ list_head_t *monitor_thread_cursor,*enumeration_thread_cursor;
  atomic_uint removed,orphaned,callbacks,notified,parent_wakes,released;
 } process_t;
 typedef struct {process_t *process;list_head_t process_node;int64_t exit_code;struct {uint64_t runtime_ns;} sched;} thread_t;

@@ -25,8 +25,8 @@ fixture = r'''
 #include <stdlib.h>
 #include <string.h>
 #include "ascii_font_internal.h"
-#define ASCII_FONT_MAX_DIMENSION 64U
-#define ASCII_FONT_MAX_CACHE_BYTES (512U*1024U)
+#define ASCII_FONT_MAX_DIMENSION 96U
+#define ASCII_FONT_MAX_CACHE_BYTES (1024U*1024U)
 #define ASCII_FONT_SUPERSAMPLE 4U
 static ascii_font_parser_t g_ascii_font_parser;
 static unsigned mode,failed_glyphs,allocations,frees;
@@ -89,7 +89,7 @@ static void reference_test_quadratic(ascii_font_point_t from,
 }
 '''
 reference_outline = source[source.index('static bool font_outline_contains('):
-                           source.index('static bool font_rasterize_glyph(')]
+                           source.index('static bool font_rasterize_from_parser(')]
 reference_outline = reference_outline.replace('font_outline_contains', 'reference_outline_contains').replace(
     'font_test_quadratic', 'reference_test_quadratic').replace('font_test_line', 'reference_test_line')
 reference_raster = r'''
@@ -179,7 +179,8 @@ int main(int argc,char **argv) {
  fail_allocation=true;assert(!font_build_cache(8,16,&actual,&size));
  assert(actual==(uint8_t*)1 && size==999 && allocations==before);fail_allocation=false;
  assert(!font_build_cache(0,16,&actual,&size));assert(!font_build_cache(8,0,&actual,&size));
- assert(!font_build_cache(65,16,&actual,&size));assert(!font_build_cache(8,65,&actual,&size));
+ assert(font_build_cache(48,96,&actual,&size));kfree(actual);actual=(uint8_t*)1;size=999;
+ assert(!font_build_cache(97,16,&actual,&size));assert(!font_build_cache(8,97,&actual,&size));
  assert(!font_build_cache(8,16,NULL,&size));assert(!font_build_cache(8,16,&actual,NULL));
  const uint8_t *saved=g_ascii_font_parser.file;g_ascii_font_parser.file=NULL;
  assert(!font_build_cache(8,16,&actual,&size));g_ascii_font_parser.file=saved;

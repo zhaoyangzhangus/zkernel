@@ -124,9 +124,8 @@ static int flush_stream(FILE *stream) {
     return 0;
 }
 
-/* Move the kernel offset behind any bytes that are still in the input
- * buffer.  This is required before an update stream changes from reading to
- * writing or seeks. */
+/* 将内核文件偏移回退到仍留在输入缓冲区中的字节之前。
+ * 更新流从读取切换为写入或执行定位前必须完成此操作。 */
 static int discard_read_buffer(FILE *stream) {
     size_t unread = 0U;
     if ((stream->flags & LIBC_FILE_READ_BUFFER) != 0U) {
@@ -237,9 +236,8 @@ static int fill_input_buffer(FILE *stream) {
             stream->flags |= LIBC_FILE_EOF;
             return 0;
         }
-        /* A stream with no buffer has no safe place to retain a byte.  The
-         * standard streams are normally unbuffered, so return it via the
-         * one-byte pushback slot. */
+        /* 无缓冲区的流没有安全位置保存字节。标准流通常不带缓冲，因此通过单字节回退槽
+         * 返回该字节。 */
         stream->ungot = value;
         stream->flags &= ~LIBC_FILE_EOF;
         return 1;
@@ -1122,7 +1120,7 @@ static size_t float_fixed_body(char *text, long double value, int precision,
     }
     for (index = 0U; index < count; ++index) float_text_character(text, &length, digits[index]);
     if (precision > 0 || alternate) {
-        /* Insert the decimal point between the integer and fractional zeros. */
+        /* 在整数部分与小数部分的零之间插入小数点。 */
         size_t fractional_start = length > 0U ? 1U : 0U;
         size_t tail = length > fractional_start ? length - fractional_start : 0U;
         if (tail != 0U) {
@@ -1232,8 +1230,7 @@ static size_t float_body(char *text, long double value, char conversion,
     size_t length;
     if (precision < 0) precision = 6;
     if ((conversion == 'g' || conversion == 'G') && precision == 0) precision = 1;
-    /* ponytail: cap pathological precisions; grow this buffer if arbitrary
-     * precision formatting becomes a compatibility requirement. */
+    /* ponytail：限制异常精度；若兼容性要求支持任意精度格式化，再扩大此缓冲区。 */
     if ((unsigned int)precision > LIBC_FLOAT_PRECISION_LIMIT) {
         precision = (int)LIBC_FLOAT_PRECISION_LIMIT;
     }
@@ -1456,8 +1453,8 @@ int vsnprintf(char *buffer, size_t capacity, const char *format,
             break;
         case 'a':
         case 'A':
-            /* Hexadecimal floating formatting is deferred until a consumer
-             * requires it; decimal forms cover the libc/runtime ABI today. */
+            /* 十六进制浮点格式化暂缓实现，直到有使用方提出需求；目前十进制格式已覆盖
+             * libc/运行时 ABI。 */
             format_string(&output, "?", &spec);
             break;
         case '\0':
@@ -1703,9 +1700,8 @@ static int scan_digit_value(int value) {
     return -1;
 }
 
-/* Return whether value can extend the numeric token already collected.  In
- * particular, '-' is only a sign at the beginning; treating it as a generic
- * candidate makes a format such as "%lx-%lx" consume both addresses. */
+/* 判断 value 是否可扩展已收集的数值词元。尤其是，'-' 仅在开头作为符号；若将其视为
+ * 通用候选字符，像 "%lx-%lx" 这样的格式就会把两个地址一并读入。 */
 static bool scan_numeric_candidate(int base, const char *token, size_t length,
                                    int value) {
     size_t prefix = 0U;
@@ -2133,8 +2129,8 @@ int fflush_unlocked(FILE *stream) {
     return fflush(stream);
 }
 
-/* Imported ISO C99 names share the existing scanner implementation. These
- * exports do not imply compatibility with glibc FILE layout or symbol versions. */
+/* 导入的 ISO C99 名称共用现有扫描器实现。导出这些符号并不代表兼容 glibc FILE 布局
+ * 或符号版本。 */
 extern __typeof__(sscanf) __isoc99_sscanf __attribute__((alias("sscanf")));
 extern __typeof__(vsscanf) __isoc99_vsscanf __attribute__((alias("vsscanf")));
 extern __typeof__(fscanf) __isoc99_fscanf __attribute__((alias("fscanf")));

@@ -45,11 +45,11 @@ constexpr int kCreateFontByFciIdAndTtcIndex=1;
 struct CreationParams {
  int CreationType() const { return 1; }
  int TtcIndex() const { return 2; }
- std::string Filename() const { return "/etc/fonts/NotoSansCJK-Regular.ttc"; }
+ std::string Filename() const { return "/EFI/OS/fonts/NotoSansCJK-Regular.ttc"; }
 };
 struct SkTypeface_Factory {
  static sk_sp<SkTypeface> FromFilenameAndTtcIndex(const char *path, int index) {
-  assert(!strcmp(path,"/etc/fonts/NotoSansCJK-Regular.ttc") && index==2);
+  assert(!strcmp(path,"/EFI/OS/fonts/NotoSansCJK-Regular.ttc") && index==2);
   return std::make_shared<SkTypeface>(SkTypeface{false});
  }
 };
@@ -79,7 +79,7 @@ static unsigned loads;
 static bool missing;
 struct SkFontMgr {
  sk_sp<SkTypeface> makeFromFile(const char *path, int index) {
-  ++loads; assert(!strcmp(path,"/etc/fonts/NotoSansCJK-Regular.ttc") && index==2);
+  ++loads; assert(!strcmp(path,"/EFI/OS/fonts/NotoSansCJK-Regular.ttc") && index==2);
   return missing ? nullptr : std::make_shared<SkTypeface>(SkTypeface{false});
  }
 };
@@ -95,13 +95,13 @@ int main(int argc, char **) {
  assert(!GetNativeFallbackFontForCharacter('a',&path,nullptr));
  assert(!loads && index==-1);
  assert(GetNativeFallbackFontForCharacter('A',&path,&index));
- assert(!strcmp(path,"/etc/fonts/default.ttf") && index==0 && !loads);
+ assert(!strcmp(path,"/EFI/OS/fonts/default.ttf") && index==0 && !loads);
  for(int c: {0x4e2d,0x65e5,0xac00}) {
   for(unsigned i=0;i<100;++i) {
    path="unchanged"; index=-1;
    bool found=GetNativeFallbackFontForCharacter(c,&path,&index);
    assert(found==!missing);
-   if(found) assert(!strcmp(path,"/etc/fonts/NotoSansCJK-Regular.ttc") && index==2);
+   if(found) assert(!strcmp(path,"/EFI/OS/fonts/NotoSansCJK-Regular.ttc") && index==2);
    else assert(!strcmp(path,"unchanged") && index==-1);
   }
  }
@@ -112,7 +112,7 @@ int main(int argc, char **) {
  gfx::FallbackFontData route;
  assert(!gfx::GetFallbackFontForChar(0x4e2d,"",nullptr));
  assert(blink::FontCache::GetFontForCharacter(0x4e2d,nullptr,&route)==!missing);
- if(!missing) assert(route.ttc_index==2 && route.filepath.path=="/etc/fonts/NotoSansCJK-Regular.ttc");
+ if(!missing) assert(route.ttc_index==2 && route.filepath.path=="/EFI/OS/fonts/NotoSansCJK-Regular.ttc");
  auto face=LoadSelectedFace(CreationParams{});
  assert(face && face->unicharToGlyph(0x4e2d));
  puts("CJK selection: primary face, TTC index, unsupported/missing glyphs and one-time load passed");

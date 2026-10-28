@@ -2,8 +2,8 @@
 #include <uapi/mm.h>
 #include "internal.h"
 
-/* Caller holds map_lock: holes remain governed by VMA permissions and are
- * populated by the fault handler later, not by mprotect. */
+/* 调用方持有 map_lock：空洞仍由 VMA 权限约束，之后由缺页处理程序填充，
+ * 而不是由 mprotect 填充。 */
 static kstatus_t protect_resident_pages(vm_space_t *space,
                                         const vm_area_t *area, uint32_t prot,
                                         bool *deferred_changed) {
@@ -21,7 +21,7 @@ static kstatus_t protect_resident_pages(vm_space_t *space,
                        (vaddr_t)va, flags, X86_CACHE_WB, &changed);
             *deferred_changed |= changed;
         } else {
-            /* Preserve native supervisor/global mapping semantics. */
+            /* 保留原生 supervisor/global 映射语义。 */
             status = x86_protect_page(space->root_table, (vaddr_t)va,
                                        flags, X86_CACHE_WB);
         }
@@ -33,8 +33,8 @@ static kstatus_t protect_resident_pages(vm_space_t *space,
 static bool range_fully_mapped(const vm_space_t *space,
                                uint64_t start, uint64_t end,
                                vm_area_t **first, vm_area_t **last) {
-    /* map_lock keeps both indexes stable. Seek once, then verify adjacency
-     * without visiting unrelated lower-address VMAs. */
+    /* map_lock 可保持两个索引稳定。先查找一次，再验证相邻关系，
+     * 不必遍历无关的低地址 VMA。 */
     vm_area_t *start_area = find_area(space, start);
     if (start_area == 0) return false;
     uint64_t cursor = start;
@@ -80,6 +80,13 @@ bool vm_range_is_mapped(vm_space_t *space, vaddr_t address, size_t size) {
 
 kstatus_t vm_sync(vm_space_t *space, vaddr_t address, size_t size,
                   uint32_t flags) {
+    typedef struct sync_request {
+        struct sync_request *next;
+        vm_object_t *object;
+        uint64_t first_page, page_count;
+    } sync_request_t;
+    sync_request_t *requests = 0;
+    sync_request_t **tail = &requests;
     const uint32_t valid_flags = OS_VM_SYNC_ASYNC |
                                  OS_VM_SYNC_INVALIDATE |
                                  OS_VM_SYNC_SYNC;
@@ -135,11 +142,34 @@ kstatus_t vm_sync(vm_space_t *space, vaddr_t address, size_t size,
         page_count = (overlap_end - overlap_start) >> PAGE_SHIFT;
         ops = area->object->u.file.ops;
         if (page_count == 0U || ops == 0 || ops->sync == 0) continue;
-        status = ops->sync(area->object->u.file.mapping,
-                           file_offset >> PAGE_SHIFT, page_count);
-        if (status != K_OK) break;
+        sync_request_t *request = kmalloc(sizeof(*request), 0U);
+        if (request == 0) {
+            status = K_ENOMEM;
+            break;
+        }
+        vm_object_get(area->object);
+        *request = (sync_request_t){
+            .object = area->object,
+            .first_page = file_offset >> PAGE_SHIFT,
+            .page_count = page_count,
+        };
+        *tail = request;
+        tail = &request->next;
     }
     map_unlock(space);
+    /* 不再使用 VMA/链表指针。每个请求都会持有不可变的文件对象/映射，直到回调结束；
+     * 即使 I/O 期间另一颗 CPU 解映射、拆分或替换了原地址范围也不受影响。 */
+    while (requests != 0) {
+        sync_request_t *request = requests;
+        requests = request->next;
+        vm_object_t *object = request->object;
+        if (status == K_OK) {
+            status = object->u.file.ops->sync(object->u.file.mapping,
+                request->first_page, request->page_count);
+        }
+        vm_object_put(object);
+        kfree(request);
+    }
     return status;
 }
 
@@ -164,28 +194,27 @@ kstatus_t vm_advise(vm_space_t *space, vaddr_t address, size_t size,
         }
     }
     if (advice != OS_VM_ADVICE_DONTNEED) {
-        /* These are hints; DONTDUMP/DODUMP are no-ops until System supports
-         * core dumps, but Linux callers must still be allowed to use them. */
+        /* 这些是提示；System 支持 core dump 前，DONTDUMP/DODUMP 不执行操作，
+         * 但仍须允许 Linux 调用方使用它们。 */
         map_unlock(space);
         return K_OK;
     }
 
-    /* DONTNEED drops resident translations first. Keep backing objects until
-     * every shootdown succeeds, so a failed unmap never loses user data. */
-    /* The whole interval is already checked mapped and guard-free. Let the
-     * sparse unmapper batch resident pages across adjacent VMA boundaries,
-     * rather than forcing an IPI/ack round trip for each small VMA. */
+    /* DONTNEED 先丢弃常驻映射。所有 shootdown 成功前都保留后备对象，
+     * 避免解映射失败时丢失用户数据。 */
+    /* 整个区间已确认均有映射且不含保护区。允许稀疏取消映射跨相邻 VMA 批量处理驻留页面，避免每个
+     * 小 VMA 都单独进行一次 IPI/确认往返。 */
     kstatus_t unmap_status = vm_tlb_unmap_range(space, address, end);
     if (unmap_status != K_OK) {
         map_unlock(space);
         return unmap_status;
     }
 
-    /* Faults that sampled a backing page before this operation must retry
-     * before installing it. The map lock excludes new snapshots until the
-     * backing-page ranges below have been discarded. */
+    /* 在此操作前已采样后备页的缺页处理程序，必须在安装页面前重试。映射锁会阻止新快照，直到下方的
+     * 后备页范围完成丢弃。 */
     atomic_fetch_add_explicit(&space->advice_generation, 1U,
                               memory_order_release);
+    anon_page_node_t *retired = 0;
     for (list_head_t *item = &first_area->ordered_node;
          item != range_end; item = item->next) {
         vm_area_t *area = area_from_list(item);
@@ -207,17 +236,20 @@ kstatus_t vm_advise(vm_space_t *space, vaddr_t address, size_t size,
         uint64_t page_count = (overlap_end - overlap_start) >> PAGE_SHIFT;
         if (first_index > UINT64_MAX - page_count) {
             map_unlock(space);
+            anon_page_release_retired(retired);
             return K_EOVERFLOW;
         }
-        kstatus_t status = anon_page_discard_range(
-            discard_object, first_index, first_index + page_count);
+        kstatus_t status = anon_page_retire_range(
+            discard_object, first_index, first_index + page_count, &retired);
         if (status != K_OK) {
             map_unlock(space);
+            anon_page_release_retired(retired);
             return status;
         }
     }
     vm_tlb_bump_generation(space);
     map_unlock(space);
+    anon_page_release_retired(retired);
     return K_OK;
 }
 
@@ -240,8 +272,26 @@ static kstatus_t vm_protect_impl(vm_space_t *space, vaddr_t address,
         map_unlock(space);
         return K_ENOENT;
     }
-    /* Resolve both boundaries first. Publish each split incrementally before
-     * any subsequent allocation/MMU failure can release map_lock. */
+    /* 已有权限无需再次切分 VMA 或遍历 PTE。COW 等受限 PTE 仍由缺页路径处理，
+     * 不因重复声明可写权限而解除共享页保护。私有可写文件若尚无影子对象，
+     * 则继续原有的准备事务，不能仅凭 VMA 权限跳过。 */
+    bool unchanged = start_area->prot == prot;
+    for (list_head_t *item = &start_area->ordered_node;
+         unchanged && item != end_area->ordered_node.next; item = item->next) {
+        vm_area_t *area = area_from_list(item);
+        if (area->prot != prot ||
+            ((prot & VM_PROT_WRITE) != 0U && area->object != 0 &&
+             area->object->type == VM_OBJECT_FILE &&
+             (area->flags & VM_MAP_PRIVATE) != 0U && area->private_object == 0)) {
+            unchanged = false;
+            break;
+        }
+    }
+    if (unchanged) {
+        map_unlock(space);
+        return K_OK;
+    }
+    /* 先解析两个边界。在后续分配/MMU 操作可能失败并释放 map_lock 前，逐步发布每次分割结果。 */
     if (address > start_area->start) {
         vm_area_t *right = vm_area_split(start_area, address);
         if (right == 0) {
@@ -262,11 +312,10 @@ static kstatus_t vm_protect_impl(vm_space_t *space, vaddr_t address,
         update_area_tree(end_area);
         insert_area_tree(space, right);
     }
-    /* All subsequent stages use this stable, fully split list interval.
-     * Shadow/PTE changes cannot insert or remove VMAs while map_lock is held. */
+    /* 后续所有阶段都使用此稳定且已完整分割的列表区间。持有 map_lock 时，Shadow/PTE 修改不能插入或移除 VMA。 */
     list_head_t *range_end = end_area->ordered_node.next;
 
-    /* A private writable file mapping needs a shadow before the PTE update. */
+    /* 修改 PTE 前，私有可写文件映射需要先创建影子对象。 */
     if ((prot & VM_PROT_WRITE) != 0) {
         list_head_t *shadow_begin = range_end;
         for (list_head_t *item = &start_area->ordered_node;
@@ -293,6 +342,7 @@ static kstatus_t vm_protect_impl(vm_space_t *space, vaddr_t address,
                 map_unlock(space);
                 return K_ENOMEM;
             }
+            area->private_object->flags |= VM_OBJECT_FLAG_MAP_OWNED;
             area->flags |= VM_AREA_CLONE_OLD_COW;
             if (shadow_begin == range_end) shadow_begin = item;
         }
@@ -302,20 +352,18 @@ static kstatus_t vm_protect_impl(vm_space_t *space, vaddr_t address,
         }
     }
 
-    /* A large anonymous reservation can have no resident PTEs at all.  Do
-     * not call x86_protect_page once per 4 KiB page in that sparse VMA. */
+    /* 大型匿名预留区可能完全没有驻留 PTE。不要对该稀疏 VMA 中的每个 4 KiB 页面都调用
+     * x86_protect_page。 */
     if (x86_page_range_has_present_pages(
             space->root_table, (vaddr_t)address, end)) {
-        /* Update all PTEs first. Acknowledge one user-root flush for the whole
-         * transaction before publishing VMA permissions or releasing map_lock. */
+        /* 先更新全部 PTE。在发布 VMA 权限或释放 map_lock 前，为整个事务执行一次已确认的用户根页表刷新。 */
         bool deferred_changed = false;
         kstatus_t status = K_OK;
         list_head_t *rollback_end = &start_area->ordered_node;
         for (list_head_t *item = &start_area->ordered_node;
              item != range_end; item = item->next) {
             vm_area_t *area = area_from_list(item);
-            /* A failing VMA may already contain changed PTEs. Include it, but
-             * never scan or rewrite the untouched suffix during rollback. */
+            /* 失败的 VMA 中可能已经有 PTE 被修改。回滚时须包含该 VMA，但绝不扫描或重写尚未处理的后缀。 */
             rollback_end = item->next;
             status = protect_resident_pages(space, area, prot, &deferred_changed);
             if (status != K_OK) break;
@@ -344,8 +392,17 @@ static kstatus_t vm_protect_impl(vm_space_t *space, vaddr_t address,
         vm_area_t *area = area_from_list(item);
         area->prot = prot;
     }
+    /* 权限事务及刷新确认成功后再合并，失败回滚仍保留原有区域边界。 */
+    list_head_t retired;
+    list_init(&retired);
+    vm_area_merge_range(space, start_area, range_end, &retired);
     vm_tlb_bump_generation(space);
     map_unlock(space);
+    while (!list_empty(&retired)) {
+        vm_area_t *area = area_from_list(retired.next);
+        list_del(&area->ordered_node);
+        area_release(area);
+    }
     return K_OK;
 }
 

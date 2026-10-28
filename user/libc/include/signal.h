@@ -20,9 +20,8 @@ typedef struct libc_siginfo {
     void *si_addr;
 } siginfo_t;
 
-/* Linux-compatible alternate signal-stack shape.  System currently keeps
- * signal delivery on the thread's normal stack, but exposing the POSIX type
- * lets portable crash and tracing code compile against the ABI. */
+/* Linux 兼容的备用信号栈结构。System 当前仍在线程常规栈上投递信号，
+ * 但公开此 POSIX 类型可让可移植崩溃处理和跟踪代码按该 ABI 编译。 */
 typedef struct {
     void *ss_sp;
     int ss_flags;
@@ -79,10 +78,9 @@ struct sigaction {
 #define SIG_IGN ((sighandler_t)OS_SIG_IGN)
 #define SIG_ERR ((sighandler_t)-1)
 
-/* Expose the Linux signal flag values expected by portable Linux code.  The
- * libc syscall adapter translates the two flags understood by System back to
- * OS_SIG_FLAG_* before entering the kernel.  The remaining flags are accepted
- * as ABI markers; System currently does not implement their extra semantics.
+/* 提供可移植 Linux 代码所需的信号标志取值。libc 系统调用适配器会在进入内核前，
+ * 将 System 支持的两个标志转换回 OS_SIG_FLAG_*。其余标志仅作为 ABI 标记接受；
+ * System 当前未实现它们的附加语义。
  */
 #define SA_NOCLDSTOP  0x00000001U
 #define SA_NOCLDWAIT  0x00000002U
@@ -103,7 +101,7 @@ struct sigaction {
 #define SIG_UNBLOCK  OS_SIG_UNBLOCK
 #define SIG_SETMASK  OS_SIG_SETMASK
 
-/* POSIX siginfo si_code values used by Chromium's crash reporter. */
+/* Chromium 崩溃报告器使用的 POSIX siginfo si_code 取值。 */
 #ifndef ILL_ILLOPC
 #define ILL_ILLOPC 1
 #define ILL_ILLOPN 2
@@ -129,7 +127,7 @@ struct sigaction {
 #define SI_KERNEL 0x80
 #endif
 
-/* Linux siginfo si_code values used by V8's trap handler. */
+/* V8 陷阱处理器使用的 Linux siginfo si_code 取值。 */
 #ifndef SI_USER
 #define SI_USER 0
 #define SI_QUEUE (-1)
@@ -138,7 +136,7 @@ struct sigaction {
 #define SI_ASYNCIO (-4)
 #endif
 
-/* Child-state codes returned by waitid(). */
+/* waitid() 返回的子进程状态码。 */
 #ifndef CLD_EXITED
 #define CLD_EXITED 1
 #define CLD_KILLED 2

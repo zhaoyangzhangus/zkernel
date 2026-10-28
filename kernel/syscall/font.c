@@ -1,4 +1,4 @@
-/* REFACTOR_SYSCALL_FONT_OWNER: runtime TrueType cache export. */
+/* REFACTOR_SYSCALL_FONT_OWNER：运行时 TrueType 缓存导出。 */
 
 #include <arch/x86_64/uaccess.h>
 #include <ascii_font.h>

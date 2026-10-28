@@ -2,9 +2,8 @@
 
 #include <stdint.h>
 
-/* The System libc is little-endian on the supported x86_64 target.  Keep the
- * standard endian conversion macros available to portable POSIX code without
- * depending on the host libc headers. */
+/* System libc 在受支持的 x86_64 目标上采用小端序。提供标准字节序转换宏，
+ * 供可移植 POSIX 代码使用，不依赖宿主 libc 头文件。 */
 #ifndef __LITTLE_ENDIAN
 #define __LITTLE_ENDIAN 1234
 #endif

@@ -5,15 +5,13 @@
 struct OS_FAT32;
 struct os_boot_info;
 
-/* The real-hardware test build keeps a persistent boot trace on the root FAT
- * volume and returns to the host OS after either a pass or a fatal failure. */
+/* 真机测试构建会在根 FAT 卷保存持久启动跟踪，并在测试通过或发生致命故障后返回宿主系统。 */
 bool realtest_enabled(void);
 void realtest_boot_info(const struct os_boot_info *info);
 void realtest_mark(const char *state);
 void realtest_checkpoint(const char *state);
-/* Driver/RM checkpoints run while interrupts and vendor-owned locks may be
- * active.  They must not enter UEFI variables or FAT/VFS; the accumulated
- * capture is flushed at the next safe runtime boundary. */
+/* 驱动/RM 检查点可能在中断开启或持有供应商锁时运行。它们不得访问 UEFI 变量或 FAT/VFS；
+ * 累积的记录会在下一个安全运行边界刷新。 */
 void realtest_checkpoint_deferred(const char *state);
 void realtest_mark_number(const char *prefix, uint32_t value);
 void realtest_clear_failure_state(void);
@@ -32,10 +30,8 @@ void realtest_record_failure(const char *file, uint32_t line);
 void realtest_record_exception(uint64_t vector, uint64_t error_code,
                                       uint64_t rip, uint64_t fault_address,
                                       bool has_fault_address);
-/* The real-test path must be able to leave the machine even when a driver
- * thread is stuck in a blocking vendor call.  These operations are lock-free
- * from the timer interrupt; the timeout reboot intentionally writes only to
- * the serial port and does not touch the FAT capture state. */
+/* 即使驱动线程卡在阻塞式供应商调用中，真机测试路径也必须能退出。
+ * 这些操作可从时钟中断无锁执行；超时重启只写串口，不访问 FAT 捕获状态。 */
 void realtest_timeout_start(void);
 void realtest_timeout_stop(void);
 bool realtest_timeout_poll(uint64_t now_tsc);

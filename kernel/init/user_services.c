@@ -1,4 +1,4 @@
-/* REFACTOR_P3_USER_SERVICES_OWNER: boot-time user-service publication. */
+/* REFACTOR_P3_USER_SERVICES_OWNER：启动时发布用户服务。 */
 #include <arch/x86_64/cpu.h>
 #include <arch/x86_64/paging.h>
 #include <kernel/device.h>
@@ -51,28 +51,13 @@ static bool init_register_device(void) {
 static kstatus_t init_load_path(const char *path, process_t *process,
                                 user_elf_image_info_t *info,
                                 vaddr_t *stack_pointer) {
-    file_t *file = 0;
-    kstatus_t status = vfs_open_kernel(path, VFS_OPEN_READ, 0U, &file);
+    void *image = 0;
+    size_t image_size = 0U;
+    /* 文件打开、边界检查、读取与回滚由 VFS 统一处理；此处只记录整体读取阶段。 */
     kernel_debug_stage(OS_DEBUG_PHASE_USER, OS_DEBUG_STEP_LOAD, 0x1AU);
-    if (status != K_OK) return status;
-    if (file->vnode == 0 || file->vnode->size == 0 ||
-        file->vnode->size > INIT_IMAGE_SIZE) {
-        vfs_close(file);
-        return K_EINVAL;
-    }
-    size_t image_size = (size_t)file->vnode->size;
-    kernel_debug_stage(OS_DEBUG_PHASE_USER, OS_DEBUG_STEP_LOAD, 0x1BU);
-    uint8_t *image = (uint8_t *)kmalloc(image_size, 0);
-    if (image == 0) {
-        vfs_close(file);
-        return K_ENOMEM;
-    }
-    uint64_t bytes = 0;
-    kernel_debug_stage(OS_DEBUG_PHASE_USER, OS_DEBUG_STEP_LOAD, 0x1CU);
-    status = vfs_read_kernel(file, image, image_size, &bytes);
+    kstatus_t status = vfs_load_file_kernel(path, 1U, INIT_IMAGE_SIZE,
+                                            &image, &image_size);
     kernel_debug_stage(OS_DEBUG_PHASE_USER, OS_DEBUG_STEP_LOAD, 0x1DU);
-    vfs_close(file);
-    if (status == K_OK && bytes != image_size) status = K_EIO;
     if (status == K_OK) {
         status = process_load_elf_image(process, image, image_size,
                                         info, stack_pointer);
@@ -168,7 +153,7 @@ bool user_init_bootstrap_self_test(void) {
     g_user_init_device_registered = false;
     if (!init_register_device() ||
         process_create(0, &process) != K_OK ||
-        init_load_path("/init", process, &info, &stack_pointer) != K_OK) {
+        init_load_path("/EFI/OS/init", process, &info, &stack_pointer) != K_OK) {
         goto cleanup;
     }
     process->flags |= PROCESS_FLAG_INIT_CPU_PINNED;
@@ -215,7 +200,7 @@ bool user_init_start(void) {
     if (!g_user_init_device_registered && !init_register_device()) goto runtime_start_fail;
     kernel_debug_stage(OS_DEBUG_PHASE_USER, OS_DEBUG_STEP_ENTER, 1U);
     if (process_create(0, &process) != K_OK ||
-        init_load_path("/init-runtime", process, &info, &stack_pointer) != K_OK) {
+        init_load_path("/EFI/OS/init-runtime", process, &info, &stack_pointer) != K_OK) {
         goto runtime_start_fail;
     }
     kernel_debug_stage(OS_DEBUG_PHASE_USER, OS_DEBUG_STEP_LOAD, 2U);

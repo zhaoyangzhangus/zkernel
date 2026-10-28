@@ -121,9 +121,9 @@ static UINT64 *allocate_direct_table(page_t **allocated, UINT64 *physical_out) {
         return 0;
     }
     page->owner = PAGE_OWNER_PAGETABLE;
-    /* The committed direct-map tables live for the lifetime of the kernel.
-     * Keep them out of every ordinary page-free path; otherwise a stale pool
-     * bit could hand a live page-table page to kmalloc and corrupt the map. */
+    /* 已提交的直接映射页表在内核整个生命周期内持续有效。
+     * 必须避免普通页面释放路径回收它们，否则过期的页面池位图可能会把
+     * 仍在使用的页表页交给 kmalloc，进而破坏映射。 */
     page->flags |= PAGE_PINNED;
     page->private_data = (UINT64)(uintptr_t)*allocated;
     *allocated = page;

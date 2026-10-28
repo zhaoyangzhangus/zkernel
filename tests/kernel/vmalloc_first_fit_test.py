@@ -5,8 +5,8 @@ import tempfile
 
 root = Path(__file__).resolve().parents[2]
 source = (root / 'kernel/mm/vmalloc.c').read_text()
-search = source[source.index('static bool find_virtual_run('):
-                source.index('/* Caller holds g_vmalloc_lock.')]
+start = source.index('static bool find_virtual_run(')
+search = source[start:source.index('\n}', start) + 2]
 search=search.replace('uint64_t suffix = used >> bit;',
                       '++span_visits; uint64_t suffix = used >> bit;')
 program = r'''

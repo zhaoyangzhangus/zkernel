@@ -5,6 +5,7 @@
 #define SCHED_ENTITY_ENQUEUED             (1U << 0)
 #define SCHED_ENTITY_INITIAL_PLACEMENT   (1U << 1)
 #define SCHED_ENTITY_REAP_QUEUED         (1U << 2)
+#define SCHED_ENTITY_VRUNTIME_RELATIVE   (1U << 3)
 
 #define SCHED_CMD_SLOTS 8U
 #define SCHED_CMD_MASK  (SCHED_CMD_SLOTS - 1U)
@@ -32,9 +33,13 @@
 #define SCHED_UNLIKELY(value) __builtin_expect(!!(value), 0)
 
 void scheduler_update_min_vruntime(run_queue_t *queue);
+bool scheduler_fair_current_wins(const run_queue_t *queue);
+void scheduler_prepare_fair_migration(const run_queue_t *source, thread_t *thread);
+void scheduler_restore_fair_migration(run_queue_t *target, thread_t *thread);
 uint64_t scheduler_account_current(run_queue_t *queue, uint64_t now_ns);
 void scheduler_trace_reschedule_interrupt(uint32_t cpu_id);
 void scheduler_trace_reschedule_request(uint32_t cpu_id, bool send);
+uint64_t scheduler_trace_reschedule_begin(void);
 void scheduler_trace_reschedule_send(uint32_t cpu_id, uint64_t started,
                                       bool accepted, uint32_t attempts);
 
@@ -56,11 +61,11 @@ _Static_assert(sizeof(sched_cmd_t) == 16U,
                "scheduler command entry must remain compact");
 
 typedef struct sched_cmd_ring {
-    /* Consumer-owned; producer only reads it. */
+    /* 由消费者持有；生产者只读取。 */
     atomic_uint head;
     uint8_t head_pad[CACHELINE_SIZE - sizeof(atomic_uint)];
 
-    /* Producer-owned; consumer only reads it. */
+    /* 由生产者持有；消费者只读取。 */
     atomic_uint tail;
     uint8_t tail_pad[CACHELINE_SIZE - sizeof(atomic_uint)];
 
@@ -84,49 +89,53 @@ _Static_assert(__builtin_offsetof(sched_cmd_overflow_ring_t, tail) >=
 typedef struct sched_cmd_channel {
     sched_cmd_ring_t primary;
     sched_cmd_overflow_ring_t overflow;
-    /* Producer-owned mode bit; the consumer only observes ring indices. */
+    /* 由生产者持有的模式位；消费者仅观察环形队列索引。 */
     bool overflow_active;
     uint8_t producer_pad[CACHELINE_SIZE - sizeof(bool)];
 } __aligned(CACHELINE_SIZE) sched_cmd_channel_t;
 
-/* Private scheduler state shared only by the scheduler implementation files. */
+/* 仅供调度器实现文件共用的私有状态。 */
 typedef struct scheduler_cpu {
     run_queue_t queue;
     bool queue_snapshot_dirty;
 
-    /* Published by producers when any incoming command becomes visible. */
+    /* 任一入站命令变为可见时由生产者发布。 */
     atomic_bool command_pending;
     thread_t * _Atomic remote_wake_head;
-    /* Timer and local wake paths publish a local reschedule request. */
+    thread_t * _Atomic priority_head;
+    /* 定时器和本地唤醒路径发布本地重新调度请求。 */
     atomic_bool need_resched;
     /*
-     * Read-mostly scheduler load snapshot.
-     * low 32 bits: queued runnable threads.
-     * high 32 bits: queued + current non-idle runnable thread.
+    * 以读取为主的调度器负载快照。
+    * 低 32 位：排队中的可运行线程数。
+    * 高 32 位：排队中加上当前非空闲可运行线程数。
      */
     atomic_uint_fast64_t queue_snapshot;
     /*
-     * Array[MAX_CPUS] of incoming SPSC command channels.
-     * Ring N has producer CPU N and this scheduler CPU as consumer.
-     * The overflow ring preserves ordering when the primary ring is full.
+    * 入站 SPSC 命令通道数组，长度为 MAX_CPUS。
+    * 第 N 个环由 CPU N 生产、当前调度器 CPU 消费。
+    * 主环已满时，溢出环仍保持命令顺序。
      */
     sched_cmd_channel_t *command_inbox;
-    /* Producer-local count of commands that entered the overflow ring. */
+    /* 在本地生产者处统计进入溢出环的命令数。 */
     uint64_t command_ring_full_count;
 
-    /* Threads that left their execution stack and await final reclamation. */
+    /* 已离开执行栈、等待最终回收的线程。 */
     thread_t *reap_head;
     thread_t *reap_tail;
-    /* Remote command references released outside the owner IRQ boundary. */
+    /* 在所属 CPU 中断边界之外释放的远端命令引用。 */
     thread_t *command_release_head;
     thread_t *command_release_tail;
-    /* Empty release queues must not enter the IRQ save/restore path. */
+    /* 释放队列为空时不能进入中断状态保存/恢复路径。 */
     atomic_bool command_release_pending;
-    /* Reaper may run from deferred context after the owner switched away. */
+    /* 所属 CPU 切离后，回收器可在延迟上下文中运行。 */
     spinlock_t reap_lock;
 
-    /* At most one deferred reaper drain may be queued per CPU. */
+    /* 每个 CPU 最多排队一个延迟回收任务。 */
     atomic_bool reap_deferred_queued;
+
+    /* 所属 CPU 的槽位：仅在汇编保存旧续执行状态并安装新栈/地址空间后发布迁移。 */
+    thread_t *switch_handoff;
 
     vaddr_t idle_stack_top;
 } scheduler_cpu_t;

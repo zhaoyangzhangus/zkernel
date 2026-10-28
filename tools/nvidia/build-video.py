@@ -49,8 +49,9 @@ flags=['--cc=../../../../tools/nvidia/video-baseline-cc.py','--disable-autodetec
        '--disable-everything','--disable-doc','--disable-debug','--disable-x86asm',
        '--disable-network','--disable-ffplay','--disable-ffprobe','--enable-ffmpeg',
        '--enable-avcodec','--enable-avformat','--enable-avfilter','--enable-swscale',
-       '--enable-vulkan','--enable-pthreads','--enable-decoder=h264',
-       '--enable-parser=h264,hevc','--enable-demuxer=h264','--enable-hwaccel=h264_vulkan',
+       '--enable-vulkan','--enable-pthreads','--enable-decoder=h264,hevc,av1',
+       '--enable-parser=h264,hevc,av1','--enable-demuxer=h264',
+       '--enable-hwaccel=h264_vulkan,hevc_vulkan,av1_vulkan',
        '--enable-protocol=file','--enable-encoder=rawvideo','--enable-muxer=rawvideo',
        '--enable-filter=hwdownload,format,scale,null']
 cache.cached_command(['./configure',*flags],

@@ -26,6 +26,10 @@ bool xhci_usb_mass_storage_configured(void);
 bool xhci_usb_msc_query(uint8_t slot, uint8_t *interface_number,
                         uint8_t *bulk_in, uint8_t *bulk_out);
 bool xhci_usb_msc_is_uas(uint8_t slot);
+/* Grow/reuse the DMA staging area; return usable bytes, or zero on failure.
+ * Caller serializes commands for this storage interface. */
+uint32_t xhci_usb_msc_prepare_buffer(uint8_t slot, uint32_t requested);
+#define XHCI_MSC_MAX_TRANSFER (1024U * 1024U)
 bool xhci_usb_msc_recover_uas(uint8_t slot);
 bool xhci_usb_msc_fallback_to_bot(uint8_t slot);
 kstatus_t xhci_usb_msc_scsi_command(uint8_t slot, const uint8_t *command,
@@ -52,3 +56,9 @@ bool xhci_process_events(uint32_t budget);
 bool xhci_schedule_deferred_work(void);
 void xhci_deferred_work(void *argument);
 uint32_t xhci_last_error(void);
+
+kstatus_t xhci_audio_stream_complete(struct audio_stream *stream, uint32_t period, uint32_t frames);
+
+/* USB 音频端点按枚举顺序选择；已有流绑定时禁止切换上下文。 */
+uint32_t xhci_audio_device_count(void);
+kstatus_t xhci_audio_select_device(uint32_t ordinal);

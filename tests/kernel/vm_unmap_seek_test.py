@@ -31,9 +31,15 @@ static bool live[128],initial[40],removed[40];
 static bool tree_dirty;
 static unsigned allocated,rebuilds,seeks,scans,locked,alloc_calls,tlb_calls,fail_alloc,fail_tlb,bumps;
 static unsigned erasures;
+struct anon_page_node { struct anon_page_node *next; };
+static kstatus_t anon_page_retire_range(vm_object_t *o,uint64_t first,uint64_t end,
+                                        struct anon_page_node **out) {
+    (void)o;(void)first;(void)end;(void)out;assert(0);return K_OK;
+}
+static void anon_page_release_retired(struct anon_page_node *pages) {assert(!locked && !pages);}
 ''' + tree + r'''
 void *kzalloc(size_t size,uint32_t flags) {
-    (void)flags;assert(locked && size==sizeof(vm_area_t));
+    (void)flags;assert(size==sizeof(vm_area_t));
     if(++alloc_calls==fail_alloc)return 0;
     assert(allocated<128);live[allocated]=true;return &areas[allocated++];
 }

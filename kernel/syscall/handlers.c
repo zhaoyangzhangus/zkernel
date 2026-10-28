@@ -22,7 +22,7 @@ typedef struct syscall_delay_diagnostic {
 } syscall_delay_diagnostic_t;
 static volatile syscall_delay_diagnostic_t g_syscall_delays[64];
 static atomic_flag g_syscall_delay_guard = ATOMIC_FLAG_INIT;
-/* Optional debugger-selected process, otherwise only group leaders. */
+/* 可选地由调试器指定进程；否则仅记录进程组 leader。 */
 static volatile uint64_t g_syscall_delay_process;
 typedef struct syscall_cost_diagnostic {
     uint64_t number, count, total_ns, maximum_ns;
@@ -32,8 +32,31 @@ static atomic_flag g_syscall_cost_guard = ATOMIC_FLAG_INIT;
 static volatile uint64_t g_syscall_cost_tid;
 static uint64_t g_syscall_cost_dropped;
 
-/* Bounded, opt-in wall time (including waits), not CPU utilization. Never
- * acquire a blocking lock or log user arguments on the interactive path. */
+/* Linux 资源准入的有界失败计数器。无参数、路径、分配、时间戳或 UART 输出；刻意不统计
+ * EAGAIN/ENOENT。列顺序：ENOMEM、EBUSY、EMFILE、ENOSPC、EIO、EINVAL、EACCES、EPERM。
+ * 排查浏览器重新加载失败时应查看增量，而非总数。 */
+static atomic_ullong g_syscall_resource_errors[512][8];
+
+static void syscall_record_resource_error(uint64_t number, int64_t status) {
+    unsigned column;
+    if (number >= sizeof(g_syscall_resource_errors) /
+                  sizeof(g_syscall_resource_errors[0])) return;
+    switch (status) {
+    case K_ENOMEM: column = 0U; break;
+    case K_EBUSY: column = 1U; break;
+    case K_EMFILE: column = 2U; break;
+    case K_ENOSPC: column = 3U; break;
+    case K_EIO: column = 4U; break;
+    case K_EINVAL: column = 5U; break;
+    case K_EACCES: column = 6U; break;
+    case K_EPERM: column = 7U; break;
+    default: return;
+    }
+    atomic_fetch_add_explicit(&g_syscall_resource_errors[number][column], 1ULL,
+                              memory_order_relaxed);
+}
+
+/* 可选的有界墙钟时间（包含等待），不是 CPU 使用率。交互路径绝不获取阻塞锁，也不记录用户参数。 */
 static void syscall_record_cost(uint64_t tid, uint64_t number,
                                 uint64_t elapsed) {
     if (tid == 0U || tid != g_syscall_cost_tid) return;
@@ -61,8 +84,7 @@ static void syscall_record_cost(uint64_t tid, uint64_t number,
 }
 static bool syscall_measure_linux_delay(const thread_t *thread) {
     if (thread == 0 || thread->process == 0) return false;
-    /* A selected process replaces the default leader-only filter. Otherwise
-     * unrelated renderer and service waits fill the bounded sample table. */
+    /* 指定进程后替代默认的仅 leader 过滤条件。否则无关的渲染器和服务等待会填满有界采样表。 */
     return g_syscall_delay_process != 0U ?
         thread->process->pid == g_syscall_delay_process :
         thread->tid == thread->process->linux_thread_group_leader_tid;
@@ -158,7 +180,7 @@ static void syscall_record_delay(uint64_t pid, uint64_t tid, uint64_t number,
 #define USER_ADDRESS_END        0x0000800000000000ULL
 #define USER_CODE_SELECTOR      0x23ULL
 #define USER_DATA_SELECTOR      0x1BULL
-#define SYSCALL_TABLE_SIZE      (OS_SYS_WINDOW_TITLE + 1U)
+#define SYSCALL_TABLE_SIZE      (OS_SYS_DESKTOP_WALLPAPER + 1U)
 
 typedef int64_t (*syscall_handler_t)(uint64_t, uint64_t, uint64_t,
                                      uint64_t, uint64_t, uint64_t);
@@ -221,6 +243,7 @@ static const syscall_handler_t g_syscall_table[SYSCALL_TABLE_SIZE] = {
     [OS_SYS_LINUX_ACTIVATE] = syscall_linux_activate,
     [OS_SYS_MEMORY_INFO] = syscall_memory_info,
     [OS_SYS_TASK_QUERY] = syscall_task_query,
+    [OS_SYS_CPU_GET_USAGE] = syscall_cpu_get_usage,
     [OS_SYS_PROCESS_TERMINATE] = syscall_process_terminate,
     [OS_SYS_THREAD_TERMINATE] = syscall_thread_terminate,
     [OS_SYS_THREAD_CREATE] = syscall_thread_create,
@@ -265,11 +288,14 @@ static const syscall_handler_t g_syscall_table[SYSCALL_TABLE_SIZE] = {
     [OS_SYS_FUTEX_WAKE] = syscall_futex_wake,
     [OS_SYS_FILE_OPEN] = syscall_file_open,
     [OS_SYS_FILE_ENUMERATE] = syscall_file_enumerate,
+    [OS_SYS_FILE_ENUMERATE_BATCH] = syscall_file_enumerate_batch,
     [OS_SYS_FILE_SEEK] = syscall_file_seek,
     [OS_SYS_FILE_STAT] = syscall_file_stat,
     [OS_SYS_FILE_TRUNCATE] = syscall_file_truncate,
     [OS_SYS_FILE_REMOVE] = syscall_file_remove,
     [OS_SYS_FILE_MKDIR] = syscall_file_mkdir,
+    [OS_SYS_FILE_CHDIR] = syscall_file_chdir,
+    [OS_SYS_FILE_GETCWD] = syscall_file_getcwd,
     [OS_SYS_FILE_FSTAT] = syscall_file_fstat,
     [OS_SYS_FILE_RENAME] = syscall_file_rename,
     [OS_SYS_FILE_READ] = syscall_file_read,
@@ -298,14 +324,18 @@ static const syscall_handler_t g_syscall_table[SYSCALL_TABLE_SIZE] = {
     [OS_SYS_SOCKET_SET_OPTION] = syscall_socket_set_option,
     [OS_SYS_SOCKET_SHUTDOWN] = syscall_socket_shutdown,
     [OS_SYS_NET_GET_STATUS] = syscall_net_get_status,
+    [OS_SYS_NET_ENUM_ADAPTER] = syscall_net_enum_adapter,
     [OS_SYS_NET_SET_IPV4] = syscall_net_set_ipv4,
     [OS_SYS_NET_SUBSCRIBE] = syscall_net_subscribe,
     [OS_SYS_GPU_CREATE_CTX] = syscall_gpu_create_context,
+    [OS_SYS_GPU_GET_INFO] = syscall_gpu_get_info,
+    [OS_SYS_DESKTOP_WALLPAPER] = syscall_desktop_wallpaper,
     [OS_SYS_GPU_ALLOC] = syscall_gpu_alloc,
     [OS_SYS_GPU_MAP] = syscall_gpu_map,
     [OS_SYS_GPU_SUBMIT] = syscall_gpu_submit,
     [OS_SYS_GPU_WAIT_FENCE] = syscall_gpu_wait_fence,
     [OS_SYS_DISPLAY_GET_INFO] = syscall_display_get_info,
+    [OS_SYS_THEME_SETTINGS] = syscall_theme_settings,
     [OS_SYS_DISPLAY_COMMIT] = syscall_display_commit,
     [OS_SYS_FONT_CACHE] = syscall_font_cache,
     [OS_SYS_IMAGE_INFO] = syscall_image_info,
@@ -322,8 +352,12 @@ static const syscall_handler_t g_syscall_table[SYSCALL_TABLE_SIZE] = {
     [OS_SYS_WINDOW_EVENT_READ] = syscall_window_event_read,
     [OS_SYS_WINDOW_UPDATE] = syscall_window_update,
     [OS_SYS_WINDOW_TITLE] = syscall_window_title,
+    [OS_SYS_WINDOW_CONTROL_TREE] = syscall_window_control_tree,
+    [OS_SYS_CLIPBOARD_SET] = syscall_clipboard_set,
+    [OS_SYS_CLIPBOARD_GET] = syscall_clipboard_get,
     [OS_SYS_AUDIO_OPEN] = syscall_audio_open,
     [OS_SYS_AUDIO_CONTROL] = syscall_audio_control,
+    [OS_SYS_AUDIO_SETTINGS] = syscall_audio_settings,
     [OS_SYS_DEBUG_QUERY] = sys_debug_query,
     [OS_SYS_DEBUG_WRITE] = syscall_debug_write,
 };
@@ -372,18 +406,14 @@ void x86_syscall_init(void) {
 static int64_t syscall_complete_dispatch(thread_t *thread, int64_t status) {
     if (thread != 0 && (__atomic_load_n(&thread->flags, __ATOMIC_ACQUIRE) & THREAD_FLAG_TERMINATE_REQUEST))
         thread_exit(-(int64_t)OS_SIGKILL);
-    /* The handler has released its locks and committed exec/signal frames.
-     * Schedule from this ordinary C continuation, whose saved stack resumes
-     * normally (as with a blocking syscall), not from the assembly restore
-     * stub. SyscallActive is saved/restored by the context switch. */
+    /* 处理程序已释放锁并提交 exec/信号栈帧。在普通 C 续执行路径中调度，使保存的栈能像阻塞系统调用一样
+     * 正常恢复；不要从汇编恢复桩中调度。SyscallActive 会由上下文切换保存/恢复。 */
     if (thread != 0 && thread->sched_class != SCHED_CLASS_IDLE &&
         !thread->exec_pending && !sched_preempt_disabled() &&
         !x86_tlb_shootdown_active() &&
         (x86_smp_take_reschedule_request() || sched_tick_should_preempt())) {
-        /* Charge the syscall's execution tail before choosing among FAIR
-         * tasks. Merely draining the inbox does not preempt FAIR-for-FAIR
-         * wakes, and timers intentionally do not charge an active syscall.
-         * Local wakes only publish need_resched, not an IPI pending bit. */
+        /* 在 FAIR 任务间选择前记入系统调用执行尾段。仅排空邮箱不会因 FAIR 唤醒 FAIR 而抢占；
+         * 时钟也刻意不记入活动系统调用的执行时间。本地唤醒只发布 need_resched，不设置 IPI 待处理位。 */
         schedule();
     }
     return status;
@@ -415,6 +445,7 @@ int64_t syscall_dispatch(arch_trap_frame_t *frame) {
         uint64_t started = (measure || measure_cost) ? x86_read_tsc() : 0U;
         int64_t status = linux_syscall_dispatch(frame);
         uint64_t elapsed = (measure || measure_cost) ? x86_read_tsc() - started : 0U;
+        if (status < 0) syscall_record_resource_error(number, status);
         if (measure_cost)
             syscall_record_cost(executing_thread->tid, number, elapsed);
         if (measure)

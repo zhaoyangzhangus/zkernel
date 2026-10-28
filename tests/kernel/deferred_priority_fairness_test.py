@@ -45,6 +45,10 @@ static void deferred_unlock(uint64_t flags) {
     assert(pthread_mutex_unlock(&queue_lock) == 0);
 }
 static unsigned rcu_poll(unsigned budget) { rcu_budget += budget; return 0; }
+static uint64_t x86_read_tsc(void) { return 0; }
+static void deferred_record_work(deferred_work_fn_t fn, uint64_t start) {
+    assert(fn && !start && !lock_depth);
+}
 static void critical(void* unused) {
     (void)unused;
     assert(lock_depth == 0);

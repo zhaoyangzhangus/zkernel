@@ -2,7 +2,7 @@
 #include <kernel/audio.h>
 #include "internal.h"
 
-/* REFACTOR_P8_XHCI_AUDIO_OWNER: USB audio stream policy and UAPI state. */
+/* REFACTOR_P8_XHCI_AUDIO_OWNER：USB 音频流策略和 UAPI 状态。 */
 
 static uint8_t g_xhci_audio_slot;
 
@@ -18,7 +18,7 @@ xhci_audio_context(
 
 
     /*
-     * O(1) steady-state path.
+    * O(1) 稳态路径。
      */
     if(g_xhci_audio_slot != 0U)
     {
@@ -38,7 +38,7 @@ xhci_audio_context(
 
 
         /*
-         * Device was unplugged or Slot was reused.
+         * 设备已拔出，或 Slot 已被复用。
          */
         g_xhci_audio_slot =
             0U;
@@ -46,7 +46,7 @@ xhci_audio_context(
 
 
     /*
-     * Slow discovery path.
+    * 较慢的查找路径。
      */
     uint32_t limit =
         state->max_slots;
@@ -93,42 +93,7 @@ xhci_audio_context(
 
 
 
-/*
- * V3.10.6B8E AUDIO CANONICAL UAPI
- *
- * xhci_audio_context_commit() removed.
- *
- * Audio UAPI mutates the canonical Slot.context directly;
- * there is no secondary context to commit or synchronize.
- */
-
-
-
-/*
- * xhci_queue_audio_transfer() still consumes state->audio_*.
- *
- * Adapt an inactive canonical Slot context to that old ABI only
- * for the duration of the doorbell operation.
- */
-/*
- * V3.10.4B DIRECT AUDIO OWNER
- *
- * Published Audio runtime state lives permanently in the supplied
- * device context.
- *
- * No Slot.context -> state->device -> Slot.context adaptation is
- * required for queue submission anymore.
- */
-/*
- * V3.10.6B8F DIRECT AUDIO QUEUE
- *
- * xhci_queue_audio_owner() removed.
- *
- * Audio UAPI already owns the canonical Slot.context pointer and
- * submits directly through xhci_queue_audio_transfer_device().
- */
-
-
+/* 音频状态直接保存在设备 Slot 中，由统一音频流持有。 */
 
 uint32_t
 xhci_usb_audio_completed(void)
@@ -178,6 +143,13 @@ xhci_audio_unlock(void)
     xhci_event_unlock(xhci_controller_state());
 }
 
+
+/* 仅撤销逻辑周期；在途 DMA 仍由完成事件回收，不能在这里清除 pending。 */
+static void xhci_audio_invalidate_stream(xhci_device_context_t *device) {
+    ++device->audio_stream_generation;
+    device->audio_stream_running = false;
+    device->audio_stream_queued = false;
+}
 
 static bool
 xhci_audio_format_supported(
@@ -292,17 +264,9 @@ xhci_audio_stream_configure(
     }
 
 
-    device->audio_stream =
-        audio;
-
-    device->audio_stream_bound =
-        true;
-
-    device->audio_stream_running =
-        false;
-
-    device->audio_stream_queued =
-        false;
+    /* 绑定新流时，使旧周期的完成事件失效。 */
+    xhci_audio_invalidate_stream(device);
+    device->audio_stream = audio;
 
     device->audio_period =
         0U;
@@ -352,8 +316,7 @@ xhci_audio_stream_start(
 
 
     if(device == 0 ||
-       device->audio_stream != audio ||
-       !device->audio_stream_bound)
+       device->audio_stream != audio)
     {
         xhci_audio_unlock();
         return K_ENOENT;
@@ -424,27 +387,14 @@ xhci_audio_stream_stop(
 
 
     if(device == 0 ||
-       device->audio_stream != audio ||
-       !device->audio_stream_bound)
+       device->audio_stream != audio)
     {
         xhci_audio_unlock();
         return K_ENOENT;
     }
 
 
-    device->audio_stream_running =
-        false;
-
-
-    if(!device->
-           audio_transfer_pending)
-    {
-        device->audio_stream_queued =
-            false;
-    }
-
-
-
+    xhci_audio_invalidate_stream(device);
 
     xhci_audio_unlock();
 
@@ -495,8 +445,7 @@ xhci_audio_stream_queue(
 
 
     if(device == 0 ||
-       device->audio_stream != audio ||
-       !device->audio_stream_bound)
+       device->audio_stream != audio)
     {
         xhci_audio_unlock();
         return K_ENOENT;
@@ -504,7 +453,8 @@ xhci_audio_stream_queue(
 
 
     if(device->audio_stream_queued ||
-       device->audio_transfer_pending)
+       (device->audio_transfer_pending &&
+        device->audio_transfer_generation == device->audio_stream_generation))
     {
         xhci_audio_unlock();
         return K_EBUSY;
@@ -535,6 +485,7 @@ xhci_audio_stream_queue(
     }
 
 
+    device->audio_transfer_failed = false;
     device->audio_period =
         period;
 
@@ -545,7 +496,7 @@ xhci_audio_stream_queue(
         true;
 
 
-    if(device->audio_stream_running)
+    if(device->audio_stream_running && !device->audio_transfer_pending)
     {
         success =
             xhci_queue_audio_transfer_device(
@@ -604,19 +555,14 @@ xhci_audio_stream_reset(
 
 
     if(device == 0 ||
-       device->audio_stream != audio ||
-       !device->audio_stream_bound)
+       device->audio_stream != audio)
     {
         xhci_audio_unlock();
         return K_ENOENT;
     }
 
 
-    device->audio_stream_running =
-        false;
-
-    device->audio_stream_queued =
-        false;
+    xhci_audio_invalidate_stream(device);
 
     device->audio_period =
         0U;
@@ -670,28 +616,61 @@ xhci_audio_stream_disconnect(
     }
 
 
-    device->audio_stream =
-        0;
-
-    device->audio_stream_running =
-        false;
-
-    device->audio_stream_queued =
-        false;
-
-
-    /*
-     * Keep bound set until any already posted Transfer Event has
-     * been consumed.  This preserves the previous behavior and
-     * prevents the autonomous self-test queue from restarting.
-     */
-    device->audio_stream_bound =
-        true;
-
-
-
+    xhci_audio_invalidate_stream(device);
+    device->audio_stream = 0;
 
     xhci_audio_unlock();
 
     return K_OK;
+}
+
+/* 只有控制器确认整个周期完成，用户态才能回收或覆盖对应缓冲区。 */
+kstatus_t xhci_audio_stream_complete(struct audio_stream *stream,
+                                    uint32_t period, uint32_t frames) {
+    (void)frames;
+    if (!stream || audio_stream_device(stream) != xhci_audio_device()) return K_ENOENT;
+    xhci_audio_lock();
+    xhci_device_context_t *device = xhci_audio_context(xhci_controller_state());
+    kstatus_t status = K_ENOENT;
+    if (device && device->audio_stream == stream) {
+        status = period != device->audio_period ? K_EINVAL :
+                 device->audio_transfer_failed ? K_EIO :
+                 device->audio_stream_queued || device->audio_transfer_pending ? K_EAGAIN : K_OK;
+    }
+    xhci_audio_unlock();
+    return status;
+}
+
+uint32_t xhci_audio_device_count(void) {
+    if (!xhci_controller_state()->initialized) return 0U;
+    uint32_t count=0U;
+    for (uint32_t i=1;i<XHCI_MAX_SLOT_TABLE;++i) {
+        xhci_slot_device_t *slot=xhci_topology_slot(i);
+        if (slot && slot->used && slot->context.audio_endpoint) ++count;
+    }
+    return count;
+}
+
+kstatus_t xhci_audio_select_device(uint32_t ordinal) {
+    uint32_t count=0U;
+    uint8_t selected=0U;
+    xhci_audio_lock();
+    for (uint32_t i=1;i<XHCI_MAX_SLOT_TABLE;++i) {
+        xhci_slot_device_t *slot=xhci_topology_slot(i);
+        if (!slot || !slot->used || !slot->context.audio_endpoint) continue;
+        if (count++==ordinal) selected=(uint8_t)i;
+    }
+    if (!selected) {xhci_audio_unlock();return K_ENOENT;}
+    if (selected!=g_xhci_audio_slot) {
+        for (uint32_t i=1;i<XHCI_MAX_SLOT_TABLE;++i) {
+            xhci_slot_device_t *slot=xhci_topology_slot(i);
+            /* 实际流和在途 DMA 才占用设备，关闭历史不影响切换。 */
+            if (slot && slot->used &&
+                (slot->context.audio_stream || slot->context.audio_transfer_pending)) {
+                xhci_audio_unlock();return K_EBUSY;
+            }
+        }
+    }
+    g_xhci_audio_slot=selected;
+    xhci_audio_unlock();return K_OK;
 }

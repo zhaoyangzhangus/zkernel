@@ -29,7 +29,7 @@ static atomic_uint g_vmalloc_init_state;
 static volatile uint32_t g_vmalloc_failure;
 static uint32_t g_vmalloc_pending_cleanup;
 static uint32_t g_vmalloc_next_free_area;
-static uint32_t g_vmalloc_area_limit; /* one past the last used record */
+static uint32_t g_vmalloc_area_limit; /* 最后一个已用记录之后的位置 */
 
 static uint64_t vmalloc_lock_irqsave(void) {
     uint64_t flags;
@@ -112,8 +112,8 @@ static bool find_virtual_run(uint32_t count, uint32_t *start_out) {
             }
             continue;
         }
-        /* Skip whole occupied/free spans. Never shift by 64 or call ctz on
-         * zero; retain a free suffix for runs crossing word boundaries. */
+        /* 跳过整个占用/空闲区间。绝不移位 64 位，也不对零调用 ctz；
+         * 保留空闲后缀，以支持跨越字边界的连续区间。 */
         for (uint32_t bit = 0; bit < 64U;) {
             uint64_t suffix = used >> bit;
             uint32_t remaining = 64U - bit;
@@ -137,9 +137,8 @@ static bool find_virtual_run(uint32_t count, uint32_t *start_out) {
     return false;
 }
 
-/* Caller holds g_vmalloc_lock. Keep the reservation until every PTE has been
- * removed with acknowledged TLB invalidation; retries see ENOENT for pages
- * already retired, so owned physical pages are never freed twice. */
+/* 调用方持有 g_vmalloc_lock。在所有 PTE 均已处理且 TLB 失效得到确认前，保留该区间。重试时已回收
+ * 页面会返回 ENOENT，因此所属物理页不会被重复释放。 */
 static bool vmalloc_release_area_locked(vmalloc_area_t *area) {
     uint32_t remaining = 0U;
     for (uint32_t i = 0; i < area->data_pages; ++i) {
@@ -147,7 +146,7 @@ static bool vmalloc_release_area_locked(vmalloc_area_t *area) {
         kstatus_t status = x86_unmap_page(area->root_table,
             area->address + (vaddr_t)i * PAGE_SIZE, &physical);
         if (status == K_OK) {
-            /* Borrowed mappings retire PTEs, not physical ownership. */
+            /* 借用映射只移除 PTE，不转移物理页所有权。 */
             if (area->owns_pages) {
                 page_t *page = phys_to_page(physical);
                 if (page != 0) page_free(page);
@@ -158,8 +157,7 @@ static bool vmalloc_release_area_locked(vmalloc_area_t *area) {
         }
     }
     if (remaining != 0U) {
-        /* Only the failed prefix can still contain live PTEs. Keep the
-         * full bitmap reservation, but do not retry its retired suffix. */
+        /* 只有失败前缀仍可能包含有效 PTE。保留完整位图预留，但不要重试已回收的后缀。 */
         area->data_pages = remaining;
         if (!area->cleanup_pending) ++g_vmalloc_pending_cleanup;
         area->cleanup_pending = true;
@@ -219,34 +217,31 @@ static vmalloc_area_t *vmalloc_reserve_area_locked(uint32_t pages,
     return area;
 }
 
-void *vmalloc(size_t size) {
-    if (size == 0 || size > VMALLOC_MANAGED_SIZE - 2U * PAGE_SIZE) return 0;
-    if (size > UINT64_MAX - (PAGE_SIZE - 1ULL)) return 0;
-    uint32_t data_pages = (uint32_t)((size + PAGE_SIZE - 1ULL) >> PAGE_SHIFT);
-    vmalloc_initialize();
-    uint64_t irq_flags = vmalloc_lock_irqsave();
-
-    vmalloc_area_t *area = vmalloc_reserve_area_locked(data_pages, true);
-    if (area == 0) {
-        vmalloc_unlock_irqrestore(irq_flags);
-        return 0;
-    }
-    paddr_t root = area->root_table;
-    uint32_t mapped = 0;
+/* 两种映射共用提交和回滚事务。借用页不转移所有权；仅新分配且尚未映射的页
+ * 在本层释放，已映射的前缀统一交给区间清理处理。调用方持有 vmalloc 锁。 */
+static kstatus_t vmalloc_populate_area_locked(vmalloc_area_t *area,
+                                              page_t *const *pages,
+                                              enum x86_cache_mode cache_mode) {
+    uint32_t data_pages = area->data_pages;
+    uint32_t mapped = 0U;
+    kstatus_t status = K_OK;
     while (mapped < data_pages) {
-        page_t *page = page_alloc(0, PAGE_ALLOC_ZERO);
+        page_t *page = area->owns_pages ? page_alloc(0, PAGE_ALLOC_ZERO) :
+                                          pages[mapped];
         if (page == 0) {
             g_vmalloc_failure = 2U;
+            status = K_ENOMEM;
             break;
         }
         paddr_t physical = page_to_phys(page);
-        kstatus_t status = x86_map_page(root, area->address + (vaddr_t)mapped * PAGE_SIZE,
-                                        physical, X86_PAGE_WRITE | X86_PAGE_GLOBAL,
-                                        X86_CACHE_WB);
+        status = x86_map_page(area->root_table,
+            area->address + (vaddr_t)mapped * PAGE_SIZE,
+            physical, X86_PAGE_WRITE | X86_PAGE_GLOBAL, cache_mode);
         if (status != K_OK) {
-            /* 保留具体错误码：3 表示映射失败，低位同时记录 -status。 */
-            g_vmalloc_failure = 0x300U | (uint32_t)(-status);
-            page_free(page);
+            if (area->owns_pages) {
+                g_vmalloc_failure = 0x300U | (uint32_t)(-status);
+                page_free(page);
+            }
             break;
         }
         ++mapped;
@@ -254,10 +249,20 @@ void *vmalloc(size_t size) {
     if (mapped != data_pages) {
         area->data_pages = mapped;
         (void)vmalloc_release_area_locked(area);
-        vmalloc_unlock_irqrestore(irq_flags);
-        return 0;
     }
-    void *result = (void *)(uintptr_t)area->address;
+    return status;
+}
+
+void *vmalloc(size_t size) {
+    if (size == 0 || size > VMALLOC_MANAGED_SIZE - 2U * PAGE_SIZE) return 0;
+    if (size > UINT64_MAX - (PAGE_SIZE - 1ULL)) return 0;
+    uint32_t data_pages = (uint32_t)((size + PAGE_SIZE - 1ULL) >> PAGE_SHIFT);
+    vmalloc_initialize();
+    uint64_t irq_flags = vmalloc_lock_irqsave();
+    vmalloc_area_t *area = vmalloc_reserve_area_locked(data_pages, true);
+    void *result = 0;
+    if (area != 0 && vmalloc_populate_area_locked(area, 0, X86_CACHE_WB) == K_OK)
+        result = (void *)(uintptr_t)area->address;
     vmalloc_unlock_irqrestore(irq_flags);
     return result;
 }
@@ -307,28 +312,11 @@ kstatus_t vmalloc_map_pages(page_t *const *pages, uint32_t page_count,
         return K_ENOMEM;
     }
 
-    uint32_t mapped = 0U;
-    kstatus_t status = K_OK;
-    while (mapped < page_count) {
-        paddr_t physical = page_to_phys(pages[mapped]);
-        status = x86_map_page(
-            area->root_table,
-            area->address + (vaddr_t)mapped * PAGE_SIZE,
-            physical, X86_PAGE_WRITE | X86_PAGE_GLOBAL,
-            (enum x86_cache_mode)cache_mode);
-        if (status != K_OK) break;
-        ++mapped;
-    }
-    if (mapped != page_count) {
-        area->data_pages = mapped;
-        (void)vmalloc_release_area_locked(area);
-        vmalloc_unlock_irqrestore(irq_flags);
-        return status == K_OK ? K_EIO : status;
-    }
-
-    *out = (void *)(uintptr_t)area->address;
+    kstatus_t status = vmalloc_populate_area_locked(
+        area, pages, (enum x86_cache_mode)cache_mode);
+    if (status == K_OK) *out = (void *)(uintptr_t)area->address;
     vmalloc_unlock_irqrestore(irq_flags);
-    return K_OK;
+    return status;
 }
 
 bool vmalloc_self_test(void) {

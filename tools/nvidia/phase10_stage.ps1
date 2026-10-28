@@ -6,6 +6,7 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'app-layout.ps1')
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 
 function Resolve-RepoPath([string]$Path) {
@@ -42,9 +43,11 @@ function Copy-FileIfChanged([string]$Source, [string]$Target) {
 }
 
 function Copy-DirectoryContents([string]$SourceRoot, [string]$TargetRoot) {
+    Assert-AppGuestLayout $TargetRoot
     Require-Directory $SourceRoot 'Phase 9 source ESP'
     foreach ($source in @(Get-ChildItem -LiteralPath $SourceRoot -Recurse -File)) {
         $relative = $source.FullName.Substring($SourceRoot.Length).TrimStart('\', '/')
+        if (Test-LegacyGuestPath $relative) { continue }
         Copy-FileIfChanged $source.FullName (Join-Path $TargetRoot $relative)
     }
 }
@@ -54,9 +57,8 @@ $phase9Esp = Join-Path $repoRoot 'build\nvidia\phase9\esp'
 $phase10Kernel = Join-Path $buildRoot 'kernel.elf'
 $testBinaryPath = Resolve-RepoPath $TestBinary
 $espRoot = Join-Path $buildRoot 'esp'
-$phase9Glvnd = Join-Path $phase9Esp 'compat\linux\usr\share\glvnd\egl_vendor.d'
-$absoluteGlvnd = Join-Path $espRoot 'usr\share\glvnd\egl_vendor.d'
-$phase10NvidiaManifest = Join-Path $repoRoot 'tools\nvidia\phase10_glvnd_10_nvidia.json'
+Assert-AppGuestLayout $espRoot
+Assert-AppInterpreter $testBinaryPath 'p10-egl-context'
 
 Require-Directory $phase9Esp 'Phase 9 source ESP'
 Require-File $phase10Kernel 'Phase 10 kernel image'
@@ -71,16 +73,8 @@ Copy-DirectoryContents $phase9Esp $espRoot
 Copy-FileIfChanged $testBinaryPath (Join-Path $espRoot 'tests\p10-egl-context')
 Copy-FileIfChanged $phase10Kernel (Join-Path $espRoot 'EFI\OS\kernel.elf')
 
-# GLVND's 595.84 libEGL loader looks for vendor manifests using the guest's
-# absolute /etc/glvnd and /usr/share/glvnd paths.  Keep the verified closure
-# under /compat/linux for the dynamic-linker RPATH, and materialize the same
-# vendor manifests at the absolute path expected by the real loader.
-Require-Directory $phase9Glvnd '595.84 GLVND vendor manifest directory'
-foreach ($manifest in @(Get-ChildItem -LiteralPath $phase9Glvnd -File)) {
-    Copy-FileIfChanged $manifest.FullName (Join-Path $absoluteGlvnd $manifest.Name)
-}
-Require-File $phase10NvidiaManifest 'System GLVND NVIDIA manifest'
-Copy-FileIfChanged $phase10NvidiaManifest (Join-Path $absoluteGlvnd '10_nvidia.json')
+Install-NvidiaApp (Join-Path $repoRoot 'build\nvidia\userspace') $espRoot 'p10-egl-context'
+Copy-FileIfChanged $testBinaryPath (Join-Path $espRoot 'usr\apps\p10-egl-context\p10-egl-context')
 
 Write-Output ('P10_STAGE_COPIED={0}' -f $script:stageCopied)
 Write-Output ('P10_STAGE_SKIPPED={0}' -f $script:stageSkipped)

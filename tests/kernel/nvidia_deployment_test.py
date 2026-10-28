@@ -13,6 +13,57 @@ spec.loader.exec_module(builder)
 
 
 class DriverDeployment(unittest.TestCase):
+    def test_cube_build_only_has_no_deployment_side_effects(self):
+        import contextlib
+        import io
+        import os
+        from unittest import mock
+        stage_spec = importlib.util.spec_from_file_location(
+            'nv_stage_build_only', ROOT / 'tools/nvidia/stage-driver.py')
+        stage = importlib.util.module_from_spec(stage_spec)
+        stage_spec.loader.exec_module(stage)
+        previous = Path.cwd()
+        with tempfile.TemporaryDirectory() as directory:
+            output = io.StringIO()
+            try:
+                with mock.patch.object(stage, 'ROOT', Path(directory)), \
+                     mock.patch.object(sys, 'argv', ['stage-driver.py', '--build-only']), \
+                     mock.patch.object(stage, 'build_cube', return_value=Path('build/nvidia/runtime/cube')) as build, \
+                     mock.patch.object(stage, 'copy_changed', side_effect=AssertionError('unexpected deployment')), \
+                     mock.patch.object(stage.builder, 'FileDigests', side_effect=AssertionError('unexpected payload scan')), \
+                     contextlib.redirect_stdout(output):
+                    stage.main()
+                build.assert_called_once_with(Path('build/nvidia/runtime'),
+                                              'x86_64-linux-gnu-gcc',
+                                              'build/nvidia/host-deps/glibc')
+                self.assertEqual(output.getvalue(), 'CUBE_BUILD_READY=build/nvidia/runtime/cube\n')
+                self.assertFalse(Path('build/esp').exists())
+                self.assertEqual(list(Path('build/nvidia/runtime').iterdir()), [])
+            finally:
+                os.chdir(previous)
+
+    def test_cube_builder_keeps_canonical_paths_and_pinned_headers(self):
+        from unittest import mock
+        stage_spec = importlib.util.spec_from_file_location(
+            'nv_stage_cube_builder', ROOT / 'tools/nvidia/stage-driver.py')
+        stage = importlib.util.module_from_spec(stage_spec)
+        stage_spec.loader.exec_module(stage)
+        out = Path('build/nvidia/runtime')
+        with mock.patch.object(stage.builder, 'compile_one') as compile_one, \
+             mock.patch.object(stage, 'link_cube') as link:
+            self.assertEqual(stage.build_cube(out, 'fixture-cc', 'pinned/glibc'), out/'cube')
+        (source, obj, compiler, flags), = compile_one.call_args.args
+        self.assertEqual((source, obj, compiler),
+                         (Path('tools/nvidia/opengl_cube_demo.c'), out/'cube.o', 'fixture-cc'))
+        self.assertIn('pinned/glibc/libc6-dev-extract/usr/include', flags)
+        self.assertIn('pinned/glibc/libc6-dev-extract/usr/include/x86_64-linux-gnu', flags)
+        self.assertIn('-DCUBE_INTERACTIVE=1', flags)
+        cube, command, inputs = link.call_args.args
+        self.assertEqual(cube, out/'cube')
+        self.assertEqual(command[-2:], ['-o', str(out/'cube')+'.tmp'])
+        self.assertIn(out/'cube.o', inputs)
+        self.assertIn('-nostdlib', command)
+
     def test_payload_copy_uses_private_temporary_files(self):
         import concurrent.futures
         import threading
@@ -310,7 +361,14 @@ int main(void) {
 #include <stdint.h>
 #include <stdbool.h>
 #define NV_FALSE 0
-typedef struct { void *stack; void *state; } nv_rm_vendor_context_t;
+typedef struct {
+ void *stack; void *state;
+ uint32_t irq_top_hits, irq_rm_handled_hits, irq_bottom_hits;
+ uint32_t irq_bottom_pending, irq_bottom_schedule_failed;
+} nv_rm_vendor_context_t;
+#define atomic_load(pointer) (*(pointer))
+static volatile uint32_t g_nv_rm_boot_diagnostic[8];
+static uint32_t x86_current_apic_id(void) { return 1U; }
 static int irq_enabled, preempt_depth, result;
 static bool sched_preempt_disabled(void) { return preempt_depth != 0; }
 static int rm_init_adapter(void *stack, void *state) {
@@ -324,10 +382,13 @@ int main(void) {
   irq_enabled=initial; result=success;
   assert(nv_rm_vendor_init_adapter(&context)==(bool)success);
   assert(irq_enabled==initial); assert(!preempt_depth);
+  assert(g_nv_rm_boot_diagnostic[0]==(success ? 2U : 3U));
+  assert(g_nv_rm_boot_diagnostic[1]==0U && g_nv_rm_boot_diagnostic[2]==1U);
  }
  preempt_depth=1; irq_enabled=0;
  assert(!nv_rm_vendor_init_adapter(&context));
  assert(!irq_enabled && preempt_depth==1);
+ assert(g_nv_rm_boot_diagnostic[0]==1U && g_nv_rm_boot_diagnostic[1]==1U);
  return 0;
 }
 '''
@@ -379,12 +440,12 @@ class PayloadDeployment(unittest.TestCase):
         inventory = json.loads((ROOT / 'build/nvidia/runtime/deployed.json').read_text())
         for name, digest in inventory.items():
             self.assertEqual(builder.sha(esp / name), digest, name)
-        for name in ('sbin/cube', 'EFI/OS/firmware/gsp_ga10x.bin',
-                     'lib/x86_64-linux-gnu/libc.so.6',
-                     'compat/linux/lib/x86_64-linux-gnu/libEGL_nvidia.so.0'):
+        for name in ('usr/apps/cube/cube', 'EFI/OS/firmware/gsp_ga10x.bin',
+                     'usr/apps/cube/lib/libc.so.6',
+                     'usr/apps/cube/lib/libEGL_nvidia.so.0'):
             self.assertIn(name, inventory)
-        interpreter = subprocess.check_output(['readelf', '-l', str(esp / 'sbin/cube')], text=True)
-        self.assertIn('/lib64/ld-linux-x86-64.so.2', interpreter)
+        interpreter = subprocess.check_output(['readelf', '-l', str(esp / 'usr/apps/cube/cube')], text=True)
+        self.assertIn('/usr/apps/cube/lib/ld-linux-x86-64.so.2', interpreter)
 
     def test_elf_blob_sections(self):
         for name in ('user-init-blob', 'user-test-blob', 'trampoline', 'uaccess-entry', 'interrupt'):
@@ -397,11 +458,13 @@ class PayloadDeployment(unittest.TestCase):
 
     def test_production_failure_does_not_reboot(self):
         source = (ROOT / 'kernel/init/runtime.c').read_text()
-        block = source.split('#if OS_NVIDIA_PHASE5\n    {', 1)[1].split('#elif', 1)[0]
+        block = source.split('#if OS_NVIDIA_PHASE5\n    if (userspace_device_init_done()) {', 1)[1].split('#elif', 1)[0]
         self.assertIn('if (realtest_enabled())\n                realtest_finish_failure();', block)
         self.assertIn('} else {\n            kernel_serial_write_serial_only("OS_NVIDIA_GSP_READY', block)
         config = (ROOT / 'build/kernel/.debug-serial').read_text().strip().split(':')
-        self.assertEqual(len(config), 11)
+        self.assertEqual(config[0], 'os-config-v1')
+        self.assertEqual(len(config), 12)
+        self.assertTrue(all(value in ('0', '1') for value in config[1:]))
         self.assertEqual(config[-1], '1')
 
 

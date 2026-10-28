@@ -13,6 +13,7 @@ for target in (
     'obj/media/renderers/renderers/native_vulkan_video_decoder.o',
     'obj/media/renderers/renderers/default_decoder_factory.o',
     'obj/media/base/base/decoder.o',
+    'obj/media/base/base/supported_types.o',
     'obj/media/filters/filters/ffmpeg_video_decoder.o',
 ):
     lines = subprocess.check_output(['ninja', '-C', str(out), '-t', 'commands',

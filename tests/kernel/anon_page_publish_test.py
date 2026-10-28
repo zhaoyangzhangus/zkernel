@@ -24,7 +24,7 @@ program = r'''
 #include <stdlib.h>
 #include <stdio.h>
 enum { VM_OBJECT_ANON=1, VM_OBJECT_SHARED=2, PAGE_ALLOC_ZERO=1, PAGE_OWNER_ANON=7 };
-typedef struct { unsigned owner; } page_t;
+typedef struct { unsigned owner; atomic_uint refs; } page_t;
 typedef pthread_mutex_t spinlock_t;
 ''' + types + r'''
 typedef struct {
@@ -49,9 +49,9 @@ static page_t *page_alloc(unsigned order, unsigned flags) {
     if (race) { int rc=pthread_barrier_wait(&barrier); assert(rc==0 || rc==PTHREAD_BARRIER_SERIAL_THREAD); }
     if(allocation_hook) {void (*hook)(void)=allocation_hook;allocation_hook=0;hook();}
     if (fail_page) return 0;
-    page_t *page=calloc(1,sizeof(*page)); assert(page); ++allocated; return page;
+    page_t *page=calloc(1,sizeof(*page)); assert(page); atomic_init(&page->refs,1); ++allocated; return page;
 }
-static void page_free(page_t *page) { assert(!held); ++released; free(page); }
+static void page_free(page_t *page) { assert(!held && atomic_load(&page->refs)==1); ++released; free(page); }
 static void *kmalloc(size_t size, unsigned flags) {
     assert(!held && !flags); ++node_attempts; if (fail_node) return 0;
     void *p=calloc(1,size); assert(p); ++nodes; return p;
@@ -63,13 +63,13 @@ static vm_object_t object={.type=VM_OBJECT_ANON};
 static page_t *winner;
 static void publish_during_failed_allocation(void) {
     fail_page=0;
-    assert(anon_page_get(&object,77,true,&winner)==K_OK);
+    assert(anon_page_get(&object,77,true,false,&winner)==K_OK);
     fail_page=1;
 }
 static page_t *outputs[8];
 static void *worker(void *arg) {
     unsigned id=(unsigned)(uintptr_t)arg;
-    assert(anon_page_get(&object,42,true,&outputs[id])==K_OK);
+    assert(anon_page_get(&object,42,true,false,&outputs[id])==K_OK);
     assert(!held); return 0;
 }
 static void clear(void) {
@@ -83,22 +83,22 @@ static void clear(void) {
 int main(void) {
     assert(!pthread_mutex_init(&store.lock,0)); object.u.anon.anon_root=&store;
     page_t *out=0;
-    assert(anon_page_get(0,0,true,&out)==K_EINVAL);
-    assert(anon_page_get(&object,0,true,0)==K_EINVAL);
-    assert(anon_page_get(&object,0,false,&out)==K_ENOENT && !allocated && !nodes);
-    fail_page=1; assert(anon_page_get(&object,0,true,&out)==K_ENOMEM && !node_attempts); fail_page=0;
+    assert(anon_page_get(0,0,true,false,&out)==K_EINVAL);
+    assert(anon_page_get(&object,0,true,false,0)==K_EINVAL);
+    assert(anon_page_get(&object,0,false,false,&out)==K_ENOENT && !allocated && !nodes);
+    fail_page=1; assert(anon_page_get(&object,0,true,false,&out)==K_ENOMEM && !node_attempts); fail_page=0;
     assert(!store.pages && !object.populated_pages && nodes==freed);
-    fail_node=1; assert(anon_page_get(&object,0,true,&out)==K_ENOMEM); fail_node=0;
+    fail_node=1; assert(anon_page_get(&object,0,true,false,&out)==K_ENOMEM); fail_node=0;
     assert(!store.pages && allocated==released);
     unsigned before_attempts=node_attempts;
     allocation_hook=publish_during_failed_allocation;fail_page=1;
-    assert(anon_page_get(&object,77,true,&out)==K_OK && out==winner);
+    assert(anon_page_get(&object,77,true,false,&out)==K_OK && out==winner);
     assert(node_attempts==before_attempts+1 && object.populated_pages==1);
     fail_page=0;clear();
     for (unsigned round=0;round<100;++round) {
         unsigned resident=round%2?16:0;
         for(unsigned i=0;i<resident;++i)
-            assert(anon_page_get(&object,1000+i,true,&out)==K_OK);
+            assert(anon_page_get(&object,1000+i,true,false,&out)==K_OK);
         unsigned before_race_find=find_calls;
         pthread_t threads[8]; race=1; assert(!pthread_barrier_init(&barrier,0,8));
         for(unsigned i=0;i<8;++i) assert(!pthread_create(&threads[i],0,worker,(void *)(uintptr_t)i));
@@ -116,17 +116,17 @@ int main(void) {
         assert(store.pages->list_link==&store.pages && outputs[0]->owner==PAGE_OWNER_ANON);
         assert(allocated==released+resident+1 && nodes==freed+resident+1);
         unsigned before=allocated; fail_page=fail_node=1;
-        assert(anon_page_get(&object,42,true,&out)==K_OK && out==outputs[0]);
-        assert(anon_page_get(&object,42,false,&out)==K_OK && allocated==before);
+        assert(anon_page_get(&object,42,true,false,&out)==K_OK && out==outputs[0]);
+        assert(anon_page_get(&object,42,false,false,&out)==K_OK && allocated==before);
         fail_page=fail_node=0; clear();
     }
     object.type=VM_OBJECT_SHARED; object.u.shared.shared_root=&store;
     unsigned before_find=find_calls;
-    assert(anon_page_get(&object,100,true,&out)==K_OK);
+    assert(anon_page_get(&object,100,true,false,&out)==K_OK);
     assert(find_calls==before_find+1);
     /* A nonempty tree must also publish a fresh index without a second find. */
     before_find=find_calls;
-    assert(anon_page_get(&object,101,true,&out)==K_OK);
+    assert(anon_page_get(&object,101,true,false,&out)==K_OK);
     assert(find_calls==before_find+1 && object.populated_pages==2); clear();
     assert(!held); assert(!pthread_mutex_destroy(&store.lock));
     puts("Anonymous publication: off-lock allocation/free, 100 eight-way empty/populated-tree races with exactly one find per caller, hit/miss/OOM/shared and winner ownership/backlinks passed");

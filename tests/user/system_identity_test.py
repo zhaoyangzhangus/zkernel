@@ -93,7 +93,8 @@ assert (ROOT / 'assets/fonts/default.ttf').is_file()
 assert (ROOT / 'assets/desktop/wallpaper.png').is_file()
 for file in ('kernel/graphics/ascii_font.c', 'user/runtime/text.c',
              'user/runtime/blend2d_api_test.c', 'user/runtime/blend2d_demo.c'):
-    assert '"/etc/fonts/default.ttf"' in (ROOT / file).read_text(), file
+    assert any(value in (ROOT / file).read_text() for value in
+               ('"/EFI/OS/fonts/default.ttf"', 'OS_FONT_DEFAULT_PATH')), file
 with tempfile.TemporaryDirectory(prefix='system-identity-') as directory:
     binary = str(Path(directory) / 'test')
     subprocess.run(['cc', '-std=c11', '-Wall', '-Wextra', '-Werror',

@@ -46,7 +46,7 @@ void x86_switch_context(arch_switch_context_t *from,
                         const arch_switch_context_t *to);
 void x86_switch_context_root(arch_switch_context_t *from,
                              const arch_switch_context_t *to,
-                             paddr_t root);
+                             paddr_t root, bool finish_handoff);
 
 /*
  * Pure Ring0 thread first-entry trampoline.
@@ -54,6 +54,25 @@ void x86_switch_context_root(arch_switch_context_t *from,
  */
 __attribute__((noreturn))
 void x86_kernel_thread_start(void);
+
+/* 仅用于尚未发布的新内核线程；栈顶下方须有至少八字节可写空间。
+ * 切换通过 RET 进入跳板，随后 CALL 保证 C 入口满足 SysV 栈对齐约定。
+ * 不改变浮点状态的所有权，也不发布线程或修改调度状态。 */
+static inline void x86_prepare_kernel_thread(arch_thread_state_t *state,
+                                             uintptr_t stack_top,
+                                             void (*entry)(void *),
+                                             void *argument) {
+    stack_top &= ~(uintptr_t)15U;
+    uintptr_t stack = stack_top - sizeof(uint64_t);
+    *(uint64_t *)stack = (uint64_t)(uintptr_t)&x86_kernel_thread_start;
+    state->switch_ctx = (arch_switch_context_t){
+        .rsp = stack,
+        .r12 = (uint64_t)(uintptr_t)entry,
+        .r13 = (uint64_t)(uintptr_t)argument,
+        .r14 = stack_top,
+    };
+    state->fs_base = 0U;
+}
 
 /*
  * 将当前栈切换到同一物理内存的另一个虚拟别名，然后从一个全新的 C 调用链继续执行。

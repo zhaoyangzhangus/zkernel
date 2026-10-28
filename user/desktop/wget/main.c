@@ -439,7 +439,7 @@ static void remove_file_best_effort(const char *path) {
 }
 
 static bool parse_resolver_file(uint32_t *dns_server) {
-    static const char path[] = "/etc/resolv.conf";
+    static const char path[] = "/EFI/OS/resolv.conf";
     uint8_t buffer[256];
     os_handle_t file = OS_INVALID_HANDLE;
     int64_t bytes;

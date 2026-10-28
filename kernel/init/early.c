@@ -33,9 +33,8 @@ static BOOLEAN apic_self_test(void) {
 }
 
 static void publish_refactor_boot_snapshot(void) {
-    /* Phase 0 is intentionally not claimed until a repeatable benchmark
-     * baseline is checked in.  The remaining records make the current
-     * frontier visible even when a later phase has not started yet. */
+    /* 在可重复的基准基线提交前，刻意不宣称 Phase 0 已完成。其余记录会显示当前进度，
+     * 即使后续阶段尚未开始。 */
     kernel_debug_stage_pending(OS_DEBUG_PHASE_REFACTOR_0);
     kernel_debug_stage_ready(OS_DEBUG_PHASE_REFACTOR_1);
     kernel_debug_stage(OS_DEBUG_PHASE_REFACTOR_2,
@@ -142,8 +141,7 @@ BOOLEAN kernel_init_early(OS_BOOT_INFO *info,
     if (!arch_enable_kernel_paging(info)) {
         return early_fail(hooks, "OS_PAGING_INIT_FAIL\r\n");
     }
-    /* The identity alias remains active until the RAM allocator installs the
-     * final direct map and framebuffer alias in the next init phase. */
+    /* 身份映射别名会一直保持有效，直到下一个 init 阶段建立最终直接映射和帧缓冲别名。 */
     hooks->write("OS_PAGING_OK\r\n");
     kernel_debug_stage(OS_DEBUG_PHASE_REFACTOR_3,
                        OS_DEBUG_STEP_PROGRESS, 1U);

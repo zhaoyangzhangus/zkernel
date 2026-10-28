@@ -1,16 +1,20 @@
-/* REFACTOR_SYSCALL_AUDIO_OWNER: audio UAPI and stream control handlers. */
+/* REFACTOR_SYSCALL_AUDIO_OWNER：音频 UAPI 和流控制处理程序。 */
 
 #include <arch/x86_64/uaccess.h>
 #include <kernel/audio.h>
 #include <kernel/device.h>
 #include <kernel/hda.h>
 #include <kernel/kmem.h>
+#include <kernel/io_mutex.h>
+#include <kernel/vfs.h>
+#include <uapi/file.h>
 #include <kernel/process.h>
 #include <kernel/xhci.h>
 #include <uapi/audio.h>
 #include <uapi/syscall.h>
 
 #include "internal.h"
+#include "audio_settings.h"
 
 static kstatus_t audio_uapi_to_kernel(const os_audio_stream_config_t *source,
                                       audio_format_t *destination) {
@@ -47,12 +51,6 @@ static kstatus_t audio_backend_stop(audio_stream_t *stream) {
     return status == K_ENOENT ? xhci_audio_stream_stop(stream) : status;
 }
 
-static kstatus_t audio_backend_queue(audio_stream_t *stream, uint32_t period,
-                                     uint32_t frames) {
-    kstatus_t status = xhci_audio_stream_queue(stream, period, frames);
-    return status == K_ENOENT ? K_ENOENT : status;
-}
-
 static kstatus_t audio_backend_reset(audio_stream_t *stream) {
     kstatus_t status = hda_audio_stream_reset(stream);
     return status == K_ENOENT ? xhci_audio_stream_reset(stream) : status;
@@ -86,16 +84,27 @@ int64_t syscall_audio_open(uint64_t arguments_pointer, uint64_t unused1,
     if (!versioned_header_valid(&arguments.hdr, sizeof(arguments))) return K_EINVAL;
     status = audio_uapi_to_kernel(&arguments.config, &format);
     if (status != K_OK) return status;
-    device = hda_audio_device();
-    if (device == 0) device = xhci_audio_device();
-    if (device == 0 || atomic_load_explicit(&device->state, memory_order_acquire) >=
-                       DEVICE_REMOVING) return K_ENOENT;
-    status = audio_stream_create(device,
-                                 (audio_direction_t)arguments.config.direction,
-                                 &stream);
+    if (arguments.backend > OS_AUDIO_BACKEND_USB_HEADSET) return K_EINVAL;
+    status = audio_settings_ensure_loaded();
     if (status != K_OK) return status;
-    status = audio_stream_configure(stream, &format);
+    if (arguments.backend == OS_AUDIO_BACKEND_AUTO) {
+        os_audio_settings_t settings = {0};
+        audio_settings_snapshot(&settings);
+        arguments.backend = settings.effective_backend;
+    }
+    /* 串行保护端点选择和首次绑定，防止另一个 OPEN 在两者之间切换 USB 设备。 */
+    status = audio_settings_lock_and_load();
+    if (status != K_OK) return status;
+    if (arguments.backend >= OS_AUDIO_BACKEND_USB)
+        status = xhci_audio_select_device(arguments.backend-OS_AUDIO_BACKEND_USB);
+    device = arguments.backend >= OS_AUDIO_BACKEND_USB ? xhci_audio_device() : hda_audio_device();
+    if (!device || atomic_load_explicit(&device->state, memory_order_acquire) >= DEVICE_REMOVING)
+        status = K_ENOENT;
+    if (status == K_OK) status = audio_stream_create(device,
+        (audio_direction_t)arguments.config.direction, &stream);
+    if (status == K_OK) status = audio_stream_configure(stream, &format);
     if (status == K_OK) status = audio_backend_configure(stream);
+    io_mutex_unlock_required(&g_audio_settings_lock);
     if (status == K_OK) {
         status = handle_create(&process->handles, stream,
                                AUDIO_STREAM_RIGHT_ALL, &handle);
@@ -128,6 +137,7 @@ int64_t syscall_audio_control(uint64_t handle, uint64_t arguments_pointer,
     kstatus_t status;
     uint32_t rights;
     uint64_t expected;
+    uint64_t submission = 0U;
     if (process == 0) return K_EPERM;
     status = copy_from_user(&arguments,
         (const void __user *)(uintptr_t)arguments_pointer, sizeof(arguments));
@@ -211,21 +221,28 @@ int64_t syscall_audio_control(uint64_t handle, uint64_t arguments_pointer,
             status = K_EINVAL;
             break;
         }
-        temporary = kzalloc((size_t)expected, 0);
+        /* 用户拷贝成功后才会提交整块数据，无需预先清零；拷贝失败直接释放。 */
+        temporary = kmalloc((size_t)expected, 0);
         if (temporary == 0) {
             status = K_ENOMEM;
             break;
         }
         status = copy_from_user(temporary,
             (const void __user *)(uintptr_t)arguments.buffer, (size_t)expected);
-        if (status == K_OK) status = audio_stream_period_write(
-            stream, arguments.period, temporary, expected);
-        if (status == K_OK) status = audio_stream_queue(stream, arguments.period,
-                                                         arguments.frames);
+        if (status == K_OK && audio_stream_direction(stream) == AUDIO_PLAYBACK) {
+            audio_format_t format;
+            audio_stream_get_format(stream, &format);
+            audio_settings_apply_gain(temporary, expected, format.sample_format);
+        }
+        if (status == K_OK) status = audio_stream_submit(stream,
+            arguments.period, temporary, expected, arguments.frames, &submission);
         if (status == K_OK) {
-            kstatus_t backend = audio_backend_queue(stream, arguments.period,
+            kstatus_t backend = xhci_audio_stream_queue(stream, arguments.period,
                                                      arguments.frames);
-            if (backend != K_OK && backend != K_ENOENT) status = backend;
+            if (backend != K_OK && backend != K_ENOENT) {
+                (void)audio_stream_cancel_submit(stream, arguments.period, submission);
+                status = backend;
+            }
         }
         kfree(temporary);
         temporary = 0;
@@ -251,7 +268,10 @@ int64_t syscall_audio_control(uint64_t handle, uint64_t arguments_pointer,
             status = K_EINVAL;
             break;
         }
-        status = audio_stream_complete(stream, arguments.period, arguments.frames);
+        status = hda_audio_stream_complete(stream, arguments.period, arguments.frames);
+        if (status == K_ENOENT) status = xhci_audio_stream_complete(stream,
+                                        arguments.period, arguments.frames);
+        if (status == K_OK) status = audio_stream_complete(stream, arguments.period, arguments.frames);
         if (status == K_OK && temporary != 0) {
             status = audio_stream_period_read(stream, arguments.period,
                                               temporary, expected);

@@ -51,11 +51,8 @@ static void *writer(void *unused) {
 int main(void) {
     process_t process={.pid=UINT64_MAX};
     assert(!linux_process_is_chrome_image(NULL) && !linux_process_is_chrome_image(&process));
-    linux_chrome_madvise_failure(NULL,0,0,0,0);
     linux_chrome_vm_failure("MMAP",&process,0,0,0,0,0); assert(!used);
-    strcpy(process.linux_exe,"/sbin/chrome"); assert(linux_process_is_chrome_image(&process));
-    linux_chrome_madvise_failure(&process,UINT64_MAX,UINT64_MAX,UINT64_MAX,INT64_MIN);
-    assert(!strcmp(output,"OS_CHROME_MADVISE_FAIL pid=0xffffffffffffffff addr=0xffffffffffffffff len=0xffffffffffffffff advice=0xffffffffffffffff status=0x8000000000000000\r\n"));
+    strcpy(process.linux_exe,"/usr/apps/chrome/chrome"); assert(linux_process_is_chrome_image(&process));
     reset(); linux_chrome_vm_failure("MPROTECT",&process,UINT64_MAX,0,7,UINT64_MAX,K_EIO);
     assert(!strcmp(output,"OS_CHROME_MPROTECT_FAIL pid=0xffffffffffffffff addr=0xffffffffffffffff len=0x0000000000000000 prot=0x0000000000000007 flags=0xffffffffffffffff status=0xfffffffffffffffb\r\n"));
     reset(); linux_chrome_vm_failure(NULL,&process,0,0,0,0,0); assert(!used);
@@ -79,9 +76,9 @@ int main(void) {
     assert(used==4 && !memcmp(output,"0123",4) && g_linux_chrome_stderr_bytes==16384);
     reset_budget(); g_linux_chrome_stderr_bytes=UINT32_MAX;
     linux_chrome_stderr_write(&process,"error",5); assert(!used && g_linux_chrome_stderr_bytes==UINT32_MAX);
-    reset_budget(); strcpy(process.linux_exe,"/sbin/chrome-extra");
+    reset_budget(); strcpy(process.linux_exe,"/usr/apps/chrome/chrome-extra");
     linux_chrome_stderr_write(&process,text,10); assert(!used && !g_linux_chrome_trace_bytes);
-    strcpy(process.linux_exe,"/sbin/chrome");
+    strcpy(process.linux_exe,"/usr/apps/chrome/chrome");
     linux_chrome_stderr_write(&process,NULL,1); linux_chrome_stderr_write(&process,text,0);
     linux_chrome_stderr_write(NULL,text,1); assert(!used && !g_linux_chrome_stderr_bytes);
     reset_budget(); concurrent_process=&process;

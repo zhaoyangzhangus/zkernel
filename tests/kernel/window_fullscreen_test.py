@@ -5,7 +5,9 @@ import tempfile
 root = Path(__file__).resolve().parents[2]
 source = (root/'kernel/graphics/window.c').read_text()
 begin = source.index('kstatus_t window_server_set_fullscreen_owned(')
-body = source[begin:source.index('kstatus_t window_server_set_decorations_owned(', begin)]
+# Extract this top-level function, not every function inserted before the next
+# historical neighbour. Adjacent drag APIs have their own state and fixtures.
+body = source[begin:source.index('\n}', begin) + 2]
 code = r'''
 #include <assert.h>
 #include <stdbool.h>
@@ -23,7 +25,8 @@ typedef struct {
 } window_server_window_t;
 static struct {unsigned display_width,display_height,title_pressed_identifier,dragging_identifier;} g_window_server={1920,1080,0,0};
 static bool ready=true,registered=true,locked;
-static unsigned marks,events,wakes;
+static unsigned marks,events,wakes,rehits;
+static void window_input_refresh_pointer_locked(void){assert(locked);++rehits;}
 static bool window_server_kernel_ready(void){return ready;}
 static void window_lock(void){assert(!locked);locked=true;}
 static void window_unlock(void){assert(locked);locked=false;}
@@ -61,7 +64,7 @@ int main(void){
   ready=false;assert(window_server_set_fullscreen_owned(&owner,&w,1)==-22);ready=true;
   assert(window_server_set_fullscreen_owned(&owner,&w,2)==-22);
  }
- assert(marks==cases*4&&events==cases*2&&wakes==cases*2&&!locked);
+ assert(marks==cases*4&&events==cases*2&&wakes==cases*2&&rehits==events&&!locked);
  assert(window_server_set_fullscreen_owned(0,0,1)==-22);
  window_server_window_t hidden={.owner=&owner,.identifier=7,.flags=OS_WINDOW_VISIBLE|OS_WINDOW_STANDARD_CAPTION_CONTROLS,
   .width=640,.height=360,.buffer_size=32*1024*1024};

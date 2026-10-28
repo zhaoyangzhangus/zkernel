@@ -200,7 +200,8 @@ $pciText = Get-Content -LiteralPath $pciSource -Raw
 $portVmText = Get-Content -LiteralPath $portVmSource -Raw
 $vmallocText = Get-Content -LiteralPath $vmallocSource -Raw
 foreach ($requiredFirmwareText in @(
-        'vfs_open_kernel(', 'vfs_read_kernel(', 'sha256_compute(',
+        'vfs_load_file_kernel(resolved, 1U, NVABI_FIRMWARE_MAX_BYTES,',
+        'NVABI_FIRMWARE_MAX_BYTES <= UINT32_MAX', 'sha256_compute(',
         'nvabi_firmware_hash_matches(', 'kfree(data)',
         'OS_NVIDIA_FIRMWARE_REQUEST',
         'OS_NVIDIA_FIRMWARE_RESOLVED',

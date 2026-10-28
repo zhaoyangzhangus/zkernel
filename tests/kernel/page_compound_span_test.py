@@ -72,14 +72,16 @@ static unsigned check_prepare(uint64_t base,unsigned order) {
  uint64_t count=64ULL<<order,slot_pages=1ULL<<order;
  for(unsigned s=0;s<g_section_count;++s)for(uint64_t j=0;j<g_sections[s].present_pages;++j) {
   page_t *p=&g_sections[s].pages[j];uint64_t pfn=g_sections[s].base_pfn+j;
-  assert(p->mapcount==-7 && p->zone==s && p->private_data==0xabcdef);
+  assert(p->zone==s);
   if(pfn>=base && pfn-base<count) {
+   assert(p->mapcount==-1 && p->private_data==0);
    uint64_t offset=pfn-base,index=offset&(slot_pages-1);
    assert(p->flags==(index?PAGE_COMPOUND_TAIL:PAGE_COMPOUND_HEAD));
    assert(p->owner==PAGE_OWNER_NONE && p->order==(index?0:order));
    assert(!atomic_load(&p->refs) && p->u.compound.index==index);
    assert(p->u.compound.head==page_for_pfn(base+offset-index));
   } else {
+   assert(p->mapcount==-7 && p->private_data==0xabcdef);
    assert(p->flags==0x80 && p->owner==9 && p->order==17 && atomic_load(&p->refs)==23);
    assert(!p->u.compound.head && !p->u.compound.index);
   }
@@ -92,14 +94,16 @@ static void check(page_t *head,unsigned order,bool free_page) {
  for(unsigned s=0;s<g_section_count;++s) for(uint64_t j=0;j<g_sections[s].present_pages;++j) {
   page_t *p=&g_sections[s].pages[j];uint64_t pfn=g_sections[s].base_pfn+j;
   bool inside=pfn>=base && pfn-base<count;uint64_t index=pfn-base;
-  assert(p->mapcount==-7 && p->zone==s && p->private_data==0xabcdef);
+  assert(p->zone==s);
   if(inside) {
+   assert(p->mapcount==-1 && p->private_data==0);
    assert(p->flags==((free_page?PAGE_FREE:0)|(index?PAGE_COMPOUND_TAIL:PAGE_COMPOUND_HEAD)));
    assert(p->owner==(free_page?PAGE_OWNER_BUDDY:PAGE_OWNER_NONE));
    assert(p->order==(index?0:order));
    assert(atomic_load(&p->refs)==(!index && !free_page?1U:0U));
    assert(p->u.compound.head==head && p->u.compound.index==index);
   } else {
+   assert(p->mapcount==-7 && p->private_data==0xabcdef);
    assert(p->flags==0x80 && p->owner==9 && p->order==17 && atomic_load(&p->refs)==23);
    assert(!p->u.compound.head && !p->u.compound.index);
   }

@@ -16,24 +16,18 @@ program = r'''
 #define WINDOW_CURSOR_HEIGHT 4
 static struct {bool presented_pointer_valid;unsigned display_height,display_width;
  unsigned presented_pointer_x,presented_pointer_y,presented_cursor_shape;}g_window_server;
-static bool flip;
-static bool qemu_stdvga_page_flip_active(void){return flip;}
 static int window_cursor_hotspot_x(unsigned s){(void)s;return 1;}
 static int window_cursor_hotspot_y(unsigned s){(void)s;return 1;}
-static unsigned window_cursor_pixel(unsigned s,unsigned x,unsigned y){
- (void)s;assert(x<4 && y<4);return 100+x+y*4;
-}
-static unsigned cursor_blend_xrgb(unsigned bg,unsigned fg){return bg+fg;}
 static void display_core_publish_xrgb8888_span(volatile unsigned *d,const unsigned *s,unsigned n){
  for(unsigned i=0;i<n;++i)d[i]=s[i];
 }
 ''' + function + r'''
 int main(void){
  g_window_server.display_width=g_window_server.display_height=8;
- for(unsigned valid=0;valid<2;++valid)for(unsigned page=0;page<2;++page)
+ for(unsigned valid=0;valid<2;++valid)
  for(unsigned py=0;py<11;++py)for(unsigned px=0;px<11;++px)
  for(unsigned y=0;y<9;++y)for(unsigned x=0;x<9;++x)for(unsigned n=0;n<=8-x;++n){
-  g_window_server.presented_pointer_valid=valid;flip=page;
+  g_window_server.presented_pointer_valid=valid;
   g_window_server.presented_pointer_x=px;g_window_server.presented_pointer_y=py;
   unsigned src[8],dst[10];for(unsigned i=0;i<8;++i)src[i]=i+1;
   for(unsigned i=0;i<10;++i)dst[i]=0xdeadbeef;
@@ -41,15 +35,14 @@ int main(void){
   bool intersects=false;
   for(unsigned i=0;i<n;++i)intersects|=(int)(x+i)>=left && (int)(x+i)<left+4 &&
     (int)y>=top && (int)y<top+4;
-  bool expected=valid && !page && n && y<8 && intersects;
+  bool expected=valid && n && y<8 && intersects;
   assert(window_present_cursor_publish_span(dst+1,src,x,y,n)==expected);
   assert(dst[0]==0xdeadbeef && dst[9]==0xdeadbeef);
   for(unsigned i=0;i<8;++i){
    unsigned want=0xdeadbeef;
    if(expected && i<n){
-    want=src[i];
-    if((int)(x+i)>=left && (int)(x+i)<left+4 && (int)y>=top && (int)y<top+4)
-     want+=100+(x+i-left)+(y-top)*4;
+    if(!((int)(x+i)>=left && (int)(x+i)<left+4 && (int)y>=top && (int)y<top+4))
+     want=src[i];
    }
    assert(dst[i+1]==want);
   }
@@ -64,4 +57,4 @@ with tempfile.TemporaryDirectory(prefix='gop-cursor-') as directory:
                     '-fsanitize=address,undefined', str(path / 'test.c'),
                     '-o', str(path / 'test')], check=True)
     subprocess.run([str(path / 'test')], check=True)
-print('GOP cursor publication: native visible-page blending, page-flip exclusion, clipped spans/canaries PASS')
+print('GOP cursor publication: bounding box untouched, outside spans copied,  clipped canaries PASS')

@@ -12,9 +12,9 @@ assert 'liteos_crt_entry' not in make
 assert '-e libc_crt_entry' in make
 assert 'audiod-blob.o' not in make and 'liteos_audiod_blob' not in make
 assert '$(BUILD)/esp/sbin/audiod: $(USER_AUDIOD_ELF)' in make
-assert '$(BUILD)/esp/sbin/fat-fsync-probe: $(DYNAMIC_FSYNC_PROBE_ELF)' in make
+assert '$(BUILD)/esp/usr/apps/fat-fsync-probe/fat-fsync-probe: $(DYNAMIC_FSYNC_PROBE_ELF)' in make
 assert '$(PHASE13_TEST_IMAGE) $(EXISTING_DIAGNOSTIC_IMAGES)' in make
-assert 'EXISTING_DIAGNOSTIC_IMAGES = $(wildcard' in make
+assert 'EXISTING_DIAGNOSTIC_IMAGES = $(foreach app,' in make
 header = (ROOT / 'include/uapi/linux_abi.h').read_text()
 assert not re.search(r'\bLITEOS_\w+', header)
 source = r'''
@@ -44,7 +44,33 @@ with tempfile.TemporaryDirectory(prefix='native-entry-') as directory:
             (sbin / name).touch()
         selected = subprocess.check_output(['make', '-s', '-f', '-', 'all'],
                                           input=program, text=True).split()
-        assert selected == [str(sbin / name) for name in expected], selected
+        assert selected == [str(fixture/'esp/usr/apps'/name/name) for name in expected], selected
+    # 旧副本删除后，新归属仍应继续参与后续诊断更新。
+    for name in ('fat-fsync-probe', 'linux-events-test'):
+        (sbin/name).unlink()
+        target=fixture/'esp/usr/apps'/name/name
+        target.parent.mkdir(parents=True)
+        target.touch()
+    selected=subprocess.check_output(['make','-s','-f','-','all'],input=program,text=True).split()
+    assert selected==[str(fixture/'esp/usr/apps'/name/name)
+                      for name in ('fat-fsync-probe','linux-events-test')],selected
+    # 执行实际路径初始化片段，较长的新路径不得覆盖启动路径或参数数组。
+    runtime = (ROOT/'kernel/process/runtime_test.c').read_text()
+    setup = runtime[runtime.index('    static const char boot_path[]'):runtime.index('    process_t *process = 0;', runtime.index('    static const char boot_path[]'))]
+    layout = '#include <stdint.h>\n#include <string.h>\n#include <assert.h>\nint main(void){uint8_t image[0x4000]={0};\n'+setup+r'''
+    assert(!strcmp((char*)image+0x3100,"/usr/apps/gshell/gshell"));
+    assert(!strcmp((char*)image+0x3180,"/usr/apps/notepad/notepad"));
+    assert(!strcmp((char*)image+0x31A0,"/usr/apps/libc-test/libc-test"));
+    assert(*(uint64_t*)(void*)(image+0x31D0)==0x004021A0ULL);
+    assert(*(uint64_t*)(void*)(image+0x31D8)==0);
+    }
+'''
+    layout_source=path/'layout.c'; layout_source.write_text(layout)
+    subprocess.run(['cc','-std=c11','-Wall','-Wextra','-Werror',str(layout_source),
+                    '-o',str(path/'layout')],check=True)
+    subprocess.run([str(path/'layout')],check=True)
+    blob=(ROOT/'tests/user/user_test_blob.S').read_text()
+    assert 'movq $0x004021A0, %rdi' in blob and 'movq $0x004021D0, %rsi' in blob
     check = path / 'abi.c'
     check.write_text(source)
     subprocess.run(['cc', '-std=c11', '-I', str(ROOT / 'include'), '-c', str(check),

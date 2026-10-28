@@ -94,7 +94,7 @@ static int64_t tls_socket_recv_raw(os_handle_t socket, void *buffer,
 }
 
 static int64_t tls_normalize_status(int64_t status) {
-    /* Some syscall return paths preserve a 32-bit negative errno as a
+    /* 某些系统调用返回路径会将 32 位负 errno 保留为
        zero-extended value; make both ABI forms comparable. */
     if (status > INT32_MAX && (uint64_t)status <= UINT32_MAX) {
         return (int64_t)(int32_t)(uint32_t)status;

@@ -14,6 +14,9 @@ codec = (root / 'kernel/fs/nativefs/directory_codec.c').read_text()
 codec = codec.replace('    for (UINT32 i = 0U; i < 260U; ++i) characters[i] = 0xFFFFU;',
                       '    ++full_resets;\n    for (UINT32 i = 0U; i < 260U; ++i) characters[i] = 0xFFFFU;')
 assert '++full_resets' in codec
+codec = codec.replace('    UINT32 cursor=0U, used=0U;',
+                      '    ++encodings;\n    UINT32 cursor=0U, used=0U;', 1)
+assert '++encodings' in codec
 old_lookup = lookup.replace('fat32_lfn_invalidate(', 'fat32_lfn_reset(lfn_characters, ')
 old_lookup = old_lookup[old_lookup.index('BOOLEAN fat32_find_directory_entry_ex('):]
 old_lookup = old_lookup.replace('fat32_find_directory_entry_ex(', 'previous_find(', 1)
@@ -32,7 +35,7 @@ code = r'''
 #define FAT32_DIRECTORY 0x10U
 #define FAT32_ATTRIBUTE_LFN 0x0FU
 #define FAT32_MAX_LFN_ENTRIES 20U
-static unsigned full_resets,sector_reads,directory_resolutions;
+static unsigned full_resets,sector_reads,directory_resolutions,encodings;
 static UINT64 failed_lba=UINT64_MAX;
 static UINT8 media[64*512];
 static OS_FAT32 fs;
@@ -202,6 +205,30 @@ int main(void) {
     fat32_lfn_store_entry(media,chars,&valid,&expected,&checksum);
     assert(valid&&!expected&&chars[0]=='t'&&chars[4]==0);
     for(unsigned i=5;i<260;++i)assert(chars[i]==0xffff);
+    /* 扫过多个长名称时只转换一次；匹配首项短别名时无需转换。 */
+    memset(media,0,sizeof(media));unsigned slot=0;char query[64];
+    for(unsigned i=0;i<80;++i){
+        snprintf(query,sizeof(query),"Long query file number %03u",i);
+        slot=long_entries(slot,query,strlen(query),i);
+    }
+    encodings=0;
+    assert(fat32_find_directory_entry_ex(&fs,0,query,strlen(query),result,0,0,0,0,&count));
+    assert(encodings==1);
+    encodings=0;
+    assert(!fat32_find_directory_entry_ex(&fs,0,"absent long query file",22,result,0,0,0,0,&count));
+    assert(encodings==1);
+    encodings=0;
+    assert(!fat32_find_directory_entry_ex(&fs,0,"\x80",1,result,0,0,0,0,&count));
+    assert(encodings==1);
+    encodings=0;
+    assert(fat32_find_directory_entry_ex(&fs,0,"F0000000.TXT",12,result,0,0,0,0,&count));
+    assert(encodings==0 && count==2);
+    puts("LFN query: 80 candidates -> one UTF-8 conversion; invalid input cached, matching short alias needs zero conversions");
+    /* 短别名命中不能把校验和不符的前导 LFN 归入该文件。 */
+    memset(media,0,sizeof(media));long_entries(0,"other name",10,123);
+    media[13]^=1;count=99;
+    assert(fat32_find_directory_entry_ex(&fs,0,"F0000123.TXT",12,result,0,0,0,0,&count));
+    assert(count==0);
     printf("LFN lookup/enumeration: %u length/sector-boundary/malformed/deletion/stale-name cases match old behavior\n",cases);
 }
 '''

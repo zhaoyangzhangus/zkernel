@@ -25,6 +25,7 @@ static unsigned char oracle[SOCKET_STREAM_BUFFER_SIZE+32];
 static unsigned cases;
 static void check(unsigned cursor, unsigned n) {
     memset(&actual, 0x75, sizeof(actual)); actual.stream_write=cursor; actual.stream_read=cursor;
+    actual.stream_dynamic=NULL;actual.stream_capacity=0;
     memcpy(&expected,&actual,sizeof(actual));
     for(unsigned i=0;i<n;++i)expected.stream_buffer[(cursor+i)%SOCKET_STREAM_BUFFER_SIZE]=input[i+7];
     copies=0;

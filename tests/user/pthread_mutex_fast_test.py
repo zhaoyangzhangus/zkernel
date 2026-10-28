@@ -33,6 +33,9 @@ program = r'''
 #include <unistd.h>
 #include <sys/syscall.h>
 #include <linux/futex.h>
+#include <sys/mman.h>
+#include <sys/wait.h>
+#include <signal.h>
 #define OS_WAIT_INFINITE UINT64_MAX
 typedef struct { volatile uint32_t state; } fixture_mutex_t;
 typedef struct { uint32_t value; } fixture_mutexattr_t;
@@ -46,13 +49,19 @@ static int absolute_timeout(const struct timespec *target, clockid_t clock, uint
     if (delta <= 0) return ETIMEDOUT;
     *ns=delta;return 0;
 }
-static int futex_wait(volatile uint32_t *word, uint32_t value, uint64_t ns) {
+static int futex_wait_mode(volatile uint32_t *word, uint32_t value, uint64_t ns, bool shared) {
     struct timespec t={ns/1000000000ULL,ns%1000000000ULL};
-    return syscall(SYS_futex,word,FUTEX_WAIT_PRIVATE,value,
+    return syscall(SYS_futex,word,shared?FUTEX_WAIT:FUTEX_WAIT_PRIVATE,value,
         ns==OS_WAIT_INFINITE?0:&t,0,0)<0?errno:0;
 }
+static int futex_wait(volatile uint32_t *word, uint32_t value, uint64_t ns) {
+    return futex_wait_mode(word,value,ns,false);
+}
+static int futex_wake_mode(volatile uint32_t *word, uint32_t count, bool shared) {
+    return syscall(SYS_futex,word,shared?FUTEX_WAKE:FUTEX_WAKE_PRIVATE,count,0,0,0)<0?errno:0;
+}
 static int futex_wake(volatile uint32_t *word, uint32_t count) {
-    return syscall(SYS_futex,word,FUTEX_WAKE_PRIVATE,count,0,0,0)<0?errno:0;
+    return futex_wake_mode(word,count,false);
 }
 ''' + metadata + masks + r'''
 static volatile uint32_t g_mutex_metadata_lock;
@@ -102,6 +111,31 @@ static void condition_roundtrip(fixture_mutex_t *m, unsigned depth) {
 }
 int main(void) {
     alarm(30);assert(sizeof(fixture_mutex_t)==4);
+    fixture_mutex_t *shared=mmap(0,4096,PROT_READ|PROT_WRITE,MAP_SHARED|MAP_ANONYMOUS,-1,0);
+    assert(shared!=MAP_FAILED);
+    fixture_mutexattr_t shared_attribute={.value=LIBC_MUTEXATTR_PSHARED_BIT};
+    for(unsigned round=0;round<32;++round){
+        assert(!fixture_mutex_init(shared,&shared_attribute));
+        assert(!fixture_mutex_lock(shared));
+        pid_t child=fork();assert(child>=0);
+        if(!child){assert(!fixture_mutex_lock(shared));assert(!fixture_mutex_unlock(shared));_exit(0);}
+        unsigned attempts=0;
+        while((__atomic_load_n(&shared->state,__ATOMIC_ACQUIRE)&~LIBC_MUTEX_SHARED_BIT)!=LIBC_LOCK_STATE_CONTENDED && attempts++<1000){
+            struct timespec pause={0,1000000};nanosleep(&pause,0);
+        }
+        assert(attempts<1000);
+        struct timespec queued_pause={0,2000000};nanosleep(&queued_pause,0);
+        assert(!fixture_mutex_unlock(shared));
+        int status=0;pid_t reaped=0;
+        for(unsigned i=0;i<1000 && !reaped;++i){
+            reaped=waitpid(child,&status,WNOHANG);
+            if(!reaped){struct timespec pause={0,1000000};nanosleep(&pause,0);}
+        }
+        if(!reaped){kill(child,SIGKILL);waitpid(child,&status,0);}
+        assert(reaped==child && WIFEXITED(status) && WEXITSTATUS(status)==0);
+        assert(!fixture_mutex_destroy(shared));
+    }
+    assert(!munmap(shared,4096));
     fixture_mutex_t fresh={.state=0xdeadbeef};
     assert(!fixture_mutex_init(&fresh,0));assert(fresh.state==0);
     // Even a stalled side-table owner cannot stop ordinary mutex operations.
@@ -161,4 +195,4 @@ with tempfile.TemporaryDirectory(prefix='system-mutex-fast-') as directory:
                     '-fsanitize=address,undefined', '-fno-omit-frame-pointer', '-no-pie',
                     str(path/'test.c'), '-o', str(path/'test')], check=True)
     subprocess.run([str(path/'test')], check=True, timeout=35)
-print('Mutex: production normal fast path bypasses stalled metadata; 320000 threaded updates, recursive/errorcheck ownership, condition release/depth restoration, timeout, wake chain and ABI passed (ASan/UBSan)')
+print('Mutex: 32 contended fork/shared-memory handoffs; private fast path, 320000 threaded updates, recursive/errorcheck, condition restore, timeout, wake chain and 4-byte ABI PASS (ASan/UBSan)')

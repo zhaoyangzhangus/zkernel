@@ -85,6 +85,10 @@ static void vm_fault_diag_emit(thread_t *thread, const vm_fault_info_t *fault,
                                uint32_t cpu_error, kstatus_t status,
                                vm_area_t *area, uint64_t file_offset,
                                uint32_t object_type) {
+    /* 在串口输出和进程销毁释放页面前获取快照。无法取得统计信息时应明确报错，
+     * 不能将其报告为可用内存为零。 */
+    uint64_t total_pages = 0U, free_pages = 0U;
+    kstatus_t memory_status = page_memory_get_stats(&total_pages, &free_pages);
     while (atomic_flag_test_and_set_explicit(&g_vm_fault_diag_lock,
                                               memory_order_acquire)) {
         __asm__ volatile ("pause");
@@ -109,6 +113,12 @@ static void vm_fault_diag_emit(thread_t *thread, const vm_fault_info_t *fault,
     vm_fault_diag_write_hex(object_type);
     vm_fault_diag_write_text(" file_offset=");
     vm_fault_diag_write_hex(file_offset);
+    vm_fault_diag_write_text(" memory_status=");
+    vm_fault_diag_write_hex((uint64_t)memory_status);
+    vm_fault_diag_write_text(" total_pages=");
+    vm_fault_diag_write_hex(total_pages);
+    vm_fault_diag_write_text(" free_pages=");
+    vm_fault_diag_write_hex(free_pages);
     vm_fault_diag_write_text("\r\n");
     atomic_flag_clear_explicit(&g_vm_fault_diag_lock, memory_order_release);
 }
@@ -173,8 +183,18 @@ typedef struct vm_fault_trace {
 
 static kstatus_t vm_handle_fault_impl(vm_space_t *space,
                                       const vm_fault_info_t *fault,
-                                      vm_fault_trace_t *trace);
+                                      vm_fault_trace_t *trace,
+                                      bool *surface_hint);
 static void vm_fault_around(vm_space_t *space, const vm_fault_info_t *fault);
+
+/* 只在持有 map_lock 时读取区域。提示用于避开普通缺页的第二次加锁查找；
+ * 窗口预取仍会重新验证当前映射，不依赖此快照的存续时间。 */
+static bool vm_area_fault_around_eligible(const vm_area_t *area) {
+    return area != 0 && (area->flags & VM_MAP_STACK) == 0U &&
+           area->object != 0 && area->object->type == VM_OBJECT_SHARED &&
+           (area->object->flags & VM_OBJECT_FLAG_WINDOW_SURFACE) != 0U;
+}
+
 
 #if VM_FAULT_TELEMETRY_ENABLED
 static atomic_uint_fast64_t g_vm_fault_counts[VM_FAULT_COUNT_MAX];
@@ -465,6 +485,7 @@ bool vm_handle_current_fault(vaddr_t address, uint32_t cpu_error,
     vm_space_t *space = process_vm_reference(thread->process);
     if (space == 0) return false;
 
+    bool surface_hint = false;
     fault.address = address;
     fault.access = (cpu_error & (1U << 4)) != 0U ? VM_PROT_EXEC :
                    (cpu_error & (1U << 1)) != 0U ? VM_PROT_WRITE :
@@ -473,11 +494,11 @@ bool vm_handle_current_fault(vaddr_t address, uint32_t cpu_error,
     uint64_t diagnostic_started = x86_read_tsc();
  #if VM_FAULT_TELEMETRY_ENABLED
     trace.start_tsc = telemetry_timestamp();
-    status = vm_handle_fault_impl(space, &fault, &trace);
+    status = vm_handle_fault_impl(space, &fault, &trace, &surface_hint);
     trace.end_tsc = telemetry_timestamp();
     vm_fault_telemetry_record(&fault, from_user, &trace);
 #else
-    status = vm_handle_fault_impl(space, &fault, 0);
+    status = vm_handle_fault_impl(space, &fault, 0, &surface_hint);
 #endif
     uint64_t diagnostic_resolved = x86_read_tsc();
     if (status != K_OK && from_user) {
@@ -510,11 +531,11 @@ bool vm_handle_current_fault(vaddr_t address, uint32_t cpu_error,
                            area != 0 ? &area_snapshot : 0,
                            object_offset, object_type);
     }
-    if (status == K_OK && (cpu_error & 1U) == 0U) {
+    if (status == K_OK && surface_hint && (cpu_error & 1U) == 0U) {
         vm_fault_around(space, &fault);
     }
-    /* Track leaders separately: a child doing executable I/O must not hide
-     * the browser UI's fault latency. No logging/allocation in this path. */
+    /* 单独跟踪主线程：执行文件 I/O 的子线程不能掩盖浏览器 UI 的缺页延迟。
+     * 此路径中不记录日志，也不分配内存。 */
     if (thread->tid == thread->process->linux_thread_group_leader_tid ||
         thread->process->pid == g_vm_slow_fault_process)
         vm_record_slow_fault(thread->process->pid, thread->tid, address,
@@ -526,15 +547,19 @@ bool vm_handle_current_fault(vaddr_t address, uint32_t cpu_error,
 
 static kstatus_t vm_handle_fault_impl(vm_space_t *space,
                                       const vm_fault_info_t *fault,
-                                      vm_fault_trace_t *trace) {
+                                      vm_fault_trace_t *trace,
+                                      bool *surface_hint) {
     if (space == 0 || fault == 0 || fault->address >= VM_USER_END) return K_EINVAL;
 retry_fault:
+    if (surface_hint != 0) *surface_hint = false;
     map_lock(space);
     vm_area_t *area = find_area(space, fault->address);
     if (area == 0 || (area->flags & VM_MAP_GUARD) != 0 || area->object == 0) {
         map_unlock(space);
         return K_EACCES;
     }
+    if (surface_hint != 0)
+        *surface_hint = vm_area_fault_around_eligible(area);
     if (trace != 0) {
         trace->vma_ready_tsc = telemetry_timestamp();
         trace->object_type = area->object->type;
@@ -550,9 +575,8 @@ retry_fault:
         ((access & VM_PROT_WRITE) != 0 && (area->prot & VM_PROT_WRITE) == 0) ||
         ((access & VM_PROT_EXEC) != 0 && (area->prot & VM_PROT_EXEC) == 0)) {
 #if OS_DEBUG_SERIAL
-        /* A present-page write fault is also used by Chromium's
-         * ProtectedMemory read-only probe. It is an expected uaccess fixup,
-         * so do not serialize the startup path on a diagnostic UART write. */
+        /* Chromium 的 ProtectedMemory 只读探测也会触发已映射页面的写缺页。
+         * 这是预期的 uaccess 修复路径，因此不要因诊断 UART 写入而串行化启动流程。 */
         if ((fault->cpu_error & 1U) == 0U) {
             vm_fault_write_diagnostic("DENY", fault, area, 0U);
         }
@@ -643,10 +667,10 @@ retry_fault:
             map_unlock(space);
             return K_OK;
         }
-        /* Resolve COW per page; a page already remapped writable is done. */
+        /* 逐页处理 COW；已重新映射为可写的页面无需再次处理。 */
         if (x86_page_entry_writable(existing_flags)) {
-            /* Another CPU may have upgraded this same physical page without
-             * an IPI. Remove our stale read-only translation before retrying. */
+            /* 另一颗 CPU 可能已在未发送 IPI 的情况下升级同一物理页。
+             * 重试前先移除本 CPU 过期的只读映射。 */
             __asm__ volatile ("invlpg (%0)" : :
                               "r"(page_address) : "memory");
             map_unlock(space);
@@ -665,8 +689,7 @@ retry_fault:
             }
         } else {
             if (!cow) {
-                /* The VMA is writable, so a stale read-only PTE is a
-                 * permission update that still needs to be repaired. */
+                /* VMA 可写，因此过期的只读 PTE 属于仍需修复的权限更新。 */
                 status = x86_protect_page(
                     space->root_table, (vaddr_t)page_address,
                     hardware_flags(area->prot, false), X86_CACHE_WB);
@@ -699,8 +722,7 @@ retry_fault:
         }
         if (trace != 0) trace->backing_ready_tsc = telemetry_timestamp();
         if (page_to_phys(page).value == existing.value) {
-            /* Once the child has dropped its reference, COW needs only a
-             * permission upgrade. Do not tear down/reallocate page tables. */
+            /* 子进程释放引用后，COW 只需提升页面权限。不要拆除或重新分配页表。 */
             status = x86_protect_page(space->root_table,
                 (vaddr_t)page_address, hardware_flags(area->prot, false),
                 X86_CACHE_WB);
@@ -733,11 +755,9 @@ retry_fault:
     }
 
     /*
-     * Backing-store callbacks can take vnode/backend locks and perform I/O.
-     * VFS user-copy paths can fault while holding those same locks, so never
-     * enter them while map_lock is held. Pin both objects and snapshot the VMA
-     * before dropping the lock; after the callback, revalidate before using
-     * the result because unmap/protect/split may have run in the meantime.
+    * 后备存储回调可能获取 vnode/后端锁并执行 I/O。VFS 用户拷贝路径可能在持有相同锁时触发缺页，因此
+    * 绝不能在持有 map_lock 时进入这些回调。解锁前固定两个对象并快照 VMA；回调返回后重新验证，因为
+    * 期间可能已执行 unmap/protect/split。
      */
     vm_area_t area_snapshot = *area;
     uint64_t advice_generation = atomic_load_explicit(
@@ -754,6 +774,7 @@ retry_fault:
         (object->u.file.file_offset >> PAGE_SHIFT) + object_index : 0U;
     map_unlock(space);
 
+    bool page_pinned = false;
     kstatus_t status;
     if (private_file) {
         page = anon_page_lookup(private_object, object_index);
@@ -774,7 +795,8 @@ retry_fault:
                  file_mapping == 0 ? K_EIO :
                  file_ops->page_get(file_mapping, file_page_index, &page);
     } else {
-        status = anon_page_get(object, object_index, true, &page);
+        status = anon_page_get(object, object_index, true, true, &page);
+        page_pinned = status == K_OK;
     }
 
     if (status == K_OK && page == 0) status = K_EIO;
@@ -791,8 +813,8 @@ retry_fault:
                object->type == VM_OBJECT_SHARED) {
         page_owner = object;
     }
-    bool page_pinned = page_owner != 0 &&
-                       anon_page_pin(page_owner, object_index, page);
+    if (page_owner != 0 && !page_pinned)
+        page_pinned = anon_page_pin(page_owner, object_index, page);
     if (page_owner != 0 && !page_pinned) {
         vm_object_put(private_object);
         vm_object_put(object);
@@ -810,14 +832,26 @@ retry_fault:
         area->object_offset != area_snapshot.object_offset ||
         area->prot != area_snapshot.prot ||
         area->flags != area_snapshot.flags) {
+        /* 无锁缺页可能在 munmap 已丢弃此片段后才填充后备页。映射拥有的索引只有一个虚拟所有者；仅发生
+         * split/protect 时保留页面，丢弃孤立结果。固定引用会使采样页面在此回收期间保持有效。 */
+        anon_page_node_t *retired = 0;
+        if (page_owner != 0 &&
+            (page_owner->flags & VM_OBJECT_FLAG_MAP_OWNED) != 0U &&
+            (area == 0 ||
+             (area->object != page_owner && area->private_object != page_owner) ||
+             ((area->object_offset + page_address - area->start) >> PAGE_SHIFT)
+                 != object_index))
+            (void)anon_page_retire_range(page_owner, object_index,
+                                         object_index + 1U, &retired);
         map_unlock(space);
+        anon_page_release_retired(retired);
         if (page_pinned) anon_page_unpin(page);
         vm_object_put(private_object);
         vm_object_put(object);
         goto retry_fault;
     }
 
-    /* A parallel fault may have installed this page while backing I/O ran. */
+    /* 后备 I/O 执行期间，并发缺页可能已安装此页面。 */
     if (x86_translate_page(space->root_table, (vaddr_t)page_address,
                            &existing, &existing_flags) == K_OK) {
         map_unlock(space);
@@ -855,7 +889,7 @@ retry_fault:
 }
 
 kstatus_t vm_handle_fault(vm_space_t *space, const vm_fault_info_t *fault) {
-    return vm_handle_fault_impl(space, fault, 0);
+    return vm_handle_fault_impl(space, fault, 0, 0);
 }
 
 static kstatus_t vm_populate_range_internal(vm_space_t *space,
@@ -896,10 +930,18 @@ static kstatus_t vm_populate_range_internal(vm_space_t *space,
         return K_EINVAL;
     }
     object = area->object;
+    bool window_surface = object->type == VM_OBJECT_SHARED &&
+        (object->flags & VM_OBJECT_FLAG_WINDOW_SURFACE) != 0U;
+    /* 自动预取缺页不得分配冷的匿名/共享页面。只有窗口表面选择主动分配后备页。在此映射锁下重新检查：
+     * vm_fault_around 采样的 VMA 可能已被替换。显式 vm_populate_range 调用仍保留原有分配语义。 */
+    if (fault_around &&
+        (!window_surface || (area->flags & VM_MAP_STACK) != 0U)) {
+        map_unlock(space);
+        return K_OK;
+    }
     vm_object_get(object);
 
-    if (object->type == VM_OBJECT_SHARED &&
-        (object->flags & VM_OBJECT_FLAG_WINDOW_SURFACE) != 0U) {
+    if (window_surface) {
         uint32_t page_flags = hardware_flags(area->prot, false);
         uint64_t populated = 0;
         kstatus_t result = K_OK;
@@ -917,7 +959,7 @@ static kstatus_t vm_populate_range_internal(vm_space_t *space,
             page_t *page = 0;
             uint64_t object_index =
                 (area->object_offset + address - area->start) >> PAGE_SHIFT;
-            kstatus_t status = anon_page_get(object, object_index, true, &page);
+            kstatus_t status = anon_page_get(object, object_index, true, false, &page);
             if (status == K_OK) {
                 status = x86_map_page(space->root_table, (vaddr_t)address,
                                       page_to_phys(page), page_flags,
@@ -929,9 +971,8 @@ static kstatus_t vm_populate_range_internal(vm_space_t *space,
             }
             ++populated;
         }
-        /* map_lock covers the whole population transaction. Account only
-         * installed pages, including a successful prefix on failure, and
-         * publish one generation before releasing this batch's map lock. */
+        /* 整个填充事务都由 map_lock 保护。仅统计已安装页面，包括失败前成功安装的部分；释放本批次的映射锁
+         * 前只发布一次代数。 */
         if (populated != 0U) {
             atomic_fetch_add_explicit(&space->rss_pages, populated,
                                       memory_order_relaxed);
@@ -1012,10 +1053,7 @@ static void vm_fault_around(vm_space_t *space, const vm_fault_info_t *fault) {
 
     map_lock(space);
     area = find_area(space, page_address);
-    if (area == 0 || (area->flags & VM_MAP_STACK) != 0U ||
-        area->object == 0 ||
-        (area->object->type != VM_OBJECT_ANON &&
-         area->object->type != VM_OBJECT_SHARED) ||
+    if (!vm_area_fault_around_eligible(area) ||
         start >= area->end || area->object_offset > area->object->size ||
         page_address < area->start) {
         map_unlock(space);

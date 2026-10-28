@@ -77,6 +77,11 @@ void *phys_to_direct(paddr_t pa);
 paddr_t direct_to_phys(const void *va);
 
 void *kmalloc(size_t size, uint32_t flags);
+/* Exclusively owned large allocation only. Grow within its existing physical
+ * block without allocation/copy; initialize new bytes like kmalloc and move
+ * the trailing guard. False leaves the allocation unchanged (also on shrink
+ * or for small allocations). The pointer must be a live kmalloc allocation. */
+bool kmalloc_try_grow(void *pointer, size_t size);
 /* Best-effort interrupt-safe small allocation from existing global slabs.
  * Never initializes, waits for a lock, touches CPU magazines or allocates pages.
  * NULL also means cache contention/exhaustion. Release in thread context. */

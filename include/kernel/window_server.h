@@ -3,6 +3,9 @@
 #include <kernel/base.h>
 #include <uapi/window.h>
 
+uint32_t window_server_theme(void);
+kstatus_t window_server_set_theme(uint32_t theme,uint32_t background);
+
 struct process;
 struct window_server_window;
 #include <uapi/window_surface.h>
@@ -30,7 +33,7 @@ kstatus_t window_server_set_fullscreen_owned(struct process *owner,
 #define KOBJECT_TYPE_WINDOW       0x0117U
 #define WINDOW_RIGHT_ALL          0x00000003U
 
-/* The concrete Window object is private to kernel/graphics. */
+/* Window 对象的具体定义仅供 kernel/graphics 内部使用。 */
 typedef struct window_server_window window_server_window_t;
 
 typedef struct window_server_snapshot {
@@ -50,7 +53,7 @@ typedef struct window_server_snapshot {
 bool window_server_init(void);
 bool window_server_start_worker(void);
 bool window_server_start_asset_worker(void);
-/* Wake the compositor for a client damage submission or an input report. */
+/* 客户端提交损坏区域或收到输入报告时唤醒合成器。 */
 void window_server_notify_worker(void);
 /* 初始化后窗口服务器由内核持有显示输出和输入路由权。 */
 bool window_server_kernel_ready(void);
@@ -64,6 +67,9 @@ kstatus_t window_server_create(struct process *owner, int32_t x, int32_t y,
                                const char *title, window_server_window_t **out);
 kstatus_t window_server_snapshot(uint32_t index, window_server_snapshot_t *out);
 kstatus_t window_server_lookup(uint32_t identifier, window_server_window_t **out);
+struct os_window_control_tree;
+kstatus_t window_server_control_tree(struct process *owner,
+    struct os_window_control_tree *request);
 kstatus_t window_server_lookup_owner(struct process *owner,
                                      window_server_window_t **out);
 uint32_t window_server_window_identifier(
@@ -76,7 +82,7 @@ void window_server_handle_closed(window_server_window_t *window);
 void window_server_close_process(struct process *owner);
 kstatus_t window_server_set(window_server_window_t *window, int32_t x, int32_t y,
                             uint32_t visible);
-/* Owned visibility: bit 0 shows, bit 1 suppresses automatic activation. */
+/* 所有者可设置的可见性：bit 0 表示显示，bit 1 表示禁止自动激活。 */
 #define WINDOW_SERVER_SHOW_INACTIVE 2U
 kstatus_t window_server_set_visibility_owned(struct process *owner,
     window_server_window_t *window, uint32_t visible);
@@ -86,7 +92,7 @@ kstatus_t window_server_focus(uint32_t identifier);
 kstatus_t window_server_map(window_server_window_t *window,
                             struct process *process,
                             uint64_t requested_address, uint64_t *mapped_address);
-/* Caller retains space through mapping and any subsequent transaction rollback. */
+/* 调用方需在映射及后续事务回滚期间持续持有地址空间。 */
 kstatus_t window_server_map_space(window_server_window_t *window,
                                   struct vm_space *space,
                                   uint64_t requested_address, uint64_t *mapped_address);
@@ -119,3 +125,5 @@ bool window_present_self_test(void);
 bool compositor_tile_self_test(void);
 bool window_lifecycle_self_test(void);
 bool desktop_alpha_self_test(void);
+
+kstatus_t desktop_wallpaper_set(const char *path);

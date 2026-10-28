@@ -18,7 +18,7 @@ binary = chromium / 'out/liteos-debian/chrome'
 build_id = re.search(r'Build ID: ([0-9a-f]+)', subprocess.check_output(
     ['readelf', '-n', str(binary)], text=True)).group(1)
 assert f'Build ID: {build_id}' in subprocess.check_output(
-    ['readelf', '-n', str(root / 'build/esp/sbin/chrome')], text=True)
+    ['readelf', '-n', str(root / 'build/esp/usr/apps/chrome/chrome')], text=True)
 bias = int(re.search(r'#define ELF_PIE_BIAS\s+(0x[0-9a-fA-F]+)',
                     (root / 'kernel/process/exec_internal.h').read_text()).group(1), 16)
 symbols = (

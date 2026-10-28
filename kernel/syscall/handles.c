@@ -1,4 +1,4 @@
-/* REFACTOR_SYSCALL_HANDLE_OWNER: user handle-close policy. */
+/* REFACTOR_SYSCALL_HANDLE_OWNER：用户句柄关闭策略。 */
 
 #include <arch/x86_64/uaccess.h>
 #include <kernel/process.h>

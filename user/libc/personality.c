@@ -3,8 +3,8 @@
 #include <uapi/linux_abi.h>
 
 bool __libc_linux_personality(void) {
-    /* The ELF interpreter activates Linux syscall numbering before entering
-     * the program.  This process-wide property is stable for the lifetime of
+    /* ELF 解释器会在进入程序前启用 Linux 系统调用编号。此进程级属性在整个生命周期内
+     * 保持稳定
      * the libc image, so cache the probe shared by malloc, futex, mmap, and
      * socket hot paths instead of issuing a kernel call at every operation. */
     static int cached_personality = -1;

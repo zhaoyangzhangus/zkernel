@@ -57,9 +57,13 @@ BOOLEAN kernel_init_devices(OS_BOOT_INFO *info,
     }
     hooks->write("OS_PCI_ECAM_OK\r\n");
 
-    /* Phase 5 needs the mounted root filesystem for the matching GSP image;
-     * the runtime continuation performs the same real probe after filesystem
-     * initialization.  Earlier phases retain their original early probe. */
+    nv_rm_driver_set_screen_info(
+        info->FrameBufferBase, info->FrameBufferWidth,
+        info->FrameBufferHeight, 32U,
+        info->FrameBufferPixelsPerScanLine * 4U,
+        info->FrameBufferSize);
+    /* Phase 5 的 GSP 测试需要已挂载的根文件系统和延迟工作线程。
+     * 用户态初始化会在发布桌面/服务前执行探测；更早的阶段仍沿用原有早期探测。 */
 #if !OS_NVIDIA_PHASE5
     if (nv_rm_driver_probe() != K_OK)
         hooks->write("OS_NVIDIA_PROBE_FAIL\r\n");
@@ -78,19 +82,16 @@ BOOLEAN kernel_init_devices(OS_BOOT_INFO *info,
         realtest_mark_value("FAILURE_XHCI", xhci_last_error());
         return devices_fail(hooks, "\r\n");
     }
-    /* xHCI status/error state is now isolated from controller/protocol units. */
+    /* xHCI 状态/错误状态现已与控制器/协议单元分离。 */
     kernel_debug_stage(OS_DEBUG_PHASE_REFACTOR_8,
                        OS_DEBUG_STEP_PROGRESS, 20U);
-    /* Runtime readiness is private to xHCI runtime.c and is exposed only by
-     * its narrow setter/getter contract. */
+    /* 运行时就绪状态由 xHCI runtime.c 私有管理，仅通过其精简的 setter/getter 约定公开。 */
     kernel_debug_stage(OS_DEBUG_PHASE_REFACTOR_8,
                        OS_DEBUG_STEP_PROGRESS, 21U);
-    /* Controller halt/bring-up primitives remain private to lifecycle.c;
-     * core.c only orchestrates the private-contract calls. */
+    /* 控制器停止/启动原语仍由 lifecycle.c 私有管理；core.c 只协调调用这些私有约定。 */
     kernel_debug_stage(OS_DEBUG_PHASE_REFACTOR_8,
                        OS_DEBUG_STEP_PROGRESS, 22U);
-    /* IRQ pending-edge state is consumed only through interrupt.c's atomic
-     * handoff, so the runtime worker cannot reach into ISR-owned storage. */
+    /* IRQ 待处理边状态仅通过 interrupt.c 的 atomic 交接消费，运行时工作线程不会访问 ISR 所有的存储。 */
     kernel_debug_stage(OS_DEBUG_PHASE_REFACTOR_8,
                        OS_DEBUG_STEP_PROGRESS, 23U);
     /* MSI-X failure diagnostics are read through interrupt.c's getter; the

@@ -6,7 +6,7 @@ import tempfile
 
 root = pathlib.Path(__file__).resolve().parents[2]
 source = (root / 'kernel/fs/vfs/backend.c').read_text()
-start = source.index('static kstatus_t vfs_memory_reserve(')
+start = source.index('struct {\n    uint64_t failures;')
 end = source.index('kstatus_t vfs_fat32_backend_read(', start)
 code = r'''
 #include <assert.h>
@@ -25,7 +25,14 @@ static void *kmalloc(size_t n, int flags) {
     if (fail) { --fail; return NULL; }
     return malloc(n);
 }
+static void *kzalloc(size_t n,int flags){void *p=kmalloc(n,flags);if(p)memset(p,0,n);return p;}
 static void kfree(void *p) { free(p); }
+/* malloc-only policy fixture: real in-place growth is tested separately. */
+static bool kmalloc_try_grow(void *p,size_t n){(void)p;(void)n;return false;}
+static unsigned stats_calls;
+static kstatus_t page_memory_get_stats(uint64_t *total, uint64_t *available) {
+    ++stats_calls; *total=1048576; *available=524288; return K_OK;
+}
 void *liteos_memcpy(void *, const void *, size_t);
 void *liteos_memmove(void *, const void *, size_t);
 void *liteos_memset(void *, int, size_t);
@@ -38,9 +45,11 @@ int main(void) {
     assert(allocations==11 && b.size==4194304);
     for (unsigned i=0; i<b.size; ++i) assert(b.data[i]==0x5a);
     unsigned before=allocations;
+    assert(g_vfs_memory_allocation_failure.state==0 && stats_calls==0);
     assert(vfs_memory_backend_truncate(&b, 17)==K_OK);
+    assert(b.data_capacity==17 && allocations==before+1);
     assert(vfs_memory_backend_truncate(&b, 8192)==K_OK);
-    assert(allocations==before);
+    assert(allocations==before+2 && b.data_capacity==8192);
     for (unsigned i=17; i<8192; ++i) assert(b.data[i]==0);
     assert(vfs_memory_backend_write(&b, 10000, block, 1, &bytes)==K_OK);
     for (unsigned i=8192; i<10000; ++i) assert(b.data[i]==0);
@@ -57,11 +66,28 @@ int main(void) {
     uint8_t *old=b.data; fail=2;
     assert(vfs_memory_backend_write(&b, 8388608, block, 1, &bytes)==K_ENOMEM);
     assert(b.data==old && b.size==10001 && b.data[0]==0x5a);
+    assert(g_vfs_memory_allocation_failure.state==2 && stats_calls==1);
+    assert(g_vfs_memory_allocation_failure.failures==1);
+    assert(g_vfs_memory_allocation_failure.required==8388609);
+    assert(g_vfs_memory_allocation_failure.attempted_capacity==8388609);
+    assert(g_vfs_memory_allocation_failure.previous_size==10001);
+    assert(g_vfs_memory_allocation_failure.previous_capacity==16384);
+    assert(g_vfs_memory_allocation_failure.total_pages==1048576);
+    assert(g_vfs_memory_allocation_failure.free_pages==524288);
+    assert(g_vfs_memory_allocation_failure.stats_status==K_OK);
     fail=1;
     assert(vfs_memory_backend_write(&b, 8388608, block, 1, &bytes)==K_OK);
     assert(b.data_capacity==8388609);
+    old=b.data; fail=1; before=allocations;
+    assert(vfs_memory_backend_truncate(&b,16777217)==K_ENOMEM);
+    assert(allocations==before+1 && fail==0);
+    assert(b.data==old && b.size==8388609 && b.data_capacity==8388609);
+    assert(b.data[0]==0x5a && b.data[8388608]==0x5a);
+    assert(g_vfs_memory_allocation_failure.failures==2 && stats_calls==1);
+    assert(g_vfs_memory_allocation_failure.required==8388609);
     assert(vfs_memory_backend_truncate(&b, 0)==K_OK);
     assert(!b.data && !b.size && !b.data_capacity);
+    assert(g_vfs_memory_allocation_failure.free_pages==524288);
     // Snapshot oracle for self-sourced writes: overlap, exact end, growth,
     // sparse holes, optional-capacity failure and complete allocation failure.
     unsigned cases=0;
@@ -112,7 +138,25 @@ int main(void) {
         assert(b.size==80+count && bytes==count && allocations==before+1);
         assert(!memcmp(b.data,expected,b.size));free(b.data);++cases;
     }
+    // Spare-capacity sources can sit inside the hole that must be zeroed.
+    // No reallocation isolates the copy/zero ordering from retired ownership.
+    for(unsigned source_offset=0;source_offset<64;++source_offset)
+    for(unsigned offset=18;offset<=50;offset+=16) {
+        unsigned count=64-source_offset;
+        if(count>64-offset)count=64-offset;
+        b=(vfs_backend_node_t){.data=malloc(64),.size=17,.data_capacity=64};
+        assert(b.data);unsigned char expected[64]={0},snapshot[64];
+        for(unsigned j=0;j<64;++j)b.data[j]=(unsigned char)(j*23+11);
+        memcpy(expected,b.data,17);memcpy(snapshot,b.data+source_offset,count);
+        memcpy(expected+offset,snapshot,count);before=allocations;
+        assert(vfs_memory_backend_write(&b,offset,b.data+source_offset,count,&bytes)==K_OK);
+        assert(b.size==offset+count && bytes==count && allocations==before);
+        assert(!memcmp(b.data,expected,b.size));free(b.data);++cases;
+    }
     printf("Self-sourced writes: %u snapshot-oracle overlap/growth/hole/OOM cases passed\n",cases);
+    assert(stats_calls==1 && g_vfs_memory_allocation_failure.failures>1);
+    assert(g_vfs_memory_allocation_failure.required==8388609);
+    assert(g_vfs_memory_allocation_failure.previous_size==10001);
     puts("4 MiB append: 1024 -> 11 allocations; truncate, holes, zero writes and OOM passed");
 }
 '''
@@ -140,3 +184,15 @@ with tempfile.TemporaryDirectory(prefix='liteos-memory-growth-') as directory:
     result=subprocess.run([binary],capture_output=True,text=True)
     assert result.returncode!=0 and 'heap-use-after-free' in result.stderr
     print('Regression control: early buffer release reproduces ASan heap-use-after-free')
+    copy = '    liteos_memmove(backend->data + offset, buffer, length);'
+    clear = ('    if (offset > backend->size)\n'
+             '        liteos_memset(backend->data + backend->size, 0, (size_t)(offset - backend->size));')
+    assert code.count(copy)==1 and code.count(clear)==1
+    negative=code.replace(copy, '').replace(clear, clear+'\n'+copy)
+    subprocess.run(['cc','-O2','-Wall','-Wextra','-Werror',
+                    '-fsanitize=address,undefined','-fno-pie','-no-pie',
+                    '-x','c','-','-x','none',obj,'-o',binary],
+                   input=negative,text=True,check=True)
+    result=subprocess.run([binary],capture_output=True,text=True)
+    assert result.returncode!=0 and '!memcmp(b.data,expected,b.size)' in result.stderr
+    print('Regression control: clearing the hole before copying corrupts spare-capacity source bytes')

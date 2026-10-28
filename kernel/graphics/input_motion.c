@@ -1,19 +1,17 @@
 #include "internal.h"
 
-/* REFACTOR_P7A_INPUT_MOTION_OWNER: batched pointer conversion and flush policy. */
+/* REFACTOR_P7A_INPUT_MOTION_OWNER：批量指针转换和刷新策略。 */
 
-/* Pointer coordinates are input state, not window or compositor state. Keep
- * their mutation in this Owner so ordinary motion and drag batching share
- * one publication boundary. */
+/* 指针坐标属于输入状态，而不是窗口或合成器状态。将坐标修改集中在此所有者中，使普通移动和拖动批处理
+ * 共用同一个发布边界。 */
 void window_input_set_pointer_locked(uint32_t x, uint32_t y) {
     g_window_server.pointer_x = x;
     g_window_server.pointer_y = y;
 }
 
 /*
- * Feed an accumulated relative axis back through the normal window routing
- * path. int64_t accumulation prevents a burst of raw events from overflowing
- * before it is emitted as one or more ABI-sized int32_t events.
+ * 将累积的相对轴数据重新送入常规窗口路由路径。使用 int64_t 累加可避免一批原始事件在拆分为一个或多个
+ * ABI 大小的 int32_t 事件之前溢出。
  */
 void window_route_motion_axis_locked(
     const window_motion_batch_t *batch,
@@ -49,8 +47,7 @@ void window_route_motion_axis_locked(
 void window_flush_motion_batch_locked(window_motion_batch_t *batch) {
     if (batch == 0 || !batch->active) return;
 
-    /* Decoration movement is consumed by Ring0, so X/Y may safely be applied
-     * as one geometry update. */
+    /* 装饰区移动由 Ring0 处理，因此可以安全地将 X/Y 合并为一次几何更新。 */
     if (window_route_drag_motion_batch_locked(batch)) {
         batch->active = false;
         batch->delta_x = 0;
@@ -58,7 +55,7 @@ void window_flush_motion_batch_locked(window_motion_batch_t *batch) {
         return;
     }
 
-    /* Keep ordinary client-facing relative input exactly as before. */
+    /* 普通的、面向客户端的相对输入保持原有行为不变。 */
     window_route_motion_axis_locked(batch, INPUT_REL_X, batch->delta_x);
     window_route_motion_axis_locked(batch, INPUT_REL_Y, batch->delta_y);
     batch->active = false;
@@ -67,9 +64,8 @@ void window_flush_motion_batch_locked(window_motion_batch_t *batch) {
 }
 
 /*
- * Consume one kernel-private HID pointer transaction. Ring3 still receives
- * the unchanged button/relative event ABI, while the compositor applies the
- * report's X/Y pair in one geometry transition.
+ * 消费一个内核私有的 HID 指针事务。Ring3 仍接收不变的按钮/相对事件 ABI；合成器则在一次
+ * 几何状态转换中应用报告中的 X/Y 坐标对。
  */
 void window_route_pointer_transaction_locked(const input_event_t *event) {
     static const uint32_t button_codes[] = {

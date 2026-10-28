@@ -47,13 +47,13 @@ static int32_t audiod_saturate_i64(int64_t value) {
 static int32_t audiod_read_sample(const uint8_t *source, uint16_t format) {
     if (format == OS_AUDIO_SAMPLE_S16_LE) {
         int16_t value = (int16_t)((uint16_t)source[0] | ((uint16_t)source[1] << 8));
-        return (int32_t)value << 16;
+        return (int32_t)value * 65536;
     }
     if (format == OS_AUDIO_SAMPLE_S24_LE) {
         int32_t value = (int32_t)source[0] | ((int32_t)source[1] << 8) |
                         ((int32_t)source[2] << 16);
         if ((value & 0x00800000) != 0) value |= (int32_t)0xFF000000U;
-        return value << 8;
+        return value * 256;
     }
     return (int32_t)((uint32_t)source[0] | ((uint32_t)source[1] << 8) |
                      ((uint32_t)source[2] << 16) | ((uint32_t)source[3] << 24));
@@ -179,26 +179,32 @@ int audiod_mix(audiod_server_t *server, void *output, size_t output_bytes,
     if ((size_t)frames > SIZE_MAX / channels / sample_bytes) return AUDIOD_EINVAL;
     required = (size_t)frames * channels * sample_bytes;
     if (output_bytes < required) return AUDIOD_EINVAL;
+    /* 客户端集合在同一批混音期间不变，只收集一次，避免逐帧扫描空槽。 */
+    audiod_client_t *clients[AUDIOD_MAX_CLIENTS];
+    uint32_t client_count = 0U;
+    for (uint32_t i = 0U; i < AUDIOD_MAX_CLIENTS; ++i) {
+        if (server->clients[i].used) clients[client_count++] = &server->clients[i];
+    }
     uint8_t *destination = (uint8_t *)output;
     for (uint32_t frame = 0U; frame < frames; ++frame) {
-        for (uint32_t i = 0U; i < AUDIOD_MAX_CLIENTS; ++i) {
-            audiod_client_t *client = &server->clients[i];
-            if (client->used && client->queued_frames == 0U) ++client->underruns;
+        for (uint32_t i = 0U; i < client_count; ++i) {
+            audiod_client_t *client = clients[i];
+            if (client->queued_frames == 0U) ++client->underruns;
         }
         for (uint32_t channel = 0U; channel < channels; ++channel) {
             int64_t sum = 0;
-            for (uint32_t i = 0U; i < AUDIOD_MAX_CLIENTS; ++i) {
-                audiod_client_t *client = &server->clients[i];
-                if (!client->used || client->queued_frames == 0U) continue;
+            for (uint32_t i = 0U; i < client_count; ++i) {
+                audiod_client_t *client = clients[i];
+                if (client->queued_frames == 0U) continue;
                 sum += client->samples[client->read_frame * OS_AUDIO_MAX_CHANNELS + channel];
             }
             audiod_write_sample(destination +
                 ((size_t)frame * channels + channel) * sample_bytes,
                 server->config.sample_format, audiod_saturate_i64(sum));
         }
-        for (uint32_t i = 0U; i < AUDIOD_MAX_CLIENTS; ++i) {
-            audiod_client_t *client = &server->clients[i];
-            if (!client->used || client->queued_frames == 0U) continue;
+        for (uint32_t i = 0U; i < client_count; ++i) {
+            audiod_client_t *client = clients[i];
+            if (client->queued_frames == 0U) continue;
             client->read_frame = (client->read_frame + 1U) % AUDIOD_RING_FRAMES;
             --client->queued_frames;
         }

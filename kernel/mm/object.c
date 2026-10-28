@@ -3,10 +3,10 @@
 #include <kernel/console.h>
 #include <kernel/string.h>
 
-/* REFACTOR_P6_VM_OBJECT_OWNER: object lifetime, anonymous backing, and COW. */
+/* REFACTOR_P6_VM_OBJECT_OWNER：对象生命周期、匿名后备存储和 COW。 */
 
-/* Anonymous/shared object lists can be touched by page-fault workers on
- * different CPUs.  Keep the owner on-CPU for the whole list transaction. */
+/* 不同 CPU 上的缺页工作线程可能同时访问匿名/共享对象链表。
+ * 整个链表事务期间都要让所有者留在当前 CPU。 */
 static void vm_store_lock(spinlock_t *lock) {
     sched_preempt_disable();
     spinlock_lock(lock);
@@ -20,7 +20,7 @@ static void vm_store_unlock(spinlock_t *lock) {
 static anon_page_node_t *anon_page_index_insert(anon_store_t *store,
                                    anon_page_node_t *node);
 
-/* Caller has already checked for anonymous/shared backing. */
+/* 调用方已确认这是匿名/共享后备存储。 */
 static anon_store_t *anon_object_store(const vm_object_t *object) {
     return object->type == VM_OBJECT_ANON ?
         (anon_store_t *)object->u.anon.anon_root :
@@ -232,14 +232,13 @@ kstatus_t vm_object_create_page_array(const uint64_t *physical_pages,
     return K_OK;
 }
 
-/* The source index is already balanced and locked. Preserve its topology
- * instead of searching and rebalancing once for every copied resident page.
- * Recursion is bounded by the height of a red-black tree, not page count.
- * Publish each allocation to the target ownership list before descending so
- * vm_object_put can unwind any partially copied tree on allocation failure. */
+/* 源索引已平衡并加锁。直接保留其拓扑，避免每复制一个常驻页面就重新查找和平衡。
+ * 递归深度由红黑树高度限制，而非页面数量。每次向下递归前先将分配结果发布到目标
+ * 所有权链表，以便分配失败时 vm_object_put 能清理部分复制的树。 */
 static kstatus_t anon_page_index_clone(const rb_node_t *source,
                                        rb_node_t **out, rb_node_t *parent,
                                        anon_store_t *target_store,
+                                       anon_page_node_t **spare,
                                        uint64_t *copied_pages) {
     if (source == 0) {
         *out = 0;
@@ -248,7 +247,9 @@ static kstatus_t anon_page_index_clone(const rb_node_t *source,
     const anon_page_node_t *node = (const anon_page_node_t *)
         ((const uint8_t *)source - __builtin_offsetof(anon_page_node_t,
                                                       index_node));
-    anon_page_node_t *copy = kmalloc(sizeof(*copy), 0);
+    anon_page_node_t *copy = *spare;
+    if (copy != 0) *spare = copy->next;
+    else copy = kmalloc(sizeof(*copy), 0);
     if (copy == 0) return K_ENOMEM;
     copy->index = node->index;
     copy->page = node->page;
@@ -263,25 +264,45 @@ static kstatus_t anon_page_index_clone(const rb_node_t *source,
     ++*copied_pages;
     *out = &copy->index_node;
     kstatus_t status = anon_page_index_clone(source->left,
-        &copy->index_node.left, &copy->index_node, target_store, copied_pages);
+        &copy->index_node.left, &copy->index_node, target_store, spare, copied_pages);
     if (status != K_OK) return status;
     return anon_page_index_clone(source->right, &copy->index_node.right,
-                                 &copy->index_node, target_store, copied_pages);
+                                 &copy->index_node, target_store, spare, copied_pages);
 }
 
 kstatus_t vm_object_clone_anon(vm_object_t *source, vm_object_t **out) {
     kstatus_t status = vm_object_create_anon((size_t)source->size, out);
     if (status != K_OK) return status;
+    (*out)->flags |= source->flags & VM_OBJECT_FLAG_MAP_OWNED;
     anon_store_t *source_store = (anon_store_t *)source->u.anon.anon_root;
     anon_store_t *target_store = (anon_store_t *)(*out)->u.anon.anon_root;
     if (source_store == 0) return K_OK;
     uint64_t copied_pages = 0;
+    /* 不持有源自旋锁时预备常见数量的节点。这只是容量提示，不是快照：克隆前，
+     * 并发缺页可能新增节点（加锁后的克隆过程会补充分配），丢弃页面则会产生
+     * 解锁后需要释放的多余节点。加锁前不借用源页面/节点，以保持快照和引用语义。 */
+    anon_page_node_t *spare = 0;
+    uint64_t reserve = atomic_load_explicit(&source->populated_pages,
+                                           memory_order_relaxed);
+    for (uint64_t i = 0; i < reserve; ++i) {
+        anon_page_node_t *node = kmalloc(sizeof(*node), 0);
+        /* 预留是可选的。使用已取得的节点，由加锁后的克隆过程判断是否确实需要更多：
+         * 页面丢弃可能使估算过大，临时内存压力也可能已经缓解。 */
+        if (node == 0) break;
+        node->next = spare;
+        spare = node;
+    }
     vm_store_lock(&source_store->lock);
     status = anon_page_index_clone(source_store->page_index.root,
-        &target_store->page_index.root, 0, target_store, &copied_pages);
+        &target_store->page_index.root, 0, target_store, &spare, &copied_pages);
     vm_store_unlock(&source_store->lock);
-    /* The target is private until this call returns. Publish the exact count
-     * once, including partial failure before its ownership list is unwound. */
+    while (spare != 0) {
+        anon_page_node_t *next = spare->next;
+        kfree(spare);
+        spare = next;
+    }
+    /* 此调用返回前目标对象保持私有。只发布一次准确计数，包括回滚所有权链表前
+     * 已部分完成的情况。 */
     atomic_store_explicit(&(*out)->populated_pages, copied_pages,
                           memory_order_relaxed);
     if (status != K_OK) {
@@ -323,7 +344,7 @@ static rb_node_t *anon_page_index_lower_bound(const anon_store_t *store,
     return candidate;
 }
 
-/* Caller holds store->lock; returns the inserted node or existing winner. */
+/* 调用方持有 store->lock；返回新插入的节点或并发操作中已存在的结果。 */
 static anon_page_node_t *anon_page_index_insert(anon_store_t *store,
                                    anon_page_node_t *node) {
     rb_node_t **link = &store->page_index.root;
@@ -354,9 +375,12 @@ static anon_page_node_t *anon_page_index_insert(anon_store_t *store,
 kstatus_t anon_page_get(vm_object_t *object,
                         uint64_t index,
                         bool create,
+                        bool pin,
                         page_t **out) {
     anon_store_t *store;
     anon_page_node_t *node;
+    page_t *page = 0;
+    anon_page_node_t *new_node = 0;
 
     if (object == 0 ||
         out == 0 ||
@@ -373,22 +397,17 @@ kstatus_t anon_page_get(vm_object_t *object,
 
     vm_store_lock(&store->lock);
     node = anon_page_index_find(store, index);
-    if (node != 0) {
-        *out = node->page;
-        vm_store_unlock(&store->lock);
-        return K_OK;
-    }
+    if (node != 0) goto found;
 
     if (!create) {
         vm_store_unlock(&store->lock);
         return K_ENOENT;
     }
-    /* Allocation/zeroing does not mutate the store. Keep the source object
-     * pinned by the caller, and recheck under the guard before publication. */
+    /* 分配/清零不会修改存储对象。调用方负责固定源对象，并在发布前于保护区内重新检查。 */
     vm_store_unlock(&store->lock);
 
-    page_t *page = page_alloc(0, PAGE_ALLOC_ZERO);
-    anon_page_node_t *new_node = page != 0 ? kmalloc(sizeof(*new_node), 0) : 0;
+    page = page_alloc(0, PAGE_ALLOC_ZERO);
+    new_node = page != 0 ? kmalloc(sizeof(*new_node), 0) : 0;
 
     if (page == 0 ||
         new_node == 0) {
@@ -398,14 +417,14 @@ kstatus_t anon_page_get(vm_object_t *object,
         }
 
         kfree(new_node);
+        new_node = 0;
 
-        /* A concurrent creator may have published while allocation failed. */
+        /* 分配失败期间，并发创建者可能已经完成发布。 */
         vm_store_lock(&store->lock);
         node = anon_page_index_find(store, index);
-        bool found = node != 0;
-        if (found) *out = node->page;
+        if (node != 0) goto found;
         vm_store_unlock(&store->lock);
-        return found ? K_OK : K_ENOMEM;
+        return K_ENOMEM;
     }
 
     page->owner =
@@ -414,24 +433,21 @@ kstatus_t anon_page_get(vm_object_t *object,
     new_node->index = index;
     new_node->page = page;
     vm_store_lock(&store->lock);
-    /* The publication search also returns a concurrent winner directly. */
+    /* 发布查找也会直接返回并发操作中胜出的结果。 */
     node = anon_page_index_insert(store, new_node);
-    if (node != new_node) {
-        *out = node->page;
-        vm_store_unlock(&store->lock);
+    if (node == new_node)
+        atomic_fetch_add_explicit(&object->populated_pages, 1U,
+                                  memory_order_relaxed);
+
+found:
+    /* 仍由存储持有页面时固定引用，缺页路径无需再次查找并竞争同一把锁。 */
+    if (pin) atomic_fetch_add_explicit(&node->page->refs, 1U, memory_order_relaxed);
+    *out = node->page;
+    vm_store_unlock(&store->lock);
+    if (new_node != 0 && node != new_node) {
         page_free(page);
         kfree(new_node);
-        return K_OK;
     }
-
-    atomic_fetch_add_explicit(&object->populated_pages, 1U,
-                              memory_order_relaxed);
-
-    *out = page;
-
-    vm_store_unlock(
-        &store->lock);
-
     return K_OK;
 }
 
@@ -467,10 +483,11 @@ bool anon_page_pin(vm_object_t *object, uint64_t index, page_t *expected) {
     return pinned;
 }
 
-kstatus_t anon_page_discard_range(vm_object_t *object, uint64_t first_index,
-                                  uint64_t end_index) {
+kstatus_t anon_page_retire_range(vm_object_t *object, uint64_t first_index,
+                                  uint64_t end_index,
+                                  anon_page_node_t **retired_out) {
     anon_store_t *store;
-    if (object == 0 || first_index > end_index ||
+    if (object == 0 || retired_out == 0 || first_index > end_index ||
         (object->type != VM_OBJECT_ANON &&
          object->type != VM_OBJECT_SHARED)) return K_EINVAL;
     if (first_index == end_index) return K_OK;
@@ -481,19 +498,16 @@ kstatus_t anon_page_discard_range(vm_object_t *object, uint64_t first_index,
     anon_page_node_t **retired_tail = &retired;
     uint64_t discarded = 0;
     vm_store_lock(&store->lock);
-    /* MADV_DONTNEED often releases a few pages from a large allocator
-     * reservation. Do not scan every unrelated resident page under the
-     * VM/store preemption guards. The index bounds the search to the range;
-     * ownership backlinks keep each list removal constant-time. */
+    /* MADV_DONTNEED 通常会从大型分配器预留区中释放少量页面。不要在 VM/存储抢占保护区内扫描所有无关
+     * 的驻留页。索引可将搜索限制在目标范围；所有权反向链接使每次链表移除保持常数时间。 */
     rb_node_t *tree_node = 0;
     rb_node_t *last = first_index == 0 ? store->page_index.root : 0;
     while (last != 0 && last->right != 0) last = last->right;
     anon_page_node_t *last_page = last != 0 ? (anon_page_node_t *)
         ((uint8_t *)last - __builtin_offsetof(anon_page_node_t, index_node)) : 0;
     if (last_page != 0 && last_page->index < end_index) {
-        /* All published pages and their exact count share this store guard.
-         * Whole-store retirement needs no per-node tree rotations/backlinks;
-         * detached nodes remain owned until their off-lock release below. */
+        /* 所有已发布页面及其精确数量共用此存储保护。整个存储对象退役无需逐节点执行树旋转/反向链接操作；
+         * 分离节点仍归当前路径所有，直到下方在锁外释放。 */
         retired = store->pages;
         store->pages = 0;
         store->page_index.root = 0;
@@ -512,8 +526,7 @@ kstatus_t anon_page_discard_range(vm_object_t *object, uint64_t first_index,
         anon_page_node_t **link = node->list_link;
         *link = node->next;
         if (node->next != 0) node->next->list_link = link;
-        /* Detached nodes retain their backing reference until after unlock.
-         * A concurrent fault may then repopulate the same index safely. */
+        /* 分离节点会保留后备引用，直到解锁后才释放。随后并发缺页可以安全地重新填充相同索引。 */
         node->next = 0;
         *retired_tail = node;
         retired_tail = &node->next;
@@ -524,13 +537,35 @@ kstatus_t anon_page_discard_range(vm_object_t *object, uint64_t first_index,
         atomic_fetch_sub_explicit(&object->populated_pages, discarded,
                                   memory_order_relaxed);
     vm_store_unlock(&store->lock);
+    if (retired != 0) {
+        /* 常见的单批处理可保持整个存储对象以 O(1) 时间分离。合并批次时只遍历已退役节点，不访问活动页面，
+         * 且在存储保护区之外执行，不涉及可能失败的分配。 */
+        if (*retired_out != 0) {
+            anon_page_node_t *tail = retired;
+            while (tail->next != 0) tail = tail->next;
+            tail->next = *retired_out;
+        }
+        *retired_out = retired;
+    }
+    return K_OK;
+}
+
+void anon_page_release_retired(anon_page_node_t *retired) {
     while (retired != 0) {
         anon_page_node_t *next = retired->next;
         page_reference_put(retired->page);
         kfree(retired);
         retired = next;
     }
-    return K_OK;
+}
+
+kstatus_t anon_page_discard_range(vm_object_t *object, uint64_t first_index,
+                                  uint64_t end_index) {
+    anon_page_node_t *retired = 0;
+    kstatus_t status = anon_page_retire_range(object, first_index, end_index,
+                                              &retired);
+    anon_page_release_retired(retired);
+    return status;
 }
 
 /* 将文件页复制到私有 shadow；文件页本身永远不会被私有映射写入。 */
@@ -563,7 +598,7 @@ kstatus_t private_file_shadow_page(vm_area_t *area, uint64_t index,
     }
     vm_store_unlock(&store->lock);
 
-    /* The candidate remains private until the full-page copy succeeds. */
+    /* 完整页面复制成功前，候选项始终保持私有。 */
     page = page_alloc(0, 0);
     node = page != 0 ? kmalloc(sizeof(*node), 0) : 0;
     if (page == 0 || node == 0) {
@@ -591,7 +626,7 @@ publish:
         vm_store_unlock(&store->lock);
         return K_OK;
     }
-    /* A winner may have appeared even if our candidate allocation failed. */
+    /* 即使候选项分配失败，也可能已有并发操作成功发布。 */
     if (existing != 0) {
         *out = existing->page;
         status = K_OK;
@@ -618,8 +653,7 @@ kstatus_t anon_page_cow(vm_object_t *object, uint64_t index, page_t **out) {
         vm_store_unlock(&store->lock);
         return K_OK;
     }
-    /* Allocation does not need the store guard. The node and its backing may
-     * change while unlocked, so never retain or dereference the old node. */
+    /* 分配不需要存储保护。解锁期间节点及其后备可能发生变化，因此绝不能保留或解引用旧节点。 */
     vm_store_unlock(&store->lock);
     page_t *replacement = page_alloc(0, 0);
     page_t *retired = 0;

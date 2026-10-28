@@ -139,10 +139,7 @@ try {
             if ($accessPath) { $roots += [string]$accessPath }
         }
         foreach ($root in ($roots | Select-Object -Unique)) {
-            $candidate = Join-Path $root 'EFI\OS\realtest.log'
-            if (-not (Test-Path -LiteralPath $candidate)) {
-                $candidate = Join-Path $root 'realtest.log'
-            }
+            $candidate = Join-Path $root 'log\realtest.log'
             if (Test-Path -LiteralPath $candidate) {
                 $volumeRoot = $root
                 $sourceLog = $candidate

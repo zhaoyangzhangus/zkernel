@@ -184,21 +184,24 @@ int main(void) {
             cache.Entries[i].Valid=cache.Entries[i].Dirty=1;
             cache.Entries[i].Lba=i;cache.Entries[i].LastUse=i+1;
         }
-        reads=writes=diagnostics=0;fail_read=failure==2;fail_write=failure==1?3:0;
+        reads=writes=diagnostics=0;fail_read=failure==2;fail_write=failure==1?2:0;
         UINT8 out[512];
         assert(block_cache_read(&cache,100,out)==(failure==0));
         if(failure==1) {
-            assert(!reads && writes==3 && diagnostics==1);
-            for(unsigned i=0;i<16;++i) assert(cache.Entries[i].Valid==(i>=2));
+            assert(!reads && writes==2 && diagnostics==1);
+            for(unsigned i=0;i<16;++i) {
+                assert(cache.Entries[i].Valid==(i>=8));
+                assert(cache.Entries[i].Dirty==(i>=8));
+            }
         } else if(failure==2) {
-            assert(reads==1 && writes==15 && diagnostics==1);
+            assert(reads==1 && writes==2 && diagnostics==1);
             for(unsigned i=0;i<15;++i) assert(!cache.Entries[i].Valid && !cache.Entries[i].Dirty);
-            assert(cache.Entries[15].Valid && cache.Entries[15].Dirty);
+            assert(cache.Entries[15].Valid && !cache.Entries[15].Dirty);
         } else {
-            assert(reads==1 && writes==15 && !diagnostics && out[0]==100);
+            assert(reads==1 && writes==2 && !diagnostics && out[0]==100);
             for(unsigned i=0;i<15;++i) assert(cache.Entries[i].Valid &&
                 !cache.Entries[i].Dirty && cache.Entries[i].Lba==100+i);
-            assert(cache.Entries[15].Valid && cache.Entries[15].Dirty && cache.Entries[15].Lba==15);
+            assert(cache.Entries[15].Valid && !cache.Entries[15].Dirty && cache.Entries[15].Lba==15);
         }
         fail_read=0;fail_write=0;
         assert(block_cache_read(&cache,100,out) && out[0]==100);

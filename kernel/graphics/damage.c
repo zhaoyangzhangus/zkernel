@@ -1,5 +1,4 @@
 #include <kernel/display.h>
-#include <kernel/qemu_stdvga.h>
 #include "internal.h"
 
 #define WINDOW_CURSOR_WIDTH 24U
@@ -91,7 +90,7 @@ static void window_damage_tiles_clear_locked(void) {
     }
 }
 
-/* Damage storage is initialized before the first display mode is known. */
+/* 在首个显示模式确定前初始化损坏区域存储。 */
 void window_damage_reset_locked(void) {
     g_window_server.dirty = false;
     g_window_server.damage_full = false;
@@ -106,14 +105,14 @@ void window_damage_reset_locked(void) {
                           memory_order_release);
 }
 
-/* Discard an empty producer generation without touching compositor state. */
+/* 丢弃空的生产者代数，不触碰合成器状态。 */
 void window_damage_clear_pending_locked(void) {
     g_window_server.dirty = false;
     atomic_store_explicit(&g_window_dirty_hint, false,
                           memory_order_release);
 }
 
-/* Rotate producer-owned damage into the immutable compositor snapshot. */
+/* 将生产者持有的损坏区域轮转到不可变的合成器快照中。 */
 void window_damage_rotate_locked(void) {
     g_window_server.damage_count = 0U;
     g_window_server.damage_full = false;
@@ -157,10 +156,10 @@ static void window_damage_mark_tiles_locked(const Rect *rect) {
 }
 
 /*
- * Publish one NEW producer generation.
+ * 发布一个新的生产者代数。
  *
- * window_lock is held, so g_window_server.dirty is the edge detector.
- * Return true only for clean -> dirty.
+ * 此时持有 window_lock，因此 g_window_server.dirty 用作边沿检测器。
+ * 仅在 clean -> dirty 时返回 true。
  */
 static inline bool window_dirty_edge_locked(void) {
     if (g_window_server.dirty) {
@@ -170,8 +169,7 @@ static inline bool window_dirty_edge_locked(void) {
     g_window_server.dirty = true;
 
     /*
-     * Generation metadata is read outside window_lock. dirty_hint release is
-     * the publication point for the new pending scene generation.
+    * 代数元数据会在 window_lock 外读取。dirty_hint 的 release 存储是发布新待处理场景代数的时刻。
      */
     (void)atomic_fetch_add_explicit(
         &g_window_dirty_generation,
@@ -191,9 +189,8 @@ void window_mark_dirty_locked(void);
 
 static void window_damage_enable_tiles_locked(void) {
     if (g_window_server.damage_tiles_active) return;
-    /* The fixed bitmap intentionally covers normal 4K-class outputs.  If a
-     * future mode exceeds it, retain correctness with the existing full
-     * damage path instead of silently clipping the right/bottom edge. */
+    /* 固定位图刻意覆盖常见 4K 级输出。若未来模式超出范围，继续使用现有全屏损坏路径保证正确性，
+     * 不要静默裁掉右侧/底部边缘。 */
     if (g_window_server.display_width >
             WINDOW_DAMAGE_MAX_TILES_X * WINDOW_DAMAGE_TILE_SIZE ||
         g_window_server.display_height >
@@ -213,8 +210,7 @@ static void window_damage_enable_tiles_locked(void) {
 
 void window_mark_dirty_locked(void) {
     /*
-     * Escalating an already-dirty generation to full damage does not create a
-     * second scheduling edge.
+    * 将已损坏的代数升级为全屏损坏，不会产生第二个调度边沿。
      */
     (void)window_dirty_edge_locked();
 
@@ -225,6 +221,38 @@ void window_mark_dirty_locked(void) {
     g_window_server.damage_bounds.y0 = 0U;
     g_window_server.damage_bounds.x1 = g_window_server.display_width;
     g_window_server.damage_bounds.y1 = g_window_server.display_height;
+}
+
+/* 插入与批量整理共用面积策略；包含关系直接返回，避免常见重复更新的面积运算。 */
+static bool window_damage_try_merge(Rect *a, const Rect *b) {
+    if (a->x0 <= b->x0 && a->y0 <= b->y0 &&
+        a->x1 >= b->x1 && a->y1 >= b->y1) return true;
+    if (b->x0 <= a->x0 && b->y0 <= a->y0 &&
+        b->x1 >= a->x1 && b->y1 >= a->y1) {
+        *a = *b;
+        return true;
+    }
+
+    uint32_t left = a->x0 < b->x0 ? a->x0 : b->x0;
+    uint32_t top = a->y0 < b->y0 ? a->y0 : b->y0;
+    uint32_t right = a->x1 > b->x1 ? a->x1 : b->x1;
+    uint32_t bottom = a->y1 > b->y1 ? a->y1 : b->y1;
+    uint32_t overlap_left = a->x0 > b->x0 ? a->x0 : b->x0;
+    uint32_t overlap_top = a->y0 > b->y0 ? a->y0 : b->y0;
+    uint32_t overlap_right = a->x1 < b->x1 ? a->x1 : b->x1;
+    uint32_t overlap_bottom = a->y1 < b->y1 ? a->y1 : b->y1;
+    uint64_t overlap = 0U;
+    if (overlap_left < overlap_right && overlap_top < overlap_bottom) {
+        overlap = (uint64_t)(overlap_right - overlap_left) *
+            (overlap_bottom - overlap_top);
+    }
+    uint64_t union_area = (uint64_t)(a->x1 - a->x0) * (a->y1 - a->y0) +
+        (uint64_t)(b->x1 - b->x0) * (b->y1 - b->y0) - overlap;
+    uint64_t merged_area = (uint64_t)(right - left) * (bottom - top);
+    /* 包围盒比真实并集多出的像素不超过 25%，保留原有合并阈值。 */
+    if (merged_area > union_area + union_area / 4U) return false;
+    *a = (Rect){.x0 = left, .y0 = top, .x1 = right, .y1 = bottom};
+    return true;
 }
 
 void window_mark_rect_locked(int32_t x, int32_t y,
@@ -264,9 +292,8 @@ void window_mark_rect_locked(int32_t x, int32_t y,
     };
 
     /*
-     * One conservative producer bound lets snapshot capture reject unrelated
-     * windows with four comparisons, without expanding tile damage or scanning
-     * the full rectangle set under window_lock.
+    * 一个保守的生产者边界即可让快照捕获通过四次比较排除无关窗口，无需扩展瓦片损坏区域，
+    * 也无需在 window_lock 下扫描完整矩形集合。
      */
     if (first_damage) {
         g_window_server.damage_bounds.x0 =
@@ -308,78 +335,9 @@ void window_mark_rect_locked(int32_t x, int32_t y,
     }
     for (uint32_t index = 0U; index < g_window_server.damage_count; ++index) {
         Rect *current = &g_window_server.damage_rects[index];
-        uint32_t merged_left;
-        uint32_t merged_top;
-        uint32_t merged_right;
-        uint32_t merged_bottom;
-        uint32_t overlap_left;
-        uint32_t overlap_top;
-        uint32_t overlap_right;
-        uint32_t overlap_bottom;
-        uint64_t current_area;
-        uint64_t candidate_area;
-        uint64_t overlap_area = 0U;
-        uint64_t union_area;
-        uint64_t merged_area;
-
-        if (candidate.x1 < current->x0 ||
-            current->x1 < candidate.x0 ||
-            candidate.y1 < current->y0 ||
-            current->y1 < candidate.y0) {
-            continue;
-        }
-
-        merged_left = candidate.x0 < current->x0 ?
-                      candidate.x0 : current->x0;
-        merged_top = candidate.y0 < current->y0 ?
-                     candidate.y0 : current->y0;
-        merged_right = candidate.x1 > current->x1 ?
-                       candidate.x1 : current->x1;
-        merged_bottom = candidate.y1 > current->y1 ?
-                        candidate.y1 : current->y1;
-
-        overlap_left = candidate.x0 > current->x0 ?
-                       candidate.x0 : current->x0;
-        overlap_top = candidate.y0 > current->y0 ?
-                      candidate.y0 : current->y0;
-        overlap_right = candidate.x1 < current->x1 ?
-                        candidate.x1 : current->x1;
-        overlap_bottom = candidate.y1 < current->y1 ?
-                         candidate.y1 : current->y1;
-
-        current_area =
-            (uint64_t)(current->x1 - current->x0) *
-            (current->y1 - current->y0);
-        candidate_area =
-            (uint64_t)(candidate.x1 - candidate.x0) *
-            (candidate.y1 - candidate.y0);
-
-        if (overlap_left < overlap_right &&
-            overlap_top < overlap_bottom) {
-            overlap_area =
-                (uint64_t)(overlap_right - overlap_left) *
-                (overlap_bottom - overlap_top);
-        }
-
-        union_area = current_area + candidate_area - overlap_area;
-
-        merged_area =
-            (uint64_t)(merged_right - merged_left) *
-            (merged_bottom - merged_top);
-
-        /*
-         * Bounding-box merge is only worthwhile when it wastes at most 25%
-         * compared with the real union.  This prevents a diagonal chain of
-         * small mouse damages from gradually becoming one huge rectangle.
-         */
-        if (merged_area > union_area + union_area / 4U) {
-            continue;
-        }
-
-        current->x0 = merged_left;
-        current->y0 = merged_top;
-        current->x1 = merged_right;
-        current->y1 = merged_bottom;
+        if (candidate.x1 < current->x0 || current->x1 < candidate.x0 ||
+            candidate.y1 < current->y0 || current->y1 < candidate.y0) continue;
+        if (!window_damage_try_merge(current, &candidate)) continue;
         return;
     }
     if (g_window_server.damage_count >= WINDOW_DAMAGE_MAX_RECTS) {
@@ -431,19 +389,16 @@ void window_mark_surface_locked(const window_server_window_t *window,
 }
 
 /*
- * Window movement produces two logical damages:
+ * 窗口移动会产生两个逻辑损坏区域：
  *
- *   1. old position: restore whatever is now underneath the window
- *   2. new position: draw the window at its new coordinates
+ *   1. 旧位置：恢复当前位于窗口下方的内容
+ *   2. 新位置：在新坐标处绘制窗口
  *
- * Do not immediately convert them into one bounding rectangle.  The generic
- * damage merge code already combines nearby/overlapping rectangles when the
- * bounding box wastes <=25%, while large moves remain as two independent
- * regions.
+ * 不要立即将它们转换为一个包围矩形。通用损坏区域合并代码会在包围盒浪费不超过 25% 时
+ * 合并附近或重叠的矩形，而较大的移动仍保留为两个独立区域。
  *
- * For a topmost drag the overlapping pixels are moved in the retained
- * composite buffer, so only the exposed strips need rasterization.  Other
- * callers request the complete new rectangle with render_new_position=true.
+ * 拖动最上层窗口时，重叠像素会在保留的合成缓冲区中移动，因此只需栅格化新暴露的条带。
+ * 其他调用方可通过 render_new_position=true 请求完整的新矩形。
  */
 void window_mark_moved_rect_locked(
     int32_t old_x,
@@ -517,7 +472,7 @@ void window_mark_moved_rect_locked(
         old_bottom : new_bottom;
 
     /*
-     * No overlap: retain the normal old/new pair.
+    * 没有重叠：保留常规的旧位置/新位置矩形对。
      */
     if (overlap_left >= overlap_right ||
         overlap_top >= overlap_bottom) {
@@ -538,9 +493,9 @@ void window_mark_moved_rect_locked(
     }
 
     /*
-     * OLD \ NEW:
+    * 旧区域 \ 新区域：
      *
-     * horizontal exposed strip across full old height.
+    * 横向暴露条带覆盖旧矩形的完整高度。
      */
     if (new_left > old_left) {
         uint32_t exposed_width =
@@ -571,8 +526,7 @@ void window_mark_moved_rect_locked(
     }
 
     /*
-     * Vertical exposed strip only covers horizontal overlap, so it cannot
-     * overlap the strip above.
+    * 纵向暴露条带仅覆盖横向重叠部分，因此不会与上方条带重叠。
      */
     {
         uint32_t overlap_width =
@@ -614,9 +568,8 @@ void window_mark_moved_rect_locked(
     }
 
     if (!render_new_position) {
-        /* NEW \ OLD: the overlap has already been copied by the retained
-         * drag blit, so render only the newly uncovered horizontal/vertical
-         * strips at the destination position. */
+        /* 新区域 \ 旧区域：重叠部分已由保留内容拖动复制，因此只需在目标位置渲染新暴露的
+         * 横向/纵向条带。 */
         if (old_left > new_left) {
             uint32_t exposed_width =
                 (uint32_t)(overlap_left - new_left);
@@ -656,8 +609,7 @@ void window_mark_moved_rect_locked(
     }
 
     if (render_new_position) {
-        /* Without a retained-pixel move, the complete final position must
-         * still be rendered. */
+        /* 未移动保留像素时，仍必须渲染最终位置的完整内容。 */
         window_mark_rect_locked(new_x, new_y, width, height);
     }
 }
@@ -705,14 +657,10 @@ void window_mark_moved_cursor_locked(uint32_t old_x, uint32_t old_y,
     if (g_window_server.composite_framebuffer != 0 &&
         g_window_server.composite_framebuffer !=
             g_window_server.framebuffer &&
-        !display_core_has_native_scanout(0U) &&
-        !qemu_stdvga_page_flip_active()) {
+        !display_core_has_native_scanout(0U)) {
         /*
-         * The retained WB scene deliberately excludes the cursor.  Moving
-         * only the pointer does not change scene pixels and must not schedule
-         * a full compositor frame. QEMU is the exception: it has no hardware
-         * cursor plane, so the old and new cursor rectangles must travel
-         * through the hidden-page flip path.
+         * 保留的 WB 场景有意不包含光标。仅移动指针不会改变场景像素，因此不得调度完整合成
+         * 帧。QEMU 和真机均直接更新可见 framebuffer 上的光标。
          */
         return;
     }
@@ -731,8 +679,7 @@ void window_mark_moved_cursor_locked(uint32_t old_x, uint32_t old_y,
     new_top = (int32_t)new_y - (int32_t)window_cursor_hotspot_y(new_shape);
 
     /*
-     * Old/new cursor locations are independent damages.  Do not create a
-     * potentially screen-sized bounding box when the pointer jumps.
+    * 旧、新光标位置是独立的损坏区域。指针跳跃时，不要创建可能覆盖整屏的包围盒。
      */
     window_mark_rect_locked(old_left, old_top,
                             WINDOW_CURSOR_WIDTH, WINDOW_CURSOR_HEIGHT);
@@ -755,14 +702,11 @@ void window_coalesce_damage_locked(void) {
     }
 
     /*
-     * Keep independent damage rectangles independent.  Merge a pair only
-     * when the bounding rectangle adds <=25% wasted pixels over their real
-     * union.  At most WINDOW_DAMAGE_MAX_RECTS exist, so this O(n^2) pass is
-     * tiny compared with repainting a needlessly large framebuffer region.
+    * 保持独立的损坏矩形彼此分离。仅当包围矩形相比真实并集多出的像素不超过 25% 时才合并。
+    * 矩形数最多为 WINDOW_DAMAGE_MAX_RECTS；每次合并减少一个矩形，重新检查次数有界。
      */
     while (first < g_window_server.damage_count) {
         uint32_t second = first + 1U;
-        bool merged_any = false;
 
         while (second < g_window_server.damage_count) {
             Rect *a =
@@ -770,49 +714,7 @@ void window_coalesce_damage_locked(void) {
             const Rect *b =
                 &g_window_server.damage_rects[second];
 
-            uint32_t left = a->x0 < b->x0 ? a->x0 : b->x0;
-            uint32_t top = a->y0 < b->y0 ? a->y0 : b->y0;
-            uint32_t right = a->x1 > b->x1 ? a->x1 : b->x1;
-            uint32_t bottom =
-                a->y1 > b->y1 ? a->y1 : b->y1;
-
-            uint32_t overlap_left =
-                a->x0 > b->x0 ? a->x0 : b->x0;
-            uint32_t overlap_top =
-                a->y0 > b->y0 ? a->y0 : b->y0;
-            uint32_t overlap_right =
-                a->x1 < b->x1 ? a->x1 : b->x1;
-            uint32_t overlap_bottom =
-                a->y1 < b->y1 ? a->y1 : b->y1;
-
-            uint64_t area_a =
-                (uint64_t)(a->x1 - a->x0) *
-                (a->y1 - a->y0);
-            uint64_t area_b =
-                (uint64_t)(b->x1 - b->x0) *
-                (b->y1 - b->y0);
-            uint64_t overlap_area = 0U;
-            uint64_t union_area;
-            uint64_t merged_area;
-
-            if (overlap_left < overlap_right &&
-                overlap_top < overlap_bottom) {
-                overlap_area =
-                    (uint64_t)(overlap_right - overlap_left) *
-                    (overlap_bottom - overlap_top);
-            }
-
-            union_area = area_a + area_b - overlap_area;
-            merged_area =
-                (uint64_t)(right - left) *
-                (bottom - top);
-
-            if (merged_area <= union_area + union_area / 4U) {
-                a->x0 = left;
-                a->y0 = top;
-                a->x1 = right;
-                a->y1 = bottom;
-
+            if (window_damage_try_merge(a, b)) {
                 for (uint32_t index = second + 1U;
                      index < g_window_server.damage_count;
                      ++index) {
@@ -821,27 +723,18 @@ void window_coalesce_damage_locked(void) {
                 }
 
                 --g_window_server.damage_count;
-                merged_any = true;
 
-                /*
-                 * a changed, so retry it against every remaining rectangle.
-                 */
-                second = first + 1U;
+                /* 后面的矩形扩大后，也可能与前面已处理的矩形满足合并条件。
+                 * 每次成功都减少一个矩形；最多 16 个矩形，重新扫描次数有界。 */
+                first = 0U;
+                second = 1U;
                 continue;
             }
 
             ++second;
         }
 
-        if (!merged_any) {
-            ++first;
-        } else {
-            /*
-             * No pair with this newly expanded rectangle remains mergeable
-             * after the restarted scan.
-             */
-            ++first;
-        }
+        ++first;
     }
 }
 

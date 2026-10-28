@@ -235,9 +235,8 @@ const char *inet_ntop(int family, const void *address, char *buffer,
             best_length = run_length;
         }
 
-        /* Build into the caller's buffer with one spare byte for the NUL.
-         * The maximum IPv6 presentation is INET6_ADDRSTRLEN, so this also
-         * keeps the result independent of the formatted-I/O implementation. */
+        /* 在调用方缓冲区中构造，并为结尾 NUL 留出一个字节。
+         * IPv6 地址文本最大长度为 INET6_ADDRSTRLEN，因此结果也不依赖格式化 I/O 实现。 */
         for (unsigned int index = 0U; index < 8U;) {
             if (index == best_start) {
                 if (offset + 2U >= (size_t)capacity) {
@@ -614,8 +613,8 @@ static int validate_receive_address(const struct sockaddr *address,
                          sizeof(struct sockaddr_in6);
     if (address == 0) return 0;
     if (length == 0 || *length < required) return socket_error(EINVAL);
-    /* recvfrom() writes this address.  Callers may pass a zeroed buffer; its
-     * incoming sa_family is not an input parameter to validate. */
+    /* recvfrom() 会写入此地址。调用方可以传入清零的缓冲区；其中原有的 sa_family
+     * 不是需要验证的输入参数。 */
     return 0;
 }
 
@@ -756,9 +755,8 @@ static void message_copy_from_buffer(const unsigned char *buffer,
     }
 }
 
-/* Linux x86-64 keeps the msghdr layout independent from the public libc
- * wrapper.  In particular, msg_namelen is a 32-bit field followed by explicit
- * padding, while the System-facing struct msghdr is allowed to evolve. */
+/* Linux x86-64 的 msghdr 布局独立于公开 libc 封装。特别是 msg_namelen 为 32 位字段，
+ * 后接显式填充；面向 System 的 struct msghdr 则允许继续演进。 */
 typedef struct libc_linux_msghdr {
     uint64_t name;
     uint32_t name_length;
@@ -1017,10 +1015,9 @@ int shutdown(int descriptor, int how) {
     if (how < OS_SOCKET_SHUT_READ || how > OS_SOCKET_SHUT_BOTH) {
         return socket_error(EINVAL);
     }
-    /* socketpair() is provided by the Linux ABI shim and returns a Linux
-     * descriptor, not a native System object handle.  Keep shutdown on the
-     * same ABI path; passing that descriptor to the native socket syscall
-     * would look it up in the native handle table and return ENOTSOCK. */
+    /* socketpair() 由 Linux ABI 兼容层提供，返回 Linux 描述符，而非原生 System 对象句柄。
+     * 关闭操作也必须走同一 ABI 路径；若将该描述符传给原生 socket 系统调用，它会在原生
+     * 句柄表中查找并返回 ENOTSOCK。 */
     if (libc_linux_personality() &&
         __libc_descriptor_is_linux_fd(descriptor)) {
         int linux_descriptor = __libc_linux_fd_for_descriptor(descriptor);

@@ -125,7 +125,7 @@ def run_case(name, settle_seconds):
     out_path = BUILD / f"hub-race-{name}.stdout"
     err_path = BUILD / f"hub-race-{name}.stderr"
 
-    # run-qemu.sh writes the canonical qemu-serial.log. We copy it after run.
+    # run-qemu.sh 会写入规范的 qemu-serial.log；运行结束后再复制该文件。
     canonical_serial = BUILD / "qemu-serial.log"
 
     for p in (monitor, out_path, err_path, canonical_serial):
@@ -176,10 +176,8 @@ def run_case(name, settle_seconds):
         ):
             return False
 
-        # The Hub becomes runtime-ready before the post-display user-runtime
-        # self-test finishes.  Keep this topology race focused on xHCI
-        # removal, instead of letting HID traffic perturb the unrelated
-        # process/VM teardown deadline.
+        # Hub 会先于显示后的 user-runtime 自测完成而进入运行状态。此拓扑竞争测试应聚焦 xHCI 移除，
+        # 不要让 HID 流量扰动无关的进程/VM 拆除时限。
         if not wait_until(
             lambda: "OS_USER_RUNTIME_SUBTESTS_OK" in
                     serial_text(canonical_serial),
@@ -190,9 +188,8 @@ def run_case(name, settle_seconds):
         if "OS_STAGE_FAIL" in serial_text(canonical_serial):
             return False
 
-        # Delay the HMP client until the boot-critical runtime self-test is
-        # complete; an attached monitor adds enough TCG work to perturb its
-        # short scheduling window.
+        # 等启动关键运行时自测完成后再连接 HMP 客户端；活动 monitor 会增加 TCG 工作量，
+        # 足以扰动其较短的调度窗口。
         end = time.monotonic() + 5.0
         while hmp is None:
             try:
@@ -205,8 +202,7 @@ def run_case(name, settle_seconds):
         choose_usb_mouse(hmp)
         send_mouse_events(hmp, 8)
 
-        # Match the original test behavior: this marker may already exist, but
-        # the eight HMP commands themselves have completed before we continue.
+        # 沿用原测试行为：此标记可能已存在，但必须等八条 HMP 命令都执行完毕后再继续。
         wait_until(
             lambda: "OS_USB_MOUSE_EVENT_OK" in serial_text(canonical_serial),
             MOUSE_READY_TIMEOUT,

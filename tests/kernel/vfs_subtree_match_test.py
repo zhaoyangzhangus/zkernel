@@ -7,7 +7,7 @@ def extract(name,end):
  start=source.index('static bool '+name+'(')
  return source[start:source.index(end,start)]
 code='#include <stdbool.h>\n#include <stddef.h>\n#include <stdint.h>\n#include <assert.h>\n#include <string.h>\n#include <stdio.h>\n#include <sanitizer/asan_interface.h>\n#define VFS_PATH_LIMIT 256\n'
-code+=extract('vfs_path_range_equals','/* Memory-backed')
+code+=extract('vfs_path_range_equals','static uint32_t vfs_free_node_slot_locked(')
 code+=extract('vfs_path_is_subtree','static kstatus_t vfs_rekey_cached_subtree_locked')
 code+=r'''
 typedef struct {char path[256];bool fat32_node,detached;} vfs_backend_node_t;
@@ -16,13 +16,15 @@ typedef int kstatus_t;
 enum {K_OK,K_ENAMETOOLONG};
 static vfs_fat32_mount_t *vfs_fat32_mount_for_path(const char *p,char *r){(void)p;(void)r;return NULL;}
 typedef struct {void *fs_private;} vnode_t;
+static void vfs_namespace_insert_locked(vnode_t *v,uint32_t slot){(void)v;(void)slot;}
+static void vfs_namespace_remove_locked(vnode_t *v){(void)v;}
 static vnode_t *g_vfs_nodes[4];
 static uint32_t g_vfs_node_capacity=4;
 static unsigned scans;
 static size_t vfs_string_length(const char *s){++scans;size_t n=0;while(n<256&&s[n])++n;return n;}
 '''
 start=source.index('static kstatus_t vfs_rekey_cached_subtree_locked(')
-rekey=source[start:source.index('\nkstatus_t vfs_rename_kernel(',start)]
+rekey=source[start:source.index('\n/* 替换磁盘文件前',start)]
 new_match='''            if (backend == 0 ||
                 !vfs_path_matches_subtree_prefix(backend->path, old_path, old_length)) continue;
             candidate_length = vfs_string_length(backend->path);'''

@@ -19,7 +19,6 @@ page_pool_group_t *g_pool_groups;
 uint32_t g_pool_base_group_count;
 uint32_t g_pool_group_count;
 page_o0_cache_t g_o0_cache[MAX_CPUS] __attribute__((aligned(CACHELINE_SIZE)));
-page_small_cache_t g_small_cache[MAX_CPUS] __attribute__((aligned(CACHELINE_SIZE)));
 page_remote_heads_t g_remote_heads[MAX_CPUS] __attribute__((aligned(CACHELINE_SIZE)));
 
 typedef struct __attribute__((aligned(CACHELINE_SIZE))) {
@@ -92,9 +91,8 @@ static page_t *section_page(const page_section_t *section, uint64_t index) {
 }
 
 static page_section_t *section_for_pfn(pfn_t pfn) {
-    /* Metadata addresses retain boot order for page_to_phys(). Only use
-     * binary PFN lookup after proving physical ranges ordered/nonoverlapping;
-     * unusual firmware maps keep the original first-match semantics. */
+    /* 元数据地址保留启动时的顺序，供 page_to_phys() 使用。只有确认物理范围有序且不重叠后才使用二分
+     * PFN 查找；异常固件映射仍保留原先的首次匹配语义。 */
     if (g_sections_pfn_ordered) {
         uint32_t first = 0U, end = g_section_count;
         while (first < end) {
@@ -178,12 +176,13 @@ void mark_compound(page_t *head, uint8_t order, bool free_page) {
         uint64_t span = count - i;
         page_t *pages = page_span_for_pfn(pfn, &span);
         if (pages == 0) { ++i; continue; }
-        /* Buddy blocks can cross adjacent sections with separate metadata.
-         * Resolve each span once, never assume head + i crosses a section. */
+        /* Buddy 块可能跨越元数据彼此独立的相邻区段。每个范围只解析一次，绝不能假设 head + i 可跨越区段。 */
         for (uint64_t j = 0; j < span; ++j, ++i) {
             page_t *page = &pages[j];
             page->flags = free_page ? PAGE_FREE : 0U;
             page->owner = free_page ? PAGE_OWNER_BUDDY : PAGE_OWNER_NONE;
+            page->private_data = 0U;
+            atomic_store_explicit(&page->mapcount, -1, memory_order_relaxed);
             page->order = i == 0 ? order : 0;
             page->u.compound.head = head;
             page->u.compound.index = i;
@@ -210,7 +209,7 @@ void insert_block(uint64_t physical, uint8_t order) {
     insert_known_block(page_for_address(physical), order);
 }
 
-/* Boot construction already bounds the candidate within one section. */
+/* 启动构造阶段已将候选范围限制在单一区段内。 */
 static bool pages_are_free(const page_t *pages, uint64_t count) {
     for (uint64_t i = 0; i < count; ++i) {
         if ((pages[i].flags & PAGE_FREE) == 0) return false;
@@ -233,9 +232,8 @@ static void build_free_lists(void) {
             while (order < BUDDY_MAX_ORDER) {
                 uint8_t next_order = (uint8_t)(order + 1U);
                 uint64_t block_pages = 1ULL << next_order;
-                /* The first page/previous half is already known free.
-                 * Check only the newly added half after section/alignment
-                 * bounds pass; boot construction has no concurrent frees. */
+                /* 首页面/前半部分已确认空闲。区段和对齐边界检查通过后，只需检查新加入的后半部分；启动构造
+                 * 阶段没有并发释放。 */
                 if (index + block_pages > section->present_pages ||
                     ((section->base_pfn + index) & (block_pages - 1ULL)) != 0 ||
                     !pages_are_free(&section->pages[index + (1ULL << order)],
@@ -339,7 +337,7 @@ static uint64_t count_usable_pages(const EFI_MEMORY_DESCRIPTOR *map, uint64_t ma
     return total;
 }
 
-/* Match the exact page-section splitting used by mm_boot_init(). */
+/* 与 mm_boot_init() 使用的页面区段拆分方式完全一致。 */
 static uint64_t count_pool_groups(const EFI_MEMORY_DESCRIPTOR *map, uint64_t map_size,
                                   uint64_t descriptor_size) {
     uint64_t total = 0;
@@ -383,8 +381,7 @@ page_t *take_from_zone_locked(uint8_t zone, uint8_t order) {
             uint64_t buddy = physical + (1ULL << source_order) * PAGE_SIZE;
             insert_block(buddy, source_order);
         }
-        /* Splitting only inserts higher-address buddies; the original block
-         * metadata remains the head of the allocated lower half. */
+        /* 拆分只会插入更高地址的 Buddy 块；原块元数据仍作为已分配低地址半区的头部。 */
         mark_compound(block, order, false);
         return block;
     }
@@ -547,7 +544,7 @@ bool mm_boot_init(OS_BOOT_INFO *boot_info) {
         atomic_init(&g_memory_page_deltas[cpu].delta_pages, 0);
     }
 
-    /* page_to_phys() is needed while build_free_lists() writes Buddy metadata. */
+    /* build_free_lists() 写入 Buddy 元数据时需要调用 page_to_phys()。 */
     check_section_pfn_order();
     check_pool_section_order();
     g_initialized = true;
@@ -564,8 +561,7 @@ page_t *phys_to_page(paddr_t pa) {
 
 paddr_t page_to_phys(const page_t *page) {
     if (page == 0 || !g_initialized) return paddr_make(UINT64_MAX);
-    /* Boot appends metadata spans in address order, independently of the
-     * firmware's physical-range order. No auxiliary lookup table is needed. */
+    /* 启动过程按地址顺序追加元数据范围，与固件的物理范围顺序无关，因此无需辅助查找表。 */
     uintptr_t address = (uintptr_t)page;
     uint32_t first = 0U, end = g_section_count;
     while (first < end) {

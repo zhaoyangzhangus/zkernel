@@ -32,11 +32,11 @@ typedef struct { unsigned owned; } linux_fd_entry_t;
 typedef struct { unsigned identity; } vm_space_t;
 typedef struct { unsigned dummy; } elf_exec_arguments_t;
 typedef struct { bool linux_abi; uint64_t interpreter_base,brk_base; } user_elf_image_info_t;
-typedef struct { uint32_t thread_count,flags,personality; atomic_uint state;
+typedef struct { uint64_t pid; uint32_t thread_count,flags,personality; atomic_uint state;
  pthread_mutex_t lock; vm_space_t *vm; bool linux_loader_pending;
  vaddr_t linux_brk_base,linux_brk;unsigned handles,linux_fds; } process_t;
 static _Thread_local unsigned held;
-static unsigned allocations,frees,new_puts,old_puts,stdio_calls,stdio_releases;
+static unsigned allocations,frees,new_puts,old_puts,stdio_calls,stdio_releases,lock_releases;
 static int prepare_error;
 static bool alloc_fail,pause_prepare,entered,allow;
 static pthread_mutex_t gate=PTHREAD_MUTEX_INITIALIZER;
@@ -72,6 +72,7 @@ static void linux_fd_table_release_stdio(linux_fd_entry_t previous[3]) {
  ++stdio_releases;
 }
 static void handle_table_destroy(unsigned *table) { assert(!held && table); }
+static void file_lock_release_owner(uint64_t pid) { assert(!held && pid==42); ++lock_releases; }
 static void linux_fd_table_destroy(unsigned *table) { assert(!held && table); }
 '''
 checks = r'''
@@ -79,7 +80,7 @@ typedef struct { process_t *p; user_elf_image_info_t info; vaddr_t stack; int st
 static void *load_job(void *opaque) {
  job_t *job=opaque;job->status=process_load_elf_image(job->p,(void*)1,17,&job->info,&job->stack);return NULL;
 }
-static void reset(void) { allocations=frees=new_puts=old_puts=stdio_calls=stdio_releases=0;alloc_fail=false;prepare_error=0;pause_prepare=false; }
+static void reset(void) { allocations=frees=new_puts=old_puts=stdio_calls=stdio_releases=lock_releases=0;alloc_fail=false;prepare_error=0;pause_prepare=false; }
 int main(void) {
  unsigned cases=0;
  for(unsigned state=0;state<4;++state)for(unsigned flags=0;flags<2;++flags)
@@ -104,11 +105,11 @@ int main(void) {
  // Real interleaving: prepared image returns only after owner VM teardown.
  for(unsigned round=0;round<100;++round) {
   reset();pause_prepare=true;entered=allow=false;
-  process_t p={.vm=space(1)};atomic_init(&p.state,PROCESS_RUNNING);pthread_mutex_init(&p.lock,NULL);
+  process_t p={.pid=42,.vm=space(1)};atomic_init(&p.state,PROCESS_RUNNING);pthread_mutex_init(&p.lock,NULL);
   job_t job={.p=&p};pthread_t worker;assert(!pthread_create(&worker,NULL,load_job,&job));
   pthread_mutex_lock(&gate);while(!entered)pthread_cond_wait(&condition,&gate);pthread_mutex_unlock(&gate);
   atomic_store(&p.state,3);process_release_runtime_resources(&p);
-  assert(!p.vm && old_puts==1 && !new_puts);
+  assert(!p.vm && old_puts==1 && !new_puts && lock_releases==1);
   pthread_mutex_lock(&gate);allow=true;pthread_cond_broadcast(&condition);pthread_mutex_unlock(&gate);
   assert(!pthread_join(worker,NULL));
   assert(job.status==K_EBUSY && !p.vm && new_puts==1 && !stdio_calls && frees==1);

@@ -12,6 +12,10 @@ esac
 [[ $check_only == 1 || $EUID == 0 ]] || { echo '请用 sudo bash 运行此脚本。' >&2; exit 1; }
 project_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
 source_dir="$project_dir/build/esp"
+if [[ $check_only == 0 ]]; then
+    python3 "$project_dir/tools/migrate-system-layout.py" "$source_dir"
+fi
+python3 "$project_dir/tools/finalize-app-layout.py" "$source_dir" --strict
 device_link=/dev/disk/by-id/usb-Lenovo_K121_AA000000000000000375-0:0
 device="$(readlink -e -- "$device_link")"
 [[ -b "$device" && "$(lsblk -dnro TRAN "$device")" == usb ]] || exit 1
@@ -27,9 +31,9 @@ for utility in parted mkfs.fat rsync mount umount sha256sum flock fuser; do
     command -v "$utility" >/dev/null || { echo "缺少工具：$utility" >&2; exit 1; }
 done
 for required in EFI/BOOT/BOOTX64.EFI EFI/OS/kernel.elf EFI/OS/loader.conf \
-                init sbin/fileman sbin/chrome sbin/cube lib/libgraphics.so.1 \
-                compat/linux/lib/x86_64-linux-gnu/libGLX_nvidia.so.0 \
-                usr/share/vulkan/icd.d/nvidia_icd.json rtl_nic/rtl8126a-2.fw rtl_nic/rtl8126a-3.fw; do
+                EFI/OS/init EFI/OS/init-runtime usr/apps/fileman/fileman usr/apps/chrome/chrome usr/apps/cube/cube lib/libgraphics.so.1 \
+                usr/apps/chrome/lib/libGLX_nvidia.so.0 \
+                usr/apps/chrome/vulkan/nvidia_icd.json EFI/OS/firmware/rtl8126/rtl8126a-2.fw EFI/OS/firmware/rtl8126/rtl8126a-3.fw; do
     [[ -s "$source_dir/$required" ]] || { echo "缺少部署文件：$required" >&2; exit 1; }
 done
 [[ -z "$(find "$source_dir" -type f -size +4294967295c -print -quit)" ]] || {

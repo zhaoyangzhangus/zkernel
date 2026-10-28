@@ -34,10 +34,10 @@ with tempfile.TemporaryDirectory(prefix='chrome-glibc-toolchain-') as directory:
                     '-I', str(source/'buildtools/third_party/libc++'),
                     str(root/'tests/user/chrome_glibc_toolchain_probe.c'),
                     '-o', str(obj)], env=environment, check=True, timeout=30)
-    subprocess.run([str(linker), f'--native-os-glibc-root={glibc}',
+    link_command = [str(linker), f'--native-os-glibc-root={glibc}',
                     '-nostdlib', '--unwindlib=none', '-Werror', '-pie', '-Wl,-e,_start',
-                    '-Wl,-dynamic-linker,/lib64/ld-linux-x86-64.so.2',
-                    '-Wl,-rpath,/compat/linux/lib/x86_64-linux-gnu',
+                    '-Wl,-dynamic-linker,/usr/apps/chrome/lib/ld-linux-x86-64.so.2',
+                    '-Wl,-rpath,/usr/apps/chrome/lib',
                     '-Wl,--disable-new-dtags', str(dev/'Scrt1.o'), str(dev/'crti.o'),
                     str(obj), '-lc', '-lm', '-lpthread', '-ldl',
                     str(runtime/'ld-linux-x86-64.so.2'),
@@ -46,7 +46,8 @@ with tempfile.TemporaryDirectory(prefix='chrome-glibc-toolchain-') as directory:
                                   (source/'build/toolchain/toolchain.gni').read_text()).group(1)/
                         'lib/x86_64-unknown-linux-gnu/libclang_rt.builtins.a'),
                     str(dev/'libc_nonshared.a'), str(dev/'crtn.o'),
-                    '-o', str(binary)], env=environment, check=True, timeout=30)
+                    '-o', str(binary)]
+    subprocess.run(link_command, env=environment, check=True, timeout=30)
     elf_env = dict(os.environ, LC_ALL='C')
     dynamic = subprocess.check_output(['readelf', '-dW', str(binary)],
                                      env=elf_env, text=True)
@@ -55,7 +56,7 @@ with tempfile.TemporaryDirectory(prefix='chrome-glibc-toolchain-') as directory:
     assert not any('stdc++' in name for name in needed)
     headers = subprocess.check_output(['readelf', '-lW', str(binary)],
                                      env=elf_env, text=True)
-    assert '[Requesting program interpreter: /lib64/ld-linux-x86-64.so.2]' in headers
+    assert '[Requesting program interpreter: /usr/apps/chrome/lib/ld-linux-x86-64.so.2]' in headers
     stage = (root/'tools/stage-chrome.sh').read_text()
     begin = stage.index('import re\n', stage.index('python3 - "$chrome_source" "$esp_dir"'))
     end = stage.index('\nPY\n', begin)
@@ -70,7 +71,7 @@ with tempfile.TemporaryDirectory(prefix='chrome-glibc-toolchain-') as directory:
     finally:
         sys.argv = previous_argv
     subprocess.run([sys.executable, str(root/'tools/nvidia/vulkan_runtime_abi.py'),
-                    '--runtime-dir', str(root/'build/esp/compat/linux/lib/x86_64-linux-gnu'),
+                    '--runtime-dir', str(root/'build/esp/usr/apps/chrome/lib'),
                     str(binary)], check=True, timeout=30)
     # Run with the guest loader explicitly, not the host interpreter. This
     # validates ABI/TLS/dlopen on the build host, NOT native-kernel execution.
@@ -113,10 +114,19 @@ with tempfile.TemporaryDirectory(prefix='chrome-glibc-toolchain-') as directory:
     assert result.returncode != 0 and 'Unapproved guest library search' in result.stderr
     assert not (base/'must-not-exist').exists()
     if options.publish_guest_probe:
+        private_link = [argument.replace('/usr/apps/chrome/lib', '/usr/apps/chrome-glibc-probe/lib')
+                        for argument in link_command]
+        subprocess.run(private_link, env=environment, check=True, timeout=30)
         destination = root/'build/nvidia/chrome-glibc-probe'
         shutil.copyfile(binary, destination)
         destination.chmod(0o755)
-        print('Guest compatibility probe:', destination, flush=True)
+        app = root/'build/esp/usr/apps/chrome-glibc-probe'
+        (app/'lib').mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(binary, app/'chrome-glibc-probe')
+        for name in ('libc.so.6', 'libm.so.6', 'libdl.so.2', 'libpthread.so.0',
+                     'librt.so.1', 'ld-linux-x86-64.so.2'):
+            shutil.copyfile(runtime/name, app/'lib'/name)
+        print('Guest compatibility probe:', app, flush=True)
 print('Guest glibc toolchain: real pinned headers/ELF, guest-loader thread/TLS/dlopen, explicit root precedence and host-library rejection passed')
 subprocess.run([sys.executable, str(root/'tests/user/chrome_vulkan_compile_test.py'),
                 '--runtime', 'glibc'], check=True, timeout=80)

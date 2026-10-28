@@ -6,6 +6,7 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'app-layout.ps1')
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 
 function Resolve-RepoPath([string]$Path) {
@@ -42,9 +43,11 @@ function Copy-FileIfChanged([string]$Source, [string]$Target) {
 }
 
 function Copy-DirectoryContents([string]$SourceRoot, [string]$TargetRoot) {
+    Assert-AppGuestLayout $TargetRoot
     Require-Directory $SourceRoot 'Phase 11 source ESP'
     foreach ($source in @(Get-ChildItem -LiteralPath $SourceRoot -Recurse -File)) {
         $relative = $source.FullName.Substring($SourceRoot.Length).TrimStart('\', '/')
+        if (Test-LegacyGuestPath $relative) { continue }
         Copy-FileIfChanged $source.FullName (Join-Path $TargetRoot $relative)
     }
 }
@@ -54,9 +57,8 @@ $phase11Esp = Join-Path $repoRoot 'build\nvidia\phase11\esp'
 $phase12Kernel = Join-Path $buildRoot 'kernel.elf'
 $testBinaryPath = Resolve-RepoPath $TestBinary
 $espRoot = Join-Path $buildRoot 'esp'
-$phase11Glvnd = Join-Path $phase11Esp 'usr\share\glvnd\egl_vendor.d'
-$absoluteGlvnd = Join-Path $espRoot 'usr\share\glvnd\egl_vendor.d'
-$phase12NvidiaManifest = Join-Path $repoRoot 'tools\nvidia\phase10_glvnd_10_nvidia.json'
+Assert-AppGuestLayout $espRoot
+Assert-AppInterpreter $testBinaryPath 'p12-window'
 
 Require-Directory $phase11Esp 'Phase 11 source ESP'
 Require-File $phase12Kernel 'Phase 12 kernel image'
@@ -68,12 +70,8 @@ Copy-DirectoryContents $phase11Esp $espRoot
 Copy-FileIfChanged $testBinaryPath (Join-Path $espRoot 'tests\p12-window')
 Copy-FileIfChanged $phase12Kernel (Join-Path $espRoot 'EFI\OS\kernel.elf')
 
-Require-Directory $phase11Glvnd '595.84 GLVND vendor manifest directory'
-foreach ($manifest in @(Get-ChildItem -LiteralPath $phase11Glvnd -File)) {
-    Copy-FileIfChanged $manifest.FullName (Join-Path $absoluteGlvnd $manifest.Name)
-}
-Require-File $phase12NvidiaManifest 'System GLVND NVIDIA manifest'
-Copy-FileIfChanged $phase12NvidiaManifest (Join-Path $absoluteGlvnd '10_nvidia.json')
+Install-NvidiaApp (Join-Path $repoRoot 'build\nvidia\userspace') $espRoot 'p12-window'
+Copy-FileIfChanged $testBinaryPath (Join-Path $espRoot 'usr\apps\p12-window\p12-window')
 
 Write-Output ('P12_STAGE_COPIED={0}' -f $script:stageCopied)
 Write-Output ('P12_STAGE_SKIPPED={0}' -f $script:stageSkipped)

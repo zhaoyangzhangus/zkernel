@@ -69,6 +69,7 @@ int64_t CommitWindowCommand(unsigned widget,WindowCommand* c){assert(widget==7);
 bool Failed(int64_t n){return n<0;}
 static uint8_t* surface_pixels;
 static unsigned front=0,acquires=0,commits=0,cancels=0;
+static gfx::Rect submitted_damage;
 static bool leased=false;
 static int begin_error=0,commit_error=0;
 static unsigned begin_width=16,begin_height=16,begin_stride=64;
@@ -80,6 +81,10 @@ int64_t CommitSurfaceCommand(unsigned widget,SurfaceCommand* command){
   command->frame={acquires,reinterpret_cast<uint64_t>(surface_pixels+(front^1U)*4096),4096,begin_width,begin_height,begin_stride,0};return 0;
  }
  if(command->operation==kSurfaceCommit){assert(leased);if(commit_error)return commit_error;
+  auto& f=command->frame;
+  assert(f.damage_x>=0&&f.damage_y>=0&&f.damage_width&&f.damage_height);
+  assert(uint64_t(f.damage_x)+f.damage_width<=f.width&&uint64_t(f.damage_y)+f.damage_height<=f.height);
+  submitted_damage=gfx::Rect(f.damage_x,f.damage_y,f.damage_width,f.damage_height);
   leased=false;front^=1;++commits;return 0;}
  assert(command->operation==kSurfaceCancel&&leased);leased=false;++cancels;return 0;
 }
@@ -216,6 +221,8 @@ int main(){
   unsigned index=(generation*37)%256;
   oracle[index]=generation+100;p[index]=oracle[index];
   assert(partial->PresentCanvasChecked(gfx::Rect(index%16,index/16,1,1)));
+  assert(nativeguest::submitted_damage.x()==int(index%16)&&nativeguest::submitted_damage.y()==int(index/16)&&
+    nativeguest::submitted_damage.width()==1&&nativeguest::submitted_damage.height()==1);
   auto* front=reinterpret_cast<uint32_t*>(pair+nativeguest::front*4096);
   assert(std::equal(oracle.begin(),oracle.end(),front));
  }
@@ -229,6 +236,8 @@ int main(){
   for(unsigned row=y;row<y+4;++row)for(unsigned col=x;col<x+3;++col)
    oracle[row*16+col]=p[row*16+col]=generation+9000;
   assert(partial->PresentCanvasChecked(gfx::Rect(x,y,3,4)));
+  assert(nativeguest::submitted_damage.x()==int(x)&&nativeguest::submitted_damage.y()==int(y)&&
+    nativeguest::submitted_damage.width()==3&&nativeguest::submitted_damage.height()==4);
   auto* front=reinterpret_cast<uint32_t*>(pair+nativeguest::front*4096);
   assert(std::equal(oracle.begin(),oracle.end(),front));
  }
@@ -243,6 +252,8 @@ int main(){
   for(unsigned row=5;row<8;++row)for(unsigned col=0;col<16;++col)
    oracle[row*16+col]=p[row*16+col]=generation+12000;
   assert(partial->PresentCanvasChecked(gfx::Rect(0,5,16,3)));
+  assert(nativeguest::submitted_damage.x()==0&&nativeguest::submitted_damage.y()==5&&
+    nativeguest::submitted_damage.width()==16&&nativeguest::submitted_damage.height()==3);
  }
  for(auto invalid:{gfx::Rect(-1,0,1,1),gfx::Rect(0,0,17,1),
                    gfx::Rect(15,15,2,2),gfx::Rect(0,0,0,1)}){

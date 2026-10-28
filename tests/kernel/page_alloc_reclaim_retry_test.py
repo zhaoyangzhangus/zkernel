@@ -1,4 +1,4 @@
-"""Actual bounded allocation retries against the prior two-copy algorithm."""
+"""Actual bounded local/global recovery against an explicit unrolled model."""
 from pathlib import Path
 import subprocess
 import tempfile
@@ -11,7 +11,7 @@ program = '#include "' + str(root / 'kernel/mm/phys/internal.h') + '"\n' + r'''
 #include <stdio.h>
 #include <string.h>
 static page_t pages[2];
-static unsigned availability,phase,cpu,order_now,initial_depth,depth,locked;
+static unsigned availability,phase,cpu,order_now,initial_depth,depth,locked,pool_held;
 static bool initial_irq,irq_enabled,mapping;
 static char trace[128];static unsigned trace_count;
 static size_t zero_bytes;
@@ -28,11 +28,11 @@ static uint32_t test_cpu(void) {assert(depth==initial_depth+1);event('C');return
 static void test_lock(void) {assert(!locked&&depth==initial_depth);event('L');locked=1;}
 static void test_unlock(void) {assert(locked);event('U');locked=0;}
 static page_t *result(unsigned zone) {
-    assert(zone<PAGE_ZONE_COUNT&&phase<2);
+    assert(zone<PAGE_ZONE_COUNT&&phase<3);
     return availability&(1U<<(phase*2+zone))?&pages[zone]:0;
 }
 page_t *pool_alloc_small(uint8_t zone,uint8_t order,uint32_t owner) {
-    assert(!irq_enabled&&depth==initial_depth+1&&!locked);
+    assert(!irq_enabled&&depth==initial_depth+1&&!locked&&pool_held);
     assert(order==order_now&&owner==cpu);event(zone==PAGE_ZONE_NORMAL?'N':'n');return result(zone);
 }
 page_t *take_from_zone_locked(uint8_t zone,uint8_t order) {
@@ -40,12 +40,24 @@ page_t *take_from_zone_locked(uint8_t zone,uint8_t order) {
     event(zone==PAGE_ZONE_NORMAL?'B':'b');return result(zone);
 }
 void pool_drain_cpu(uint32_t owner) {
-    assert(owner==cpu&&!locked&&depth==initial_depth+1&&phase==0);
+    assert(owner==cpu&&!locked&&!pool_held&&depth==initial_depth+1&&phase==0);
     if(order_now<=PAGE_POOL_SMALL_MAX_ORDER)assert(!irq_enabled);
     event('R');phase=1;
 }
+void pool_reclaim_all(void) {
+    assert(!locked&&!pool_held&&phase==1);
+    assert(depth==initial_depth+(order_now<=PAGE_POOL_SMALL_MAX_ORDER));
+    if(order_now<=PAGE_POOL_SMALL_MAX_ORDER)assert(!irq_enabled);
+    event('X');phase=2;
+}
+void pool_cpu_lock(uint32_t owner){assert(owner==cpu&&!pool_held&&!locked&&!irq_enabled);pool_held=1;event('q');}
+void pool_cpu_unlock(uint32_t owner){assert(owner==cpu&&pool_held&&!locked);pool_held=0;event('Q');}
+page_t *pool_alloc_remote(uint8_t order,page_alloc_flags_t flags,uint32_t requester){
+    (void)flags;assert(order==order_now&&requester==cpu&&(phase==1||phase==2));
+    assert(!locked&&!pool_held&&!irq_enabled&&depth==initial_depth+1);event('Y');return 0;
+}
 void page_stats_note_alloc(uint8_t order) {
-    assert(order==order_now&&!locked&&depth==initial_depth&&irq_enabled==initial_irq);event('A');
+    assert(order==order_now&&!locked&&!pool_held&&depth==initial_depth&&irq_enabled==initial_irq);event('A');
 }
 paddr_t page_to_phys(const page_t *page) {assert(page==&pages[0]||page==&pages[1]);event('P');return (paddr_t){4096};}
 void *phys_to_direct(paddr_t physical) {assert(physical.value==4096);event('M');return mapping?pages:0;}
@@ -63,45 +75,45 @@ void page_free(page_t *page) {
 #define unlock_pages test_unlock
 #define page_memory_zero test_zero
 ''' + function + r'''
-/* Independent pre-refactor control: initial attempt and retry are separate. */
-static page_t *previous_alloc(uint8_t order,page_alloc_flags_t flags) {
+/* Independent unrolled control: first try, local recovery, then global recovery. */
+static page_t *reference_pool_try(uint8_t order,page_alloc_flags_t flags,uint32_t owner){
+    pool_cpu_lock(owner);
+    page_t *page=0;
+    if(flags&PAGE_ALLOC_DMA32)page=pool_alloc_small(PAGE_ZONE_DMA32,order,owner);
+    else{page=pool_alloc_small(PAGE_ZONE_NORMAL,order,owner);
+         if(!page)page=pool_alloc_small(PAGE_ZONE_DMA32,order,owner);}
+    pool_cpu_unlock(owner);return page;
+}
+static page_t *reference_buddy_try(uint8_t order,page_alloc_flags_t flags){
+    lock_pages();page_t *page=0;
+    if(flags&PAGE_ALLOC_DMA32)page=take_from_zone_locked(PAGE_ZONE_DMA32,order);
+    else{page=take_from_zone_locked(PAGE_ZONE_NORMAL,order);
+         if(!page)page=take_from_zone_locked(PAGE_ZONE_DMA32,order);}
+    unlock_pages();return page;
+}
+static page_t *reference_alloc(uint8_t order,page_alloc_flags_t flags) {
     if(order>BUDDY_MAX_ORDER)return 0;
     page_t *page=0;
     if(order<=PAGE_POOL_SMALL_MAX_ORDER) {
         uint64_t irq_flags=page_pool_irq_save();x86_preempt_disable_fast();
         uint32_t owner=x86_current_cpu_index_fast();
-        if(flags&PAGE_ALLOC_DMA32)page=pool_alloc_small(PAGE_ZONE_DMA32,order,owner);
-        else {
-            page=pool_alloc_small(PAGE_ZONE_NORMAL,order,owner);
-            if(!page)page=pool_alloc_small(PAGE_ZONE_DMA32,order,owner);
-        }
+        page=reference_pool_try(order,flags,owner);
         if(!page) {
             pool_drain_cpu(owner);
-            if(flags&PAGE_ALLOC_DMA32)page=pool_alloc_small(PAGE_ZONE_DMA32,order,owner);
-            else {
-                page=pool_alloc_small(PAGE_ZONE_NORMAL,order,owner);
-                if(!page)page=pool_alloc_small(PAGE_ZONE_DMA32,order,owner);
-            }
+            page=reference_pool_try(order,flags,owner);
         }
+        if(!page)page=pool_alloc_remote(order,flags,owner);
+        if(!page){pool_reclaim_all();page=reference_pool_try(order,flags,owner);}
+        if(!page)page=pool_alloc_remote(order,flags,owner);
         x86_preempt_enable_fast();page_pool_irq_restore(irq_flags);
     } else {
-        lock_pages();
-        if(flags&PAGE_ALLOC_DMA32)page=take_from_zone_locked(PAGE_ZONE_DMA32,order);
-        else {
-            page=take_from_zone_locked(PAGE_ZONE_NORMAL,order);
-            if(!page)page=take_from_zone_locked(PAGE_ZONE_DMA32,order);
-        }
-        unlock_pages();
+        page=reference_buddy_try(order,flags);
         if(!page) {
             x86_preempt_disable_fast();uint32_t owner=x86_current_cpu_index_fast();
-            pool_drain_cpu(owner);x86_preempt_enable_fast();lock_pages();
-            if(flags&PAGE_ALLOC_DMA32)page=take_from_zone_locked(PAGE_ZONE_DMA32,order);
-            else {
-                page=take_from_zone_locked(PAGE_ZONE_NORMAL,order);
-                if(!page)page=take_from_zone_locked(PAGE_ZONE_DMA32,order);
-            }
-            unlock_pages();
+            pool_drain_cpu(owner);x86_preempt_enable_fast();
+            page=reference_buddy_try(order,flags);
         }
+        if(!page){pool_reclaim_all();page=reference_buddy_try(order,flags);}
     }
     if(page)page_stats_note_alloc(order);
     if(page&&(flags&PAGE_ALLOC_ZERO)) {
@@ -112,14 +124,14 @@ static page_t *previous_alloc(uint8_t order,page_alloc_flags_t flags) {
     return page;
 }
 static void reset(void) {
-    phase=locked=trace_count=0;trace[0]=0;zero_bytes=0;
+    phase=locked=pool_held=trace_count=0;trace[0]=0;zero_bytes=0;
     depth=initial_depth;irq_enabled=initial_irq;
 }
 int main(void) {
     unsigned cases=0;
     for(unsigned order=0;order<=BUDDY_MAX_ORDER+2;++order)
     for(unsigned f=0;f<9;++f)
-    for(availability=0;availability<16;++availability)
+    for(availability=0;availability<64;++availability)
     for(unsigned map=0;map<2;++map)
     for(unsigned irq=0;irq<2;++irq)
     for(initial_depth=0;initial_depth<4;++initial_depth)
@@ -127,7 +139,7 @@ int main(void) {
         order_now=order==BUDDY_MAX_ORDER+2?255:order;
         unsigned flags=f==8?0x80000000U:f;
         mapping=map;initial_irq=irq;cpu=owner?MAX_CPUS-1:0;
-        reset();page_t *expected=previous_alloc(order_now,flags);
+        reset();page_t *expected=reference_alloc(order_now,flags);
         char expected_trace[128];strcpy(expected_trace,trace);
         size_t expected_zero=zero_bytes;unsigned expected_phase=phase;
         reset();page_t *actual=page_alloc_slow(order_now,flags);
@@ -137,7 +149,7 @@ int main(void) {
         if(zero_bytes)assert(zero_bytes==(size_t)PAGE_SIZE<<order_now);
         ++cases;
     }
-    printf("Allocation retries: %u exact old/new call traces across orders/flags/zone availability/CPUs/IRQ/nested preemption; bounded recovery, DMA32 restriction, zeroing sizes and mapping-failure rollback preserved\n",cases);
+    printf("Allocation retries: %u production/unrolled-model traces across orders/flags/three-stage zone availability/CPUs/IRQ/nested preemption; bounded local/global recovery, pool/Buddy lock separation, DMA32 restriction, zeroing and mapping-failure rollback PASS\n",cases);
 }
 '''
 with tempfile.TemporaryDirectory(prefix='liteos-reclaim-') as directory:

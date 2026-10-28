@@ -17,24 +17,38 @@ typedef struct deferred_item {
     void *argument;
 } deferred_item_t;
 
+#define DEFERRED_SLOW_WORK_SLOTS 8U
+typedef struct deferred_slow_work {
+    deferred_work_fn_t function;
+    uint64_t count;
+    uint64_t total_ns;
+    uint64_t max_ns;
+    uint64_t last_start_tsc;
+    uint64_t last_end_tsc;
+} deferred_slow_work_t;
+/* 仅执行时间至少为 1 ms 的回调会访问此表或其队列锁。诊断计数会记录慢任务，不进行同步 UART 输出。 */
+static deferred_slow_work_t g_deferred_slow_work[DEFERRED_SLOW_WORK_SLOTS];
+static uint64_t g_deferred_slow_work_untracked;
+
 static struct {
     spinlock_t lock;
     deferred_item_t items[DEFERRED_QUEUE_CAPACITY];
     uint32_t head;
     uint32_t tail;
     uint32_t count;
-    /* Protected by lock; persists across short batches and all consumers. */
+    /* 由锁保护；在多个短批次和所有消费者之间保持有效。 */
     uint32_t critical_burst;
     deferred_item_t critical_item;
-    bool critical_ready; /* protected by lock, including the sleep handshake */
+    bool critical_ready; /* 由锁保护，包括休眠握手期间 */
     atomic_uint init_state;
 
     /*
-     * One global worker matches the current one-global-queue architecture.
-     * It is a persistent Ring0 scheduler thread: no process, no user CR3.
+    * 一个全局工作线程与当前单全局队列架构相匹配。它是常驻 Ring0 调度线程，不属于任何进程，也不
+    * 使用用户 CR3。
      */
     thread_t worker;
     atomic_bool worker_started;
+    atomic_bool worker_starting;
 } g_deferred;
 
 static volatile uint32_t g_deferred_progress[MAX_CPUS];
@@ -79,17 +93,12 @@ static uint8_t g_deferred_worker_stack[DEFERRED_WORKER_STACK_SIZE]
     __attribute__((aligned(16)));
 
 /*
- * Device IRQs enqueue work through deferred_try_schedule().  A plain
- * try-lock is not sufficient here: if an xHCI completion arrives while a
- * normal producer owns the queue lock, acknowledging the IRQ and returning
- * loses the only wakeup for that HID transfer.  The next report cannot be
- * queued until this event is consumed, so keyboard and mouse input stops
- * permanently.
+ * 设备 IRQ 通过 deferred_try_schedule() 入队。此处仅使用 try-lock 并不足够：如果 xHCI 完成中断
+ * 到达时普通生产者正持有队列锁，那么确认 IRQ 后直接返回会丢失该 HID 传输唯一的唤醒信号。在此事件
+ * 被消费前，下一个报告无法入队，因此键盘和鼠标输入会永久停止。
  *
- * Keep the queue's critical sections IRQ-safe and tiny.  Once a CPU owns the
- * lock it cannot be interrupted locally; another CPU may spin only until the
- * fixed-size ring bookkeeping below completes.  This is event-driven, not a
- * timer poll or a retry loop for xHCI.
+ * 队列临界区必须中断安全且尽可能短。CPU 获得锁后不会被本地中断打断；其他 CPU 只会在下方固定大小
+ * 的环形队列记账完成前短暂自旋。这是事件驱动机制，不是定时器轮询或 xHCI 重试循环。
  */
 static uint64_t deferred_irq_save(void) {
     uint64_t flags;
@@ -108,11 +117,9 @@ static void deferred_irq_restore(uint64_t flags) {
 static uint64_t deferred_lock(void) {
     uint64_t flags = deferred_irq_save();
     /*
-     * Queue producers include normal syscall context as well as IRQ/deferred
-     * context.  Interrupt masking protects the local critical section, but
-     * it does not stop the scheduler from moving a normal producer to
-     * another CPU while it owns the global queue lock.  Keep the owner on
-     * this CPU until the ring bookkeeping is published.
+    * 队列生产者既包括普通系统调用上下文，也包括 IRQ/延迟上下文。屏蔽中断可以保护本地临界区，但在
+    * 普通生产者持有全局队列锁时，无法阻止调度器将其迁移到另一 CPU。必须让所有者留在当前 CPU，直到
+    * 环形队列记账发布完成。
      */
     uint32_t cpu_index = x86_current_cpu_index();
     sched_preempt_disable();
@@ -144,19 +151,16 @@ static void deferred_wake_worker(void) {
     }
 
     /*
-     * sched_wake() is IRQ-safe.  If the worker is still RUNNING this is only
-     * a hint; the queue lock handshake below guarantees it will observe the
-     * newly queued item before it can block.
+    * sched_wake() 可在 IRQ 中安全调用。如果工作线程仍处于 RUNNING 状态，此调用仅是提示；下方的
+    * 队列锁握手会确保它在阻塞前观察到新入队的工作项。
     */
     sched_wake(&g_deferred.worker);
     deferred_debug_set(8U);
 
     /*
-     * sched_wake() is intentionally a state transition API.  If a previous
-     * wake already left this worker READY in the run queue, there is no new
-     * BLOCKED -> READY transition to trigger an IPI.  Retry the target CPU
-     * request for that state as well; this closes the pending-IPI race where
-     * the worker is queued but the earlier request was already consumed.
+    * sched_wake() 有意设计为状态转换 API。如果先前的唤醒已使工作线程处于运行队列中的 READY 状态，
+    * 就不会发生新的 BLOCKED -> READY 转换来触发 IPI。此状态下也要重试目标 CPU 请求，以关闭这种
+    * pending IPI 竞争：工作线程已入队，但先前的请求已被消费。
      */
     if (atomic_load_explicit(&g_deferred.worker.state,
                              memory_order_acquire) != THREAD_RUNNING) {
@@ -175,18 +179,17 @@ static bool deferred_worker_prepare_sleep(void) {
     if (thread != &g_deferred.worker) return false;
 
     /*
-     * Lost-wakeup barrier:
+    * 防止丢失唤醒的屏障：
      *
-     * Producer:
+    * 生产者：
      *     deferred_lock -> enqueue/publish -> unlock -> sched_wake(worker)
      *
-     * Consumer:
+    * 消费者：
      *     deferred_lock -> verify empty -> RUNNING->BLOCKED -> unlock
      *                   -> schedule()
      *
-     * Therefore an IRQ can never publish work in the gap between the empty
-     * test and BLOCKED publication.  If it publishes after unlock,
-     * sched_wake() sees BLOCKED (or READY/current) and preserves the wakeup.
+    * 因此 IRQ 绝不会在检查队列为空与发布 BLOCKED 状态之间发布工作。如果工作在解锁后发布，
+    * sched_wake() 会观察到 BLOCKED（或 READY/当前运行）状态并保留唤醒信号。
      */
     uint64_t flags = deferred_lock();
 
@@ -207,8 +210,7 @@ deferred_worker_main(void *argument) {
 
     for (;;) {
         /*
-         * A bounded batch prevents a permanently busy device from keeping
-         * this FAIR kernel worker on-CPU forever.
+         * 有界批次可避免持续繁忙的设备让此 FAIR 内核工作线程永久占用 CPU。
          */
         uint32_t completed = deferred_run(64U);
 
@@ -218,9 +220,8 @@ deferred_worker_main(void *argument) {
         }
 
         /*
-         * deferred_run() may have stopped because the queue became empty.
-         * Recheck under the producer lock and publish BLOCKED atomically with
-         * that empty observation.
+         * deferred_run() 可能因队列变空而停止。在生产者锁下重新检查，并与观察到队列为空这一操作
+         * 原子地发布 BLOCKED 状态。
          */
         if (deferred_worker_prepare_sleep()) {
             schedule();
@@ -231,8 +232,7 @@ deferred_worker_main(void *argument) {
 }
 
 bool deferred_init(void) {
-    /* After initial publication, queue operations use their own locks.
-     * Observe readiness without rewriting the shared init cache line. */
+    /* 初始状态发布后，队列操作会使用各自的锁。读取就绪状态时不重写共享的初始化缓存行。 */
     if (atomic_load_explicit(&g_deferred.init_state, memory_order_acquire) == 2U) return true;
     unsigned expected = 0U;
     if (atomic_compare_exchange_strong_explicit(&g_deferred.init_state, &expected, 1U,
@@ -247,6 +247,7 @@ bool deferred_init(void) {
         g_deferred.critical_item.argument = 0;
         g_deferred.critical_ready = false;
         atomic_init(&g_deferred.worker_started, false);
+        atomic_init(&g_deferred.worker_starting, false);
         for (uint32_t cpu_index = 0U; cpu_index < MAX_CPUS; ++cpu_index) {
             __atomic_store_n(&g_deferred_progress[cpu_index], 0U,
                              __ATOMIC_RELAXED);
@@ -273,12 +274,20 @@ bool deferred_start_worker(void) {
     }
 
     /*
-     * This is the explicit scheduler-ready boundary.  Early boot calls only
-     * deferred_init()/deferred_run(); they never need a schedulable thread.
+    * 这是显式的调度器就绪边界。启动早期只调用 deferred_init()/deferred_run()，无需可调度线程。
      */
     thread_t *current = sched_current_thread();
     uint32_t cpu_id = x86_current_cpu_index();
     if (current == 0 || cpu_id >= MAX_CPUS) return false;
+
+    /* 创建期间不允许其他调用方重置同一个线程；失败后释放创建权，允许稍后重试。 */
+    bool expected = false;
+    if (!atomic_compare_exchange_strong_explicit(&g_deferred.worker_starting,
+            &expected, true, memory_order_acq_rel, memory_order_acquire)) return false;
+    if (atomic_load_explicit(&g_deferred.worker_started, memory_order_acquire)) {
+        atomic_store_explicit(&g_deferred.worker_starting, false, memory_order_release);
+        return true;
+    }
 
     thread_t *worker = &g_deferred.worker;
     memset(worker, 0, sizeof(*worker));
@@ -288,16 +297,11 @@ bool deferred_start_worker(void) {
     worker->object.flags = 0U;
     worker->object.ops = 0;
 
-    /*
-     * TID 0 is reserved from normal process allocation (user TIDs begin at
-     * 1) and gives the bottom-half worker deterministic first ordering when
-     * FAIR vruntime ties at boot.
-     */
-    worker->tid = 0U;
+    /* Vendor 回调使用此工作线程的身份表示锁所有权。调度平局判定不得为不同内核任务分配相同 ID。 */
+    worker->tid = process_allocate_task_id();
     worker->process = 0;
-    atomic_init(&worker->state, THREAD_READY);
-    atomic_init(&worker->block_epoch, 0U);
-    atomic_init(&worker->command_ack, 0U);
+    sched_initialize_new_thread(worker, cpu_id, true);
+    atomic_store_explicit(&worker->state, THREAD_READY, memory_order_relaxed);
 
     worker->kernel_stack_base = g_deferred_worker_stack;
     worker->kernel_stack_size = sizeof(g_deferred_worker_stack);
@@ -306,49 +310,15 @@ bool deferred_start_worker(void) {
          sizeof(g_deferred_worker_stack)) &
         ~(vaddr_t)0x0FULL;
 
-    worker->sched_class = SCHED_CLASS_FAIR;
-    worker->base_sched_class = SCHED_CLASS_FAIR;
-    worker->rt_priority = 0U;
-    worker->base_rt_priority = 0U;
-    worker->sched.weight = 1024U;
-    worker->sched.nice = 0;
-    worker->sched.vruntime = 0U;
-
-    list_init(&worker->sched.rt_node);
     list_init(&worker->process_node);
     list_init(&worker->owned_mutexes);
 
-    for (uint32_t word = 0U; word < MAX_CPUS / 64U; ++word) {
-        worker->affinity.bits[word] = 0U;
-    }
-    worker->affinity.bits[cpu_id >> 6] =
-        1ULL << (cpu_id & 63U);
-    worker->owner_cpu = (uint16_t)cpu_id;
-    worker->current_cpu = (uint16_t)cpu_id;
+    x86_prepare_kernel_thread(&worker->arch, worker->kernel_stack_top,
+                              deferred_worker_main, 0);
 
     /*
-     * x86_switch_context_root() finishes with RET.
-     *
-     * saved RSP points at the synthetic return address.  After RET the
-     * trampoline sees a 16-byte-aligned RSP; its CALL then enters C with the
-     * SysV-required RSP % 16 == 8.
-     */
-    uintptr_t stack_top = (uintptr_t)worker->kernel_stack_top;
-    uintptr_t switch_stack = stack_top - sizeof(uint64_t);
-    *(uint64_t *)switch_stack =
-        (uint64_t)(uintptr_t)&x86_kernel_thread_start;
-
-    worker->arch.switch_ctx.rsp = switch_stack;
-    worker->arch.switch_ctx.r12 =
-        (uint64_t)(uintptr_t)&deferred_worker_main;
-    worker->arch.switch_ctx.r13 = 0U;
-    worker->arch.switch_ctx.r14 = stack_top;
-    worker->arch.fs_base = 0U;
-
-    /*
-     * Publish the wake target before making it runnable.  A concurrent IRQ
-     * may call sched_wake() while state is READY; that is harmless because
-     * sched_enqueue() below already preserves the runnable instance.
+    * 使线程可运行前先发布唤醒目标。并发 IRQ 可能在状态为 READY 时调用 sched_wake()；这不会造成问题，
+    * 因为下方 sched_enqueue() 已会保留该可运行实例。
      */
     atomic_store_explicit(&g_deferred.worker_started, true,
                           memory_order_release);
@@ -357,14 +327,16 @@ bool deferred_start_worker(void) {
     if (!enqueued) {
         atomic_store_explicit(&g_deferred.worker_started, false,
                               memory_order_release);
+        atomic_store_explicit(&g_deferred.worker_starting, false,
+                              memory_order_release);
         return false;
     }
+    sched_monitor_register(worker, "irq-deferred");
+    atomic_store_explicit(&g_deferred.worker_starting, false, memory_order_release);
 
     /*
-     * Do not synchronously switch from the user-init bootstrap continuation.
-     * The worker is already READY and queued; its reschedule request and the
-     * next normal scheduling boundary will run it without stranding the
-     * bootstrap thread inside a first-run context hand-off.
+    * 不要从用户初始化引导续接路径同步切换。工作线程已处于 READY 并入队；重新调度请求和下一个常规
+    * 调度边界会运行该线程，不会使引导线程困在首次运行的上下文交接中。
      */
 
     return true;
@@ -375,8 +347,7 @@ bool deferred_worker_started(void) {
                                 memory_order_acquire);
 }
 
-/* Caller holds the IRQ-safe queue lock. Keep both producer entry points on
- * one ring publication path, with their existing diagnostics and wakeups. */
+/* 调用方持有中断安全的队列锁。两个生产者入口共用一条环形队列发布路径，同时保留各自的诊断和唤醒。 */
 static bool deferred_enqueue_locked(deferred_work_fn_t function, void *argument) {
     if (g_deferred.count == DEFERRED_QUEUE_CAPACITY) return false;
     g_deferred.items[g_deferred.tail].function = function;
@@ -422,14 +393,11 @@ bool deferred_schedule_critical(deferred_work_fn_t function, void *argument) {
     uint64_t flags;
 
     /*
-     * This single slot is deliberately reserved for the xHCI MSI-X worker.
-     * Its caller owns a coalescing queued bit covering pending and executing
-     * device work. Do not turn this into a shared fallback queue without
-     * adding per-source ownership.
+    * 此单槽队列专门保留给 xHCI MSI-X 工作线程。调用方拥有合并式排队标志，涵盖待处理和正在执行的设备
+    * 工作。若未增加逐来源所有权，不得将其改成共享回退队列。
      *
-     * Publication now shares deferred_lock with the worker's sleep handshake.
-     * That is what closes the EMPTY->BLOCKED lost-wakeup window for the
-     * emergency slot as well as the normal ring.
+    * 发布操作现在与工作线程休眠握手共用 deferred_lock，因此可同时关闭紧急槽位和普通环形队列中
+    * EMPTY->BLOCKED 之间的丢失唤醒窗口。
      */
     if (function == 0 || !deferred_init()) return false;
 
@@ -450,8 +418,7 @@ bool deferred_schedule_critical(deferred_work_fn_t function, void *argument) {
     return true;
 }
 
-/* Caller holds the queue lock. Empty the slot before callback execution,
- * preserving the existing ability to enqueue follow-up work from a callback. */
+/* 调用方持有队列锁。执行回调前清空槽位，以保留回调中继续追加后续工作的能力。 */
 static bool deferred_take_critical(deferred_item_t *item) {
     if (item == 0 || !g_deferred.critical_ready) {
         return false;
@@ -461,14 +428,40 @@ static bool deferred_take_critical(deferred_item_t *item) {
     return item->function != 0;
 }
 
+static void deferred_record_work(deferred_work_fn_t function, uint64_t start) {
+    uint64_t end = x86_read_tsc();
+    uint64_t nanoseconds = x86_tsc_to_ns(end - start);
+    if (nanoseconds < 1000000ULL) return;
+    uint64_t flags = deferred_lock();
+    deferred_slow_work_t *record = 0;
+    for (uint32_t i = 0; i < DEFERRED_SLOW_WORK_SLOTS; ++i) {
+        if (g_deferred_slow_work[i].function == function) {
+            record = &g_deferred_slow_work[i];
+            break;
+        }
+        if (record == 0 && g_deferred_slow_work[i].function == 0)
+            record = &g_deferred_slow_work[i];
+    }
+    if (record != 0) {
+        record->function = function;
+        ++record->count;
+        record->total_ns += nanoseconds;
+        if (nanoseconds > record->max_ns) record->max_ns = nanoseconds;
+        record->last_start_tsc = start;
+        record->last_end_tsc = end;
+    } else {
+        ++g_deferred_slow_work_untracked;
+    }
+    deferred_unlock(flags);
+}
+
 uint32_t deferred_run(uint32_t budget) {
     uint32_t completed = 0;
     if (budget == 0U || !deferred_init()) return 0;
     while (completed < budget) {
         deferred_item_t item = {0};
-        /* Serialize selection, not execution. A shared burst count prevents
-         * short syscall batches (and concurrent consumers) from resetting
-         * HID priority before a waiting network task gets its turn. */
+        /* 仅串行化选择过程，不串行化执行过程。共享的突发计数可避免短系统调用批次（以及并发消费者）
+         * 在等待中的网络任务获得执行机会前重置 HID 优先级。 */
         uint64_t flags = deferred_lock();
         bool have_item = false;
         if (g_deferred.critical_burst < DEFERRED_CRITICAL_BURST_LIMIT ||
@@ -489,7 +482,9 @@ uint32_t deferred_run(uint32_t budget) {
         }
         deferred_unlock(flags);
         if (!have_item) break;
+        uint64_t start_tsc = x86_read_tsc();
         item.function(item.argument);
+        deferred_record_work(item.function, start_tsc);
         ++completed;
     }
     /* RCU 回调在可抢占的普通内核上下文中执行，不能放进硬中断。 */

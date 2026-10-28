@@ -8,7 +8,7 @@ source = (root / 'kernel/syscall/linux.c').read_text()
 poll = source[source.index('typedef struct linux_poll_wait_set {'):
               source.index('static bool linux_poll_wait_ready(')]
 epoll = source[source.index('static bool linux_epoll_watch_has_wait_source('):
-               source.index('/* The predicate runs after enrollment')]
+               source.index('static bool linux_epoll_wait_ready(')]
 code = r'''
 #include <assert.h>
 #include <stdbool.h>
@@ -28,7 +28,7 @@ typedef struct {object_t header;spinlock_t lock;void *read_end,*write_end;} linu
 typedef struct {unsigned non_object_magic;void *wait_object;} frontend_t;
 typedef struct {unsigned kind;void *private_data;} linux_fd_entry_t;
 typedef struct {int16_t events,revents;} linux_pollfd_t;
-typedef struct {bool used;unsigned kind,events;void *private_data;} linux_epoll_watch_t;
+typedef struct {bool used;unsigned kind,events;void *private_data;bool disabled;} linux_epoll_watch_t;
 typedef struct {spinlock_t lock;uint64_t control_sequence;unsigned watch_limit;linux_epoll_watch_t watches[8];} linux_epoll_object_t;
 static unsigned held;
 static void spinlock_lock(spinlock_t *l){assert(!l->held);l->held=true;++held;}
@@ -44,7 +44,8 @@ int main(void) {
  frontend_t a={9999,&source},b={9999,&source};
  linux_pollfd_t fds[8];linux_fd_entry_t entries[8];
  for(unsigned i=0;i<8;++i){fds[i]=(linux_pollfd_t){.events=1};entries[i]=(linux_fd_entry_t){LINUX_FD_NVIDIA,i%2?(void*)&a:(void*)&b};}
- linux_poll_wait_set_t set;
+ void *poll_objects[4];uint8_t poll_owned[4];
+ linux_poll_wait_set_t set={.objects=poll_objects,.owned=poll_owned,.capacity=4};
  assert(!linux_poll_capture_wait_set(fds,entries,8,&set));
  assert(set.count==1&&set.objects[0]==&source&&!set.owned[0]&&!source.gets);
  linux_poll_wait_set_release(&set);assert(!set.count&&!source.puts);
@@ -72,14 +73,23 @@ int main(void) {
  linux_poll_wait_set_release(&set);assert(unique[0].refs==1);
  /* epoll must pin the actual wait object, not the opaque NVIDIA frontend. */
  linux_epoll_object_t ep={.control_sequence=123,.watch_limit=3};
- ep.watches[0]=(linux_epoll_watch_t){true,LINUX_FD_NVIDIA,1,&a};
- ep.watches[1]=(linux_epoll_watch_t){true,LINUX_FD_NVIDIA,1,&b};
- ep.watches[2]=(linux_epoll_watch_t){false,LINUX_FD_NVIDIA,1,&a};
+ ep.watches[0]=(linux_epoll_watch_t){true,LINUX_FD_NVIDIA,1,&a,false};
+ ep.watches[1]=(linux_epoll_watch_t){true,LINUX_FD_NVIDIA,1,&b,false};
+ ep.watches[2]=(linux_epoll_watch_t){false,LINUX_FD_NVIDIA,1,&a,false};
  void *objects[8];size_t count=0;uint64_t sequence=0;
  assert(!linux_epoll_capture_wait_set(&ep,objects,8,&count,&sequence));
  assert(sequence==123&&count==2&&objects[0]==&ep&&objects[1]==&source&&source.refs==2&&source.gets==1);
  linux_epoll_release_wait_set(objects,count);assert(source.refs==1&&source.puts==1);
- ep.watches[2]=(linux_epoll_watch_t){true,LINUX_FD_UNIX_SOCKET,1,&socket};
+ /* Zero masks must subscribe for ERR/HUP; disarmed ONESHOT must not. */
+ ep.watches[0].events=0;ep.watches[1].disabled=true;
+ assert(!linux_epoll_capture_wait_set(&ep,objects,8,&count,&sequence)&&count==2);
+ assert(objects[1]==&source&&source.refs==2);
+ linux_epoll_release_wait_set(objects,count);
+ ep.watches[0].disabled=true;
+ assert(!linux_epoll_capture_wait_set(&ep,objects,8,&count,&sequence)&&count==1);
+ linux_epoll_release_wait_set(objects,count);assert(source.refs==1);
+ ep.watches[0].events=1;ep.watches[0].disabled=false;ep.watches[1].disabled=false;
+ ep.watches[2]=(linux_epoll_watch_t){true,LINUX_FD_UNIX_SOCKET,1,&socket,false};
  assert(linux_epoll_capture_wait_set(&ep,objects,3,&count,&sequence)==K_ENOSPC);
  assert(source.refs==1&&socket.header.refs==1&&read.refs==1&&write.refs==1&&!held);
  write.refs=0;

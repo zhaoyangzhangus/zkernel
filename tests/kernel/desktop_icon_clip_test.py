@@ -2,8 +2,13 @@
 from pathlib import Path
 import subprocess
 import tempfile
+import resource
 root = Path(__file__).resolve().parents[2]
 source = (root/'kernel/graphics/shell.c').read_text()
+# 缓存槽数由实际应用资源表决定，宿主夹具同步使用生产声明，而非过时的独立图集模型。
+assets = (root/'kernel/graphics/assets.c').read_text()
+asset_start = assets.index('desktop_asset_image_t g_desktop_app_assets[')
+asset_declaration = assets[asset_start:assets.index(';',asset_start)+1]
 functions = source[source.index('typedef struct desktop_icon_clip {'):
                    source.index('static bool desktop_draw_wallpaper_asset_locked(')]
 program = r'''
@@ -31,7 +36,7 @@ static uint32_t desktop_icon_area_pixel(const uint8_t *p,uint32_t s,
  uint32_t l,uint32_t t,uint32_t sw,uint32_t sh,uint32_t w,uint32_t h,uint32_t x,uint32_t y) {
  (void)p;(void)s;(void)l;(void)t;(void)sw;(void)sh;(void)h;++filtered;return y*w+x;
 }
-''' + functions + r'''
+''' + asset_declaration + functions + r'''
 int main(void) {
  desktop_render_context_t c={.bounds={70,70,80,80}};
  uint8_t p[16]={0};desktop_asset_image_t a={.pixels=p,.stride=8,.width=2,.height=2};
@@ -70,11 +75,42 @@ int main(void) {
  desktop_draw_asset_icon_locked(&c,10,10,64,64,&a,0,0,2,2);assert(visits==4096);
  for(unsigned y=0;y<64;++y)for(unsigned x=0;x<64;++x)
   assert(output[(y+10)*128+x+10]==y*64+x);
+ /* 每个应用均应拥有缓存槽；填满后复用不得重新过滤，额外图稿只处理损坏范围。 */
+ enum {slots=sizeof(g_desktop_app_assets)/sizeof(g_desktop_app_assets[0])-1U};
+ static uint8_t bank[slots][16];
+ c.bounds=(Rect){12,13,14,16};
+ before=filtered;
+ for(unsigned i=0;i<slots-1U;++i){
+  a.pixels=bank[i];visits=0;
+  desktop_draw_asset_icon_locked(&c,10,10,64,64,&a,0,0,2,2);
+  assert(visits==6&&filtered==before+(i+1U)*4096U);
+ }
+ before=filtered;
+ for(unsigned i=0;i<slots-1U;++i){
+  a.pixels=bank[i];visits=0;
+  desktop_draw_asset_icon_locked(&c,10,10,64,64,&a,0,0,2,2);
+  assert(visits==6&&filtered==before);
+ }
+ a.pixels=bank[slots-1U];visits=0;
+ desktop_draw_asset_icon_locked(&c,10,10,64,64,&a,0,0,2,2);
+ assert(visits==6&&filtered==before+6);
+ a.pixels=p;before=filtered;
+ desktop_draw_asset_icon_locked(&c,10,10,64,64,&a,0,0,2,2);
+ assert(filtered==before);
 }
 '''
 with tempfile.TemporaryDirectory(prefix='desktop-icon-clip-') as directory:
     path=Path(directory); (path/'test.c').write_text(program)
-    subprocess.run(['cc','-std=c11','-Wall','-Wextra','-Werror',
-        '-fsanitize=address,undefined',str(path/'test.c'),'-o',str(path/'test')],check=True)
+    command=['cc','-std=c11','-Wall','-Wextra','-Werror',
+        '-fsanitize=address,undefined',str(path/'test.c'),'-o',str(path/'test')]
+    subprocess.run(command,check=True)
     subprocess.run([str(path/'test')],check=True)
+    capacity='cache[sizeof(g_desktop_app_assets)/sizeof(g_desktop_app_assets[0])-1U]'
+    assert capacity in program
+    (path/'test.c').write_text(program.replace(capacity,'cache[1]'))
+    subprocess.run(command,check=True)
+    result=subprocess.run([str(path/'test')],capture_output=True,text=True,
+        preexec_fn=lambda:resource.setrlimit(resource.RLIMIT_CORE,(0,0)))
+    assert result.returncode!=0 and 'Assertion' in result.stderr,result.stderr
+    print('Negative control rejected: cache omits application icon slots')
 print('Desktop icon clipping: 2x3 damage visits 6 instead of 4096 pixels; invisible icons do no filtering; cache reuse and full-frame pixels PASS')

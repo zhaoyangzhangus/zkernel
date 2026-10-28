@@ -51,15 +51,14 @@ static vm_area_t *build_sorted_area_tree(list_head_t **item, size_t count,
     area->rb.right = right != 0 ? &right->rb : 0;
     rb_tree_set_parent(area->rb.left, &area->rb);
     rb_tree_set_parent(area->rb.right, &area->rb);
-    /* Child summaries are complete: publish this node's summary in the same
-     * bottom-up pass instead of walking the finished tree a second time. */
+    /* 子节点摘要均已完成；在同一次自底向上遍历中发布当前节点摘要，
+     * 不再对构建完成的树进行第二次遍历。 */
     augment_area(area, left, right);
     return area;
 }
 
-/* map_lock held: the list is already sorted. Build in linear time without
- * repeated searches/rotations; color only the incomplete deepest level red
- * so every null-leaf path has equal black height. */
+/* 调用方持有 map_lock：链表已经排序。以线性时间构建，不重复搜索或旋转；
+ * 仅将最深的不完整层标为红色，确保每条空叶路径具有相同黑高。 */
 void rebuild_area_tree(vm_space_t *space) {
     size_t count = 0U;
     for (list_head_t *item = space->area_list.next;
@@ -79,19 +78,34 @@ static void augment_area_node(rb_node_t *node) {
 }
 
 static void augment_area_rotation(rb_node_t *old_root, rb_node_t *new_root) {
-    /* Recompute the demoted node first: the promoted node depends on it.
-     * The enclosing subtree covers the same interval after the rotation. */
+    /* 先重新计算降级节点，因为提升后的节点依赖它。
+     * 旋转后外层子树覆盖的区间保持不变。 */
     augment_area_node(old_root);
     augment_area_node(new_root);
 }
 
-/* Bounds may shrink within the old range without changing tree ordering. */
-void update_area_tree(vm_area_t *area) {
-    for (rb_node_t *node = &area->rb; node != 0; node = rb_tree_parent(node))
+static void update_area_path(rb_node_t *node, bool stop_unchanged) {
+    /* 起点可能是摘要仍有效、但刚挂到新父节点的叶子；至少重算其父节点。
+     * 更高层只依赖子树摘要，摘要未变时无需继续传播。 */
+    augment_area_node(node);
+    for (node = rb_tree_parent(node); node != 0; node = rb_tree_parent(node)) {
+        vm_area_t *area = area_from_rb(node);
+        uint64_t minimum = area->subtree_min_start;
+        uint64_t maximum = area->subtree_max_end;
+        uint64_t gap = area->subtree_max_gap;
         augment_area_node(node);
+        if (stop_unchanged && minimum == area->subtree_min_start &&
+            maximum == area->subtree_max_end && gap == area->subtree_max_gap)
+            break;
+    }
 }
 
-/* map_lock held; the new range has already been checked for overlap. */
+/* 调整结束边界不改变树的排序；调用方保证与相邻区域不重叠。 */
+void update_area_tree(vm_area_t *area) {
+    update_area_path(&area->rb, true);
+}
+
+/* 调用方持有 map_lock；新范围已完成重叠检查。 */
 void insert_area_tree(vm_space_t *space, vm_area_t *area) {
     rb_node_t **link = &space->areas.root;
     rb_node_t *parent = 0;
@@ -103,14 +117,15 @@ void insert_area_tree(vm_space_t *space, vm_area_t *area) {
     rb_tree_node_init(&area->rb);
     rb_tree_set_parent(&area->rb, parent);
     *link = &area->rb;
-    /* Publish valid child summaries before any balancing rotation. */
+    /* 执行平衡旋转前，先发布有效的子节点摘要。 */
     update_area_tree(area);
     rb_tree_insert_rebalance_augmented(&space->areas, &area->rb,
                                        augment_area_rotation);
 }
 
 static void propagate_area_node(rb_node_t *node) {
-    update_area_tree(area_from_rb(node));
+    /* 删除时后继可能被搬到更高处，旧位置的摘要未变也必须修复新位置。 */
+    update_area_path(node, false);
 }
 
 void erase_area_tree(vm_space_t *space, vm_area_t *area) {
@@ -129,8 +144,8 @@ vm_area_t *find_area(const vm_space_t *space, uint64_t address) {
     return 0;
 }
 
-/* map_lock held: return the containing VMA, or the first successor for a
- * hole. Nonoverlapping ordered ranges make this a tree lower-bound search. */
+/* 调用方持有 map_lock：返回包含目标地址的 VMA；若地址位于空洞，则返回其后的首个 VMA。范围有序且
+ * 互不重叠，因此这是树上的下界查找。 */
 vm_area_t *find_area_at_or_after(const vm_space_t *space, uint64_t address) {
     vm_area_t *next = 0;
     rb_node_t *node = space->areas.root;
@@ -167,8 +182,7 @@ static bool find_gap_subtree(rb_node_t *node, uint64_t *cursor, uint64_t size) {
     if (area->subtree_min_start >= *cursor &&
         size <= area->subtree_min_start - *cursor) return true;
     if (area->subtree_max_gap < size) {
-        /* The preceding gap was too small and no internal gap can fit.
-         * Skip the entire subtree, including a dense run of many VMAs. */
+        /* 前一个空洞太小，子树内部也没有可用空洞。跳过整个子树，包括其中密集排列的多个 VMA。 */
         *cursor = area->subtree_max_end;
         return false;
     }
@@ -186,14 +200,41 @@ uint64_t find_gap(const vm_space_t *space, uint64_t hint, uint64_t size) {
     return size <= VM_USER_END - cursor ? cursor : 0;
 }
 
+/* 调用方持有 map_lock，只扫描修改区间及两侧邻居。摘除的节点交给调用方锁外释放。 */
+void vm_area_merge_range(vm_space_t *space, vm_area_t *first,
+                          list_head_t *range_end, list_head_t *retired) {
+    list_head_t *head = &space->area_list;
+    /* 右邻居可能被合并，使用它之后的稳定节点作为终点。 */
+    list_head_t *stop = range_end != head ? range_end->next : head;
+    vm_area_t *left = first;
+    if (left->ordered_node.prev != head)
+        left = area_from_list(left->ordered_node.prev);
+    while (left->ordered_node.next != stop && left->ordered_node.next != head) {
+        vm_area_t *right = area_from_list(left->ordered_node.next);
+        uint64_t length = left->end - left->start;
+        if (left->end == right->start && left->prot == right->prot &&
+            left->flags == right->flags && left->object == right->object &&
+            left->private_object == right->private_object &&
+            right->object_offset >= left->object_offset &&
+            right->object_offset - left->object_offset == length) {
+            erase_area_tree(space, right);
+            left->end = right->end;
+            update_area_tree(left);
+            list_del(&right->ordered_node);
+            list_add_tail(retired, &right->ordered_node);
+        } else {
+            left = right;
+        }
+    }
+}
+
 vm_area_t *area_allocate(void) {
     vm_area_t *area = (vm_area_t *)kzalloc(sizeof(vm_area_t), 0);
     if (area != 0) list_init(&area->ordered_node);
     return area;
 }
 
-/* Prepare an interior tail without mutating the source, list or index.
- * Caller holds map_lock and owns cleanup/publication of the returned VMA. */
+/* 准备内部尾段，但不修改源区域、列表或索引。调用方持有 map_lock，并负责清理/发布返回的 VMA。 */
 vm_area_t *vm_area_copy_tail(const vm_area_t *area, uint64_t start) {
     vm_area_t *right = area_allocate();
     if (right == 0) return 0;

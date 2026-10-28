@@ -9,13 +9,10 @@ def source(name):
 render = source('render.c')
 spans = render[render.index('static void compositor_surface_blend_span('):]
 tile = source('tile_metadata.c')
-tile = tile[tile.index('static bool tile_view_bounds('):tile.index('static bool tile_metadata_build_into(')]
+tile = tile[tile.index('static uint32_t tile_count_for_extent('):tile.index('bool compositor_tile_metadata_build(')]
 plan = source('render_plan.c')
 plan = plan[plan.index('bool compositor_view_fully_covers_snapshot_bounds('):
             plan.index('static uint32_t compositor_render_plan_exact_floor(')]
-cache = source('occlusion_cache.c')
-cache = cache[cache.index('#define WINDOW_OCCLUSION_CACHE_MIN_SCORE'):
-              cache.index('uint32_t compositor_occlusion_floor_for_damage(')]
 program = r'''
 #include <kernel/base.h>
 #include <uapi/window.h>
@@ -26,12 +23,13 @@ program = r'''
 #define WINDOW_DAMAGE_TILE_SIZE 32U
 #define WINDOW_DAMAGE_MAX_TILES_X 8U
 #define WINDOW_DAMAGE_TILE_COUNT 64U
-#define WINDOW_OCCLUSION_NO_FLOOR 255U
+#define WINDOW_DAMAGE_MAX_TILES_Y 8U
+#define WINDOW_SERVER_MAX_WINDOWS 64U
+typedef struct { uint64_t touch_mask, opaque_mask; } compositor_tile_meta_t;
 typedef struct { uint32_t x0,y0,x1,y1; } Rect;
-typedef struct { int32_t x,y; uint32_t width,height,flags,background; uint64_t buffer_size,surface_offset; bool maximized; } compositor_window_view_t;
+typedef struct { int32_t x,y; uint32_t width,height,flags,background,surface_width,surface_height; uint64_t buffer_size,surface_offset; bool maximized,surface_lease; } compositor_window_view_t;
 typedef struct { bool readable; uint64_t row_bytes; } compositor_surface_source_context_t;
 typedef struct { unsigned window_count,damage_count; compositor_window_view_t windows[2]; Rect damage_rects[16]; } compositor_snapshot_t;
-static struct { unsigned display_width,display_height; } g_window_server={256,256};
 static uint32_t page_data[3072], output[3072];
 static int missing=-1;
 static unsigned copied;
@@ -39,8 +37,6 @@ static bool window_client_decorations(uint32_t f) { return (f&OS_WINDOW_CLIENT_D
 static bool window_standard_caption(uint32_t f) { return (f&(OS_WINDOW_CLIENT_DECORATIONS|OS_WINDOW_STANDARD_CAPTION_CONTROLS))==(OS_WINDOW_CLIENT_DECORATIONS|OS_WINDOW_STANDARD_CAPTION_CONTROLS); }
 static unsigned window_outer_width(unsigned w,unsigned f) { (void)f; return w; }
 static unsigned window_outer_height(unsigned h,unsigned f) { (void)f; return h; }
-static unsigned window_damage_tile_columns_locked(void) { return 8; }
-static unsigned window_damage_tile_rows_locked(void) { return 8; }
 static uint8_t *compositor_surface_page_resolve(const compositor_surface_source_context_t *s,uint64_t index) {
     (void)s; assert(index<3); return (int)index==missing ? 0 : (uint8_t*)&page_data[index*1024];
 }
@@ -50,7 +46,7 @@ static void compositor_surface_copy_destination(uint32_t *wb,volatile uint32_t *
 static void compositor_surface_fill_destination(uint32_t *wb,volatile uint32_t *dev,uint32_t n,uint32_t c) {
     for(unsigned i=0;i<n;++i) { if(wb)wb[i]=c; else dev[i]=c; }
 }
-''' + spans + tile + plan + cache + r'''
+''' + spans + tile + plan + r'''
 static void run_span(compositor_window_view_t *w,bool device,uint32_t start,uint32_t end) {
     compositor_surface_source_context_t s={.readable=true};
     uint64_t index=UINT64_MAX;uint8_t *base=0;
@@ -74,7 +70,17 @@ int main(void) {
         for(unsigned i=5;i<1030;++i)assert(output[i]==0x006080a0);
         w.buffer_size=sizeof(page_data);
     }
-    assert(!copied);w.flags&=~OS_WINDOW_PREMULTIPLIED_ALPHA;
+    assert(!copied);
+    // Actual Chrome-like opaque interior takes the bulk path, preserving
+    // translucent/transparent boundary pixels and both destination types.
+    for(unsigned device=0;device<2;++device) {
+        for(unsigned i=0;i<256;++i){page_data[i]=0xff123456;output[i]=0x006080a0;}
+        page_data[0]=0x80402010;page_data[255]=0;
+        unsigned before=copied;run_span(&w,device,0,256);
+        assert(copied==before+1 && output[0]==0x00706060 && output[255]==0x006080a0);
+        for(unsigned i=1;i<255;++i)assert(output[i]==0xff123456);
+    }
+    w.flags&=~OS_WINDOW_PREMULTIPLIED_ALPHA;
     run_span(&w,false,0,5);assert(copied && !memcmp(output,page_data,20));
     w.surface_offset=4096;w.buffer_size=4096;
     run_span(&w,false,0,5);assert(!memcmp(output,page_data+1024,20));
@@ -104,20 +110,21 @@ int main(void) {
     w.flags=OS_WINDOW_VISIBLE|OS_WINDOW_CLIENT_DECORATIONS;
     w.surface_offset=0;w.buffer_size=sizeof(page_data);
     int64_t l,t,r,b;Rect bounds={32,32,64,64};
-    assert(tile_view_opaque_bounds(&w,&l,&t,&r,&b));
+    assert(compositor_view_opaque_bounds(&w,&l,&t,&r,&b));
     assert(compositor_view_fully_covers_snapshot_bounds(&w,&bounds));
     compositor_snapshot_t snapshot={.window_count=2,.damage_count=16};
     snapshot.windows[0]=w;snapshot.windows[1]=w;
     snapshot.windows[1].flags|=OS_WINDOW_PREMULTIPLIED_ALPHA;
     for(unsigned i=0;i<16;++i)snapshot.damage_rects[i]=bounds;
-    assert(!tile_view_opaque_bounds(&snapshot.windows[1],&l,&t,&r,&b));
+    assert(!compositor_view_opaque_bounds(&snapshot.windows[1],&l,&t,&r,&b));
     assert(!compositor_view_fully_covers_snapshot_bounds(&snapshot.windows[1],&bounds));
-    compositor_build_occlusion_floor_cache(&snapshot);
-    assert(g_compositor_occlusion_floor_valid && g_compositor_occlusion_floor[9]==0);
+    compositor_tile_meta_t metadata[64];uint32_t columns=0,rows=0;
+    assert(tile_metadata_build_into(&snapshot,256,256,metadata,&columns,&rows));
+    assert(metadata[9].opaque_mask==1);
     snapshot.windows[0].flags|=OS_WINDOW_PREMULTIPLIED_ALPHA;
-    compositor_build_occlusion_floor_cache(&snapshot);
-    assert(g_compositor_occlusion_floor[9]==WINDOW_OCCLUSION_NO_FLOOR);
-    puts("Alpha: WB/device, premultiplied edges, transparent RGB, page crossings/missing/tails, 4000 alternating-slot moving strokes without residual pixels, opaque fast path, tile/exact/cache exclusion passed");
+    assert(tile_metadata_build_into(&snapshot,256,256,metadata,&columns,&rows));
+    assert(!metadata[9].opaque_mask);
+    puts("Alpha: WB/device, premultiplied edges, transparent RGB, page crossings/missing/tails, 4000 alternating-slot moving strokes without residual pixels, opaque fast path, tile/exact exclusion passed");
 }
 '''
 with tempfile.TemporaryDirectory(prefix='liteos-alpha-') as directory:

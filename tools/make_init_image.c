@@ -205,12 +205,12 @@ int main(int argc, char **argv) {
     put_u32(image, DATA_OFFSET + 0x1A0U, 2U);
     put_header(image, DATA_OFFSET + 0x1C0U, 48U);
     put_header(image, DATA_OFFSET + 0x400U, 48U);
-    put_path(image, DATA_OFFSET + 0x480U, "/sbin/gshell");
+    put_path(image, DATA_OFFSET + 0x480U, "/usr/apps/gshell/gshell");
     put_path(image, DATA_OFFSET + 0x4C0U, "/sbin/netd");
     put_path(image, DATA_OFFSET + 0x500U, "/sbin/deviced");
     put_path(image, DATA_OFFSET + 0x520U, "/sbin/logd");
     put_path(image, DATA_OFFSET + 0x540U, "/sbin/crashd");
-    put_path(image, DATA_OFFSET + 0x560U, "/sbin/chrome-start");
+    put_path(image, DATA_OFFSET + 0x560U, "/usr/apps/chrome/chrome-start");
 
     if (!write_image(argv[2], image)) {
         fprintf(stderr, "cannot write %s\n", argv[2]);

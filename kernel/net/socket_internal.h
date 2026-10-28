@@ -1,4 +1,4 @@
-/* REFACTOR_P8_SOCKET_INTERNAL: private socket/test contract. */
+/* REFACTOR_P8_SOCKET_INTERNAL：私有 socket/测试约定。 */
 #pragma once
 
 #include <kernel/socket.h>

@@ -3,10 +3,10 @@
 #include <kernel/xhci.h>
 #include "internal.h"
 
-/* REFACTOR_P8_XHCI_SELF_TEST_OWNER: controller and runtime validation. */
+/* REFACTOR_P8_XHCI_SELF_TEST_OWNER：控制器和运行时验证。 */
 static bool xhci_hardware_self_test_one(const pci_device_t *pci) {
-    /* V3.10.3D1 SELF TEST ACTIVATION INLINED
-     * No self-test activation helper remained after V3.10.3C.
+    /* V3.10.3D1 已内联自测激活逻辑。
+     * V3.10.3C 之后不再保留自测激活辅助函数。
      */
 
     xhci_clear_device_flags();
@@ -43,10 +43,9 @@ static bool xhci_hardware_self_test_one(const pci_device_t *pci) {
                    selected_slot)
             {
                 /*
-                 * V3.10.6B8C DIRECT SELF-TEST SLOT
+                 * V3.10.6B8C 自测直接使用 Slot
                  *
-                 * selected_slot already names the permanent
-                 * canonical context.
+                 * selected_slot 已指向永久的规范上下文。
                  */
                 xhci_recompute_topology(
                     xhci_controller_state());
@@ -54,12 +53,9 @@ static bool xhci_hardware_self_test_one(const pci_device_t *pci) {
                 success =
                     true;
 
-                /* A successful probe already established the production
-                 * controller state.  Resetting and re-enumerating the same
-                 * device here invalidates freshly configured UAS endpoints
-                 * before the first SCSI command.  Keep the stable Slot; the
-                 * explicit re-enumeration helper remains available to tests
-                 * which deliberately exercise detach/attach lifetime. */
+                /* 探测成功时已经建立了生产环境所需的控制器状态。此处重置并重新枚举同一设备，
+                 * 会在首个 SCSI 命令前使刚配置的 UAS 端点失效。保留稳定 Slot；显式重新枚举辅助函数
+                 * 仍供需要专门测试分离/重新连接生命周期的测试使用。 */
                 keep_controller =
                     true;
                 realtest_mark("XHCI_STABLE_SLOT_RETAINED");
@@ -79,10 +75,8 @@ static bool xhci_hardware_self_test_one(const pci_device_t *pci) {
         xhci_recompute_topology(xhci_controller_state());
 
         /*
-         * Startup Hub status TDs are deliberately armed before runtime.
-         * Drain every setup-time completion now, while MSI-X is still hidden
-         * from runtime consumers, then normalize every Hub to exactly one
-         * pending status TD.
+         * Hub 状态 TD 会在运行时前预先挂起。此时 MSI-X 仍对运行时消费者屏蔽，先排空所有设置阶段
+         * 的完成事件，再确保每个 Hub 恰好有一个待处理状态 TD。
          */
         if(!xhci_drain_startup_events(
                xhci_controller_state(),
@@ -103,9 +97,8 @@ static bool xhci_hardware_self_test_one(const pci_device_t *pci) {
                     xhci_controller_state(),
                     &g_xhci_hub_runtime_ops))
         {
-            /* A broken optional Hub must not discard a directly attached
-             * root MSC device.  Keep storage and HID runtime available; the
-             * Hub hotplug path remains disabled for this controller. */
+            /* 可选 Hub 故障不能导致直接连接的根 MSC 设备不可用。保留存储和 HID 运行时功能；
+             * 此控制器的 Hub 热插拔路径保持禁用。 */
             if(xhci_usb_mass_storage_configured())
             {
                 realtest_mark(
@@ -129,8 +122,7 @@ static bool xhci_hardware_self_test_one(const pci_device_t *pci) {
             }
         }
 
-    /* Runtime xHCI I/O is interrupt-driven.  A controller without an MSI or
-     * MSI-X route is recorded as unavailable instead of being polled. */
+    /* xHCI 运行时 I/O 由中断驱动。没有 MSI 或 MSI-X 路由的控制器会记为不可用，而不是轮询。 */
     xhci_runtime_set_ready(success);
     if (success && !xhci_core_bind_msix(xhci_controller_state())) {
             uint32_t irq_error = xhci_last_error();
@@ -153,13 +145,12 @@ static bool xhci_hardware_self_test_one(const pci_device_t *pci) {
             kernel_serial_write(
                 "OS_XHCI_HUB_RUNTIME_OK\r\n");
 
-            /* Count only post-MSI-X runtime HID completions. */
+            /* 仅统计 MSI-X 启用后的运行时 HID 完成事件。 */
             xhci_hid_runtime_reset_completion_counters();
 
             /*
-             * A completion may have landed in the tiny bind window after the
-             * startup drain and before MSI-X was unmasked.  Schedule one
-             * bounded deferred pass so such an event cannot be stranded.
+             * 完成事件可能落在启动事件排空之后、MSI-X 取消屏蔽之前的短暂绑定窗口。
+             * 安排一次有界延迟处理，避免事件滞留。
              */
             (void)xhci_schedule_deferred_work();
         }
@@ -215,9 +206,8 @@ static bool xhci_start_auxiliary_hid(const pci_device_t *pci) {
         realtest_mark_number("XHCI_AUX_MSIX_ERROR", xhci_last_error());
         realtest_mark_number("XHCI_AUX_MSIX_STAGE",
                                     irq_stage);
-        /* Enumeration and endpoint setup are not enough for runtime HID:
-         * without an interrupt route there is no event-driven completion
-         * path, so release this controller and leave a failure marker. */
+        /* 仅完成枚举和端点设置还不足以支持运行时 HID：没有中断路由就没有事件驱动的完成路径，
+         * 因此释放该控制器并记录失败标记。 */
         xhci_hid_controller_set_active(false);
         realtest_mark_number("XHCI_AUX_HID_IRQ_MODE", 0U);
         realtest_mark("XHCI_AUX_HID_IRQ_UNAVAILABLE");
@@ -268,14 +258,12 @@ bool xhci_hardware_self_test(void) {
                                         xhci_last_error());
             continue;
         }
-        /* An earlier controller may have produced a detailed EP0 failure.
-         * That failure is no longer boot-fatal once a later controller owns
-         * the usable USB topology. */
+        /* 前一个控制器可能产生了详细的 EP0 失败信息。后续控制器接管可用 USB 拓扑后，
+         * 该失败不再导致启动失败。 */
         realtest_clear_failure_state();
 
-        /* A passing controller is not enough for a real boot: the FAT volume
-         * must be reachable through its MSC device. Prefer that controller
-         * when firmware exposes several independent xHCI functions. */
+        /* 控制器自测通过还不足以保证真机启动：必须能通过 MSC 设备访问 FAT 卷。
+         * 固件公开多个独立 xHCI 功能时，优先选择该控制器。 */
         if (xhci_usb_mass_storage_configured()) {
             realtest_mark_number("XHCI_CONTROLLER_MSC", index);
             xhci_start_auxiliary_hid_controllers(index);
@@ -286,17 +274,15 @@ bool xhci_hardware_self_test(void) {
         if (index + 1U < controller_count) {
             (void)xhci_core_destroy(xhci_controller_state());
         } else {
-            /* The last controller is usable for HID even when no USB mass
-             * storage device is attached.  It is already initialized; do
-             * not run the self-test a second time on the live controller. */
+            /* 即使没有连接 USB 大容量存储，最后一个控制器仍可用于 HID。它已初始化，
+             * 不要在运行中的控制器上再次执行自测。 */
             realtest_mark("XHCI_FALLBACK_READY");
             return true;
         }
     }
 
-    /* Keep a usable HID-only controller as a last resort when no controller
-     * owns mass storage. Re-run it because probing another controller tears
-     * down the shared xHCI state. */
+    /* 没有控制器管理大容量存储时，最后保留可用的纯 HID 控制器。由于探测其他控制器会拆除
+     * 共用的 xHCI 状态，因此需要重新运行该控制器自测。 */
     if (fallback_controller != 0 &&
         xhci_hardware_self_test_one(fallback_controller)) {
         realtest_clear_failure_state();

@@ -4,7 +4,7 @@
 
 typedef int nl_item;
 
-/* C/POSIX locale items used by libc++'s Linux locale adapter. */
+/* libc++ Linux 区域设置适配器使用的 C/POSIX 区域项。 */
 #define CODESET    14
 #define D_T_FMT    0
 #define D_FMT      1

@@ -19,6 +19,7 @@ struct job;
 /* Cold-path resource owners register independently; Process never names them. */
 typedef void (*process_teardown_callback_t)(struct process *process);
 #define PROCESS_TEARDOWN_CALLBACK_MAX 8U
+#define PROCESS_CWD_CAPACITY 256U
 
 enum process_state {
     PROCESS_NEW = 0,
@@ -51,6 +52,9 @@ typedef struct process {
     list_head_t threads;
     /* Borrowed monitor hint; read/write and detach invalidation use thread_lock. */
     list_head_t *monitor_thread_cursor;
+    /* 线程枚举缓存只在 thread_lock 内使用；线程成员变化时清空。 */
+    list_head_t *enumeration_thread_cursor;
+    uint32_t enumeration_thread_index;
     list_head_t job_node;
     uint32_t thread_count;
     uint64_t retired_cpu_ns; /* Thread-lock protected completed CPU time. */
@@ -59,6 +63,7 @@ typedef struct process {
 
     /* Global monitor membership and stable user-visible metadata. */
     list_head_t global_node;
+    /* 名称与当前目录都只在短暂持锁期间复制。 */
     spinlock_t info_lock;
     bool global_registered;
     char name[OS_PROCESS_NAME_MAX];
@@ -72,7 +77,7 @@ typedef struct process {
     /* The native System dynamic loader runs before Linux ABI activation. */
     bool linux_loader_pending;
     char linux_root[256];
-    char linux_cwd[256];
+    char cwd[PROCESS_CWD_CAPACITY];
     char linux_exe[256];
     vaddr_t linux_brk_base;
     vaddr_t linux_brk;
@@ -99,6 +104,9 @@ kstatus_t process_terminate_pid(process_t *caller, uint64_t pid, uint64_t create
 kstatus_t process_terminate_tid(process_t *caller, uint64_t pid, uint64_t tid, uint64_t create_time_ns);
 uint64_t process_allocate_task_id(void);
 void process_set_name(process_t *process, const char *path);
+process_t *current_process(void);
+kstatus_t process_cwd_copy(process_t *process, char output[PROCESS_CWD_CAPACITY]);
+kstatus_t process_cwd_set(process_t *process, const char *path);
 kstatus_t process_exec(process_t *process, const char __user *path,
                        const char __user *const __user *argv,
                        const char __user *const __user *envp,

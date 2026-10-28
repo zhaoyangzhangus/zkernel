@@ -85,6 +85,7 @@ code = r'''
 #include <stddef.h>
 #include <stdio.h>
 #include <string.h>
+#include <uapi/utf8.h>
 static char g_text[8192],g_file_path[256]="/notes.txt",g_status[128]="STATUS";
 static size_t g_text_length,g_cursor,g_selection_anchor;
 static uint32_t g_scroll_line,g_target_width,g_target_height;
@@ -127,9 +128,8 @@ static void draw_character(uint32_t x,uint32_t y,char c,uint32_t color){
 #define ui_text_draw_clipped(...) ((void)0)
 #define user_client_chrome_close(...) ((void)0)
 #define user_client_chrome_frame(...) ((void)0)
-#define ui_message_draw(...) ((void)0)
 ''' + extract('static uint32_t editor_columns(') + '\n' + extract(
-    'static uint32_t editor_visible_lines(') + '\n' + extract('static void advance_position(').replace(
+    'static uint32_t editor_visible_lines(') + '\n' + extract('static void prepare_position(') + '\n' + extract('static void advance_position(').replace(
     "if (character == '\\n')", "++steps; if (character == '\\n')") + '\n' + extract(
     'static void cursor_position(') + '\n' + ORACLE + '\n' + extract(
     'static void ensure_cursor_visible(') + '\n' + extract('static void draw_editor(') + r'''
@@ -188,6 +188,6 @@ with tempfile.TemporaryDirectory(prefix='system-editor-draw-') as directory:
     binary = str(Path(directory) / 'test')
     subprocess.run(['cc', '-O2', '-std=c11', '-Wall', '-Wextra', '-Werror',
                     '-Wno-unused-variable', '-fsanitize=address,undefined',
-                    '-fno-pie', '-no-pie', '-x', 'c', '-', '-o', binary],
+                    '-fno-pie', '-no-pie', '-I'+str(ROOT/'include'), '-x', 'c', '-', '-o', binary],
                    input=code, text=True, check=True)
     subprocess.run([binary], check=True)

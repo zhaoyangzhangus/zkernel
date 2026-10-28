@@ -86,7 +86,8 @@ int main(void) {
   assert(copy_calls==(tail<255?2U:1U));++cases;
  }
  char *path=memory+PAGE_SIZE+16;
- strcpy(path,"relative/path");assert(!check(path));++cases;
+ strcpy(path,"relative/path");assert(check(path));
+ assert(!memcmp(output+16,path,strlen(path)+1));++cases;
  path[0]=0;assert(!check(path));++cases;
  uintptr_t invalid[]={0,1,65535,0x0000800000000000ULL,UINTPTR_MAX};
  for(unsigned i=0;i<sizeof(invalid)/sizeof(*invalid);++i) {

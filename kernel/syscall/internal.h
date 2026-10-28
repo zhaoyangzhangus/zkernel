@@ -3,7 +3,7 @@
 #include <kernel/process.h>
 #include <uapi/abi.h>
 
-/* Private syscall-handler contract; this is not part of the user ABI. */
+/* 系统调用处理程序的私有约定；不属于用户 ABI。 */
 process_t *current_process(void);
 /* Bounded Chrome-only stderr capture, shared by Linux and native writes. */
 void linux_chrome_stderr_write(process_t *process, const char *text,
@@ -104,6 +104,8 @@ int64_t syscall_handle_set_flags(uint64_t handle, uint64_t flags,
 int64_t syscall_socket_create(uint64_t family, uint64_t type, uint64_t protocol,
                               uint64_t output_pointer, uint64_t create_flags,
                               uint64_t unused5);
+int64_t syscall_net_enum_adapter(uint64_t pointer,uint64_t a,uint64_t b,
+    uint64_t c,uint64_t d,uint64_t e);
 int64_t syscall_net_get_status(uint64_t arguments_pointer, uint64_t unused1,
                                uint64_t unused2, uint64_t unused3,
                                uint64_t unused4, uint64_t unused5);
@@ -177,6 +179,8 @@ int64_t syscall_gpu_wait_fence(uint64_t handle, uint64_t value,
 int64_t syscall_gpu_map(uint64_t arguments_pointer, uint64_t unused1,
                            uint64_t unused2, uint64_t unused3,
                            uint64_t unused4, uint64_t unused5);
+int64_t syscall_theme_settings(uint64_t pointer,uint64_t a,uint64_t b,
+    uint64_t c,uint64_t d,uint64_t e);
 int64_t syscall_display_get_info(uint64_t arguments_pointer,
                                     uint64_t unused1, uint64_t unused2,
                                     uint64_t unused3, uint64_t unused4,
@@ -203,7 +207,10 @@ int64_t syscall_thread_terminate(uint64_t pointer, uint64_t, uint64_t, uint64_t,
 int64_t syscall_window_update(uint64_t arguments_pointer, uint64_t unused1,
                                  uint64_t unused2, uint64_t unused3,
                                  uint64_t unused4, uint64_t unused5);
+int64_t syscall_clipboard_set(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+int64_t syscall_clipboard_get(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 int64_t syscall_window_title(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+int64_t syscall_window_control_tree(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 int64_t syscall_window_enumerate(uint64_t arguments_pointer, uint64_t unused1,
                                     uint64_t unused2, uint64_t unused3,
                                     uint64_t unused4, uint64_t unused5);
@@ -236,6 +243,9 @@ int64_t syscall_file_open(uint64_t path, uint64_t flags, uint64_t mode,
 int64_t syscall_file_enumerate(uint64_t arguments_pointer, uint64_t unused1,
                                   uint64_t unused2, uint64_t unused3,
                                   uint64_t unused4, uint64_t unused5);
+int64_t syscall_file_enumerate_batch(uint64_t arguments_pointer, uint64_t unused1,
+                                    uint64_t unused2, uint64_t unused3,
+                                    uint64_t unused4, uint64_t unused5);
 int64_t syscall_file_seek(uint64_t arguments_pointer, uint64_t unused1,
                              uint64_t unused2, uint64_t unused3,
                              uint64_t unused4, uint64_t unused5);
@@ -254,6 +264,10 @@ int64_t syscall_file_remove(uint64_t arguments_pointer, uint64_t unused1,
 int64_t syscall_file_mkdir(uint64_t arguments_pointer, uint64_t unused1,
                            uint64_t unused2, uint64_t unused3,
                            uint64_t unused4, uint64_t unused5);
+int64_t syscall_file_chdir(uint64_t path, uint64_t unused1, uint64_t unused2,
+                           uint64_t unused3, uint64_t unused4, uint64_t unused5);
+int64_t syscall_file_getcwd(uint64_t buffer, uint64_t size, uint64_t unused2,
+                            uint64_t unused3, uint64_t unused4, uint64_t unused5);
 int64_t syscall_file_rename(uint64_t arguments_pointer, uint64_t unused1,
                             uint64_t unused2, uint64_t unused3,
                             uint64_t unused4, uint64_t unused5);
@@ -275,6 +289,9 @@ int64_t syscall_file_write(uint64_t handle, uint64_t buffer, uint64_t length,
 int64_t syscall_file_fsync(uint64_t handle, uint64_t unused1, uint64_t unused2,
                               uint64_t unused3, uint64_t unused4,
                               uint64_t unused5);
+int64_t syscall_audio_settings(uint64_t arguments_pointer, uint64_t unused1,
+                              uint64_t unused2, uint64_t unused3,
+                              uint64_t unused4, uint64_t unused5);
 int64_t syscall_audio_open(uint64_t arguments_pointer, uint64_t unused1,
                            uint64_t unused2, uint64_t unused3,
                            uint64_t unused4, uint64_t unused5);
@@ -338,3 +355,8 @@ int64_t syscall_system_power(uint64_t action, uint64_t unused1,
 int64_t syscall_io_cancel(uint64_t request_id, uint64_t unused1,
                           uint64_t unused2, uint64_t unused3,
                           uint64_t unused4, uint64_t unused5);
+
+int64_t syscall_cpu_get_usage(uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t);
+int64_t syscall_gpu_get_info(uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t);
+
+int64_t syscall_desktop_wallpaper(uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t);

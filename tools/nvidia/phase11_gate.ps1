@@ -7,6 +7,7 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'app-layout.ps1')
 . (Join-Path $PSScriptRoot 'log-records.ps1')
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 
@@ -36,14 +37,15 @@ function Require-Text([string]$Text, [string]$Pattern, [string]$Description) {
 }
 
 $buildRoot = Resolve-RepoPath $Build
+Assert-AppGuestLayout (Join-Path $buildRoot 'esp')
 $kernel = Join-Path $buildRoot 'esp\EFI\OS\kernel.elf'
 $testBinary = Join-Path $buildRoot 'esp\tests\p11-triangle'
-$loader = Join-Path $buildRoot 'esp\lib64\ld-linux-x86-64.so.2'
-$libc = Join-Path $buildRoot 'esp\lib\x86_64-linux-gnu\libc.so.6'
-$compatRoot = Join-Path $buildRoot 'esp\compat\linux'
+$loader = Join-Path $buildRoot 'esp\usr\apps\p11-triangle\lib\ld-linux-x86-64.so.2'
+$libc = Join-Path $buildRoot 'esp\usr\apps\p11-triangle\lib\libc.so.6'
+$appRoot = Join-Path $buildRoot 'esp\usr\apps\p11-triangle'
 $phase10Build = Join-Path $repoRoot 'tools\nvidia\phase10_gate.ps1'
 $phase10BuildRoot = Join-Path $repoRoot 'build\nvidia\phase10'
-$manifest = Join-Path $repoRoot 'build\nvidia\phase9\compat\userspace-595.84.json'
+$manifest = Join-Path $repoRoot 'build\nvidia\userspace-595.84.json'
 $manifestSource = Join-Path $repoRoot 'tools\nvidia\check_userspace_59584.ps1'
 $pythonChecker = Join-Path $repoRoot 'tools\nvidia\check_userspace_59584.py'
 $importSource = Join-Path $repoRoot 'tools\nvidia\import_userspace_59584.ps1'
@@ -126,7 +128,7 @@ if (@($vendorDiff | Where-Object { $_.Trim() }).Count -ne 0) {
 }
 
 $checkOutput = @(& powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
-    $manifestSource -Root $compatRoot -Manifest $manifest `
+    $manifestSource -AppRoot $appRoot -Manifest $manifest `
     -PackageRoot build/nvidia/official-595.84/extracted-gitbash 2>&1 |
     ForEach-Object { $_.ToString() })
 if ($LASTEXITCODE -ne 0 -or
@@ -192,7 +194,7 @@ $testProgram = @(& $readelf.Source '-lW' '--' $testBinary 2>&1 |
     ForEach-Object { $_.ToString() })
 if ($LASTEXITCODE -ne 0 -or
     @($testProgram | Where-Object {
-        $_ -match 'Requesting program interpreter:\s+/lib64/ld-linux-x86-64\.so\.2'
+        $_ -match 'Requesting program interpreter:\s+/usr/apps/p11-triangle/lib/ld-linux-x86-64\.so\.2'
     }).Count -ne 1) {
     Fail-Gate 'Phase 11 probe does not carry the required PT_INTERP'
 }
@@ -200,22 +202,22 @@ $testDynamic = @(& $readelf.Source '-dW' '--' $testBinary 2>&1 |
     ForEach-Object { $_.ToString() })
 if ($LASTEXITCODE -ne 0 -or
     @($testDynamic | Where-Object { $_ -match 'Shared library:\s+\[libc\.so\.6\]' }).Count -ne 1 -or
-    @($testDynamic | Where-Object { $_ -match '/compat/linux/lib/x86_64-linux-gnu' }).Count -ne 1) {
-    Fail-Gate 'Phase 11 probe has no /compat/linux RPATH or libc dependency'
+    @($testDynamic | Where-Object { $_ -match '/usr/apps/p11-triangle/lib' }).Count -ne 1) {
+    Fail-Gate 'Phase 11 probe has no app-private RPATH or libc dependency'
 }
 
 foreach ($relative in @(
-        'lib/x86_64-linux-gnu/libEGL.so.1',
-        'lib/x86_64-linux-gnu/libEGL_nvidia.so.0',
-        'lib/x86_64-linux-gnu/libGLdispatch.so.0',
-        'lib/x86_64-linux-gnu/libOpenGL.so.0',
-        'lib/x86_64-linux-gnu/libnvidia-eglcore.so.595.84',
-        'lib/x86_64-linux-gnu/libnvidia-glcore.so.595.84',
-        'lib/x86_64-linux-gnu/libnvidia-glsi.so.595.84',
-        'lib/x86_64-linux-gnu/libnvidia-gpucomp.so.595.84',
-        'lib/x86_64-linux-gnu/libnvidia-tls.so.595.84',
-        'usr/share/glvnd/egl_vendor.d/10_nvidia.json')) {
-    Require-File (Join-Path $compatRoot ($relative.Replace('/', '\'))) `
+        'lib/libEGL.so.1',
+        'lib/libEGL_nvidia.so.0',
+        'lib/libGLdispatch.so.0',
+        'lib/libOpenGL.so.0',
+        'lib/libnvidia-eglcore.so.595.84',
+        'lib/libnvidia-glcore.so.595.84',
+        'lib/libnvidia-glsi.so.595.84',
+        'lib/libnvidia-gpucomp.so.595.84',
+        'lib/libnvidia-tls.so.595.84',
+        'egl/10_nvidia.json')) {
+    Require-File (Join-Path $appRoot ($relative.Replace('/', '\'))) `
         "595.84 userspace asset $relative"
 }
 

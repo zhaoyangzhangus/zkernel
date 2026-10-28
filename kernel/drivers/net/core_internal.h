@@ -14,7 +14,10 @@
 #define E1000_RX_STATUS_DD (1U << 0)
 #define E1000_RX_BUDGET 32U
 
-#define RTL8126_RING_COUNT 64U
+/* Cover a full 256KiB TCP window (~180 Ethernet frames) while the bounded
+ * 32-packet poll batch dispatches ACKs. 256 descriptors still fit one page;
+ * do not increase the per-callback software queue/latency budget with it. */
+#define RTL8126_RING_COUNT 256U
 #define RTL8126_TX_BUFFER_SIZE 2048U
 #define RTL8126_RX_BUFFER_SIZE 16384U
 #define RTL8126_RX_DESCRIPTOR_LENGTH (RTL8126_RX_BUFFER_SIZE - 1U)
@@ -49,6 +52,7 @@ _Static_assert(sizeof(rtl8126_descriptor_t) == 16U,
 typedef struct e1000_state {
     const pci_device_t *pci;
     net_backend_t backend;
+    spinlock_t tx_lock;
     uint8_t mmio_bar;
     bool io_mode;
     uint16_t io_base;
@@ -104,12 +108,15 @@ typedef struct e1000_state {
     uint8_t *rtl_tx_buffers;
     uint8_t *rtl_rx_buffers;
     uint16_t rtl_tx_next;
+    uint16_t rtl_tx_clean;
+    uint16_t rtl_tx_pending;
     uint16_t rtl_rx_next;
     uint16_t rtl_xid;
     uint32_t rtl_phy_ocp_base;
     uint8_t rtl_irq_vector;
     bool rtl_irq_msix;
     bool rtl_irq_bound;
+    bool rtl_dma_quarantined;
     bool rtl_firmware_required;
     volatile uint32_t rtl_irq_count;
     volatile uint32_t rtl_irq_status_count;
@@ -153,6 +160,8 @@ static inline void e1000_write(const e1000_state_t *state, uint32_t offset,
 }
 
 bool e1000_transmit(e1000_state_t *state, const uint8_t *frame, size_t length);
+kstatus_t e1000_transmit_status(e1000_state_t *state, const uint8_t *frame,
+                               size_t length);
 void e1000_record_error(uint32_t error);
 e1000_state_t *e1000_controller_state(void);
 void e1000_state_prepare(e1000_state_t *state, const pci_device_t *pci,
@@ -178,9 +187,10 @@ bool e1000_dispatch_software_queues(e1000_state_t *state);
 const pci_device_t *rtl8126_pci_find(void);
 bool rtl8126_initialize_state(e1000_state_t *state, const pci_device_t *pci);
 bool rtl8126_destroy_state(e1000_state_t *state);
-bool rtl8126_transmit_state(e1000_state_t *state, const uint8_t *frame,
-                            size_t length);
+kstatus_t rtl8126_transmit_status(e1000_state_t *state, const uint8_t *frame,
+                                  size_t length);
 bool rtl8126_poll_receive_state(e1000_state_t *state);
+void rtl8126_rearm_interrupts(e1000_state_t *state);
 bool rtl8126_link_up_state(e1000_state_t *state);
 void rtl8126_emit_diagnostic(void);
 bool rtl8126_bind_interrupt_state(e1000_state_t *state);

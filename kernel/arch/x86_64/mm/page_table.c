@@ -12,8 +12,8 @@ typedef struct {
     spinlock_t lock;
     atomic_uint owner;
 } __attribute__((aligned(64))) page_table_guard_t;
-/* Shared kernel tables always use guard zero; private user roots use stable
- * stripes. Hash collisions serialize safely, without lifetime hooks. */
+/* 共享内核页表始终使用 guard 0；私有用户根页表使用稳定的分片锁。哈希冲突只会安全地
+ * 串行化操作，不需要额外的生命周期钩子。 */
 static page_table_guard_t g_page_table_guards[PAGE_TABLE_USER_GUARDS + 1U];
 static atomic_uint g_page_table_cpu_guard[MAX_CPUS];
 static atomic_uint g_page_table_waiter;
@@ -33,10 +33,8 @@ static void table_lock(paddr_t root, uint64_t address) {
     bool enabled_delivery = false;
 
     /*
-     * A page-table operation can span allocation, TLB shootdown, and the
-     * final PTE publication.  It may enable interrupts while waiting so a
-     * remote TLB IPI can be acknowledged, but the current thread must not be
-     * switched away while it owns this guard.
+    * 页表操作可能跨越内存分配、TLB shootdown 和最终 PTE 发布。等待时可以开启中断，
+    * 以便确认远端 TLB IPI；但持有此 guard 期间不得切换当前线程。
      */
     sched_preempt_disable();
     uint32_t cpu_index = x86_current_cpu_index();
@@ -101,8 +99,8 @@ void x86_page_table_arch_init(void) {
 void x86_page_table_debug_state(uint32_t *lock_state, uint32_t *owner_cpu,
                                 uint32_t *waiter_cpu,
                                 uint64_t *wait_count) {
-    /* Diagnostic describes the latest waiter's stripe, or this CPU's last
-     * stripe. There is no single global owner for independent user roots. */
+    /* 诊断信息描述最近等待者使用的分片，或此 CPU 最近使用的分片。独立用户根页表没有
+     * 单一的全局所有者。 */
     uint32_t waiter = atomic_load_explicit(&g_page_table_waiter,
                                            memory_order_acquire);
     uint32_t cpu = waiter < MAX_CPUS ? waiter : x86_current_cpu_index();
@@ -364,8 +362,8 @@ kstatus_t x86_unmap_user_page_batch(paddr_t root, const vaddr_t *addresses,
             (index != 0U && va <= addresses[index - 1U])) return K_EINVAL;
     }
     table_lock(root, 0U);
-    /* Validate the whole batch before changing any PTE. Missing leaves are
-     * harmless; huge, supervisor and global mappings are not batchable. */
+    /* 修改任何 PTE 前先验证整个批次。缺少叶项无害；大页、特权级映射和全局映射不能
+     * 批量处理。 */
     for (size_t index = 0U; index < count; ++index) {
         uint64_t va = addresses[index];
         uint64_t *table = pml4;
@@ -390,7 +388,7 @@ kstatus_t x86_unmap_user_page_batch(paddr_t root, const vaddr_t *addresses,
     if (resident_count == 0U) { table_unlock(); return K_OK; }
     for (size_t index = 0U; index < resident_count; ++index) *entries[index] = 0U;
     if (!x86_tlb_shootdown_root(root)) {
-        /* No ownership is released until every target CPU acknowledges. */
+        /* 所有目标 CPU 均确认前，不释放任何资源所有权。 */
         for (size_t index = 0U; index < resident_count; ++index)
             *entries[index] = saved[index];
         table_unlock(); return K_EIO;
@@ -400,10 +398,9 @@ kstatus_t x86_unmap_user_page_batch(paddr_t root, const vaddr_t *addresses,
         if (page != 0)
             atomic_fetch_sub_explicit(&page->mapcount, 1, memory_order_relaxed);
     }
-    /* Sorted addresses share their PT/PD/PDPT. Scan each table for emptiness
-     * only at its group's last address, not once per removed leaf. Rewalk
-     * before reclaiming; saved parent pointers may have been freed. A hole
-     * at a group's end still needs to trigger ancestor reclamation. */
+    /* 排序后的地址可能共享 PT/PD/PDPT。仅在每组最后一个地址处检查各级页表是否为空，
+     * 不必为每个已移除叶项都扫描一次。回收前重新遍历，因为已保存的父指针可能已经失效。
+     * 即使一组末尾是空洞，也仍需触发祖先页表回收。 */
     for (size_t index = 0U; index < count; ++index) {
         uint64_t va = addresses[index];
         if (index + 1U < count && (addresses[index + 1U] >> 21) == (va >> 21))
@@ -431,12 +428,9 @@ kstatus_t x86_unmap_user_page_batch(paddr_t root, const vaddr_t *addresses,
 }
 
 /*
- * Walk only the page-table entries that cover a range.  A Linux MAP_NORESERVE
- * reservation creates a VMA but normally creates no user page tables at all;
- * probing the top-level entries makes mprotect/munmap of such a range O(number
- * of populated page-table branches), rather than O(number of virtual pages).
- * The caller receives a conservative "present" result for malformed page
- * tables so the existing per-page error handling remains in force.
+ * 仅遍历覆盖目标范围的页表项。Linux MAP_NORESERVE 预留会创建 VMA，但通常不会创建用户
+ * 页表；探测顶层页表项可使此类范围上的 mprotect/munmap 复杂度取决于已填充的页表分支数，
+ * 而非虚拟页数。页表损坏时向调用方保守地报告“存在”，以继续沿用现有的逐页错误处理。
  */
 static bool page_table_range_has_present_locked(const uint64_t *table,
                                                 uint32_t level,
@@ -482,8 +476,8 @@ bool x86_page_range_has_present_pages(paddr_t root, vaddr_t start,
     uint64_t *pml4;
     bool present;
 
-    /* The VM layer passes canonical user ranges.  Be conservative for any
-     * unexpected input so this helper cannot hide an existing error. */
+    /* VM 层传入规范的用户地址范围。遇到意外输入时采取保守处理，避免此辅助函数掩盖
+     * 已有错误。 */
     if (begin >= end || !x86_is_canonical(begin) ||
         end > X86_64_USER_TOP + 1ULL) {
         return true;
@@ -544,8 +538,8 @@ kstatus_t x86_next_present_page(paddr_t root, vaddr_t start, uint64_t end,
     return status;
 }
 
-/* Defer only user, non-global permission changes; callers never use this to
- * replace physical pages or free mappings. A root flush completes the batch. */
+/* 仅延迟用户态、非全局映射的权限变更；调用方不会用此路径替换物理页或释放映射。
+ * 刷新根页表即可完成整个批次。 */
 kstatus_t x86_protect_user_page_deferred(paddr_t root, vaddr_t address,
     uint32_t flags, enum x86_cache_mode cache_mode, bool *changed) {
     uint64_t va = (uint64_t)address;
@@ -630,19 +624,17 @@ kstatus_t x86_protect_page(paddr_t root, vaddr_t virtual_address, uint32_t flags
     if ((flags & X86_PAGE_USER) != 0) entry |= PTE_USER;
     if ((flags & X86_PAGE_GLOBAL) != 0) entry |= PTE_GLOBAL;
     if ((flags & X86_PAGE_EXEC) == 0) entry |= PTE_NO_EXECUTE;
-    /* A repeated COW fork usually visits already read-only PTEs. Preserve
-     * hardware accounting bits and avoid a remote shootdown when neither
-     * the mapping nor its permissions/cache policy has changed. */
+    /* 重复的 COW fork 通常会遇到已经只读的 PTE。若映射及其权限/缓存策略均未变化，则
+     * 保留硬件记账位并避免远端 shootdown。 */
     entry |= old & (PTE_ACCESSED | PTE_DIRTY);
     if (entry == old) {
         table_unlock();
         return K_OK;
     }
     table[indices[3]] = entry;
-    /* A user write-permission upgrade cannot expose another physical page or
-     * revoke access. Remote read-only translations remain safe: their next
-     * write faults and the VM fault handler invalidates that local entry.
-     * Keep synchronous shootdown for replacements, restrictions and globals. */
+    /* 提升用户页写权限不会暴露其他物理页，也不会撤销访问权。远端只读转换仍然安全：
+     * 后续写入会触发缺页，VM 缺页处理程序会使该本地项失效。替换映射、收紧权限和全局
+     * 映射仍使用同步 shootdown。 */
     if (va <= X86_64_USER_TOP &&
         (old & (PTE_USER | PTE_GLOBAL | PTE_WRITE)) == PTE_USER &&
         entry == (old | PTE_WRITE)) {

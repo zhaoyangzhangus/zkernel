@@ -1,12 +1,14 @@
 """Production async submit/worker lifetime and ownership with controlled scheduling."""
 from pathlib import Path
+import resource
+import signal
 import subprocess
 import tempfile
 
 root = Path(__file__).resolve().parents[2]
 source = (root/'kernel/net/socket_io.c').read_text()
 functions = source[source.index('static void socket_async_send_work('):
-                   source.index('static bool socket_receive_ready(')]
+                   source.index('static void socket_receive_notify_peer(')]
 code = r'''
 #include <assert.h>
 #include <stdlib.h>
@@ -24,13 +26,20 @@ static void *pending_arg;
 static uint64_t ids;
 static unsigned posts,sends,expected_family;
 static size_t expected_length;
+static size_t allocation_length,allocated_bytes,cleared_bytes;
 static unsigned char expected_payload[SOCKET_MAX_PAYLOAD];
 static unsigned char input[SOCKET_MAX_PAYLOAD+32],address6[16];
 static os_completion_entry_t last;
 static kstatus_t send_status;
-void *kzalloc(size_t n,uint32_t flags) {
-    assert(!flags && n==sizeof(socket_async_send_t));
-    if(oom)return 0; ++allocs; return calloc(1,n);
+void *kmalloc(size_t n,uint32_t flags) {
+    assert(!flags && n==sizeof(socket_async_send_t)+allocation_length);
+    if(oom)return 0;
+    void *p=malloc(n);assert(p);memset(p,0xA5,n);
+    ++allocs;allocated_bytes+=n;return p;
+}
+void socket_zero(void *p,size_t n) {
+    assert(n==sizeof(socket_async_send_t));
+    cleared_bytes+=n;memset(p,0,n);
 }
 void kfree(void *p) { assert(p); ++frees; free(p); }
 socket_private_t *socket_private(socket_t *s) { assert(s==&sock); return missing_private?0:&state; }
@@ -70,6 +79,7 @@ kstatus_t completion_port_post(completion_port_t *p,const os_completion_entry_t 
 }
 ''' + functions + r'''
 static kstatus_t submit(unsigned family,const void *data,size_t n,uint64_t *id) {
+    allocation_length=n;
     return family==4?socket_send_async(&sock,data,n,0x01020304,443,&port,0x12345678,id):
         socket_send_async_ipv6(&sock,data,n,address6,443,&port,0x12345678,id);
 }
@@ -130,6 +140,9 @@ int main(void) {
     sock.family=OS_AF_INET6; sock.type=OS_SOCK_STREAM;
     assert(socket_send_async_ipv6(&sock,input,1,address6,443,&port,0,&id)==K_EINVAL);
     assert(before==allocs && id==UINT64_MAX); balanced(); socket_async_send_work(0);
+    assert(cleared_bytes==allocs*sizeof(socket_async_send_t));
+    printf("Async storage: %zu-byte header, exact header+payload allocation, %zu allocated bytes and %zu header-only cleared bytes\n",
+           sizeof(socket_async_send_t),allocated_bytes,cleared_bytes);
     printf("Socket async: %u full-length IPv4/IPv6 queued/immediate-worker cases, copied payload/completions and all reference/OOM/schedule failures balanced\n",cases);
 }
 '''
@@ -147,3 +160,18 @@ with tempfile.TemporaryDirectory(prefix='liteos-socket-async-') as directory:
     failure=subprocess.run([binary],text=True,capture_output=True,timeout=30)
     assert failure.returncode!=0 and 'heap-use-after-free' in failure.stderr
     print('Regression control: post-publication request-ID read reproduces ASan heap-use-after-free')
+    for name, old, new in (
+        ('maximum-size allocation', 'kmalloc(sizeof(*request) + length, 0)',
+         'kmalloc(sizeof(*request) + SOCKET_MAX_PAYLOAD, 0)'),
+        ('payload clearing', 'socket_zero(request, sizeof(*request));',
+         'socket_zero(request, sizeof(*request) + length);'),
+    ):
+        bad=code.replace(old,new)
+        assert bad!=code,name
+        subprocess.run(command,input=bad,text=True,check=True)
+        failure=subprocess.run(
+            [binary],capture_output=True,text=True,timeout=30,
+            preexec_fn=lambda: resource.setrlimit(resource.RLIMIT_CORE,(0,0)))
+        assert failure.returncode==-signal.SIGABRT and 'Assertion' in failure.stderr, (
+            name,failure.returncode,failure.stderr)
+        print('Negative control rejected:',name)

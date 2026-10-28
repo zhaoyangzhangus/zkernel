@@ -11,11 +11,18 @@ assert 'cube_output = vec4(interpolated_color, 0.0)' in source
 assert 'gl.clear_color(0.035F, 0.045F, 0.075F, 0.0F)' in source
 assert 'pixels[index * 4U + 3U] = 0U' not in source
 function = 'static int cube_present(' + source.split('static int cube_present(', 1)[1].split(
-    'static int cube_process_events(', 1)[0]
+    'static void cube_record_profile(', 1)[0]
 harness = r'''
 #include <stdint.h>
 #include <stddef.h>
 #include <assert.h>
+#include "cube_timing.h"
+static unsigned clock_mode,clock_calls;
+static int cube_now_ns(uint64_t *value){
+ ++clock_calls;
+ *value=clock_mode==2?100000-clock_calls*1000:clock_calls*1000;
+ return clock_mode!=1;
+}
 #define CUBE_GL_BGRA 0x80e1U
 #define CUBE_GL_UNSIGNED_BYTE 0x1401U
 #define CUBE_GL_NO_ERROR 0U
@@ -48,21 +55,42 @@ static int cube_window_command(int fd,unsigned op,int x,int y,unsigned w,unsigne
 int main(void){
  cube_gl_api_t api={read_pixels,get_error};
  g_cube_window_buffer_address=(uintptr_t)pixels;
- assert(cube_present(&api,7,8,8,1,123));
+ cube_timing_sample_t timing={0};
+ assert(cube_present(&api,7,8,8,1,123,&timing));
+ assert(timing.valid&&timing.readback_ns==1000&&timing.publish_ns==1000);
+ cube_timing_totals_t totals={0};
+ cube_timing_add(&totals,&timing);
+ timing.readback_ns=3000;timing.publish_ns=500;
+ cube_timing_add(&totals,&timing);
+ assert(totals.frames==2&&totals.readback_ns==4000&&totals.publish_ns==1500);
+ assert(totals.readback_max_ns==3000&&totals.publish_max_ns==1000);
  assert(reads==1&&overlays==1&&presents==1);
  error=1;
- assert(!cube_present(&api,7,8,8,1,123));
+ assert(!cube_present(&api,7,8,8,1,123,&timing));
+ assert(!timing.valid);
+ cube_timing_add(&totals,&timing);
+ assert(totals.frames==2);
  assert(reads==2&&overlays==1&&presents==1);
  error=0;invalid_x=255;g_cube_shared_buffer_reported=0;
- assert(!cube_present(&api,7,8,8,1,123));
+ assert(!cube_present(&api,7,8,8,1,123,0));
  assert(reads==3&&overlays==1&&presents==1&&!g_cube_shared_buffer_reported);
- assert(!cube_present(0,7,8,8,1,123));
- assert(!cube_present(&api,-1,8,8,1,123));
- assert(!cube_present(&api,7,0,8,1,123));
- assert(!cube_present(&api,7,UINT32_MAX,UINT32_MAX,1,123));
+ assert(!cube_present(0,7,8,8,1,123,0));
+ assert(!cube_present(&api,-1,8,8,1,123,0));
+ assert(!cube_present(&api,7,0,8,1,123,0));
+ assert(!cube_present(&api,7,UINT32_MAX,UINT32_MAX,1,123,0));
  g_cube_window_buffer_address=0;
- assert(!cube_present(&api,7,8,8,1,123));
+ assert(!cube_present(&api,7,8,8,1,123,0));
  assert(reads==3&&overlays==1&&presents==1);
+ g_cube_window_buffer_address=(uintptr_t)pixels;
+ invalid_x=0;g_cube_shared_buffer_reported=1;
+ for(clock_mode=1;clock_mode<=2;++clock_mode){
+  timing.valid=1;
+  assert(cube_present(&api,7,8,8,1,123,&timing));
+  assert(!timing.valid); /* Diagnostics must not break rendering. */
+ }
+ unsigned before=clock_calls;
+ assert(cube_present(&api,7,8,8,1,123,0));
+ assert(clock_calls==before);
  return 0;
 }
 '''
@@ -71,6 +99,6 @@ with tempfile.TemporaryDirectory(prefix='cube-present-') as directory:
     code, binary=base/'test.c',base/'test'
     code.write_text(harness)
     subprocess.run(['gcc','-O2','-Wall','-Wextra','-Werror','-fsanitize=address,undefined',
-                    '-fno-pie','-no-pie',str(code),'-o',str(binary)],check=True)
+                    '-fno-pie','-no-pie','-I',str(ROOT/'tools/nvidia'),str(code),'-o',str(binary)],check=True)
     subprocess.run([str(binary)],check=True)
 print('Cube present: readback before overlay/publication, XRGB, errors and bounds passed')

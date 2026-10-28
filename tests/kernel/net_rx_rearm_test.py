@@ -28,11 +28,15 @@ static bool g_e1000_runtime_ready=true, lock_available=true, inject;
 static atomic_bool g_e1000_poll_queued, g_e1000_poll_retry;
 static unsigned kicks, syncs, polls, unlocks;
 static unsigned *last_dma;
+static void e1000_record_poll_wait(void) {}
 static bool e1000_lifecycle_try_lock(void) { return lock_available; }
 static void e1000_lifecycle_unlock(void) { ++unlocks; }
 static void dma_sync_for_cpu(unsigned *dma) { ++syncs;last_dma=dma; }
 static bool e1000_schedule_deferred_poll(void) {
     assert(!atomic_load(&g_e1000_poll_queued));++kicks;return true;
+}
+static void rtl8126_rearm_interrupts(void *s) {
+    assert(s==&g_e1000 && !atomic_load(&g_e1000_poll_queued));
 }
 static bool e1000_poll(void) {
     ++polls;

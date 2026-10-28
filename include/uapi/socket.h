@@ -12,7 +12,7 @@ enum os_socket_type {
     OS_SOCK_DGRAM = 2,
 };
 
-/* Optional flags passed in the fourth argument of SOCKET_CREATE/ACCEPT. */
+/* 作为 SOCKET_CREATE/ACCEPT 第四个参数传入的可选标志。 */
 #define OS_SOCKET_CREATE_FLAG_CLOEXEC (1U << 0)
 #define OS_SOCKET_CREATE_FLAG_MASK    OS_SOCKET_CREATE_FLAG_CLOEXEC
 

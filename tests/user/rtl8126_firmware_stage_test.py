@@ -23,7 +23,7 @@ with tempfile.TemporaryDirectory(prefix='rtl8126-stage-') as directory:
     command = ['python3', str(script), '--build', str(base / 'build'),
                '--source', str(source)]
     subprocess.run(command, check=True, capture_output=True)
-    targets = [base / 'build/esp/rtl_nic' / name for name in names]
+    targets = [base / 'build/esp/EFI/OS/firmware/rtl8126' / name for name in names]
     stamps = [path.stat().st_mtime_ns for path in targets]
     subprocess.run(command, check=True, capture_output=True)
     assert stamps == [path.stat().st_mtime_ns for path in targets]

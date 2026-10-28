@@ -34,6 +34,7 @@ TESTS = (
     'user/chrome_vulkan_context_loss_test.py',
     'user/chrome_guest_library_policy_test.py',
     'user/chromium_toolchain_root_test.py',
+    'user/chrome_external_protocol_test.py',
 )
 
 # These validate symbol addresses/build identity against the deployed ESP,

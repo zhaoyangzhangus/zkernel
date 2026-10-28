@@ -1,7 +1,7 @@
 #pragma once
 #include <stdint.h>
 
-/* Client-content primitive, independent of window decorations. */
+/* 独立于窗口装饰的客户端内容绘制原语。 */
 static inline void user_paint_round_rect(uint32_t *pixels, uint32_t stride,
     uint32_t width, uint32_t height, uint32_t x, uint32_t y,
     uint32_t rect_width, uint32_t rect_height, uint32_t color) {

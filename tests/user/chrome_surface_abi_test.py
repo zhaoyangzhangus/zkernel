@@ -14,13 +14,15 @@ c = r'''
 #include "uapi/linux_abi.h"
 #include "uapi/window.h"
 int main(void) {
- printf("%u %u %zu %zu %zu %zu %zu %zu %zu %zu %zu\n",
+ printf("%u %u %zu %zu %zu %zu %zu %zu %zu %zu %zu %zu %zu %zu %zu\n",
   LINUX_WINDOW_IOCTL_SURFACE, OS_WINDOW_SURFACE_EXCHANGE,
   sizeof(os_surface_command_t),sizeof(os_surface_frame_t),
   offsetof(os_surface_command_t,frame),offsetof(os_surface_frame_t,token),
   offsetof(os_surface_frame_t,address),offsetof(os_surface_frame_t,capacity),
   offsetof(os_surface_frame_t,width),offsetof(os_surface_frame_t,stride),
-  offsetof(os_surface_frame_t,reserved));
+  offsetof(os_surface_frame_t,reserved),
+  offsetof(os_surface_frame_t,damage_x),offsetof(os_surface_frame_t,damage_y),
+  offsetof(os_surface_frame_t,damage_width),offsetof(os_surface_frame_t,damage_height));
 }
 '''
 cpp = r'''
@@ -29,13 +31,15 @@ cpp = r'''
 #include "ui/ozone/platform/nativeguest/nativeguest_window_abi.h"
 using namespace ui::nativeguest;
 int main() {
- std::printf("%u %u %zu %zu %zu %zu %zu %zu %zu %zu %zu\n",
+ std::printf("%u %u %zu %zu %zu %zu %zu %zu %zu %zu %zu %zu %zu %zu %zu\n",
   kWindowIoctlSurface,kWindowSurfaceExchange,
   sizeof(SurfaceCommand),sizeof(SurfaceFrame),
   offsetof(SurfaceCommand,frame),offsetof(SurfaceFrame,token),
   offsetof(SurfaceFrame,address),offsetof(SurfaceFrame,capacity),
   offsetof(SurfaceFrame,width),offsetof(SurfaceFrame,stride),
-  offsetof(SurfaceFrame,reserved));
+  offsetof(SurfaceFrame,reserved),
+  offsetof(SurfaceFrame,damage_x),offsetof(SurfaceFrame,damage_y),
+  offsetof(SurfaceFrame,damage_width),offsetof(SurfaceFrame,damage_height));
 }
 '''
 with tempfile.TemporaryDirectory(prefix='surface-abi-') as directory:

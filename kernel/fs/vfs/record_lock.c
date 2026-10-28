@@ -1,8 +1,8 @@
 #include <kernel/file_lock.h>
 #include <uapi/linux_abi.h>
 
-/* Bounded, allocation-free under the fd lock. Saturation fails atomically
- * with ENOLCK; it must never silently discard database exclusion. */
+/* 在 fd 锁保护下有界运行且不分配内存。容量耗尽时以 ENOLCK 原子失败；
+ * 绝不能静默丢弃数据库排他锁。 */
 #define FILE_LOCK_CAPACITY 512U
 typedef struct record_lock {
     vnode_t *node;
@@ -12,7 +12,7 @@ static spinlock_t g_record_lock;
 static record_lock_t g_records[FILE_LOCK_CAPACITY];
 #define FILE_LOCK_WAIT_CAPACITY 256U
 static record_lock_t g_lock_waiters[FILE_LOCK_WAIT_CAPACITY];
-/* Scratch is protected by g_record_lock, not placed on a kernel stack. */
+/* 临时数据由 g_record_lock 保护，不放在内核栈上。 */
 static uint64_t g_wait_owners[FILE_LOCK_CAPACITY + FILE_LOCK_WAIT_CAPACITY];
 
 static bool overlaps(const file_lock_range_t *a, const file_lock_range_t *b) {
@@ -55,8 +55,7 @@ kstatus_t file_lock_begin_wait(vnode_t *node, const file_lock_range_t *request,
         return K_ENOLCK;
     }
     g_lock_waiters[slot] = (record_lock_t){node, *request};
-    /* Walk all wait-for edges, including multiple shared-lock owners and
-     * multiple blocked threads belonging to one process. */
+    /* 遍历所有等待边，包括多个共享锁所有者，以及同一进程中的多个阻塞线程。 */
     size_t count = 1;
     g_wait_owners[0] = request->owner;
     for (size_t cursor = 0; cursor < count; ++cursor) {
@@ -77,7 +76,7 @@ kstatus_t file_lock_begin_wait(vnode_t *node, const file_lock_range_t *request,
             }
         }
     }
-    /* The syscall's pinned fd owns the node for this wait's lifetime. */
+    /* 系统调用固定的 fd 在整个等待期间持有该节点。 */
     *ticket = (uint32_t)slot;
     spinlock_unlock(&g_record_lock);
     return K_OK;
@@ -117,9 +116,8 @@ kstatus_t file_lock_set(vnode_t *node, const file_lock_range_t *request) {
         if (!same_owner(r, node, request->owner) || !overlaps(&r->range, request))
             continue;
         owner_overlap = true;
-        /* Normalized owner ranges make a covered, same-mode request a true
-         * no-op. Do not split/rejoin it, churn vnode pins, consume spare
-         * records, or publish a change to blocked lock users. */
+        /* 规范化后的所有者区间使被覆盖且模式相同的请求成为真正的空操作。不要拆分/合并区间、
+         * 反复固定 vnode、消耗备用记录，或向阻塞中的锁用户发布变更。 */
         if (r->range.type == request->type &&
             r->range.first <= request->first && r->range.last >= request->last) {
             spinlock_unlock(&g_record_lock);
@@ -138,7 +136,7 @@ kstatus_t file_lock_set(vnode_t *node, const file_lock_range_t *request) {
         spinlock_unlock(&g_record_lock);
         return K_ENOLCK;
     }
-    /* First free fully covered records, so a split can reuse their slots. */
+    /* 先释放被完全覆盖的记录，使拆分操作可以复用这些槽位。 */
     for (size_t i = 0; i < FILE_LOCK_CAPACITY; ++i) {
         record_lock_t *r = &g_records[i];
         if (same_owner(r, node, request->owner) &&
@@ -166,7 +164,7 @@ kstatus_t file_lock_set(vnode_t *node, const file_lock_range_t *request) {
         record_lock_t *added = empty_locked();
         *added = (record_lock_t){node, *request};
         object_get(node);
-        /* Keep the owner's ranges normalized, including adjacent locks. */
+        /* 保持所有者的锁区间规范化，包括相邻区间。 */
         for (size_t i = 0; i < FILE_LOCK_CAPACITY; ++i) {
             record_lock_t *r = &g_records[i];
             if (r == added || !same_owner(r, node, request->owner) ||
@@ -178,7 +176,7 @@ kstatus_t file_lock_set(vnode_t *node, const file_lock_range_t *request) {
                 if (r->range.last > added->range.last) added->range.last = r->range.last;
                 r->node = 0;
                 ++released;
-                i = (size_t)-1; /* merging can connect a previously scanned range */
+                i = (size_t)-1; /* 合并可能连接到之前已扫描的区间 */
             }
         }
     }
@@ -196,7 +194,7 @@ void file_lock_release_file(vnode_t *node, uint64_t owner) {
             ++released;
         }
     }
-    /* Closing an unlocked alias must also wake a blocked request on that fd. */
+    /* 关闭未加锁的别名 fd 时，也必须唤醒在该 fd 上阻塞的请求。 */
     atomic_fetch_add_explicit(&node->record_lock_sequence, 1U, memory_order_release);
     spinlock_unlock(&g_record_lock);
     while (released--) object_put(node);

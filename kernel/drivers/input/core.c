@@ -50,6 +50,13 @@ static int32_t input_add_delta(int32_t left, int32_t right) {
     return (int32_t)sum;
 }
 
+static bool input_delta_can_merge(int32_t left, int32_t right) {
+    /* 反向移动必须保留边缘截断的顺序；溢出也不能靠饱和加法丢失位移。 */
+    int64_t sum = (int64_t)left + right;
+    return !(left < 0 && right > 0) && !(left > 0 && right < 0) &&
+           sum >= INT32_MIN && sum <= INT32_MAX;
+}
+
 static bool input_event_is_motion(const input_event_t *event) {
     return event != 0 &&
            (event->type == INPUT_EVENT_RELATIVE ||
@@ -75,8 +82,12 @@ static bool input_coalesce_motion(const input_event_t *incoming) {
             queued->flags != incoming->flags ||
             (relative && queued->code != incoming->code)) continue;
         if (relative) {
+            if (!input_delta_can_merge(queued->value, incoming->value)) return false;
             queued->value = input_add_delta(queued->value, incoming->value);
         } else {
+            if (!input_delta_can_merge(queued->value2, incoming->value2) ||
+                !input_delta_can_merge(queued->value3, incoming->value3) ||
+                !input_delta_can_merge(queued->value4, incoming->value4)) return false;
             queued->value2 = input_add_delta(queued->value2, incoming->value2);
             queued->value3 = input_add_delta(queued->value3, incoming->value3);
             queued->value4 = input_add_delta(queued->value4, incoming->value4);
@@ -241,6 +252,26 @@ size_t input_core_pop_batch(input_event_t *events, size_t capacity) {
         g_input.count -= (uint32_t)count;
         input_publish_pending();
     }
+    input_unlock();
+    return count;
+}
+
+size_t input_core_pop_cursor_motion(input_event_t *events, size_t capacity) {
+    if (events == 0 || capacity == 0U || !g_input.initialized) return 0U;
+    size_t count = 0U;
+    input_lock();
+    while (count < capacity && g_input.count != 0U) {
+        const input_event_t *event = &g_input.events[g_input.read];
+        bool relative = event->type == INPUT_EVENT_RELATIVE &&
+            (event->code == INPUT_REL_X || event->code == INPUT_REL_Y);
+        bool pointer = event->type == INPUT_EVENT_POINTER &&
+            event->code == 0U && event->value4 == 0;
+        if (!relative && !pointer) break;
+        events[count++] = *event;
+        g_input.read = (g_input.read + 1U) % INPUT_CORE_CAPACITY;
+        --g_input.count;
+    }
+    if (count != 0U) input_publish_pending();
     input_unlock();
     return count;
 }

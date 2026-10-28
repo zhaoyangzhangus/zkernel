@@ -8,7 +8,7 @@ spec = importlib.util.spec_from_file_location('video_decoder_gate',
     root / 'tools/nvidia/video-decoder-runtime-gate.py')
 gate = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(gate)
-actual = root / 'build/esp/compat/linux/lib/x86_64-linux-gnu'
+actual = root / 'build/esp/usr/apps/chrome/lib'
 library = root / 'build/nvidia/vulkan/libos-vulkan-video.so.1'
 with tempfile.TemporaryDirectory() as directory:
     runtime = Path(directory)

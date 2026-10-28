@@ -53,8 +53,7 @@ static struct {
     uint64_t desktop_chrome_closing_pid;
     atomic_uint desktop_launch_queue_count;
     uint32_t desktop_launch_queue[8], desktop_launch_queue_head;
-    uint32_t count;
-    window_server_window_t *windows[8];
+    struct {uint32_t count;window_server_window_t *children[8];} scene;
 } g_window_server;
 static _Thread_local bool locked;
 static pthread_mutex_t mutex=PTHREAD_MUTEX_INITIALIZER;
@@ -83,20 +82,20 @@ int main(void) {
         atomic_store(&g_window_server.desktop_chrome_launch_pid,0);
         atomic_store(&g_window_server.desktop_chrome_relaunch_pending,false);
         g_window_server.desktop_chrome_closing_pid=0;
-        g_window_server.count=0;
+        g_window_server.scene.count=0;
         assert(desktop_chrome_request_launch());
         assert(!desktop_chrome_request_launch()); /* Startup coalesces. */
         assert(!atomic_load(&g_window_server.desktop_chrome_relaunch_pending));
         assert(desktop_chrome_launch_publish_pid(
             &g_window_server.desktop_chrome_launch_pid,old.pid));
-        g_window_server.windows[0]=&first;
-        g_window_server.count=1;
+        g_window_server.scene.children[0]=&first;
+        g_window_server.scene.count=1;
         window_lock(); desktop_chrome_window_opened_locked(&old); window_unlock();
         window_lock(); desktop_chrome_window_closed_locked(&old); window_unlock();
         assert(g_window_server.desktop_chrome_closing_pid==0); /* Other window remains. */
         assert(!desktop_chrome_request_launch());
         assert(!atomic_load(&g_window_server.desktop_chrome_relaunch_pending));
-        g_window_server.count=0;
+        g_window_server.scene.count=0;
         window_lock(); desktop_chrome_window_closed_locked(&old); window_unlock();
         assert(!desktop_chrome_request_launch());
         assert(!desktop_chrome_request_launch());
@@ -108,11 +107,11 @@ int main(void) {
         assert(desktop_launch_dequeue(&app) && app==2); /* Other apps progress. */
         assert(!desktop_launch_dequeue(&app));
         /* A recreated window satisfies the request, not a future auto-restart. */
-        g_window_server.windows[0]=&popup;
-        g_window_server.count=1;
+        g_window_server.scene.children[0]=&popup;
+        g_window_server.scene.count=1;
         window_lock(); desktop_chrome_window_opened_locked(&old); window_unlock();
         assert(!atomic_load(&g_window_server.desktop_chrome_relaunch_pending));
-        g_window_server.count=0;
+        g_window_server.scene.count=0;
         window_lock(); desktop_chrome_window_closed_locked(&old); window_unlock();
         assert(!desktop_chrome_request_launch());
         window_lock(); assert(!desktop_chrome_process_released_locked(41)); window_unlock();

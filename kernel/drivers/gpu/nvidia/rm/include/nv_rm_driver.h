@@ -67,6 +67,8 @@ typedef struct nv_rm_screen_info {
 kstatus_t nv_rm_driver_probe(void);
 
 const nv_gpu_device_t *nv_rm_driver_current(void);
+/* 只读初始化时发布的显存容量；不进入 RM，不触发设备初始化。 */
+uint64_t nv_rm_driver_memory_bytes(const pci_device_t *device);
 
 void nv_rm_driver_set_screen_info(uint64_t physical_base, uint32_t width,
                                   uint32_t height, uint32_t depth,

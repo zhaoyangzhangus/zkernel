@@ -130,7 +130,7 @@ bool blend2d_draw_demo(uint32_t *pixels, uint32_t stride,
     if (!result_ok(result)) goto cleanup;
     font_data_ready = true;
     if (!result_ok(bl_font_data_create_from_file(
-            &font_data, "/etc/fonts/default.ttf", BL_FILE_READ_NO_FLAGS))) {
+            &font_data, "/EFI/OS/fonts/default.ttf", BL_FILE_READ_NO_FLAGS))) {
         goto cleanup;
     }
     result = bl_font_face_init(&font_face);

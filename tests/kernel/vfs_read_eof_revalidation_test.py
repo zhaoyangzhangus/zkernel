@@ -6,18 +6,39 @@ import tempfile
 
 root = Path(__file__).resolve().parents[2]
 source = (root/'kernel/fs/vfs/file_io.c').read_text()
-production = source[source.index('static kstatus_t vfs_read_backend_chunk('):source.index('static kstatus_t vfs_write_chunk(')]
+production = source[source.index('static void vfs_read_kernel_yield('):source.index('static kstatus_t vfs_write_chunk(')]
 program = r'''
 #include <assert.h>
+/* 非缓存测试只桩化读取合并；映射一致性由单独的真实代码回归测试覆盖。 */
+#define vfs_page_cache_present(vnode) ((void)(vnode), false)
+#define K_ENOMEM (-12)
+#define vfs_page_cache_buffer_alias(vnode,buffer,length) \
+    ((void)(vnode),(void)(buffer),(void)(length),false)
+#define vfs_backend_consistent_read_lock(backend) ((void)(backend), K_OK)
+#define vfs_backend_consistent_read_unlock(backend) ((void)(backend))
+#define vfs_page_cache_overlay_read(vnode,offset,buffer,length) \
+    ((void)(vnode),(void)(offset),(void)(buffer),(void)(length),K_OK)
+/* 单句柄测试只桩化偏移锁；共享句柄并发由专门的回归测试覆盖。 */
+#define vfs_file_position_init(file) ((void)(file))
+#define vfs_file_position_lock(file) ((void)(file), K_OK)
+#define vfs_file_position_unlock(file) ((void)(file))
 #include <stdbool.h>
 #include <stdint.h>
 #include <stddef.h>
 #include <string.h>
 #include <stdio.h>
+#include <stdlib.h>
+static void *kmalloc(size_t n,unsigned flags){(void)flags;return malloc(n);}
+static void kfree(void *p){free(p);}
 #define __user
 #define PAGE_SIZE 4096U
 enum {K_OK=0,K_EINVAL=-22,K_EIO=-5,K_EACCES=-13,KOBJECT_TYPE_FILE=1,VFS_OPEN_READ=1};
 typedef int kstatus_t;
+typedef struct {unsigned sched_class;} thread_t;
+#define SCHED_CLASS_IDLE 2U
+static thread_t *sched_current_thread(void){return NULL;}
+static bool sched_preempt_disabled(void){return false;}
+static void schedule(void){assert(!"boot test must not yield");}
 typedef struct {
  void *context;uint64_t size;
  kstatus_t (*read)(void *,uint64_t,void *,size_t,uint64_t *);
@@ -31,7 +52,7 @@ static void vfs_backend_lock(vfs_backend_node_t *b){
  assert(!depth);depth=1;++locks;
  // Model truncate winning the lock before the first or second chunk.
  if(mode==1 && locks==1)b->size=0;
- if(mode==2 && locks==2)b->size=current_position?current_position-1:0;
+ if(mode==2 && calls==1)b->size=current_position?current_position-1:0;
 }
 static void vfs_backend_unlock(vfs_backend_node_t *b){(void)b;assert(depth);depth=0;}
 static bool x86_user_range_valid(const void *p,size_t len){return p || !len;}
@@ -59,12 +80,13 @@ int main(void){
   calls=depth=locks=0;mode=m;current_position=f.position;memset(buffer,0xa5,sizeof(buffer));
   uint64_t expected=offsets[o]<sizes[s]?sizes[s]-offsets[o]:0;
   if(expected>lengths[n])expected=lengths[n];
+  size_t unit=expected>=4U*PAGE_SIZE?(size_t)expected:PAGE_SIZE;
   if(m==1)expected=0;
-  if(m==2 && !kernel && expected>PAGE_SIZE)expected=PAGE_SIZE;
+  if(m==2 && !kernel && expected>unit)expected=unit;
   uint64_t bytes=123;
   int status=kernel?vfs_read_kernel(&f,buffer+16,lengths[n],&bytes):vfs_read(&f,buffer+16,lengths[n],&bytes);
   assert(status==K_OK && bytes==expected && f.position==offsets[o]+expected && !depth);
-  unsigned expected_calls=expected?kernel?1:(unsigned)((expected+PAGE_SIZE-1)/PAGE_SIZE):0;
+  unsigned expected_calls=expected?kernel?1:(unsigned)((expected+unit-1)/unit):0;
   assert(calls==expected_calls);
   for(unsigned i=0;i<sizeof(buffer);++i)
    assert(buffer[i]==(i>=16 && i<16+expected?disk[offsets[o]+i-16]:0xa5));
@@ -89,6 +111,6 @@ with tempfile.TemporaryDirectory(prefix='liteos-read-eof-') as directory:
             assert result.returncode == 0, result.stderr
             print(result.stdout.strip())
     run('production', program)
-    guard='kstatus_t status = position >= backend->size ? K_OK :'
+    guard='status = position >= backend->size ? K_OK :'
     assert guard in program
-    run('unrevalidated-eof', program.replace(guard,'kstatus_t status ='), True)
+    run('unrevalidated-eof', program.replace(guard,'status ='), True)

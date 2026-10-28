@@ -24,3 +24,5 @@ kstatus_t hda_audio_stream_start(struct audio_stream *stream);
 kstatus_t hda_audio_stream_stop(struct audio_stream *stream);
 kstatus_t hda_audio_stream_reset(struct audio_stream *stream);
 kstatus_t hda_audio_stream_disconnect(struct audio_stream *stream);
+
+kstatus_t hda_audio_stream_complete(struct audio_stream *stream, uint32_t period, uint32_t frames);

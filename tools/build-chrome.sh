@@ -12,10 +12,12 @@ chromium_src="$(CDPATH= cd -- "$chromium_src" && pwd)"
 chromium_out="$chromium_src/out/liteos-debian"
 build_log="${OS_CHROME_BUILD_LOG:-$project_root/build/chrome-unified-build.log}"
 check_only=false
+plan_only=false
 case "${1:-}" in
     '') ;;
     --check) check_only=true ;;
-    *) echo "用法：$0 [--check]；CHROMIUM_SRC 可指定 Chromium 源码目录" >&2; exit 2 ;;
+    --plan) plan_only=true ;;
+    *) echo "用法：$0 [--check|--plan]；CHROMIUM_SRC 可指定 Chromium 源码目录" >&2; exit 2 ;;
 esac
 (( $# <= 1 )) || { echo "参数过多" >&2; exit 2; }
 
@@ -51,6 +53,11 @@ printf 'Chromium source: %s\nChromium output: %s\nSystem build: %s/build\n' \
     "$chromium_src" "$chromium_out" "$project_root"
 echo 'GN threads=1; Ninja jobs=12; CPUQuota=1200%; MemoryHigh=22G; MemoryMax=24G; swap=24G; cache=30G'
 $check_only && exit 0
+max_build_steps="${OS_CHROME_MAX_BUILD_STEPS:-500}"
+if $plan_only; then
+    exec python3 "$project_root/tools/chrome-build-plan.py" \
+        --out "$chromium_out" --max-steps "$max_build_steps"
+fi
 
 mkdir -p "$project_root/build"
 [[ -d "$(dirname -- "$build_log")" ]] || {
@@ -85,11 +92,14 @@ systemd-run --user --wait --pipe --collect --unit=system-chromium-build \
     --working-directory="$chromium_src" \
     -p Nice=10 -p MemoryHigh=22G -p MemoryMax=24G -p MemorySwapMax=24G -p CPUQuota=1200% \
     -p KillMode=control-group \
-    env SCCACHE_CACHE_SIZE=30G OS_ROOT="$project_root" /bin/bash -c \
+    env SCCACHE_CACHE_SIZE=30G OS_ROOT="$project_root" \
+    OS_CHROME_MAX_BUILD_STEPS="$max_build_steps" /bin/bash -c \
     'set -euo pipefail
 graph=out/liteos-debian/build.ninja
 if [[ ! -f "$graph" ]] || ! { grep -m1 -A3 "^rule gn$" "$graph" | grep -qE "^  command = .*gn .*--threads=1([[:space:]]|$).*--regeneration gen \\.$"; }; then
     ./buildtools/linux64/gn gen out/liteos-debian --threads=1
 fi
+python3 "$OS_ROOT/tools/chrome-build-plan.py" --out out/liteos-debian \
+    --max-steps "$OS_CHROME_MAX_BUILD_STEPS"
 exec ninja -C out/liteos-debian -j12 chrome' \
     >>"$build_log" 2>&1

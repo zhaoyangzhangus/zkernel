@@ -5,7 +5,7 @@ import tempfile
 ROOT=Path(__file__).resolve().parents[2]
 source=(ROOT/'kernel/fs/nativefs/transaction.c').read_text()
 types=source[source.index('typedef struct fat_chain_snapshot'):source.index('static VOID *fat_transaction_alloc(')]
-walkers=source[source.index('static BOOLEAN fat_chain_cycle_step('):source.index('/* Source links are retained,')]
+walkers=source[source.index('static BOOLEAN fat_chain_cycle_step('):source.index('static BOOLEAN fat_chain_tail(')]
 program=r'''
 #include <assert.h>
 #include <stdint.h>

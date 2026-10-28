@@ -3,9 +3,8 @@
 #include <kernel/base.h>
 
 /*
- * Boot/runtime phases are deliberately small and stable.  The numeric values
- * are part of the debug-log contract: a serial trace can be decoded even when
- * the kernel is too early in boot to print a symbolic name.
+ * 启动/运行阶段的定义刻意保持精简且稳定。数值属于调试日志约定的一部分：
+ * 即使内核尚处于无法输出符号名称的早期启动阶段，也能解码串口跟踪记录。
  */
 typedef enum debug_phase {
     OS_DEBUG_PHASE_BOOT = 1,
@@ -21,10 +20,9 @@ typedef enum debug_phase {
     OS_DEBUG_PHASE_DESKTOP = 11,
 
     /*
-     * The implementation specification has its own 0..20 phase contract.
-     * Keep it in a separate numeric range so existing operational phase
-     * names and old log parsers remain stable while a debug image can still
-     * locate every specification phase.
+    * 实现规范使用独立的 0..20 阶段约定。为其分配单独的数值范围，
+    * 使现有运行阶段名称和旧日志解析器保持稳定，同时允许调试镜像
+    * 定位每个规范阶段。
      */
     OS_DEBUG_PHASE_SPEC_0 = 32,
     OS_DEBUG_PHASE_SPEC_1 = 33,
@@ -48,8 +46,8 @@ typedef enum debug_phase {
     OS_DEBUG_PHASE_SPEC_19 = 51,
     OS_DEBUG_PHASE_SPEC_20 = 52,
 
-    /* Refactoring-roadmap phases 0..9 use a third range.  These records
-     * describe repository/build gates, not OS implementation claims. */
+    /* 重构路线图阶段 0..9 使用第三个数值范围。这些记录描述仓库/构建门禁，
+     * 并不代表操作系统实现阶段。 */
     OS_DEBUG_PHASE_REFACTOR_0 = 64,
     OS_DEBUG_PHASE_REFACTOR_1 = 65,
     OS_DEBUG_PHASE_REFACTOR_2 = 66,
@@ -63,7 +61,7 @@ typedef enum debug_phase {
     OS_DEBUG_PHASE_REFACTOR_9 = 74,
 } debug_phase_t;
 
-/* Common step identifiers used by the current boot and runtime paths. */
+/* 当前启动和运行路径共用的步骤标识。 */
 enum {
     OS_DEBUG_STEP_ENTER = 1,
     OS_DEBUG_STEP_LOAD = 2,
@@ -79,33 +77,27 @@ enum {
     OS_DEBUG_STEP_THREAD_EXIT_SCHEDULE = 12,
     OS_DEBUG_STEP_USER_MARK = 13,
     OS_DEBUG_STEP_STRESS = 14,
-    /* The phase exists in this build, but its acceptance implementation is
-     * intentionally not claimed yet. */
+    /* 此构建包含该阶段，但暂不宣称其验收实现已经完成。 */
     OS_DEBUG_STEP_PENDING = 15,
-    /* A refactor boundary has landed, but its complete acceptance gate is
-     * still open. */
+    /* 重构边界已落地，但完整的验收门禁仍未通过。 */
     OS_DEBUG_STEP_PROGRESS = 16,
-    /* A fatal path stopped the current phase.  The status and call site are
-     * emitted for failure-only boot diagnostics. */
+    /* 致命路径中止了当前阶段。仅在启动失败诊断中输出状态和调用位置。 */
     OS_DEBUG_STEP_FAIL = 17,
 };
 
 /*
- * Publish a phase transition.  The latest phase/step/value/sequence remain
- * available to a debugger in all builds; OS_DEBUG_SERIAL additionally
- * emits one COM1-only record.  It never writes the GOP framebuffer.
+ * 发布阶段转换。所有构建中，调试器都可以读取最新的阶段、步骤、值和序号；
+ * OS_DEBUG_SERIAL 还会额外输出一条仅发送至 COM1 的记录。此功能不会写入 GOP 帧缓冲。
  *
- * Callers use the macros below so every record carries the source location
- * that emitted it.  The explicit *_at entry points are kept separate from
- * the macros so the implementation can still export a normal function
- * symbol for debuggers and compatibility callers.
+ * 调用方使用下方宏，以便每条记录都携带其来源位置。显式的 *_at 入口与宏分开，
+ * 这样实现仍可为调试器和兼容调用方导出普通函数符号。
  */
 void kernel_debug_stage_at(uint16_t phase, uint16_t step, uint32_t value,
                            const char *file, uint32_t line);
 void kernel_debug_stage_fail_at(uint16_t phase, uint16_t step, int64_t status,
                                 const char *file, uint32_t line);
 
-/* Stable symbols for debugger expressions and older out-of-tree callers. */
+/* 为调试器表达式和较早的树外调用方保留稳定符号。 */
 void kernel_debug_stage(uint16_t phase, uint16_t step, uint32_t value);
 void kernel_debug_stage_fail(uint16_t phase, uint16_t step, int64_t status);
 
@@ -114,7 +106,7 @@ void kernel_debug_stage_fail(uint16_t phase, uint16_t step, int64_t status);
 #define kernel_debug_stage_fail(phase, step, status) \
     kernel_debug_stage_fail_at((phase), (step), (status), __FILE__, __LINE__)
 
-/* Keep common phase transitions at the real caller's source location. */
+/* 让常见阶段转换记录真实调用方的源代码位置。 */
 #define kernel_debug_stage_enter(phase) \
     kernel_debug_stage_at((phase), OS_DEBUG_STEP_ENTER, 0U, \
                           __FILE__, __LINE__)
@@ -125,7 +117,7 @@ void kernel_debug_stage_fail(uint16_t phase, uint16_t step, int64_t status);
     kernel_debug_stage_at((phase), OS_DEBUG_STEP_PENDING, 0U, \
                           __FILE__, __LINE__)
 
-/* Runtime self-tests enable this narrow event stream around their user image. */
+/* 运行时自测会在其用户映像执行期间启用此精简事件流。 */
 void debug_trace_set(bool enabled);
 bool debug_trace_enabled(void);
 void debug_trace_stage_at(uint16_t phase, uint16_t step, uint32_t value,

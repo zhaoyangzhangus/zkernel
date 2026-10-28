@@ -1,0 +1,10 @@
+<!doctype html><meta charset="utf-8"><title>系统声音测试</title>
+<style>body{font:20px system-ui;padding:40px;background:#fafafa;color:#222}button{font:inherit;padding:12px 24px;margin:12px 12px 12px 0}p{max-width:650px;line-height:1.8}</style>
+<h1>系统声音测试</h1><p>播放时可打开“设置 → 声音”，切换 5070 HDMI / DP 或主板耳机输出，调整音量或静音。</p>
+<button id="play">播放测试音</button><button id="stop">停止</button><p id="status">尚未播放</p>
+<script>
+let context,oscillator;
+document.getElementById('play').onclick=async()=>{try{if(context)await context.close();context=new AudioContext();await context.resume();oscillator=context.createOscillator();let gain=context.createGain();gain.gain.value=.05;oscillator.frequency.value=440;oscillator.connect(gain).connect(context.destination);oscillator.start();statusText('正在播放 · '+context.sampleRate+' Hz');}catch(e){statusText('播放失败：'+e.message)}};
+document.getElementById('stop').onclick=async()=>{if(context){await context.close();context=null;}statusText('已停止')};
+function statusText(text){document.getElementById('status').textContent=text}
+</script>

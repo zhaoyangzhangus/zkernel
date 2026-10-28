@@ -92,6 +92,10 @@ static bool deferred_take_critical(deferred_item_t *item) {
     (void)item;assert(lock_depth==1);assert(!g_deferred.critical_ready);return false;
 }
 static unsigned rcu_poll(unsigned budget) {(void)budget;assert(!lock_depth);return 0;}
+static uint64_t x86_read_tsc(void) {return 0;}
+static void deferred_record_work(deferred_work_fn_t fn,uint64_t start) {
+    assert(fn&&!start&&!lock_depth);
+}
 ''' + enqueue + previous + run + r'''
 #define TOTAL 8000U
 static atomic_uint seen[TOTAL];

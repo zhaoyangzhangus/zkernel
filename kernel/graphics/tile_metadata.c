@@ -48,43 +48,27 @@ static bool tile_intersects(int64_t left, int64_t top,
            top < tile_bottom && bottom > tile_top;
 }
 
-static bool tile_is_covered(int64_t left, int64_t top,
-                            int64_t right, int64_t bottom,
-                            int64_t tile_left, int64_t tile_top,
-                            int64_t tile_right, int64_t tile_bottom) {
-    return left <= tile_left && top <= tile_top &&
-           right >= tile_right && bottom >= tile_bottom;
+/* 已知外框时只计算不透明内接区域，避免重复查询窗口尺寸。 */
+static bool tile_inset_opaque_bounds(const compositor_window_view_t *view,
+    int64_t *left, int64_t *top, int64_t *right, int64_t *bottom) {
+    if ((view->flags & OS_WINDOW_PREMULTIPLIED_ALPHA) != 0U) return false;
+    uint32_t inset = window_client_decorations(view->flags) ?
+        (view->maximized ? 0U : 8U) : WINDOW_CORNER_RADIUS;
+    if (*right - *left <= (int64_t)inset * 2 ||
+        *bottom - *top <= (int64_t)inset * 2) return false;
+    *left += inset;
+    *top += inset;
+    *right -= inset;
+    *bottom -= inset;
+    return true;
 }
 
-static bool tile_view_opaque_bounds(const compositor_window_view_t *view,
-                                    int64_t *left, int64_t *top,
-                                    int64_t *right, int64_t *bottom) {
+bool compositor_view_opaque_bounds(const compositor_window_view_t *view,
+    int64_t *left, int64_t *top, int64_t *right, int64_t *bottom) {
     if (view != 0 && (view->flags & OS_WINDOW_PREMULTIPLIED_ALPHA) != 0U)
         return false;
-    if (!tile_view_bounds(view, left, top, right, bottom)) return false;
-
-    /* Client-owned surfaces are XRGB and cover their complete frame. */
-    if (window_client_decorations(view->flags)) {
-        if (!view->maximized) {
-            if (*right - *left <= 16 || *bottom - *top <= 16) return false;
-            *left += 8;
-            *right -= 8;
-            *top += 8;
-            *bottom -= 8;
-        }
-        return true;
-    }
-
-    if (*right - *left <= (int64_t)(WINDOW_CORNER_RADIUS * 2U) ||
-        *bottom - *top <= (int64_t)(WINDOW_CORNER_RADIUS * 2U)) {
-        return false;
-    }
-
-    *left += WINDOW_CORNER_RADIUS;
-    *top += WINDOW_CORNER_RADIUS;
-    *right -= WINDOW_CORNER_RADIUS;
-    *bottom -= WINDOW_CORNER_RADIUS;
-    return true;
+    return tile_view_bounds(view, left, top, right, bottom) &&
+        tile_inset_opaque_bounds(view, left, top, right, bottom);
 }
 
 static bool tile_metadata_build_into(
@@ -107,8 +91,7 @@ static bool tile_metadata_build_into(
             metadata[y * WINDOW_DAMAGE_MAX_TILES_X + x] = (compositor_tile_meta_t){0};
     }
 
-    /* Geometry is constant within a snapshot. Compute it once per window,
-     * then visit only intersecting tiles, keeping masks in compacted order. */
+    /* 每个窗口只计算一次外框，再遍历接触瓦片，掩码顺序与快照保持一致。 */
     for (uint32_t window_index = 0U; window_index < snapshot->window_count; ++window_index) {
         const compositor_window_view_t *view = &snapshot->windows[window_index];
         int64_t left, top, right, bottom;
@@ -127,26 +110,30 @@ static bool tile_metadata_build_into(
         uint32_t last_y = (uint32_t)((clipped_bottom - 1) / WINDOW_DAMAGE_TILE_SIZE);
         if (last_x >= columns) last_x = columns - 1U;
         if (last_y >= rows) last_y = rows - 1U;
-        bool opaque = tile_view_opaque_bounds(view, &opaque_left, &opaque_top,
-                                             &opaque_right, &opaque_bottom);
+        opaque_left = left;
+        opaque_top = top;
+        opaque_right = right;
+        opaque_bottom = bottom;
+        bool opaque = tile_inset_opaque_bounds(view, &opaque_left, &opaque_top,
+                                               &opaque_right, &opaque_bottom);
         uint64_t bit = 1ULL << window_index;
         for (uint32_t y = first_y; y <= last_y; ++y) {
+            int64_t tile_top = (int64_t)y * WINDOW_DAMAGE_TILE_SIZE;
+            int64_t tile_bottom = tile_top + WINDOW_DAMAGE_TILE_SIZE;
+            if (tile_bottom > (int64_t)display_height) tile_bottom = display_height;
+            /* 同一行共用纵向覆盖结果，透明行只写接触掩码。 */
+            bool opaque_row = opaque && opaque_top <= tile_top &&
+                              opaque_bottom >= tile_bottom;
+            uint32_t row_index = y * WINDOW_DAMAGE_MAX_TILES_X;
             for (uint32_t x = first_x; x <= last_x; ++x) {
-                uint32_t index = y * WINDOW_DAMAGE_MAX_TILES_X + x;
+                compositor_tile_meta_t *tile = &metadata[row_index + x];
+                tile->touch_mask |= bit;
+                if (!opaque_row) continue;
                 int64_t tile_left = (int64_t)x * WINDOW_DAMAGE_TILE_SIZE;
-                int64_t tile_top = (int64_t)y * WINDOW_DAMAGE_TILE_SIZE;
                 int64_t tile_right = tile_left + WINDOW_DAMAGE_TILE_SIZE;
-                int64_t tile_bottom = tile_top + WINDOW_DAMAGE_TILE_SIZE;
                 if (tile_right > (int64_t)display_width) tile_right = display_width;
-                if (tile_bottom > (int64_t)display_height) tile_bottom = display_height;
-                metadata[index].touch_mask |= bit;
-                if (tile_is_covered(left, top, right, bottom, tile_left, tile_top,
-                                    tile_right, tile_bottom))
-                    metadata[index].full_mask |= bit;
-                if (opaque && tile_is_covered(opaque_left, opaque_top, opaque_right,
-                                              opaque_bottom, tile_left, tile_top,
-                                              tile_right, tile_bottom))
-                    metadata[index].opaque_mask |= bit;
+                if (opaque_left <= tile_left && opaque_right >= tile_right)
+                    tile->opaque_mask |= bit;
             }
         }
     }
@@ -161,6 +148,14 @@ bool compositor_tile_metadata_build(
     uint32_t rows = 0U;
 
     g_compositor_tile_meta_valid = false;
+
+    /* 动画帧使用动态裁剪和平移，不消费静态瓦片遮挡数据。
+     * 先作废旧结果再跳过构建，结束动画后的普通帧必须重新计算。 */
+    if (snapshot != 0 && snapshot->animations) {
+        g_compositor_tile_columns = 0U;
+        g_compositor_tile_rows = 0U;
+        return false;
+    }
 
     if (!tile_metadata_build_into(
             snapshot,
@@ -223,7 +218,6 @@ bool compositor_tile_self_test(void) {
         columns != 1U ||
         rows != 1U ||
         metadata[0].touch_mask != 0x1U ||
-        metadata[0].full_mask != 0x1U ||
         metadata[0].opaque_mask != 0U) {
         return false;
     }
@@ -257,10 +251,8 @@ bool compositor_tile_self_test(void) {
     }
 
     if (metadata[0].touch_mask != 0x3U ||
-        metadata[0].full_mask != 0x1U ||
         metadata[0].opaque_mask != 0U ||
         metadata[1].touch_mask != 0x1U ||
-        metadata[1].full_mask != 0x1U ||
         metadata[1].opaque_mask != 0U) {
         return false;
     }
@@ -306,9 +298,42 @@ bool compositor_tile_self_test(void) {
     kernel_perf_emit_scope("graphics.overlap_8", benchmark_start);
 
     return metadata[0].touch_mask == 0xFFU &&
-           metadata[0].full_mask == 0x1U &&
            metadata[0].opaque_mask == 0U &&
            metadata[1].touch_mask == 0x1U &&
-           metadata[1].full_mask == 0x1U &&
            metadata[1].opaque_mask == 0U;
+}
+
+/* 规划与回退绘制共用瓦片遮挡下限，透明窗口不能遮住下面的图层。 */
+uint32_t compositor_tile_occlusion_floor(uint32_t tile_x, uint32_t tile_y,
+                                         uint32_t window_count) {
+    const compositor_tile_meta_t *metadata = compositor_tile_metadata_at(tile_x, tile_y);
+    if (metadata == 0) return UINT32_MAX;
+    uint64_t blockers = metadata->opaque_mask;
+    if (blockers == 0U) return UINT32_MAX;
+    uint32_t floor = 63U - (uint32_t)__builtin_clzll(blockers);
+    return floor < window_count ? floor : UINT32_MAX;
+}
+
+uint32_t compositor_occlusion_floor_for_damage(void) {
+    Rect bounds;
+    if (!compositor_tile_metadata_valid() ||
+        !rect_clip_to_extent(g_compositor_snapshot.damage_bounds.x0,
+            g_compositor_snapshot.damage_bounds.y0,
+            g_compositor_snapshot.damage_bounds.x1,
+            g_compositor_snapshot.damage_bounds.y1,
+            g_window_server.display_width, g_window_server.display_height, &bounds))
+        return UINT32_MAX;
+
+    uint32_t floor = UINT32_MAX;
+    for (uint32_t y = (uint32_t)bounds.y0 / WINDOW_DAMAGE_TILE_SIZE;
+         y <= (uint32_t)(bounds.y1 - 1) / WINDOW_DAMAGE_TILE_SIZE; ++y) {
+        for (uint32_t x = (uint32_t)bounds.x0 / WINDOW_DAMAGE_TILE_SIZE;
+             x <= (uint32_t)(bounds.x1 - 1) / WINDOW_DAMAGE_TILE_SIZE; ++x) {
+            uint32_t candidate = compositor_tile_occlusion_floor(
+                x, y, g_compositor_snapshot.window_count);
+            if (candidate == UINT32_MAX) return UINT32_MAX;
+            if (candidate < floor) floor = candidate;
+        }
+    }
+    return floor;
 }

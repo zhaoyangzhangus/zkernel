@@ -129,10 +129,9 @@ usb_hub_port_disconnect(
             port - 1U];
 
     /*
-     * child_slot == 0 means unconditional clear.
+    * child_slot == 0 表示无条件清除。
      *
-     * Otherwise only clear the relationship if it still refers
-     * to the device being removed.
+    * 否则，仅当关系仍指向正在移除的设备时才清除。
      */
     if(child_slot == 0U ||
        *entry == child_slot)
@@ -158,7 +157,7 @@ usb_hub_remove(
 }
 
 
-/* REFACTOR_P8_XHCI_HUB_OWNER: port control and change acknowledgement. */
+/* REFACTOR_P8_XHCI_HUB_OWNER：端口控制和变化确认。 */
 
 #define XHCI_SETUP_GET_STATUS 0U
 #define XHCI_SETUP_SET_FEATURE 3U
@@ -219,19 +218,18 @@ bool xhci_hub_get_port_status_device(
 
 
 /*
- * Compatibility wrapper.
+ * 兼容包装函数。
  *
- * V3.10.1B deliberately leaves every existing Hub caller on the
- * old state->device working-context behavior.
+ * V3.10.1B 刻意让现有 Hub 调用方继续使用旧的 state->device 工作上下文行为。
  */
 
 
 
 
 /*
- * V3.10.1C EXPLICIT HUB SET FEATURE
+ * V3.10.1C Hub 显式设置特性
  *
- * Hub EP0 state belongs to the supplied device context.
+ * Hub EP0 状态属于传入的设备上下文。
  */
 bool xhci_hub_set_port_feature_device(
     xhci_state_t *state,

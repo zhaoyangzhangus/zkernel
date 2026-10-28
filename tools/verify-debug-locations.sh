@@ -26,9 +26,8 @@ if ! "$objdump_cmd" -t "$elf_path" |
     exit 1
 fi
 
-# The kernel is linked as an ELF debug image even though its intermediate link
-# object is PE/COFF.  Keep two representative source units in the check so a
-# stripped or symbol-only image cannot accidentally pass the F5 contract.
+# 尽管中间链接对象为 PE/COFF，内核最终仍链接为 ELF 调试映像。检查两个有代表性的源文件，
+# 避免被剥离或仅含符号的映像意外通过 F5 约定检查。
 for source in kernel/debug_stage.c kernel/init/early.c; do
     if ! "$objdump_cmd" --dwarf=info "$elf_path" |
         grep -F "$source" >/dev/null; then
@@ -41,10 +40,8 @@ done
 "$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/verify-qemu-stages.sh" \
     "$log_path"
 
-# Benchmark records are another debugger-facing contract.  A timing value
-# without its call site is useful for a graph, but not for explaining a
-# regression in a refactor.  Keep this check separate from the stage verifier
-# because a deliberately early boot-failure log may contain no benchmark yet.
+# 基准记录也是面向调试器的约定。只有计时值而没有调用位置，虽可用于绘图，却无法解释重构回归。
+# 此检查与阶段验证分开，因为刻意在早期启动失败的日志中可能尚无基准记录。
 benchmark_records=$(grep -E '^OS_BENCH(_VALUE)? ' "$log_path" || true)
 if [[ -n "$benchmark_records" ]]; then
     unlocated_benchmarks=$(printf '%s\n' "$benchmark_records" |

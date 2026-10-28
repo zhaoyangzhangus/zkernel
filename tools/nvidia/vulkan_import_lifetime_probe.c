@@ -1,4 +1,4 @@
-/* GPU-only readback after the imported surface's CPU/window owners disappear. */
+/* 导入 surface 的 CPU/窗口所有者消失后，仅通过 GPU 回读验证生命周期。 */
 #include <vulkan/vulkan_core.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -50,7 +50,7 @@ int vulkan_import_lifetime(VkPhysicalDevice gpu,VkDevice device,VkQueue queue,
     linux_window_command_t remove={.operation=LINUX_WINDOW_OPERATION_CLOSE};
     if(ioctl(*fd,(unsigned long)LINUX_WINDOW_IOCTL_COMMIT,&remove)!=0)goto cleanup;
     int old_fd=*fd;
-    *fd=-1; /* Linux close consumes the descriptor, including delayed errors. */
+    *fd=-1; /* Linux close 会消费该描述符，包括延迟报告的错误。 */
     if(close(old_fd)!=0)goto cleanup;
     puts("VULKAN_LIFETIME_DETACHED cpu_mapping=0 window_fd=0");
 
@@ -87,6 +87,6 @@ cleanup:
     if(pool)vkDestroyCommandPool(device,pool,NULL);
     if(readback)vkDestroyBuffer(device,readback,NULL);
     if(memory)vkFreeMemory(device,memory,NULL);
-    /* Imported buffer/memory belongs to the caller, not this readback helper. */
+    /* 导入的缓冲区/内存归调用方所有，不属于此回读辅助函数。 */
     return status;
 }

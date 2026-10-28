@@ -13,6 +13,9 @@ with tempfile.TemporaryDirectory(prefix='system-qemu-proxy-path-') as directory:
     fixture = Path(directory)/'run-qemu.sh'
     for label,text,expected in [
         ('actual launcher',launcher,True),
+        ('NAT default',launcher.replace('emulated_net=0\n', 'emulated_net=1\n', 1),False),
+        ('physical NIC omitted',launcher.replace('vfio_devices+=("$physical_nic")', ':'),False),
+        ('implicit NIC enabled',launcher.replace('qemu_args+=( -nic none )', ':'),False),
         ('missing alias',launcher.replace(alias,'-netdev "user,id=vm-net"'),False),
         ('old relay',launcher.replace(alias,
             '-netdev "user,id=vm-net,guestfwd=tcp:10.0.2.100:7890-cmd:socat - TCP4:127.0.0.1:7890"'),False),

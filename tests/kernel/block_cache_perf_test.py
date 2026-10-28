@@ -51,8 +51,8 @@ with tempfile.TemporaryDirectory(prefix='liteos-cache-perf-') as directory:
         source = root/'kernel/fs/pagecache/cache.c'
         if old:
             baseline = source.read_text()
-            start = baseline.index('        /* Bound speculative admission')
-            end = baseline.index('        /* A FAT read', start)
+            start = baseline.index('        UINT32 hot_count = 0U;')
+            end = baseline.index('        while (reserved_count < prefetch_limit', start)
             baseline = baseline[:start] + baseline[end:]
             baseline = baseline.replace('entry->LastUse = 0U;',
                                         'entry->LastUse = cache->Clock;')

@@ -47,7 +47,7 @@
 #define OS_RT_STB_LOCAL          0U
 #define OS_RT_STB_GLOBAL         1U
 #define OS_RT_STB_WEAK           2U
-/* GCC uses this binding for C++ function-local/static data. */
+/* GCC 使用此绑定处理 C++ 函数局部/静态数据。 */
 #define OS_RT_STB_GNU_UNIQUE     10U
 #define OS_RT_STT_TLS            6U
 

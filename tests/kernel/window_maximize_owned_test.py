@@ -5,7 +5,7 @@ import tempfile
 root=Path(__file__).resolve().parents[2]
 source=(root/'kernel/graphics/input_router.c').read_text()
 start=source.index('kstatus_t window_server_set_maximized_owned(')
-body=source[start:source.index('/* Normal and captured routing',start)]
+body=source[start:source.index('\n}',start)+2]
 code=r'''
 #include <assert.h>
 #include <stdbool.h>

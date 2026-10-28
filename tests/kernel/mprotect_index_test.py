@@ -43,6 +43,10 @@ void *kzalloc(size_t size,unsigned flags) {
 }
 void vm_object_get(vm_object_t *o) {if(o)atomic_fetch_add(&o->refs.value,1);}
 void vm_object_put(vm_object_t *o) {if(o)assert(atomic_fetch_sub(&o->refs.value,1)>0);}
+static void area_release(vm_area_t *a) {
+    assert(!locked);
+    vm_object_put(a->object);vm_object_put(a->private_object);
+}
 kstatus_t vm_object_create_anon(size_t size,vm_object_t **out) {
     assert(locked);if(++shadow_calls==fail_shadow)return K_ENOMEM;
     assert(shadow_count<128);*out=&shadows[shadow_count++];(*out)->size=size;
@@ -178,15 +182,17 @@ int main(void) {
                (failure?K_ENOMEM:K_OK));
         assert(areas[0].private_object==&shadows[100] &&
                (areas[0].flags&VM_AREA_CLONE_OLD_COW) && atomic_load(&shadows[100].refs.value)==1);
-        assert(transaction_visits==(failure?2:4));
+        assert(transaction_visits==(failure?2:6));
     }
     for(unsigned target=0;target<4;++target) {
+        /* 合并只额外访问左邻居、首段及右邻居，不扫描无关前缀或后缀。 */
+        unsigned merge_visits=(target>0?2:0)+(target<3?1:0);
         prepare(4,0,false);
         assert(vm_protect(&space,areas[target].start,8*PAGE_SIZE,VM_PROT_READ|VM_PROT_USER)==K_OK);
-        assert(transaction_visits==2);
+        assert(transaction_visits==2+merge_visits);
         prepare(4,1,false);
         assert(vm_protect(&space,areas[target].start,8*PAGE_SIZE,VM_PROT_READ|VM_PROT_USER)==K_OK);
-        assert(transaction_visits==3);
+        assert(transaction_visits==3+merge_visits);
         prepare(4,1,false);fail_protect=1;
         assert(vm_protect(&space,areas[target].start,8*PAGE_SIZE,VM_PROT_READ|VM_PROT_USER)==K_EINVAL);
         assert(transaction_visits==3);

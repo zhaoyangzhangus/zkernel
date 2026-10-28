@@ -2,8 +2,8 @@
 
 #include <kernel/console.h>
 
-/* REFACTOR_P8_XHCI_HUB_TRANSFER_OWNER: Hub interrupt status-ring
- * configuration and queue submission use one direct transfer Owner. */
+/* REFACTOR_P8_XHCI_HUB_TRANSFER_OWNER：Hub 中断状态环配置和队列提交
+ * 由同一个直接传输所有者负责。 */
 
 #define XHCI_RING_TRB_COUNT 256U
 #define XHCI_LINK_TRB_TYPE 6U
@@ -62,8 +62,8 @@ bool xhci_queue_hub_status_device(xhci_state_t *state,
 }
 
 /*
- * Compatibility wrapper for unpublished enumeration/setup paths.
- * Published Hub runtime events never use this wrapper.
+ * 供尚未发布的枚举/设置路径使用的兼容包装函数。
+ * 已发布的 Hub 运行时事件绝不使用此包装函数。
  */
 bool xhci_configure_hub_endpoint(xhci_state_t *state) {
     uint32_t endpoint_id;
@@ -104,13 +104,13 @@ bool xhci_configure_hub_endpoint(xhci_state_t *state) {
     }
 
     /*
-     * Tell the xHC that this Slot is a Hub.
+    * 告知 xHC 此 Slot 表示一个 Hub。
      */
     input_slot[0] |=
         XHCI_SLOT_HUB;
 
     /*
-     * MTT is valid only for a High-Speed multi-TT Hub.
+    * MTT 仅适用于高速多 TT Hub。
      */
     input_slot[0] &=
         ~XHCI_SLOT_MTT;
@@ -124,7 +124,7 @@ bool xhci_configure_hub_endpoint(xhci_state_t *state) {
     }
 
     /*
-     * Number of downstream ports.
+    * 下游端口数量。
      */
     input_slot[1] &=
         ~(0xFFU <<
@@ -135,8 +135,8 @@ bool xhci_configure_hub_endpoint(xhci_state_t *state) {
         XHCI_SLOT_MAX_PORTS_SHIFT;
 
     /*
-     * TT Think Time applies to High-Speed USB2 Hubs.
-     * Full-Speed Hub Slot Context must leave it zero.
+    * TT Think Time 适用于高速 USB2 Hub。
+    * 全速 Hub 的 Slot Context 必须将其设为零。
      */
     input_slot[2] &=
         ~(0x03U <<

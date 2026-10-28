@@ -5,7 +5,7 @@ import gdb, subprocess, struct, json, time, os, sys
 from pathlib import Path
 sys.path.insert(0, str(Path("tools/chromium").resolve()))
 from trace_build import validate_chrome_build
-expected = 'Build ID: ccd5fc305e3b0600'
+expected = 'Build ID: 2ea4a62ae34e05c9'
 try:
     validate_chrome_build(expected)
 except RuntimeError as error:
@@ -23,9 +23,9 @@ samples=0
 # ProxyMain. Choose adjacent stages without exceeding four hardware slots.
 mode=os.environ.get('OS_COMMIT_STAGE','activation')
 stages={
-    'activation':((0x4d166600,'BEGIN_MAIN_FRAME'),(0x4d0c5d20,'ACTIVATE_SYNC_TREE')),
-    'commit':((0x4d166600,'BEGIN_MAIN_FRAME'),(0x4d1639e0,'DO_COMMIT')),
-    'dispatch':((0x4d166460,'SEND_BEGIN_MAIN_FRAME'),(0x4d166600,'BEGIN_MAIN_FRAME')),
+    'activation':((0x4d35aea0,'BEGIN_MAIN_FRAME'),(0x4d2ba3c0,'ACTIVATE_SYNC_TREE')),
+    'commit':((0x4d35aea0,'BEGIN_MAIN_FRAME'),(0x4d358280,'DO_COMMIT')),
+    'dispatch':((0x4d35ad00,'SEND_BEGIN_MAIN_FRAME'),(0x4d35aea0,'BEGIN_MAIN_FRAME')),
 }
 if mode not in stages:raise gdb.GdbError('Unknown OS_COMMIT_STAGE')
 def current():
@@ -63,8 +63,8 @@ class Stage(gdb.Breakpoint):
         gdb.post_event(lambda:gdb.execute('detach'))
         gdb.post_event(lambda:gdb.execute('quit'))
         return True
-NewTab('*0x51e890e0',gdb.BP_HARDWARE_BREAKPOINT,internal=True)
+NewTab('*0x520f0100',gdb.BP_HARDWARE_BREAKPOINT,internal=True)
 for address,label in stages[mode]:Stage('*%#x'%address,label)
-Stage('*0x4eb671d0','BEGIN_PAINT')
+Stage('*0x4edaf0c0','BEGIN_PAINT')
 end
 continue

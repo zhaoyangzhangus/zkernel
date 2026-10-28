@@ -1,13 +1,12 @@
 #include "internal.h"
 
-/* REFACTOR_P7B_COMPOSITOR_DRAG_OWNER: retained-scene drag overlap moves. */
+/* REFACTOR_P7B_COMPOSITOR_DRAG_OWNER：保留场景拖动时的重叠区域移动。 */
 
 /*
- * WB retained-scene qword store.
+ * WB 保留场景的 qword 存储。
  *
- * The private composite framebuffer is ordinary cacheable RAM on this path.
- * MOVQ is used explicitly so unaligned source/destination X coordinates remain
- * valid without relying on C alignment rules.
+ * 此路径中的私有合成帧缓冲区是普通可缓存 RAM。
+ * 显式使用 MOVQ，使未对齐的源/目标 X 坐标有效，而不依赖 C 对齐规则。
  */
 static inline void compositor_wb_store64(
     uint32_t *destination,
@@ -20,12 +19,11 @@ static inline void compositor_wb_store64(
 }
 
 /*
- * WB retained-scene qword load.
+ * WB 保留场景的 qword 加载。
  *
- * P6 centralizes WB -> GOP publication in display core, but the compositor
- * still needs a WB load for the overlap-safe backward memmove used while
- * moving retained-scene pixels.  Keep this read-only helper local; it does
- * not duplicate the display-memory writer that P6 removes from this module.
+ * P6 将 WB -> GOP 发布集中到 display core，但合成器移动保留场景像素时仍需执行 WB 加载，
+ * 以支持安全处理重叠区间的反向 memmove。此只读辅助函数保留在本地，不重复实现 P6
+ * 从此模块移除的显示内存写入逻辑。
  */
 static inline uint64_t compositor_wb_load64(
     const uint32_t *source) {
@@ -41,16 +39,13 @@ static inline uint64_t compositor_wb_load64(
 }
 
 /*
- * Copy an overlapping WB span from high addresses toward low addresses.
+ * 将重叠的 WB 区间从高地址向低地址复制。
  *
- * This is the only direction REP MOVSQ cannot safely provide while keeping
- * DF=0.  The kernel never sets the direction flag here: an interrupt/exception
- * may run at any instruction, and the normal x86-64 kernel ABI expects DF to
- * remain clear.
+ * 在保持 DF=0 的前提下，REP MOVSQ 只有此方向无法安全完成。内核在此处绝不设置方向标志：
+ * 中断/异常可能在任意指令处发生，而常规 x86-64 内核 ABI 要求 DF 始终清零。
  *
- * Load a complete 64-byte block before storing any part of it.  That makes
- * even a one-pixel right shift safe when source/destination overlap inside
- * the same block.
+ * 先加载完整的 64 字节块，再写入其中任何部分。这样即使源和目标在同一块内重叠并右移一个像素，
+ * 操作仍然安全。
  */
 static inline void compositor_move_wb_pixels_backward(
     uint32_t *destination,
@@ -118,10 +113,9 @@ static inline void compositor_move_wb_pixels_backward(
 }
 
 /*
- * memmove semantics for one XRGB8888 WB scanline span.
+ * 对一段 XRGB8888 WB 扫描线执行 memmove 语义的复制。
  *
- * Forward/non-overlapping copies use the existing REP MOVSQ fast path.
- * Only an overlapping right shift needs the high->low helper above.
+ * 正向/不重叠复制使用现有 REP MOVSQ 快速路径。仅重叠的向右移动需要使用上方的高到低复制辅助函数。
  */
 static inline void compositor_move_wb_pixels(
     uint32_t *destination,
@@ -166,9 +160,8 @@ static inline void compositor_move_wb_pixels(
         pixels);
 }
 
-/* Move the overlap of a topmost dragged window inside the retained compose
- * buffer.  The source is the last committed frame, so this avoids rereading
- * the client section and repainting every pixel for a one-pixel motion. */
+/* 在保留的合成缓冲区内移动最上层拖动窗口的重叠区域。源数据来自最近一次已提交帧，因此
+ * 单像素移动时无需重新读取客户端分区并重绘所有像素。 */
 void compositor_blit_drag_overlap(void) {
     const compositor_snapshot_t *snapshot = &g_compositor_snapshot;
     int64_t local_left;
@@ -271,8 +264,7 @@ void compositor_blit_drag_overlap(void) {
         int64_t destination_x =
             (int64_t)snapshot->drag_new_x + local_left;
 
-        /* The fallback path never calls this function, so the retained
-         * framebuffer is private WB RAM rather than the visible scanout. */
+        /* 回退路径不会调用此函数，因此保留帧缓冲区是私有 WB RAM，而非可见的扫描输出区域。 */
         uint32_t *scene =
             (uint32_t *)(uintptr_t)
                 g_window_server.composite_framebuffer;

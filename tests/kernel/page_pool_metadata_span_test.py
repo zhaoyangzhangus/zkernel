@@ -9,7 +9,7 @@ helpers = source[source.index('static void pool_install_base('):source.index('st
 alloc = source[source.index('page_t *pool_alloc_small('):source.index('static PAGE_NOINLINE bool pool_free_slow(')]
 slot = source[source.index('static bool pool_page_in_local_group('):source.index('bool pool_free_small(')]
 # Independent physical-address path retained as the pre-cache oracle.
-previous = slot[:slot.index('    /* Only the cached metadata array')]
+previous = slot[:slot.index('    uintptr_t metadata_delta =')]
 previous += slot[slot.index('    uint64_t page_physical'):]
 previous = previous.replace('pool_page_in_local_group(', 'previous_slot(')
 free_small = source[source.index('bool pool_free_small('):source.index('static PAGE_NOINLINE void pool_free_o0_slow(')]
@@ -111,8 +111,16 @@ int main(void) {
             pool->free_mask=UINT64_MAX;slow_calls=0;
             for(unsigned bit=0;bit<64;++bit) {
                 page_t *expected=page_for_pfn(base_pfn+((uint64_t)bit<<order));
+                expected->owner=PAGE_OWNER_PAGETABLE;
+                expected->private_data=74;
+                expected->flags|=PAGE_DIRTY|PAGE_UPTODATE|PAGE_WRITEBACK;
+                atomic_store(&expected->mapcount,73);
                 page_t *actual=order==0?pool_alloc_o0_normal(0):pool_alloc_small(PAGE_ZONE_NORMAL,order,0);
                 assert(actual==expected&&atomic_load(&actual->refs)==1&&!slow_calls);
+                assert(actual->owner==PAGE_OWNER_NONE && !actual->private_data);
+                assert(actual->flags==PAGE_COMPOUND_HEAD && actual->order==order);
+                assert(atomic_load(&actual->mapcount)==-1);
+                assert(actual->u.compound.head==actual && !actual->u.compound.index);
             }
             assert(!pool->free_mask);
             assert(!pool_alloc_small(PAGE_ZONE_NORMAL,order,0)&&slow_calls==1);
@@ -148,3 +156,14 @@ with tempfile.TemporaryDirectory(prefix='liteos-pool-metadata-') as directory:
                     '-I' + str(root / 'include'), '-x', 'c', '-', '-o', binary],
                    input=program, text=True, check=True)
     subprocess.run([binary], check=True, timeout=60)
+    old = program.replace('pool_prepare_allocated_page(page, order);',
+        'atomic_store_explicit(&page->refs, 1U, memory_order_relaxed);')
+    old = old.replace('pool_prepare_allocated_page(page, 0U);',
+        'atomic_store_explicit(&page->refs, 1U, memory_order_relaxed);')
+    assert old != program
+    subprocess.run(['cc', '-std=c11', '-O2', '-Wall', '-Wextra', '-Werror',
+                    '-I' + str(root / 'include'), '-x', 'c', '-', '-o', binary],
+                   input=old, text=True, check=True)
+    result = subprocess.run([binary], capture_output=True)
+    assert result.returncode != 0, 'stale page-table metadata escaped detection'
+print('Negative control rejected: pooled allocation retains page-table owner/mapcount/private pin count')

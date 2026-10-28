@@ -7,50 +7,26 @@
 #include <kernel/vm.h>
 #include "internal.h"
 
-static atomic_flag g_process_exit_diag_lock = ATOMIC_FLAG_INIT;
-
-static void process_exit_diag_char(char value) {
-    for (uint32_t attempt = 0U; attempt < 100000U; ++attempt) {
-        uint8_t ready;
-        __asm__ volatile ("inb %w1, %0" : "=a"(ready) : "d"(0x3FDU));
-        if ((ready & 0x20U) != 0U) break;
-        __asm__ volatile ("pause");
-    }
-    __asm__ volatile ("outb %0, %w1" : : "a"((uint8_t)value), "d"(0x3F8U));
-}
-
-static void process_exit_diag_text(const char *text) {
-    while (*text != '\0') process_exit_diag_char(*text++);
-}
-
-static void process_exit_diag_hex(uint64_t value) {
-    static const char digits[] = "0123456789abcdef";
-    process_exit_diag_text("0x");
-    for (int shift = 60; shift >= 0; shift -= 4) {
-        process_exit_diag_char(digits[(value >> (uint32_t)shift) & 0xFU]);
-    }
-}
-
 static void process_exit_diag(process_t *process, thread_t *thread,
                               int64_t status, uint32_t signal) {
-    while (atomic_flag_test_and_set_explicit(&g_process_exit_diag_lock,
-                                              memory_order_acquire)) {
-        __asm__ volatile ("pause");
-    }
-    process_exit_diag_text("OS_PROCESS_EXIT pid=");
-    process_exit_diag_hex(process != 0 ? process->pid : 0U);
-    process_exit_diag_text(" tid=");
-    process_exit_diag_hex(thread != 0 ? thread->tid : 0U);
-    process_exit_diag_text(" status=");
-    process_exit_diag_hex((uint64_t)status);
-    process_exit_diag_text(" signal=");
-    process_exit_diag_hex(signal);
-    process_exit_diag_text("\r\n");
-    atomic_flag_clear_explicit(&g_process_exit_diag_lock, memory_order_release);
+#if OS_DEBUG_SERIAL
+    /* 常规退出复用整条记录的公共输出，不另设串口锁或绕过日志开关。 */
+    kernel_serial_printf_serial_only(
+        "OS_PROCESS_EXIT pid=0x%llx tid=0x%llx status=0x%llx signal=0x%llx\r\n",
+        (unsigned long long)(process != 0 ? process->pid : 0U),
+        (unsigned long long)(thread != 0 ? thread->tid : 0U),
+        (unsigned long long)(uint64_t)status,
+        (unsigned long long)signal);
+#else
+    (void)process;
+    (void)thread;
+    (void)status;
+    (void)signal;
+#endif
 }
 
 static bool process_is_chrome_image(const process_t *process) {
-    static const char path[] = "/sbin/chrome";
+    static const char path[] = "/usr/apps/chrome/chrome";
     if (process == 0) return false;
     for (size_t index = 0U; index < sizeof(path); ++index) {
         if (process->linux_exe[index] != path[index]) return false;
@@ -68,23 +44,22 @@ bool process_publish_thread_exit(thread_t *thread, int64_t status) {
     process = thread->process;
     remote_owner = thread->owner_cpu != x86_current_cpu_index();
 
-    /* A remote scheduler acknowledgement may be deferred until syscall exit.
-     * Never hold the process thread lock across that wait: the target CPU can
-     * itself be trying to acquire this lock before it reaches that boundary.
+    /* 远端调度器确认可能延迟到系统调用退出时才完成。等待期间绝不能持有进程线程锁：目标 CPU 在到达
+     * 该边界前也可能正试图获取此锁。
      */
     if (process != 0 && !remote_owner) {
         process_thread_lock(process);
-        /* Publish the result before making a local thread visibly dead. */
+        /* 将结果发布后，再使本地线程对外显示为已死亡。 */
         previous_status = thread->exit_code;
         thread->exit_code = status;
     }
     published = sched_publish_dead(thread);
     if (process != 0 && !remote_owner) {
-        /* A non-current or already-terminal thread did not publish this status. */
+        /* 非当前线程或已进入终止状态的线程不会发布此状态。 */
         if (!published) thread->exit_code = previous_status;
         process_thread_unlock(process);
     } else if (process != 0 && published) {
-        /* Remote publication is complete; commit status under the owner lock. */
+        /* 远端状态发布已完成；在所有者锁下提交状态。 */
         process_thread_lock(process);
         thread->exit_code = status;
         process_thread_unlock(process);
@@ -128,12 +103,10 @@ void thread_release_execution_ref(thread_t *thread) {
     }
 
     process_t *process = thread->process;
-    /* The scheduler calls this only after the dead thread's execution stack
-     * is inactive. Reclaim the user stack while retaining its VM against
-     * concurrent final-sibling resource teardown. */
-    /* Stack registration uses the same owner lock. A reaper can claim its
-     * execution flag while registration holds the lock, but cannot inspect
-     * or clear the stack ownership until that transaction is complete. */
+    /* 调度器仅在死亡线程的执行栈不再活动后调用此函数。回收用户栈时要保留其 VM，以防与最后一个同级
+     * 线程的资源拆除并发发生。 */
+    /* 栈注册也使用同一所有者锁。注册持锁期间，回收器可以设置执行标志，但必须等该事务完成后才能检查
+     * 或清除栈所有权。 */
     if (process != 0) process_thread_lock(process);
     bool owned = thread->user_stack_owned;
     vaddr_t base = thread->user_stack_base;
@@ -169,11 +142,9 @@ static __noreturn void process_exit_internal(int64_t status,
         if (first_exit) process_exit_diag(process, thread, status, signal);
 
         /*
-         * A sibling may be running on another CPU, in which case
-         * thread_terminate() cannot reclaim it synchronously.  Mark every
-         * sibling first so it exits at a safe user boundary; otherwise a
-         * busy sibling can leave the process permanently EXITING while
-         * retaining process resources.
+         * 同级线程可能正在另一 CPU 上运行，此时 thread_terminate() 无法同步回收它。先标记所有同级
+         * 线程，使其在安全的用户态边界退出；否则繁忙线程可能在保留进程资源的同时，让进程永久停留在
+         * EXITING 状态。
          */
         if (first_exit) {
             process_terminate_siblings(process, thread, status);
@@ -206,10 +177,8 @@ __noreturn void thread_exit(int64_t status) {
         }
         linux_thread_exit_cleanup(thread);
         /*
-         * THREAD_DEAD becomes visible before the current context switches
-         * away.  Keep the list detach and handle notification in that same
-         * publication transaction; otherwise a timer can expose a dead
-         * thread while process->thread_count still includes it.
+         * 当前上下文切走前，THREAD_DEAD 已对外可见。列表摘除和句柄通知必须与状态发布处于同一事务；
+         * 否则定时器可能先暴露死亡线程，而 process->thread_count 仍将其计入。
          */
         sched_preempt_disable();
         debug_trace_stage(OS_DEBUG_PHASE_USER_RUNTIME,
@@ -227,9 +196,8 @@ __noreturn void thread_exit(int64_t status) {
                                  (uint32_t)status);
         process_detach_thread(thread);
         /*
-         * Wake handle waiters only after the process list and any
-         * PROCESS_DEAD transition are visible.  An execing sibling may
-         * inspect thread_count immediately after WAIT_ONE returns.
+         * 只有进程列表及可能发生的 PROCESS_DEAD 转换均可见后，才能唤醒句柄等待者。正在 exec 的同级
+         * 线程可能会在 WAIT_ONE 返回后立即检查 thread_count。
          */
         object_notify_signaled(thread);
         sched_preempt_enable();

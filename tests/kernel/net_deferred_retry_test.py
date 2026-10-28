@@ -7,10 +7,15 @@ root = Path(__file__).resolve().parents[2]
 source = (root / 'kernel/drivers/net/core.c').read_text()
 start = source.index('bool e1000_schedule_deferred_poll(void)')
 end = source.index('void e1000_deferred_poll(void *argument)', start)
+timing_end = source.index('} g_e1000_poll_timing;') + len('} g_e1000_poll_timing;')
+timing_start = source.rfind('static struct {', 0, timing_end)
 program = r'''
 #include <assert.h>
 #include <stdbool.h>
 #include <stdatomic.h>
+#include <stdint.h>
+''' + source[timing_start:timing_end] + r'''
+static uint64_t telemetry_timestamp(void) { return 1000U; }
 static bool g_e1000_runtime_ready = true;
 static atomic_bool g_e1000_poll_queued, g_e1000_poll_retry;
 static bool queue_full;

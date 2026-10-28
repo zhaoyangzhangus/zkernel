@@ -25,10 +25,8 @@ MONITOR = Path(
 
 RUNNER_STDOUT = BUILD / "b10b3-runner.stdout"
 RUNNER_STDERR = BUILD / "b10b3-runner.stderr"
-# QEMU's HMP mouse_move path coalesces updates faster than the guest's USB
-# polling interval.  Keep the default deliberately above that coalescing
-# window so the stress phase measures HID re-arming rather than host-input
-# batching.  CI can still override it for a controller-specific probe.
+# QEMU 的 HMP mouse_move 路径合并更新的速度快于来宾 USB 轮询间隔。默认延迟刻意设得较长，
+# 使压力阶段测量 HID 重新挂起，而不是宿主输入批处理。CI 仍可为特定控制器探测覆盖此值。
 MOUSE_EVENT_DELAY = float(os.environ.get("XHCI_TEST_MOUSE_DELAY", "0.05"))
 MOUSE_READY_TIMEOUT = float(
     os.environ.get("XHCI_TEST_MOUSE_READY_TIMEOUT", "5.0")
@@ -50,9 +48,8 @@ def serial_text():
     try:
         return SERIAL.read_text(errors="replace")
     except OSError:
-        # QEMU writes this file directly in headless mode.  A Windows/WSL
-        # mounted-file read can briefly return EAGAIN/ENODATA while the file
-        # is being extended; the next polling iteration will retry.
+        # 无头模式下 QEMU 会直接写入此文件。文件扩展期间，Windows/WSL 挂载文件读取可能短暂返回
+        # EAGAIN/ENODATA；下一轮轮询会重试。
         return ""
 
 
@@ -205,7 +202,7 @@ def choose_usb_mouse(hmp):
         )
 
     #
-    # Prefer the explicit QEMU USB mouse.
+    # 优先选择明确标记为 QEMU USB 的鼠标。
     #
     for index, line in candidates:
         lowered = line.lower()
@@ -221,8 +218,7 @@ def choose_usb_mouse(hmp):
             return index
 
     #
-    # In case this QEMU version labels it differently,
-    # the hot-plugged USB mouse is normally the newest one.
+    # 若当前 QEMU 版本使用了不同名称，热插入的 USB 鼠标通常是列表中的最新设备。
     #
     index = candidates[-1][0]
 
@@ -252,13 +248,12 @@ def send_mouse_events(hmp, count):
         direction = -direction
 
         #
-        # Avoid collapsing every host movement into one guest report.
+        # 避免将宿主机的所有移动合并成一份来宾报告。
         #
         time.sleep(MOUSE_EVENT_DELAY)
 
-    # A button transition is a stronger end-to-end probe than movement alone:
-    # it must produce a boot-mouse interrupt report even when a headless QEMU
-    # frontend coalesces relative motion.
+    # 按键状态变化比单纯移动更适合作为端到端探测：即使无头 QEMU 前端合并了相对移动，
+    # 也必须产生 boot-mouse 中断报告。
     hmp.command("mouse_button 1", timeout=1.0)
     time.sleep(MOUSE_EVENT_DELAY)
     hmp.command("mouse_button 0", timeout=1.0)
@@ -354,10 +349,8 @@ def main():
         )
 
         #
-        # xHCI can become MSI-X-ready before the kernel has finished its
-        # deterministic boot self-tests.  Do not inject live mouse input until
-        # the persistent deferred worker is deliberately started at the
-        # runtime boundary.
+        # xHCI 可能在内核完成确定性启动自测前就已准备好 MSI-X。运行时边界显式启动持久延迟工作线程前，
+        # 不要注入实时鼠标输入。
         #
         wait_until(
             lambda:
@@ -367,9 +360,8 @@ def main():
             BOOT_READY_TIMEOUT
         )
 
-        # The deferred worker is published before the graphics worker.  Wait
-        # for the complete post-boot scheduler boundary before injecting HID
-        # input, otherwise the first report can race window-worker startup.
+        # 延迟工作线程先于 graphics 工作线程发布。注入 HID 输入前等待完整的启动后调度器边界，
+        # 否则首份报告可能与窗口工作线程启动竞争。
         wait_until(
             lambda:
                 "OS_WINDOW_WORKER_OK"
@@ -378,10 +370,8 @@ def main():
             BOOT_READY_TIMEOUT
         )
 
-        # The window worker starts before the post-display user-runtime
-        # self-test.  Do not inject HID traffic while that test is still
-        # exercising VM, scheduler, and process teardown; otherwise this
-        # hotplug test can manufacture an unrelated USER_RUNTIME timeout.
+        # 窗口工作线程在显示后的 user-runtime 自测前启动。自测仍在检查 VM、调度器和进程拆除时不要注入 HID 流量，
+        # 否则热插拔测试可能制造无关的 USER_RUNTIME 超时。
         wait_until(
             lambda:
                 "OS_USER_RUNTIME_SUBTESTS_OK"
@@ -395,10 +385,8 @@ def main():
                 "boot runtime self-test failed before hotplug"
             )
 
-        # Keep the monitor server online during boot, but do not attach a
-        # client until the boot-critical runtime self-test has completed.  A
-        # live HMP connection changes QEMU's main-loop load enough to perturb
-        # that deliberately tight self-test window on TCG.
+        # 启动期间保持 monitor 服务在线，但等启动关键运行时自测完成后再连接客户端。活动 HMP 连接会明显改变
+        # QEMU 主循环负载，在 TCG 上扰动时间窗口刻意收紧的自测。
         deadline = time.monotonic() + 5.0
         while True:
             try:
@@ -410,8 +398,7 @@ def main():
                 time.sleep(0.05)
 
         #
-        # Generate a few initial events, but deliberately stay well
-        # below 256 so the 256 milestone can prove post-replug HID.
+        # 先生成少量初始事件，刻意远低于 256，以便后续通过 256 里程碑证明重新插入后的 HID 工作正常。
         #
         choose_usb_mouse(hmp)
 
@@ -433,9 +420,8 @@ def main():
                 "256 HID milestone occurred before hotplug test"
             )
 
-        # Let QEMU's Hub interrupt endpoint return to its normal NAK/retry
-        # state before changing a downstream port.  This avoids coupling the
-        # topology test to the last mouse report's completion timing.
+        # 更改下游端口前，让 QEMU Hub 中断端点恢复到常规 NAK/重试状态，
+        # 避免拓扑测试受最后一份鼠标报告的完成时序影响。
         time.sleep(HUB_SETTLE_SECONDS)
 
         baseline_changes = (
@@ -479,7 +465,7 @@ def main():
         )
 
         #
-        # Allow QEMU's delete request to settle before reusing the ID.
+        # 复用设备 ID 前等待 QEMU 的删除请求完成。
         #
         time.sleep(0.5)
 
@@ -507,9 +493,8 @@ def main():
             12.0
         )
 
-        # device_add is asynchronous in QEMU.  The Hub-change marker means
-        # the Slot is published, while the host input device may still be
-        # joining QEMU's active-mouse list.
+        # QEMU 的 device_add 是异步操作。Hub-change 标记表示 Slot 已发布，但宿主输入设备可能仍在加入
+        # QEMU 活动鼠标列表。
         time.sleep(HUB_SETTLE_SECONDS)
 
         if "OS_XHCI_FAIL=" in serial_text():
@@ -529,8 +514,7 @@ def main():
         choose_usb_mouse(hmp)
 
         #
-        # Enough reports to cross the driver's 256 completion
-        # milestone even if a few host motions are coalesced.
+        # 发送足够多报告，即使宿主合并了少量移动，也能超过驱动的 256 次完成里程碑。
         #
         send_mouse_events(
             hmp,

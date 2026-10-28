@@ -1,7 +1,7 @@
 #include <kernel/kmem.h>
 #include "internal.h"
 
-/* The compositor writes the retained scene here before scanout publication. */
+/* 合成器在发布扫描输出前，将保留场景写入此缓冲区。 */
 void window_buffer_reset_locked(void) {
     g_window_server.composite_framebuffer = 0;
 }

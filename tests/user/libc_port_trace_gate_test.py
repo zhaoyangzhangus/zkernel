@@ -6,7 +6,7 @@ import tempfile
 root = Path(__file__).resolve().parents[2]
 source = (root / 'user/libc/syscall.c').read_text()
 constants = source[source.index('static volatile uint32_t g_libc_service_trace_drop_chunks;'):
-                   source.index('/* Saturate diagnostic quotas:')]
+                   source.index('static bool libc_trace_budget(')]
 start = source.index('static bool libc_drop_service_trace_chunk(')
 function = source[start:source.index('static void libc_debug_path(', start)]
 debug_start = source.index('static ssize_t debug_write(')

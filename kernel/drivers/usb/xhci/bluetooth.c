@@ -2,7 +2,7 @@
 #include <kernel/xhci.h>
 #include "internal.h"
 
-/* REFACTOR_P8_XHCI_BLUETOOTH_OWNER: USB Bluetooth transport and events. */
+/* REFACTOR_P8_XHCI_BLUETOOTH_OWNER：USB Bluetooth 传输和事件。 */
 
 #define XHCI_RING_TRB_COUNT 256U
 #define XHCI_CONFIGURE_ENDPOINT_TYPE 12U
@@ -79,16 +79,15 @@ static bool xhci_queue_bt_event_device(
 }
 
 /*
- * Compatibility wrapper.
+ * 兼容包装函数。
  *
- * V3.10.5A does not migrate callers yet.
+ * V3.10.5A 阶段尚未迁移调用方。
  */
 /*
- * V3.10.6B9F BT WORKING WRAPPERS REMOVED
+ * V3.10.6B9F 已移除 BT 工作上下文包装函数
  *
- * Bluetooth enumeration now names state->device explicitly.
- * Runtime Bluetooth paths continue to resolve permanent Slot.context
- * from their Slot ID.
+ * Bluetooth 枚举现在显式使用 state->device。
+ * Bluetooth 运行时路径仍通过 Slot ID 查找永久 Slot.context。
  */
 
 
@@ -188,20 +187,19 @@ static bool xhci_queue_bt_acl_out_device(
 
 
 /*
- * V3.10.6B7B BT ACL-OUT WRAPPER REMOVED
+ * V3.10.6B7B 已移除 BT ACL-OUT 包装函数
  */
 
 
 /*
- * Send using the context currently installed in state->device.
+ * 使用当前安装在 state->device 中的上下文发送。
  *
- * The public Bluetooth callback below resolves Slot ID first and
- * temporarily installs the owning context when necessary.
+ * 下方公开的 Bluetooth 回调先解析 Slot ID，并在必要时临时安装所属上下文。
  */
 /*
- * V3.10.6B7B EXPLICIT BT SEND CORE
+ * V3.10.6B7B BT 显式发送核心
  *
- * All Bluetooth TX state belongs to the supplied device context.
+ * 所有 Bluetooth TX 状态均属于传入的设备上下文。
  */
 static kstatus_t xhci_bt_send_device(
     xhci_state_t *state,
@@ -232,7 +230,7 @@ static kstatus_t xhci_bt_send_device(
     }
 
     /*
-     * HCI ACL packet -> USB Bulk OUT.
+    * HCI ACL 数据包 -> USB Bulk OUT。
      */
     if(packet[0] == 0x02U)
     {
@@ -265,7 +263,7 @@ static kstatus_t xhci_bt_send_device(
     }
 
     /*
-     * HCI Command packet -> USB class control transfer.
+    * HCI Command 数据包 -> USB 类控制传输。
      */
     if(packet[0] != 0x01U ||
        device->descriptor_buffer.cpu == 0)
@@ -312,15 +310,14 @@ static kstatus_t xhci_bt_send_device(
 
 
 /*
- * V3.7.7 BT SLOT TRANSPORT
+ * V3.7.7 BT Slot 传输
  *
- * Bluetooth Core -> xHCI transmission is now routed by the Slot ID
- * permanently bound when bt_controller is created.
+ * Bluetooth Core -> xHCI 的传输现在通过 bt_controller 创建时永久绑定的 Slot ID 路由。
  */
 /*
- * V3.10.6B7B CANONICAL BT SEND
+ * V3.10.6B7B 规范 BT 发送路径
  *
- * Bluetooth transport is permanently bound to one hardware Slot:
+ * Bluetooth 传输永久绑定到一个硬件 Slot：
  *
  *     transport->slot
  *           |
@@ -330,8 +327,8 @@ static kstatus_t xhci_bt_send_device(
  *           v
  *   xhci_bt_send_device()
  *
- * No inventory lookup.
- * No state->device activation.
+ * 不查找 inventory。
+ * 不激活 state->device。
  */
 static kstatus_t xhci_bt_send(
     void *context,
@@ -440,8 +437,7 @@ bool xhci_configure_bt_endpoints(xhci_state_t *state) {
             0U, 2U, state->bt_acl_out_max_packet, &state->bt_acl_out_ring.mapping);
     }
     /*
-     * Bind this Bluetooth controller permanently to its hardware
-     * Slot before Bluetooth Core receives the callback pointer.
+    * 在 Bluetooth Core 收到回调指针前，将此 Bluetooth 控制器永久绑定到其硬件 Slot。
      */
     if(state->device_slot == 0U)
     {
@@ -482,23 +478,23 @@ bool xhci_configure_bt_endpoints(xhci_state_t *state) {
 
 
 /*
- * V3.10.6B7C CANONICAL BT TRANSFER EVENT
+ * V3.10.6B7C 规范 BT 传输事件
  *
- * Transfer Event Slot ID is the permanent Bluetooth identity.
+ * Transfer Event 的 Slot ID 是永久 Bluetooth 标识。
  *
- *     Transfer Event
+ *     传输事件
  *          |
- *        Slot ID
+ *        Slot 标识
  *          |
  *          v
  *     Slot.context
  *          |
  *     +----+----+
  *     |         |
- * completion  re-arm
+ * 完成回调    重新布置
  *
- * Published Bluetooth runtime state never enters state->device.
- * inventory[] is not involved in BT event routing.
+ * 已发布的 Bluetooth 运行时状态不会进入 state->device。
+ * BT 事件路由不使用 inventory[]。
  */
 bool xhci_handle_bt_transfer_event(
     xhci_state_t *state,
@@ -532,8 +528,7 @@ bool xhci_handle_bt_transfer_event(
 
 
     /*
-     * Only a fully published canonical Bluetooth context owns
-     * runtime Transfer Events.
+    * 只有已完整发布的规范 Bluetooth 上下文才拥有运行时 Transfer Event。
      */
     if(!slot_dev->used ||
        slot_dev->context.device_slot !=
@@ -566,7 +561,7 @@ bool xhci_handle_bt_transfer_event(
 
 
     /*
-     * HCI Event interrupt-IN.
+    * HCI Event interrupt-IN。
      */
     if(device->bt_event_endpoint !=
            0U &&
@@ -622,7 +617,7 @@ bool xhci_handle_bt_transfer_event(
 
 
     /*
-     * ACL bulk-IN.
+    * ACL bulk-IN。
      */
     if(device->bt_acl_in_endpoint !=
            0U &&
@@ -676,7 +671,7 @@ bool xhci_handle_bt_transfer_event(
 
 
     /*
-     * ACL bulk-OUT completion.
+    * ACL bulk-OUT 完成。
      */
     if(device->bt_acl_out_endpoint !=
            0U &&

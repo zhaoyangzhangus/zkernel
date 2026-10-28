@@ -31,7 +31,13 @@ with tempfile.TemporaryDirectory(prefix='chrome-entrypoints-') as directory:
         path = tools / name
         path.write_text('#!/bin/sh\nexit 99\n'); path.chmod(0o755)
     args = out / 'args.gn'
-    original = f'native_os_root = "{ROOT}"\nnative_os_build_dir = "{ROOT}/build"\n'
+    sdk_header = src / 'build/linux/debian_bullseye_amd64-sysroot/usr/include/linux/limits.h'
+    sdk_header.parent.mkdir(parents=True)
+    sdk_header.write_text('/* Fixed SDK fixture; no host headers. */\n')
+    original = (f'native_os_root = "{ROOT}"\nnative_os_build_dir = "{ROOT}/build"\n'
+                'use_sysroot = true\n'
+                'sysroot = "//build/linux/debian_bullseye_amd64-sysroot"\n'
+                'use_qt5 = false\nuse_qt6 = false\nrtc_use_pipewire = false\n')
     args.write_text(original)
     env.update(CHROMIUM_SRC=str(src), PATH=str(tools) + os.pathsep + os.environ['PATH'])
     result = subprocess.run(['bash', str(builder), '--check'], env=env,

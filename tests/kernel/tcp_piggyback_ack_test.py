@@ -21,17 +21,24 @@ for family in ('4','6'):
     start=runtime.rfind('} else {',0,call)
     blocks.append(block_at(runtime,start))
     handler=protocol.index('kstatus_t socket_inject_tcp_ack_ipv'+family+'_reply(')
-    start=protocol.index('if (private->tcp_state == SOCKET_TCP_ESTABLISHED &&',handler)
+    entry=block_at(protocol,handler)
+    assert 'return socket_tcp_ack_target(target, sequence, acknowledgement, flags, window, reply);' in entry
+    shared=protocol.index('static kstatus_t socket_tcp_ack_target(')
+    start=protocol.index('if (private->tcp_state == SOCKET_TCP_ESTABLISHED &&\n'
+                         '        private->tcp_send_pending &&\n'
+                         '        acknowledgement == private->tcp_send_next_sequence)', shared)
     acks.append(protocol[start:protocol.index('    bool established',start)])
 program=r'''
 #include <assert.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
 #define K_OK 0
 #define K_EAGAIN (-11)
 #define K_EIO (-5)
 #define NET_TCP_FLAG_ACK 16
+#define NET_TCP_FLAG_SYN 2
 #define NET_TCP_FLAG_PSH 8
 #define NET_TCP_FLAG_FIN 1
 #define SOCKET_TCP_ESTABLISHED 2
@@ -45,6 +52,8 @@ typedef struct {
     unsigned tcp_send_next_sequence,tcp_send_length,tcp_send_flags;
     unsigned tcp_send_unacknowledged,tcp_send_retransmits;
     uint64_t tcp_send_deadline_tsc;
+    uint64_t tcp_local_retry_tsc;
+    uint8_t tcp_send_payload[4096];
 } private_t;
 typedef struct {
     uint32_t source_address,destination_address,sequence,acknowledgement;
@@ -58,6 +67,9 @@ static unsigned notifications,ack_calls,rx_calls,replies;
 static bool rx_full;
 static char events[4];
 static unsigned event_count;
+static void socket_copy(void *d,const void *s,size_t n){memmove(d,s,n);}
+static uint64_t x86_read_tsc(void){return 1000;}
+static uint64_t socket_tcp_retransmit_deadline(uint64_t t){return t+1000;}
 '''
 for index, family in enumerate(('4','6')):
     addr='uint32_t' if family=='4' else 'const uint8_t*'
@@ -128,27 +140,27 @@ int main(void) {
         packet_t packet={.flags=NET_TCP_FLAG_ACK,.sequence=2000,
             .acknowledgement=950,.window=8192,.payload_length=4};
         assert(dispatch[family](packet)==K_OK);
-        assert(sender.tcp_send_pending && sender.tcp_send_length==100);
-        assert(!notifications && ack_calls==1 && rx_calls==1 && replies==1);
+        assert(sender.tcp_send_pending && sender.tcp_send_length==50 && sender.tcp_send_unacknowledged==950);
+        assert(notifications==1 && ack_calls==1 && rx_calls==1 && replies==1);
         /* An ACK beyond SND.NXT cannot confirm bytes never transmitted. */
         reset();
         packet.acknowledgement=1001;
         assert(dispatch[family](packet)==K_OK);
         assert(sender.tcp_send_pending && sender.tcp_send_length==100);
         assert(sender.tcp_send_unacknowledged==900 && !notifications);
-        /* A numerically large stale ACK is still stale across sequence wrap. */
+        /* A numerically large ACK can be valid partial progress across wrap. */
         reset();
         sender.tcp_send_next_sequence=32;
         sender.tcp_send_unacknowledged=UINT32_MAX-67;
         packet.acknowledgement=UINT32_MAX-15;
         assert(dispatch[family](packet)==K_OK);
-        assert(sender.tcp_send_pending && sender.tcp_send_length==100);
-        assert(sender.tcp_send_unacknowledged==UINT32_MAX-67 && !notifications);
+        assert(sender.tcp_send_pending && sender.tcp_send_length==48);
+        assert(sender.tcp_send_unacknowledged==UINT32_MAX-15 && notifications==1);
         event_count=0;
         packet.acknowledgement=32;
         assert(dispatch[family](packet)==K_OK);
         assert(!sender.tcp_send_pending && !sender.tcp_send_length);
-        assert(sender.tcp_send_unacknowledged==32 && notifications==1);
+        assert(sender.tcp_send_unacknowledged==32 && notifications==2);
     }
 }
 '''

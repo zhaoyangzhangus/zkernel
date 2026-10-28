@@ -26,14 +26,14 @@ static atomic_uint_fast64_t g_next_task_id;
 static atomic_uint g_process_init_state;
 static spinlock_t g_process_registry_lock;
 static list_head_t g_process_registry;
-/* Borrowed only under registry_lock; every membership change invalidates it. */
+/* 仅在 registry_lock 保护下借用；任何成员变更都会使其失效。 */
 static list_head_t *g_process_enumeration_cursor;
 static uint32_t g_process_enumeration_index;
 static list_head_t *g_process_monitor_cursor;
 static spinlock_t g_process_teardown_lock;
 static process_teardown_callback_t
     g_process_teardown_callbacks[PROCESS_TEARDOWN_CALLBACK_MAX];
-/* Registration is append-only; this dense prefix is protected by its lock. */
+/* 注册只追加不删除；此连续前缀由对应锁保护。 */
 static uint32_t g_process_teardown_count;
 
 extern void x86_user_thread_start(void);
@@ -160,8 +160,8 @@ static void process_orphan_children(process_t *process) {
         process_parent_unlock(child);
         process_children_unlock(process);
 
-        /* The list owns one child reference and the relation owns one
-         * parent reference.  Neither is released while the list lock is held. */
+        /* 链表持有一个子进程引用，父子关系持有一个父进程引用。
+         * 持有链表锁时不能释放任一引用。 */
         object_put(child);
         if (related) object_put(process);
     }
@@ -176,8 +176,8 @@ static void process_detach_from_parent(process_t *process) {
     parent = process_parent_reference(process);
     if (parent == 0) return;
 
-    /* Re-check the relation after taking the parent list lock.  This avoids
-     * taking the inverse lock order used by process_orphan_children(). */
+    /* 获取父进程子进程链表锁后重新检查关系，避免采用与
+     * process_orphan_children() 相反的锁顺序。 */
     process_children_lock(parent);
     process_parent_lock(process);
     if (process->parent == parent) {
@@ -191,13 +191,13 @@ static void process_detach_from_parent(process_t *process) {
     process_parent_unlock(process);
     process_children_unlock(parent);
 
-    if (detached) object_put(process); /* parent child-list reference */
-    if (related) object_put(parent);   /* child parent-relation reference */
-    /* A waiter may be sleeping on a live child that failed construction or
-     * was aborted. Removal changes its predicate to ECHILD just as reaping
-     * does. Keep the lookup reference until notification has finished. */
+    if (detached) object_put(process); /* 父进程子进程链表持有的引用 */
+    if (related) object_put(parent);   /* 子进程父子关系持有的引用 */
+    /* 等待者可能正在等待一个构造失败或已中止、但仍存活的子进程。
+     * 移除该子进程会像回收进程一样将等待条件变为 ECHILD。
+     * 通知完成前必须保留查找引用。 */
     if (detached) (void)wake_all(&parent->child_waitq);
-    object_put(parent);                /* temporary lookup reference */
+    object_put(parent);                /* 临时查找引用 */
 }
 
 static bool process_child_matches(const process_t *child, int64_t pid) {
@@ -228,17 +228,17 @@ static bool process_wait_predicate(void *opaque) {
             context->candidate = child;
             break;
         }
-        /* A positive PID names one child. Its live match already determines
-         * this predicate; unrelated following children cannot satisfy it. */
+        /* 正 PID 指定唯一子进程。匹配到仍存活的子进程后，等待条件已确定；
+         * 后续无关子进程不能改变结果。 */
         if (context->pid > 0) break;
     }
     process_children_unlock(context->parent);
-    /* A disappearing child is also a terminal result for this wait. */
+    /* 子进程消失也是此等待操作的终止结果。 */
     return !context->has_child || context->candidate != 0;
 }
 
-/* Called only by the owner of the locked transition to PROCESS_DEAD.
- * The caller retains the process; callbacks and notifications run unlocked. */
+/* 仅由持锁完成 PROCESS_DEAD 状态转换的所有者调用。
+ * 调用方保留进程引用；回调和通知均在解锁后执行。 */
 static void process_publish_exit(process_t *process) {
     process_registry_remove(process);
     process_orphan_children(process);
@@ -268,7 +268,7 @@ bool process_begin_exit(process_t *process, int64_t status, uint32_t signal) {
     process_thread_unlock(process);
     if (empty) {
         process_publish_exit(process);
-        /* No execution reaper exists to release an empty process's resources. */
+        /* 没有执行回收器负责释放空进程的资源。 */
         process_release_runtime_resources(process);
     }
     return first_exit;
@@ -285,6 +285,8 @@ void process_detach_thread(thread_t *thread) {
                                  UINT64_MAX : process->retired_cpu_ns + runtime;
         if (process->monitor_thread_cursor == &thread->process_node)
             process->monitor_thread_cursor = 0;
+        /* 增删会改变后续线程的枚举索引，且缓存节点可能即将释放。 */
+        process->enumeration_thread_cursor = 0;
         list_del(&thread->process_node);
         if (process->thread_count != 0) --process->thread_count;
         if (process->thread_count == 0 &&
@@ -330,7 +332,31 @@ void process_set_name(process_t *process, const char *path) {
     sched_preempt_enable();
 }
 
-/* Caller owns or retains process; no registry/thread lock is needed for names. */
+/* 路径快照和替换只复制固定大小的数据，不在自旋锁下解析路径或读取磁盘。 */
+kstatus_t process_cwd_copy(process_t *process, char output[PROCESS_CWD_CAPACITY]) {
+    if (process == 0 || output == 0) return K_EINVAL;
+    sched_preempt_disable();
+    spinlock_lock(&process->info_lock);
+    memcpy(output, process->cwd, PROCESS_CWD_CAPACITY);
+    spinlock_unlock(&process->info_lock);
+    sched_preempt_enable();
+    return K_OK;
+}
+
+kstatus_t process_cwd_set(process_t *process, const char *path) {
+    if (process == 0 || path == 0 || path[0] != '/') return K_EINVAL;
+    size_t length = 0U;
+    while (length < PROCESS_CWD_CAPACITY && path[length] != '\0') ++length;
+    if (length >= PROCESS_CWD_CAPACITY) return K_ENAMETOOLONG;
+    sched_preempt_disable();
+    spinlock_lock(&process->info_lock);
+    memcpy(process->cwd, path, length + 1U);
+    spinlock_unlock(&process->info_lock);
+    sched_preempt_enable();
+    return K_OK;
+}
+
+/* 调用方拥有或保留 process；读取名称无需注册表锁或线程锁。 */
 static void process_snapshot_name(process_t *process, char *name, size_t capacity) {
     size_t copied = capacity < OS_PROCESS_NAME_MAX ? capacity : OS_PROCESS_NAME_MAX;
     sched_preempt_disable();
@@ -389,7 +415,7 @@ kstatus_t process_enumerate(uint32_t index, os_process_snapshot_t *snapshot) {
         return K_OK;
     }
     process_registry_unlock();
-    return K_ENOENT;
+    return current == index ? sched_monitor_process(snapshot) : K_ENOENT;
 }
 
 kstatus_t process_enumerate_thread(uint32_t index,
@@ -401,23 +427,41 @@ kstatus_t process_enumerate_thread(uint32_t index,
          process_node != &g_process_registry; process_node = process_node->next) {
         process_t *process = list_entry(process_node, process_t, global_node);
         process_thread_lock(process);
-        /* Membership and count share thread_lock. Skip whole preceding
-         * lists without walking their threads on every indexed query.
-         * Subtraction also avoids overflow when summing global counts. */
+        /* 成员关系和数量共用 thread_lock。按索引查询时跳过前面的整个列表，避免逐个遍历线程。
+         * 使用减法也可避免累加全局数量时溢出。 */
         if (remaining >= process->thread_count) {
             remaining -= process->thread_count;
             process_thread_unlock(process);
             continue;
         }
-        /* Membership is locked and counted: start at the nearer end while
-         * preserving the externally visible forward enumeration order. */
-        bool reverse = remaining > (process->thread_count - 1U) / 2U;
-        if (reverse) remaining = process->thread_count - 1U - remaining;
-        for (list_head_t *thread_node = reverse ? process->threads.prev : process->threads.next;
+        /* 首、尾和上次命中的节点都在同一线程锁内；选择距离最近的起点。
+         * 顺序采样时只前进一个节点，任意索引仍保持原来的正向枚举顺序。 */
+        uint32_t target = remaining, distance = target;
+        list_head_t *start = process->threads.next;
+        bool reverse = false;
+        uint32_t tail_distance = process->thread_count - 1U - target;
+        if (tail_distance < distance) {
+            start = process->threads.prev;
+            distance = tail_distance;
+            reverse = true;
+        }
+        if (process->enumeration_thread_cursor != 0) {
+            uint32_t cached = process->enumeration_thread_index;
+            uint32_t cached_distance = target >= cached ? target - cached : cached - target;
+            if (cached < process->thread_count && cached_distance < distance) {
+                start = process->enumeration_thread_cursor;
+                distance = cached_distance;
+                reverse = target < cached;
+            }
+        }
+        remaining = distance;
+        for (list_head_t *thread_node = start;
              thread_node != &process->threads;
              thread_node = reverse ? thread_node->prev : thread_node->next) {
             if (remaining-- != 0U) continue;
             thread_t *thread = list_entry(thread_node, thread_t, process_node);
+            process->enumeration_thread_cursor = thread_node;
+            process->enumeration_thread_index = target;
             process->monitor_thread_cursor = thread_node;
             snapshot->hdr.size = sizeof(*snapshot);
             snapshot->hdr.version = OS_SYSCALL_ABI_VERSION;
@@ -427,12 +471,10 @@ kstatus_t process_enumerate_thread(uint32_t index,
             snapshot->state = atomic_load_explicit(&thread->state,
                                                    memory_order_acquire);
             snapshot->current_cpu = thread->current_cpu;
-            /* The snapshot no longer needs the thread itself. Retain only
-             * its process while reading the name, without global-list lock. */
+            /* 快照不再需要线程本身。读取名称时只保留其所属进程，且不持有全局列表锁。 */
             object_get(process);
-            /* The next monitor query usually consumes this very snapshot.
-             * Seed the PID hint while registry membership is still locked;
-             * removal invalidates it before dropping registry ownership. */
+            /* 下一次监控查询通常会直接使用此快照。在注册表成员锁仍持有时设置 PID 提示；移除
+             * 成员时会先使提示失效，再释放注册表所有权。 */
             g_process_monitor_cursor = &process->global_node;
             process_thread_unlock(process);
             process_registry_unlock();
@@ -443,14 +485,13 @@ kstatus_t process_enumerate_thread(uint32_t index,
         process_thread_unlock(process);
     }
     process_registry_unlock();
-    return K_ENOENT;
+    return sched_monitor_thread(remaining, snapshot);
 }
 
 static process_t *process_monitor_find(uint64_t pid) {
     process_t *found = 0;
     process_registry_lock();
-    /* Resource queries normally follow enumeration or repeat a parent PID
-     * for its threads. Both borrowed hints are valid only under this lock. */
+    /* 资源查询通常紧跟枚举操作，或针对线程重复查询同一父 PID。两个借用提示仅在持有此锁时有效。 */
     list_head_t *hint = g_process_monitor_cursor;
     if (hint == 0 || list_entry(hint, process_t, global_node)->pid != pid) {
         hint = g_process_enumeration_cursor;
@@ -471,7 +512,7 @@ static process_t *process_monitor_find(uint64_t pid) {
     return found;
 }
 
-/* Caller holds thread_lock, including the VM lifetime guard. */
+/* 调用方持有 thread_lock，包括 VM 生命周期保护。 */
 static bool process_monitor_protected(const process_t *process) {
     return process->pid <= 1U || process->vm == 0 ||
         (__atomic_load_n(&process->flags, __ATOMIC_RELAXED) & PROCESS_FLAG_INIT_CPU_PINNED) != 0U;
@@ -483,7 +524,7 @@ static bool process_monitor_terminable(const process_t *process, uint64_t create
         atomic_load_explicit(&process->state, memory_order_acquire) == PROCESS_RUNNING;
 }
 
-/* The returned thread is borrowed and may only be used under thread_lock. */
+/* 返回的线程指针为借用指针，只能在持有 thread_lock 时使用。 */
 static thread_t *process_monitor_thread_locked(process_t *process, uint64_t tid) {
     list_head_t *hint = process->monitor_thread_cursor;
     if (hint != 0) {
@@ -530,8 +571,8 @@ thread_t *linux_thread_reference_by_tid(uint64_t tid) {
         if (current != 0) object_get(current);
         return current;
     }
-    /* The common pthread query stays within its own process. Registry lock
-     * precedes thread_lock for foreign tasks, matching enumeration/removal. */
+    /* 常见的 pthread 查询仅涉及当前进程。查询外部任务时，锁顺序与枚举/移除一致：先获取注册表锁，
+     * 再获取 thread_lock。 */
     thread_t *found = current != 0 && current->process != 0 ?
         process_linux_thread_reference(current->process, tid) : 0;
     if (found != 0) return found;
@@ -549,6 +590,7 @@ thread_t *linux_thread_reference_by_tid(uint64_t tid) {
 
 kstatus_t process_task_query(uint64_t pid, uint64_t tid, os_task_info_t *info) {
     if (info == 0 || pid == 0U) return K_EINVAL;
+    if (pid == OS_KERNEL_WORKERS_PID) return sched_monitor_query(tid, info);
     process_t *process = process_monitor_find(pid);
     if (process == 0) return K_ENOENT;
     *info = (os_task_info_t){0};
@@ -586,8 +628,7 @@ kstatus_t process_task_query(uint64_t pid, uint64_t tid, os_task_info_t *info) {
     return found ? K_OK : K_ENOENT;
 }
 
-/* Allocation-free fallback for low memory; no live thread pointer survives
- * unlocking without an object reference. */
+/* 内存不足时使用无需分配的回退路径；解锁后，任何活动线程指针都必须有对象引用保护。 */
 static void process_terminate_threads_fallback(process_t *process, thread_t *exclude, int64_t status) {
     uint64_t after_tid = 0U;
     for (;;) {
@@ -598,8 +639,7 @@ static void process_terminate_threads_fallback(process_t *process, thread_t *exc
             thread_t *candidate = list_entry(node, thread_t, process_node);
             if (candidate == exclude || atomic_load_explicit(&candidate->state, memory_order_acquire) == THREAD_DEAD) continue;
             if (candidate->tid <= after_tid) continue;
-            /* The list need not be TID ordered. Keep its lowest next IDs;
-             * no list cursor or unreferenced pointer survives unlocking. */
+            /* 列表不必按 TID 排序。保留其中最小的后续 ID；解锁后不保留列表游标或无引用保护的指针。 */
             uint32_t position = count;
             while (position != 0U && targets[position - 1U]->tid > candidate->tid) --position;
             if (position == 16U) continue;
@@ -623,8 +663,7 @@ static void process_terminate_threads_fallback(process_t *process, thread_t *exc
 }
 
 void process_terminate_siblings(process_t *process, thread_t *exclude, int64_t status) {
-    /* EXITING forbids new attachment. The count can only shrink while the
-     * snapshot storage is allocated outside thread_lock. */
+    /* EXITING 状态禁止新增关联。在线程锁外分配快照存储期间，线程数只会减少。 */
     thread_t *local_targets[16];
     thread_t **targets = local_targets;
     process_thread_lock(process);
@@ -688,8 +727,7 @@ kstatus_t process_terminate_tid(process_t *caller, uint64_t pid, uint64_t tid, u
     }
     process_thread_unlock(process);
     if (target != 0) {
-        /* Running threads leave only at a safe user boundary, never by
-         * reclaiming an arbitrary live kernel continuation. */
+        /* 运行中的线程只能在安全的用户态边界退出，绝不能通过回收任意活动内核续接路径来退出。 */
         (void)thread_terminate(target, -(int64_t)OS_SIGKILL);
         object_put(target);
     }
@@ -755,8 +793,8 @@ void process_initialize_object(object_header_t *header, object_type_id_t type,
 
 static kstatus_t process_create_vm(process_t *parent, vm_space_t **out) {
     if (parent == 0) return vm_space_create(out);
-    /* Exit can detach the parent's VM while the child is being allocated.
-     * Pin its snapshot under the owner lock, never clone/put under that lock. */
+    /* 分配子进程期间，父进程退出可能解除其 VM 关联。在所有者锁下固定父进程快照，但绝不在该锁下
+     * 执行克隆或释放操作。 */
     process_thread_lock(parent);
     vm_space_t *source = parent->vm;
     if (source != 0) vm_space_get(source);
@@ -777,9 +815,8 @@ kstatus_t process_create_named(process_t *parent, const char *name,
                               &g_process_ops);
     process->pid = process_allocate_task_id();
     atomic_init(&process->state, PROCESS_NEW);
-    /* CPU pinning is only for the bootstrap process itself.  Inheriting it
-     * pins every descendant (including multithreaded applications) to the
-     * bootstrap CPU and defeats SMP scheduling. */
+    /* CPU 固定仅适用于引导进程本身。若继承该限制，所有后代（包括多线程应用）都会被固定到引导
+     * CPU，从而破坏 SMP 调度。 */
     atomic_init(&process->parent_lock.state, 0U);
     atomic_init(&process->children_lock.state, 0U);
     wait_queue_init(&process->child_waitq);
@@ -804,16 +841,15 @@ kstatus_t process_create_named(process_t *parent, const char *name,
     process->linux_loader_pending = false;
     process->linux_root[0] = '/';
     process->linux_root[1] = '\0';
-    process->linux_cwd[0] = '/';
-    process->linux_cwd[1] = '\0';
+    process->cwd[0] = '/';
+    process->cwd[1] = '\0';
     process->linux_exe[0] = '\0';
     process->linux_brk_base = 0U;
     process->linux_brk = 0U;
     if (parent != 0) {
         __builtin_memcpy(process->linux_root, parent->linux_root,
                          sizeof(process->linux_root));
-        __builtin_memcpy(process->linux_cwd, parent->linux_cwd,
-                         sizeof(process->linux_cwd));
+        (void)process_cwd_copy(parent, process->cwd);
         __builtin_memcpy(process->linux_exe, parent->linux_exe,
                          sizeof(process->linux_exe));
         process->linux_brk_base = parent->linux_brk_base;
@@ -920,8 +956,7 @@ kstatus_t process_fork(process_t *parent, process_t **out) {
     if (status != K_OK) return status;
 
     handle_table_t cloned = {0};
-    /* Windows are owner-bound resources.  A forked command must not inherit
-     * the shell's window handle and close the parent's window on exit. */
+    /* 窗口是绑定所有者的资源。fork 出来的命令不得继承 shell 的窗口句柄，否则退出时会关闭父进程窗口。 */
     status = handle_table_clone_without_type(&parent->handles, &cloned,
                                              KOBJECT_TYPE_WINDOW);
     if (status != K_OK) {
@@ -1012,9 +1047,9 @@ kstatus_t process_wait_child(process_t *parent, int64_t pid, uint32_t options,
                       OS_WAIT_INFINITE;
             continue;
         }
-        object_put(parent); /* child parent-relation reference */
-        object_put(child);  /* child-list reference */
-        object_put(child);  /* predicate reference */
+        object_put(parent); /* 子进程父子关系引用 */
+        object_put(child);  /* 子进程列表引用 */
+        object_put(child);  /* 条件判断引用 */
         (void)wake_all(&parent->child_waitq);
         *child_pid = (int64_t)result_pid;
         *exit_code = status_value;
@@ -1025,8 +1060,7 @@ kstatus_t process_wait_child(process_t *parent, int64_t pid, uint32_t options,
 
 void process_release_runtime_resources(process_t *process) {
     if (process == 0) return;
-    /* This bit is a monotonic ownership claim, not a completion barrier.
-     * Repeated reapers need no write to an already-claimed cache line. */
+    /* 此标志表示单调递增的所有权声明，不是完成屏障。重复执行回收操作时，无需再次写入已声明的缓存行。 */
     if ((__atomic_load_n(&process->flags, __ATOMIC_ACQUIRE) &
          PROCESS_FLAG_RESOURCES_RELEASED) != 0U) return;
     uint32_t old_flags = __atomic_fetch_or(&process->flags,
@@ -1052,7 +1086,7 @@ static bool process_destruction_self_test_round(void) {
     void *lookup = 0;
     bool success = false;
     if (process_create(0, &parent) != K_OK) goto cleanup;
-    /* Child processes must not inherit the bootstrap-only CPU restriction. */
+    /* 子进程不得继承仅供引导阶段使用的 CPU 限制。 */
     parent->flags |= PROCESS_FLAG_INIT_CPU_PINNED;
     if (thread_create_user(parent, 0x400000ULL, 0x800000ULL, 0, &thread) != K_OK ||
         parent->thread_count != 1U || thread->process != parent ||
@@ -1110,8 +1144,7 @@ bool process_core_self_test(void) {
         return false;
     }
 
-    /* Exercise the real registry/resource path: no thread reaper will ever
-     * visit a newly-created empty process after its termination. */
+    /* 覆盖真实的注册表/资源路径：新建空进程终止后，不会有线程回收器再访问它。 */
     process_t *empty = 0;
     if (process_create(0, &empty) != K_OK) return false;
     bool empty_exited = process_begin_exit(empty, -9, 9U) &&

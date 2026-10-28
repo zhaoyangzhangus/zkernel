@@ -8,7 +8,7 @@ source = (root / 'kernel/graphics/input_router.c').read_text()
 clear = source[source.index('void window_clear_title_capture_locked('):
                source.index('void window_input_reset_desktop_state_locked(')]
 moved = source[source.index('bool window_title_capture_moved_locked('):
-               source.index('static window_server_window_t *window_at_locked(')]
+               source.index('uint32_t window_input_cursor_shape_locked(')]
 start = source.index('            } else if (((target->flags & OS_WINDOW_EXPLICIT_MOVE_RESIZE)')
 client_start = source.index('            } else if (\n                window_client_decorations(target->flags)', start)
 end = source.index('            } else if (', client_start + 20)

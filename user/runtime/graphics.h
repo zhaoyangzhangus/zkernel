@@ -6,8 +6,8 @@
 extern "C" {
 #endif
 
-/* The graphics ABI accepts only a caller-owned XRGB8888 buffer. Blend2D owns
- * the rasterization state while the caller retains ownership of the pixels. */
+/* 图形 ABI 仅接受由调用方管理的 XRGB8888 缓冲区。Blend2D 管理光栅化状态，
+ * 像素数据仍归调用方所有。 */
 void gfx_clear(uint32_t *pixels, uint32_t stride, uint32_t width,
                       uint32_t height, uint32_t color);
 void gfx_fill_rect(uint32_t *pixels, uint32_t stride, uint32_t width,

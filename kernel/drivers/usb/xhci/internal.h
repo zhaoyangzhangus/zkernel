@@ -25,9 +25,8 @@ typedef struct __attribute__((packed)) xhci_trb {
 
 _Static_assert(sizeof(xhci_trb_t) == 16U, "xHCI TRB ABI");
 
-/* Private controller model shared by the xHCI core and its protocol Owners.
- * These types stay below the public kernel API; protocol units only depend on
- * the canonical Slot context and never create a second device model. */
+/* xHCI 核心和协议所有者共用的私有控制器模型。
+ * 这些类型不属于内核公共 API；协议模块只依赖规范 Slot 上下文，绝不另建设备模型。 */
 typedef struct xhci_dma_page {
     page_t *page;
     dma_mapping_t mapping;
@@ -43,9 +42,8 @@ typedef struct xhci_dma_region {
     void *cpu;
 } xhci_dma_region_t;
 
-/* A composite USB device may expose independent Boot HID interfaces (for
- * example a mouse and a keyboard).  Keep the second interface's ring and
- * report state with the same canonical Slot context. */
+/* 复合 USB 设备可能公开相互独立的 Boot HID 接口（例如鼠标和键盘）。
+ * 第二个接口的环和报告状态仍保存在同一规范 Slot 上下文中。 */
 typedef struct xhci_hid_endpoint {
     xhci_dma_page_t ring;
     xhci_dma_page_t report;
@@ -61,7 +59,6 @@ typedef struct xhci_hid_endpoint {
     uint8_t previous_keys[6];
     uint8_t previous_buttons;
 } xhci_hid_endpoint_t;
-
 #define XHCI_DEVICE_FIELDS \
     xhci_dma_page_t input_context; \
     xhci_dma_page_t output_context; \
@@ -100,6 +97,9 @@ typedef struct xhci_hid_endpoint {
     uint8_t hid_previous_keys[6]; \
     uint8_t hid_previous_buttons; \
     xhci_hid_endpoint_t hid_secondary; \
+    uint8_t audio_protocol, audio_control_interface, audio_clock; \
+    uint8_t audio_mute_unit, audio_volume_unit, audio_volume_channels; \
+    bool audio_transfer_failed; \
     uint8_t audio_interface; \
     uint8_t audio_alt_setting; \
     uint8_t audio_endpoint; \
@@ -113,12 +113,15 @@ typedef struct xhci_hid_endpoint {
     uint8_t audio_cycle; \
     bool audio_transfer_pending; \
     uint32_t audio_completed; \
+    uint32_t audio_stream_generation; \
+    uint32_t audio_transfer_generation; \
+    uint16_t audio_transfer_first; \
+    uint16_t audio_transfer_packets; \
     audio_stream_t *audio_stream; \
     uint32_t audio_period; \
     uint32_t audio_frames; \
     bool audio_stream_running; \
     bool audio_stream_queued; \
-    bool audio_stream_bound; \
     uint8_t hub_interface; \
     bool hub_interface_present; \
     uint8_t hub_port_count; \
@@ -186,7 +189,7 @@ typedef struct xhci_device_context {
 
 #define XHCI_MAX_SLOT_TABLE 256U
 
-/* xHCI event fields shared by the controller dispatcher and protocol Owners. */
+/* 控制器分发器和协议所有者共用的 xHCI 事件字段。 */
 #define XHCI_TRANSFER_EVENT_TYPE 32U
 #define XHCI_TRB_TYPE_SHIFT 10U
 #define XHCI_TRB_SLOT_SHIFT 24U
@@ -226,9 +229,8 @@ typedef struct xhci_state {
     uint32_t max_slots;
     uint32_t max_ports;
     uint32_t context_size;
-    /* HCCPARAMS1.MaxPsaSize decoded to the number of primary stream-context
-     * entries (2^(field + 1)).  xHCI hosts exposing only two entries are
-     * treated as not supporting usable bulk streams, like Linux xHCI. */
+    /* 将 HCCPARAMS1.MaxPsaSize 解码为主流上下文条目数（2^(field + 1)）。
+     * 与 Linux xHCI 一样，仅提供两个条目的主机视为不支持可用的 bulk stream。 */
     uint32_t max_primary_stream_array_size;
     uint16_t hci_version;
     uint32_t command_index;
@@ -251,9 +253,10 @@ typedef struct xhci_state {
     uint32_t deferred_event_tail;
     uint32_t deferred_event_count;
     spinlock_t event_lock;
-    /* RFLAGS.IF owned by the CPU which currently owns event_lock. */
+    /* RFLAGS.IF 由当前持有 event_lock 的 CPU 管理。 */
     uint64_t event_lock_saved_flags;
     uint32_t event_lock_owner;
+    atomic_bool event_work_waiting;
     uint8_t irq_vector;
     bool irq_msi;
     bool initialized;
@@ -262,6 +265,7 @@ typedef struct xhci_state {
 void xhci_runtime_reset_state(void);
 void xhci_runtime_stop(void);
 bool xhci_runtime_ready(void);
+void xhci_runtime_resume_events(void);
 void xhci_runtime_set_ready(bool ready);
 void xhci_interrupt_reset_state(void);
 bool xhci_interrupt_take_pending(void);
@@ -272,18 +276,15 @@ bool xhci_controller_halt(xhci_state_t *state);
 bool xhci_core_bind_msix(xhci_state_t *state);
 void xhci_core_unbind_msix(xhci_state_t *state);
 
-/* The synchronous transfer paths and the deferred event worker share one
- * event consumer.  Keep lock ownership in the controller core so a holder
- * cannot be preempted while another CPU waits for the same event stream. */
+/* 同步传输路径和延迟事件工作线程共用一个事件消费者。锁所有权由控制器核心管理，避免某个 CPU 等待
+ * 同一事件流时，持锁者被抢占。 */
 void xhci_event_lock(xhci_state_t *state);
 bool xhci_event_try_lock(xhci_state_t *state);
 void xhci_event_unlock(xhci_state_t *state);
 
 /*
- * The Hub runtime Owner contains the topology state machine, but the xHCI
- * core remains the owner of controller commands, DMA rings, and Slot context
- * publication.  Keep that dependency explicit instead of reaching through
- * private static functions or a second device model.
+ * Hub 运行时所有者包含拓扑状态机，但控制器命令、DMA 环及 Slot 上下文发布仍由 xHCI 核心负责。应显式
+ * 保留该依赖，不要绕过边界调用私有静态函数，也不要建立第二套设备模型。
  */
 typedef struct xhci_hub_runtime_ops {
     bool (*queue_status)(xhci_state_t *state,
@@ -308,8 +309,7 @@ typedef struct xhci_hub_runtime_ops {
     void (*clear_device_flags)(void);
 } xhci_hub_runtime_ops_t;
 
-/* Event dispatch receives the topology boundary from the controller Owner;
- * it does not reach into root-port publication internals directly. */
+/* 事件分发从控制器所有者处获取拓扑边界，不会直接访问根端口发布的内部实现。 */
 typedef struct xhci_event_dispatch_ops {
     bool (*handle_root_port_event)(xhci_state_t *state, uint8_t port,
                                    uint32_t portsc);
@@ -317,18 +317,15 @@ typedef struct xhci_event_dispatch_ops {
 } xhci_event_dispatch_ops_t;
 
 extern const xhci_event_dispatch_ops_t g_xhci_event_dispatch_ops;
-/* Topology.c owns Slot Table storage; other Owners use this indexed view. */
+/* topology.c 管理 Slot 表存储；其他所有者通过此索引视图访问。 */
 xhci_slot_device_t *xhci_topology_slot(uint32_t slot);
-/* The Core Owner keeps the singleton controller storage private. */
+/* 核心所有者将单例控制器存储保持为私有。 */
 xhci_state_t *xhci_controller_state(void);
-/* A second controller may be kept alive for HID when storage is attached to
- * another independent xHCI function.  It deliberately has no global USB
- * topology ownership. */
+/* 存储设备连接到另一独立 xHCI 功能时，第二个控制器仍可为 HID 保持运行。它有意不拥有全局 USB 拓扑。 */
 xhci_state_t *xhci_hid_controller_state(void);
 bool xhci_hid_controller_active(void);
 void xhci_hid_controller_set_active(bool active);
-/* REFACTOR_P8_XHCI_TOPOLOGY_OWNER: derived status is published through
- * read-only queries; the snapshot storage remains private to topology.c. */
+/* REFACTOR_P8_XHCI_TOPOLOGY_OWNER：派生状态通过只读查询发布；快照存储仍由 topology.c 私有管理。 */
 bool xhci_topology_device_enumerated(void);
 uint32_t xhci_topology_device_count(void);
 bool xhci_topology_hid_configured(void);
@@ -399,7 +396,7 @@ bool xhci_drop_endpoint_transfer_events(xhci_state_t *state,
                                         uint8_t slot,
                                         uint8_t endpoint_id);
 
-/* Controller primitives consumed by the MSC protocol Owner. */
+/* MSC 协议所有者使用的控制器原语。 */
 uint64_t xhci_dma_address(const dma_mapping_t *mapping);
 uint32_t xhci_controller_read32(const xhci_state_t *state, uint32_t offset);
 bool xhci_controller_write32(const xhci_state_t *state, uint32_t offset,
@@ -499,7 +496,7 @@ bool xhci_configure_bt_endpoints(xhci_state_t *state);
 bool xhci_handle_bt_transfer_event(xhci_state_t *state,
                                    const xhci_trb_t *event);
 
-/* Private ring primitive shared by the xHCI controller and ring unit. */
+/* xHCI 控制器与环形队列单元共用的私有环原语。 */
 void xhci_ring_init_link(void *cpu, uint64_t dma_address,
                          uint32_t trb_count);
 void xhci_command_encode(void *raw_trb, uint32_t type, uint8_t slot,
@@ -528,8 +525,7 @@ bool xhci_transfer_encode_status(void *raw_trb, bool direction_in,
                                  uint32_t cycle);
 bool xhci_transfer_encode_self_test(void);
 
-/* Device/endpoint data-layout primitives kept independent from controller
- * MMIO, ring ownership, and transfer scheduling. */
+/* 设备/端点数据布局原语独立于控制器 MMIO、环所有权和传输调度。 */
 void xhci_device_context_clear(void *context, uint64_t size);
 bool xhci_device_context_self_test(void);
 void xhci_endpoint_context_encode(uint32_t endpoint[5], uint8_t interval,
@@ -546,8 +542,7 @@ void xhci_endpoint_context_set_streams(uint32_t endpoint[5],
                                        uint8_t max_primary_streams);
 bool xhci_endpoint_context_self_test(void);
 
-/* HID report decoding is independent from controller MMIO and transfer-ring
- * ownership.  Core supplies a compact snapshot and copies the state back. */
+/* HID 报告解码独立于控制器 MMIO 和传输环所有权。核心提供精简快照，并负责写回状态。 */
 typedef struct xhci_hid_report_context {
     const uint8_t *report;
     uint8_t protocol;
@@ -574,6 +569,8 @@ bool xhci_restart_hid_endpoint_secondary(xhci_state_t *state,
                                           xhci_device_context_t *device);
 bool xhci_handle_hid_transfer_event(xhci_state_t *state,
                                     const xhci_trb_t *event);
+bool xhci_handle_hid_io_event(xhci_state_t *state,
+                              const xhci_trb_t *event);
 void xhci_hid_runtime_initialize(void);
 void xhci_hid_runtime_reset_completion_counters(void);
 void xhci_report_hid_completion_milestones(void);

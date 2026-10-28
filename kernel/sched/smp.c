@@ -240,14 +240,16 @@ __noreturn void x86_smp_ap_entry(uint32_t cpu_index) {
                                    SMP_AP_STEP_CPU_LOCAL, memory_order_release);
     }
 
-    atomic_store_explicit(&g_ap_states[cpu_index],
-                          valid ? AP_STATE_STARTED : AP_STATE_FAILED,
-                          memory_order_release);
     if (valid) {
         atomic_store_explicit(&g_ap_boot_steps[cpu_index],
                               SMP_AP_STEP_STARTED, memory_order_release);
         atomic_fetch_add_explicit(&g_started_count, 1U, memory_order_relaxed);
     }
+    /* STARTED 是 BSP 的 acquire 屏障。先发布计数和诊断步骤，否则最后一个 AP 可能会在
+     * 计数可见前报告就绪，导致 BSP 错误地判定最终计数检查失败。 */
+    atomic_store_explicit(&g_ap_states[cpu_index],
+                          valid ? AP_STATE_STARTED : AP_STATE_FAILED,
+                          memory_order_release);
 
     if (valid) {
         /* BSP 建立全部运行队列后才发布 online，避免调度器观察到半初始化 CPU。 */
@@ -273,7 +275,7 @@ __noreturn void x86_smp_ap_entry(uint32_t cpu_index) {
                                           memory_order_release);
                 ap_timer_enabled = true;
             }
-            /* Check the level-triggered request before entering HLT as well. */
+            /* 进入 HLT 前也要检查电平触发请求。 */
             if (x86_smp_take_reschedule_request() ||
                 sched_runnable_count() != 0U) {
                 (void)sched_try_run_ready();
@@ -421,8 +423,7 @@ bool x86_smp_start_aps(const OS_BOOT_INFO *boot_info) {
             realtest_mark_number("SMP_AP_INIT_ASSERTED", i);
         }
         tsc_delay(10000000ULL);
-        /* Follow the x86 Linux INIT sequence: level-triggered INIT must be
-         * deasserted before the STARTUP IPI is issued. */
+        /* 遵循 x86 Linux 的 INIT 顺序：发送 STARTUP IPI 前必须撤销电平触发的 INIT。 */
         if (!lapic_send_init_deassert(apic_id)) {
             smp_record_bsp_failure(i, apic_id,
                                    SMP_BSP_FAIL_SEND_INIT_DEASSERT);
@@ -577,10 +578,9 @@ void x86_smp_ipi_interrupt(void) {
          * 路径会看不到请求，从而把首次运行完全依赖于中断内 schedule() 的时序。
          */
         /*
-         * The BSP bootstrap continuation also uses the logical idle thread
-         * as queue.current, but it does not execute scheduler_idle_main().
-         * Consume the request here for both idle-loop and bootstrap cases;
-         * otherwise a local IRQ wake can strand a READY worker in the queue.
+         * BSP 启动续执行路径也会将逻辑 idle 线程设为 queue.current，但不会执行
+         * scheduler_idle_main()。此处同时处理 idle 循环和启动路径的请求；
+         * 否则本地 IRQ 唤醒可能使 READY 工作线程滞留在队列中。
          */
         reschedule = atomic_exchange_explicit(
             &g_reschedule_pending[cpu_index], false,
@@ -592,9 +592,8 @@ void x86_smp_ipi_interrupt(void) {
     if (reschedule) {
         scheduler_trace_reschedule_interrupt(cpu_index);
         /*
-         * Keep the request pending while a syscall is executing.  TLB IPIs
-         * use a separate vector and remain serviceable; the syscall exit
-         * path consumes this request after its frame is complete.
+         * 系统调用执行期间保留该请求。TLB IPI 使用单独的向量，仍可正常处理；
+         * 系统调用退出路径会在其栈帧完整后消费此请求。
          */
         if (x86_syscall_active_fast()) {
             if (cpu_index < g_discovered_count && cpu_index < MAX_CPUS) {
@@ -646,13 +645,11 @@ bool x86_smp_request_reschedule(uint32_t cpu_index) {
         !x86_smp_cpu_online(cpu_index)) return false;
 
     /*
-     * Most wake bursts arrive while a request is already pending.
-     * Avoid an unconditional LOCK XCHG in that common case.
+    * 大多数唤醒突发都发生在已有请求待处理时。
+    * 常见情况下避免无条件执行 LOCK XCHG。
      *
-     * The producer has already published its runqueue update before reaching
-     * this function. If the target concurrently consumes the old request, it
-     * will schedule after that publication; otherwise the CAS below installs
-     * a new request and sends the IPI.
+    * 生产者到达此函数前已发布运行队列更新。若目标 CPU 并发消费了旧请求，
+    * 它会在该更新发布后重新调度；否则下面的 CAS 会安装新请求并发送 IPI。
      */
     if (atomic_load_explicit(&g_reschedule_pending[cpu_index],
                              memory_order_relaxed)) {
@@ -672,7 +669,7 @@ bool x86_smp_request_reschedule(uint32_t cpu_index) {
     }
 
     scheduler_trace_reschedule_request(cpu_index, true);
-    uint64_t send_started = x86_read_tsc();
+    uint64_t send_started = scheduler_trace_reschedule_begin();
     for (uint32_t attempt = 0; attempt < 4U; ++attempt) {
         if (lapic_send_fixed(platform->cpus[cpu_index].apic_id,
                                     X86_SMP_IPI_VECTOR)) {
@@ -682,7 +679,7 @@ bool x86_smp_request_reschedule(uint32_t cpu_index) {
         __asm__ volatile ("pause");
     }
 
-    /* pending remains set; the target timer/idle polling is the fallback. */
+    /* pending 保持置位；目标 CPU 的时钟/空闲轮询作为后备处理路径。 */
     scheduler_trace_reschedule_send(cpu_index, send_started, false, 4U);
     return false;
 }
@@ -692,9 +689,9 @@ bool x86_smp_take_reschedule_request(void) {
     if (cpu_index >= g_discovered_count || cpu_index >= MAX_CPUS) return false;
 
     /*
-     * Fast path for the overwhelmingly common idle-poll case.
-     * A producer that races after this load still sends an IPI, and the
-     * runnable snapshot is checked by the idle loop as a second condition.
+    * 面向绝大多数空闲轮询场景的快速路径。
+    * 若生产者在此次读取后发生竞争，仍会发送 IPI；空闲循环还会通过可运行快照
+    * 再次检查这一条件。
      */
     if (!atomic_load_explicit(&g_reschedule_pending[cpu_index],
                               memory_order_relaxed)) {

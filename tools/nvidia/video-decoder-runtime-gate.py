@@ -20,6 +20,8 @@ def check(runtime, library):
     stage.abi.check(runtime, closure.values())
     exports = subprocess.check_output(['nm', '-D', '--defined-only', str(library)], text=True)
     expected = {'OS_VIDEO_1', 'os_video_decoder_abi', 'os_video_decoder_create_h264',
+                'os_video_decoder_create',
+                'os_video_decoder_query',
                 'os_video_decoder_send', 'os_video_decoder_receive',
                 'os_video_decoder_reset', 'os_video_decoder_destroy'}
     names = {line.split()[-1].split('@')[0] for line in exports.splitlines()}

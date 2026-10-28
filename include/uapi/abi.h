@@ -13,7 +13,7 @@ typedef int64_t os_status_t;
 
 #define OS_INVALID_HANDLE ((os_handle_t)0)
 
-/* Per-handle flags.  These are copied on fork and consumed by exec. */
+/* 每个句柄各自拥有的标志。fork 时复制，exec 时使用。 */
 #define OS_HANDLE_FLAG_CLOEXEC (1U << 0)
 
 typedef struct os_versioned_header {

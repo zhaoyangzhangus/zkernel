@@ -28,16 +28,19 @@ for declaration in ('BOOLEAN fat32_open(void) {}\n',
                             text=True)
     assert result.returncode == 1, declaration
 
-# Frozen before renaming, not calculated from the new declarations.
+# 保留重命名前的布局基线；FAT 运行时后来明确增加可睡眠的变更互斥锁。
+# 只允许这一个新增字段的大小增量，不放宽其余字段、磁盘格式或资源上限检查。
 SIZES = {
-    'OS_FAT32': 352840, 'OS_FAT32_FILE': 560, 'OS_BLOCK_DEVICE': 88,
+    'OS_FAT32': '352840 + sizeof(io_mutex_t)', 'OS_FAT32_FILE': 560, 'OS_BLOCK_DEVICE': 88,
     'OS_BLOCK_MANAGER': 2824, 'OS_BLOCK_CACHE_ENTRY': 4120,
     'OS_BLOCK_CACHE': 66024,
 }
 OFFSETS = {
     'OS_FAT32': {'Device': 0, 'BytesPerSector': 8, 'FatStartLba': 40,
                  'Cache': 80, 'OpenFileLock': 66104, 'MutationLock': 66108,
-                 'OpenFiles': 66112, 'Mounted': 352832},
+                 'MutationMutex': 66112,
+                 'OpenFiles': '66112 + sizeof(io_mutex_t)',
+                 'Mounted': '352832 + sizeof(io_mutex_t)'},
     'OS_FAT32_FILE': {'FileSystem': 8, 'FirstCluster': 16, 'Size': 24,
                       'DirectoryLba': 40, 'DirectoryOffset': 48,
                       'CursorValid': 52, 'SeekLogical': 76,
@@ -65,7 +68,7 @@ for name, size in SIZES.items():
 for name, fields in OFFSETS.items():
     for field, offset in fields.items():
         code += f'CHECK(offsetof({name}, {field}) == {offset});\n'
-code += 'int main(void) { puts("Storage layout: six structures, 29 offsets and resource limits unchanged"); }\n'
+code += 'int main(void) { puts("Storage layout: six structures, 30 offsets, explicit runtime mutex delta and unchanged resource limits"); }\n'
 with tempfile.TemporaryDirectory(prefix='storage-layout-') as directory:
     binary = str(Path(directory) / 'test')
     subprocess.run(['cc', '-std=c11', '-Wall', '-Wextra', '-Werror',

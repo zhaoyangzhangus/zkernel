@@ -10,7 +10,7 @@ enum input_event_type {
     INPUT_EVENT_BUTTON = 2,
     INPUT_EVENT_RELATIVE = 3,
     INPUT_EVENT_ABSOLUTE = 4,
-    /* Kernel-internal HID report transaction; never exposed as Ring3 ABI. */
+    /* 内核内部 HID 报告事务；不会暴露为 Ring3 ABI。 */
     INPUT_EVENT_POINTER = 5,
 };
 
@@ -21,10 +21,9 @@ enum input_event_value {
 };
 
 /*
- * Stable pointer codes shared by the HID backend and user-space clients.
- * Keep the values aligned with the conventional evdev relative-axis and
- * button ranges so additional input backends do not need a translation
- * layer just to report a basic mouse.
+ * 由 HID 后端和用户态客户端共用的稳定指针代码。
+ * 取值遵循常见 evdev 相对轴和按键范围，使新增输入后端无需仅为报告基本鼠标事件
+ * 再增加转换层。
  */
 enum input_relative_code {
     INPUT_REL_X = 0,
@@ -65,14 +64,15 @@ typedef struct input_pointer_motion {
 #define INPUT_CORE_CAPACITY 256U
 
 bool input_core_init(void);
-/* Bind a generic consumer wait queue; the input Owner never names a client
- * subsystem such as Graphics. */
+/* 绑定通用消费者等待队列；输入所有者不会依赖 Graphics 等客户端子系统。 */
 void input_core_bind_wakeup(wait_queue_t *wait_queue);
 kstatus_t input_core_push(const input_event_t *event);
 kstatus_t input_core_push_pointer(const input_pointer_motion_t *motion);
 kstatus_t input_core_pop(input_event_t *event);
-/* Nonblocking FIFO extraction; returns zero for invalid/empty requests. */
+/* 非阻塞地从 FIFO 中提取事件；请求无效或队列为空时返回零。 */
 size_t input_core_pop_batch(input_event_t *events, size_t capacity);
+/* 仅提取开头连续的 X/Y 或无滚轮指针事件；绝不越过输入屏障。 */
+size_t input_core_pop_cursor_motion(input_event_t *events, size_t capacity);
 kstatus_t input_core_wait(uint64_t timeout_ns);
 kstatus_t input_core_read(input_event_t *event, uint64_t timeout_ns);
 uint32_t input_core_pending(void);

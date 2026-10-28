@@ -6,6 +6,7 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'app-layout.ps1')
 . (Join-Path $PSScriptRoot 'log-records.ps1')
 
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
@@ -34,11 +35,12 @@ function Require-Text([string]$Text, [string]$Pattern, [string]$Description) {
 }
 
 $buildRoot = Resolve-RepoPath $Build
+Assert-AppGuestLayout (Join-Path $buildRoot 'esp')
 $kernel = Join-Path $buildRoot 'esp\EFI\OS\kernel.elf'
 $testBinary = Join-Path $buildRoot 'esp\tests\p7-glibc'
-$loader = Join-Path $buildRoot 'esp\lib64\ld-linux-x86-64.so.2'
-$libc = Join-Path $buildRoot 'esp\lib\x86_64-linux-gnu\libc.so.6'
-$dataFile = Join-Path $buildRoot 'esp\tests\p7-data.txt'
+$loader = Join-Path $buildRoot 'esp\usr\apps\p7-glibc\lib\ld-linux-x86-64.so.2'
+$libc = Join-Path $buildRoot 'esp\usr\apps\p7-glibc\lib\libc.so.6'
+$dataFile = Join-Path $buildRoot 'esp\usr\apps\p7-glibc\p7-data.txt'
 $linuxSource = Join-Path $repoRoot 'kernel\syscall\linux.c'
 $execSource = Join-Path $repoRoot 'kernel\process\exec.c'
 $processSource = Join-Path $repoRoot 'kernel\process\process.c'
@@ -146,7 +148,7 @@ $testProgram = @(& $readelf.Source '-lW' '--' $testBinary 2>&1 |
     ForEach-Object { $_.ToString() })
 if ($LASTEXITCODE -ne 0 -or
     @($testProgram | Where-Object {
-        $_ -match 'Requesting program interpreter:\s+/lib64/ld-linux-x86-64\.so\.2'
+        $_ -match 'Requesting program interpreter:\s+/usr/apps/p7-glibc/lib/ld-linux-x86-64\.so\.2'
     }).Count -ne 1) {
     Fail-Gate 'staged test does not carry the required PT_INTERP'
 }

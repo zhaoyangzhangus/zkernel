@@ -7,6 +7,9 @@ root=Path(__file__).resolve().parents[2]
 source=(root/'kernel/sched/smp.c').read_text()
 start=source.index('bool x86_smp_request_reschedule(')
 end=source.index('bool x86_smp_take_reschedule_request(',start)
+core=(root/'kernel/sched/core.c').read_text()
+begin=core.index('uint64_t scheduler_trace_reschedule_begin(void) {')
+begin_probe=core[begin:core.index('void scheduler_trace_reschedule_send(',begin)]
 program=r'''
 #include <assert.h>
 #include <stdbool.h>
@@ -22,9 +25,12 @@ static atomic_bool g_reschedule_pending[4];
 static uint64_t now=100, start_seen, elapsed_seen;
 static unsigned calls, complete_calls, succeed_at, attempts_seen, requests;
 static bool accepted_seen, requested_send;
+static volatile uint64_t g_sched_wake_trace_tid=1;
+static unsigned clock_reads;
 static const x86_acpi_platform_t *x86_acpi_platform(void) { return available ? &platform : NULL; }
 static bool x86_smp_cpu_online(uint32_t cpu) { assert(cpu<4);return online; }
-static uint64_t x86_read_tsc(void) { return now; }
+static uint64_t x86_read_tsc(void) { ++clock_reads;return now; }
+''' + begin_probe + r'''
 static void scheduler_trace_reschedule_request(uint32_t cpu,bool send) {
     assert(cpu==2);++requests;requested_send=send;
 }
@@ -56,6 +62,21 @@ int main(void) {
     atomic_store(&g_reschedule_pending[2],false);calls=0;succeed_at=1;
     assert(x86_smp_request_reschedule(2));
     assert(calls==1 && complete_calls==3 && accepted_seen && attempts_seen==1);
+    /* The default disabled probe must not read the timestamp counter, even
+     * for actual sends and all four failed hardware submission attempts. */
+    g_sched_wake_trace_tid=0;
+    for(unsigned trial=0;trial<10000;++trial) {
+        atomic_store(&g_reschedule_pending[2],false);calls=0;succeed_at=trial%5;
+        unsigned before=clock_reads;
+        bool result=x86_smp_request_reschedule(2);
+        assert(result==(succeed_at!=0));
+        assert(clock_reads==before&&start_seen==0);
+        before=clock_reads;unsigned sent=calls;
+        assert(x86_smp_request_reschedule(2)&&clock_reads==before&&calls==sent);
+    }
+    g_sched_wake_trace_tid=1;atomic_store(&g_reschedule_pending[2],false);
+    calls=0;succeed_at=1;unsigned before=clock_reads;
+    assert(x86_smp_request_reschedule(2)&&clock_reads==before+1);
 }
 '''
 with tempfile.TemporaryDirectory(prefix='liteos-reschedule-send-') as directory:
@@ -64,4 +85,4 @@ with tempfile.TemporaryDirectory(prefix='liteos-reschedule-send-') as directory:
                     '-fsanitize=address,undefined','-fno-pie','-no-pie',
                     '-x','c','-','-o',binary],input=program,text=True,check=True)
     subprocess.run([binary],check=True)
-print('IPI send probe: actual completion, retries, coalescing and retained fallback request passed')
+print('IPI send probe: actual completion, retries, coalescing, retained fallback and 10000 disabled-probe sends without timestamp reads passed')

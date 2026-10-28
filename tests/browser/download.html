@@ -1,0 +1,20 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>图片保存与下载验证</title>
+<style>body{font:20px sans-serif;max-width:800px;margin:48px auto;line-height:1.7}button{font:inherit;padding:10px 20px;margin:8px}img{width:128px;height:128px}code{background:#eee;padding:4px}</style>
+<h1>图片保存与下载验证</h1>
+<p>右键下面的图片，选择“图片另存为”。文件选择框中应显示完整路径，取消应返回网页。</p>
+<img src="../settings/icon.png" alt="用于保存的图片">
+<p>普通下载默认保存到 <code>/Downloads</code>。</p>
+<button onclick="download(new TextEncoder().encode('Chrome 下载验证\n'),'chrome-download.txt','text/plain')">下载文本文件</button>
+<button onclick="download(Uint8Array.from({length:1048576},(_,i)=>i&255),'下载 验证.bin','application/octet-stream')">下载 1 MiB 文件</button>
+<p id="result"></p>
+<script>
+function download(bytes,name,type){
+ const url=URL.createObjectURL(new Blob([bytes],{type}));
+ const link=document.createElement('a');link.href=url;link.download=name;
+ document.body.appendChild(link);link.click();link.remove();
+ setTimeout(()=>URL.revokeObjectURL(url),60000);
+ document.getElementById('result').textContent='已发起 '+name+' 的下载；请在下载列表确认完成，并在文件管理器中检查文件。';
+}
+</script>

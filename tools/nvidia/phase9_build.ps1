@@ -10,6 +10,7 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'app-layout.ps1')
 . (Join-Path $PSScriptRoot 'object-paths.ps1')
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $phase8Root = Join-Path $repoRoot 'build\nvidia\phase8'
@@ -75,8 +76,10 @@ function Copy-FileIfChanged([string]$Source, [string]$Target) {
 }
 
 function Copy-DirectoryContents([string]$SourceRoot, [string]$TargetRoot) {
+    Assert-AppGuestLayout $TargetRoot
     foreach ($source in @(Get-ChildItem -LiteralPath $SourceRoot -Recurse -File)) {
         $relative = $source.FullName.Substring($SourceRoot.Length).TrimStart('\', '/')
+        if (Test-LegacyGuestPath $relative) { continue }
         Copy-FileIfChanged $source.FullName (Join-Path $TargetRoot $relative)
     }
 }
@@ -219,8 +222,8 @@ Invoke-CompileIfChanged (Join-Path $repoRoot 'tools\nvidia\phase9_userspace_load
 $hostLinkArgs = @(
     '-nostdlib', '-nodefaultlibs', '-nostartfiles',
     '-Wl,--build-id=none',
-    '-Wl,-dynamic-linker,/lib64/ld-linux-x86-64.so.2',
-    '-Wl,-rpath,/compat/linux/lib/x86_64-linux-gnu:/compat/linux/lib',
+    '-Wl,-dynamic-linker,/usr/apps/p9-userspace-load/lib/ld-linux-x86-64.so.2',
+    '-Wl,-rpath,/usr/apps/p9-userspace-load/lib',
     '-Wl,--disable-new-dtags',
     '-Wl,--allow-shlib-undefined',
     ('-Wl,-rpath-link,{0}' -f $hostRunLib.Replace('\', '/')),
@@ -262,8 +265,8 @@ else { Write-Output 'P9_HOST_LINK=INCREMENTAL_SKIP' }
 if ($LASTEXITCODE -ne 0) { throw "P9 userspace import failed ($LASTEXITCODE)." }
 & powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
     (Join-Path $repoRoot 'tools\nvidia\check_userspace_59584.ps1') `
-    -Root build/nvidia/phase9/compat/linux `
-    -Manifest build/nvidia/phase9/compat/userspace-595.84.json `
+    -Root build/nvidia/userspace `
+    -Manifest build/nvidia/userspace-595.84.json `
     -PackageRoot $PackageRoot
 if ($LASTEXITCODE -ne 0) { throw "P9 userspace static check failed ($LASTEXITCODE)." }
 
@@ -276,7 +279,7 @@ Copy-FileIfChanged $phase9Kernel (Join-Path $phase9Esp 'EFI\OS\kernel.elf')
     (Join-Path $repoRoot 'tools\nvidia\phase9_stage.ps1') `
     -Build build/nvidia/phase9 -GlibcRoot $GlibcRoot `
     -TestBinary build/nvidia/phase9/phase9-userspace/p9-userspace-load `
-    -UserspaceRoot build/nvidia/phase9/compat/linux
+    -UserspaceRoot build/nvidia/userspace
 if ($LASTEXITCODE -ne 0) { throw "P9 staging failed ($LASTEXITCODE)." }
 
 Write-Output ('P9_KERNEL={0}' -f $phase9Kernel)

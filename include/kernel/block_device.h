@@ -3,9 +3,8 @@
 #include <uefi.h>
 
 /*
- * The block-device registry is a kernel storage interface, not a USB
- * compatibility detail. Keep its ABI in the canonical kernel header so
- * NVMe, USB MSC, page-cache, and filesystem code share one declaration.
+ * 块设备注册表属于内核存储接口，不是 USB 兼容性细节。将其 ABI 保存在规范内核头文件中，
+ * 使 NVMe、USB MSC、页缓存和文件系统代码共用同一声明。
  */
 #define OS_BLOCK_DEVICE_COUNT 32U
 #define OS_BLOCK_NAME_LENGTH  32U

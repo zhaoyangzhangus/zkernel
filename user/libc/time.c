@@ -46,8 +46,7 @@ static bool checked_mul_i64(int64_t left, int64_t right, int64_t *result) {
     return true;
 }
 
-/* Howard Hinnant's civil-calendar conversion, kept integer-only so the
- * runtime does not need a floating-point helper library. */
+/* Howard Hinnant 的民用日历转换算法。仅使用整数运算，避免运行时依赖浮点辅助库。 */
 static int64_t days_from_civil(int64_t year, unsigned int month,
                                unsigned int day) {
     int64_t adjusted_year = year - (month <= 2U ? 1 : 0);
@@ -112,7 +111,7 @@ struct tm *gmtime_r(const time_t *value, struct tm *result) {
 }
 
 struct tm *localtime_r(const time_t *value, struct tm *result) {
-    /* System currently has no timezone database; local time is UTC. */
+    /* System 当前没有时区数据库；本地时间使用 UTC。 */
     return gmtime_r(value, result);
 }
 
@@ -161,7 +160,7 @@ int timespec_get(struct timespec *value, int base) {
 }
 
 void tzset(void) {
-    /* System currently exposes UTC only and has no timezone database. */
+    /* System 目前仅提供 UTC，且没有时区数据库。 */
 }
 
 __attribute__((target("sse"))) double difftime(time_t end, time_t start) {
@@ -181,8 +180,7 @@ time_t mktime(struct tm *value) {
         return (time_t)-1;
     }
     year = (int64_t)value->tm_year + 1900LL;
-    /* Normalize month first so negative and out-of-range months carry into
-     * the year before the civil-calendar conversion. */
+    /* 先规范化月份，使负数或超范围月份在民用日历转换前进位到年份。 */
     month_index = floor_divide((int64_t)value->tm_mon, 12LL);
     if (!checked_add_i64(year, month_index, &year)) {
         errno = EOVERFLOW;

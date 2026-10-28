@@ -1,5 +1,6 @@
 """Actual allocation paths: one payload fill, unchanged poison/slack/guards."""
 from pathlib import Path
+import resource
 import subprocess
 import tempfile
 
@@ -10,7 +11,7 @@ fill = source[source.index('static void bytes_fill('):source.index('static void 
 fill = fill.replace('__builtin_memset(memory, value, size)', 'tracked_fill(memory, value, size)')
 headers = source[source.index('static uint16_t class_index_for_size('):source.index('static kmem_magazine_t *current_magazine(')]
 guards = source[source.index('static uint64_t allocation_cookie('):source.index('static slab_page_t *create_slab(')]
-allocate = source[source.index('static void *activate_payload('):source.index('static void kfree_internal(')]
+allocate = source[source.index('static void *activate_payload('):source.index('bool kmalloc_try_grow(')]
 take = source[source.index('static void *cache_take_payload_locked('):source.index('static bool magazine_refill(')]
 code = r'''
 #include <assert.h>
@@ -30,7 +31,7 @@ code = r'''
 typedef struct { unsigned owner; } page_t;
 typedef struct { atomic_uint state; } spinlock_t;
 ''' + layout + r'''
-static unsigned preempt, locked, errors, mode, hits;
+static unsigned preempt, locked, errors, mode, hits, caller_preempt;
 static unsigned allocation_attempts,last_order;
 static bool fail_page, fail_direct, available;
 static uint8_t slot[4096] __attribute__((aligned(64)));
@@ -40,6 +41,7 @@ static slab_page_t slab;
 static uintptr_t tracked_start;
 static size_t tracked_size, filled;
 static void tracked_fill(void *p,uint8_t v,size_t n) {
+ if(n>2048)assert(preempt==caller_preempt && !locked);
  uintptr_t begin=(uintptr_t)p,end=begin+n;
  uintptr_t low=begin>tracked_start?begin:tracked_start;
  uintptr_t high=end<tracked_start+tracked_size?end:tracked_start+tracked_size;
@@ -62,6 +64,12 @@ static bool magazine_refill(uint16_t i,kmem_magazine_t *m) {
 static void record_fastpath_hit(uint32_t cpu) { assert(cpu==0);++hits; }
 static void cache_lock(kmem_cache_t *c) { (void)c;assert(preempt && !locked);++locked; }
 static void cache_unlock(kmem_cache_t *c) { (void)c;assert(locked==1);--locked; }
+static bool spinlock_try_lock(spinlock_t *lock) {
+ unsigned expected=0;return atomic_compare_exchange_strong(&lock->state,&expected,1U);
+}
+static void spinlock_unlock(spinlock_t *lock) {
+ assert(atomic_load(&lock->state)==1U);atomic_store(&lock->state,0U);
+}
 static slab_page_t *cache_partial_head(kmem_cache_t *c) { return c->slabs; }
 static slab_page_t *create_slab(uint16_t i) { (void)i;return available?&slab:0; }
 static void cache_partial_insert(kmem_cache_t *c,slab_page_t *s) { c->slabs=s; }
@@ -69,7 +77,7 @@ static void cache_partial_remove_head(kmem_cache_t *c,slab_page_t *s) {
  assert(c->slabs==s);c->slabs=0;
 }
 static page_t *page_alloc(unsigned order,unsigned flags) {
- assert(preempt && !flags);++allocation_attempts;last_order=order;if(fail_page)return 0;
+ assert(preempt==caller_preempt && !locked && !flags);++allocation_attempts;last_order=order;if(fail_page)return 0;
  assert(((size_t)PAGE_SIZE<<order)<=sizeof(arena));return &page;
 }
 static void page_free(page_t *p) { assert(p==&page); }
@@ -124,7 +132,9 @@ int main(void) {
  /* Free poison corruption must still be detected before zeroing it away. */
  mode=0;prepare(0,17);slot[KMEM_PAYLOAD_OFFSET+9]^=1;
  unsigned before=errors;assert(kzalloc(17,0));assert(errors==before+1);
+ for(caller_preempt=0;caller_preempt<4;++caller_preempt)
  for(unsigned zero=0;zero<2;++zero) {
+  preempt=caller_preempt;
   const size_t sizes[]={2048,4096,5000,65536,512*1024};
   for(unsigned i=0;i<sizeof(sizes)/sizeof(sizes[0]);++i) {
    prepare(0,1);tracked_start=(uintptr_t)arena+KMEM_PAYLOAD_OFFSET;
@@ -132,9 +142,10 @@ int main(void) {
    uint8_t *p=zero?kzalloc(sizes[i],0x42):kmalloc(sizes[i],0x42);
    assert(p==(void*)tracked_start && filled==sizes[i]);
    for(size_t j=0;j<sizes[i];++j)assert(p[j]==(zero?0:KMEM_POISON_ALLOC));
-   assert(header_redzones_valid(payload_header(p),p) && !preempt && !locked);
+   assert(header_redzones_valid(payload_header(p),p) && preempt==caller_preempt && !locked);
   }
  }
+ caller_preempt=preempt=0;
  prepare(0,1);mode=2;available=false;assert(!kzalloc(1,0) && !preempt && !locked);
  fail_page=true;assert(!kzalloc(5000,0) && !preempt);fail_page=false;
  fail_direct=true;assert(!kzalloc(5000,0) && !preempt);fail_direct=false;
@@ -184,3 +195,16 @@ with tempfile.TemporaryDirectory(prefix='liteos-kzalloc-init-') as directory:
                     '-fsanitize=address,undefined','-fno-pie','-no-pie',
                     '-x','c','-','-o',binary],input=code,text=True,check=True)
     subprocess.run([binary],check=True)
+    old = ('    sched_preempt_enable();\n'
+           '    return large ? allocate_large(size, flags, zero) : result;')
+    new = ('    if (large) result = allocate_large(size, flags, zero);\n'
+           '    sched_preempt_enable();\n    return result;')
+    negative=code.replace(old,new)
+    assert negative!=code
+    subprocess.run(['cc','-std=c11','-Wall','-Wextra','-Werror','-Wno-unused-variable',
+                    '-fsanitize=address,undefined','-fno-pie','-no-pie',
+                    '-x','c','-','-o',binary],input=negative,text=True,check=True)
+    result=subprocess.run([binary],capture_output=True,text=True,
+                          preexec_fn=lambda: resource.setrlimit(resource.RLIMIT_CORE,(0,0)))
+    assert result.returncode!=0 and 'Assertion' in result.stderr
+    print('Negative control rejected: large allocation holds an extra preemption guard')

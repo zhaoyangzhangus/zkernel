@@ -11,10 +11,9 @@ typedef struct os_thread_create {
     uint32_t reserved;
 } os_thread_create_t;
 
-/* Optional fourth THREAD_CREATE argument.  A caller that allocates a private
- * user stack can ask the kernel to reclaim it after the thread has switched
- * away from that stack.  Keeping this descriptor out of os_thread_create_t
- * preserves the original ABI layout for older callers. */
+/* 可选的第四个 THREAD_CREATE 参数。分配私有用户栈的调用方可请求内核在线程
+ * 切离该栈后回收它。此描述符不放入 os_thread_create_t，以保留旧调用方使用的
+ * 原始 ABI 布局。 */
 typedef struct os_thread_stack {
     os_versioned_header_t hdr;
     uint64_t base;
@@ -42,12 +41,15 @@ typedef struct os_process_info {
 #define OS_PROCESS_NAME_MAX 32U
 #define OS_THREAD_NAME_MAX  32U
 
-/* Additive monitor ABI: existing enumeration layouts remain unchanged. */
+/* 供监视器使用的增量 ABI：现有枚举结构布局保持不变。 */
 #define OS_TASK_PROTECTED (1U << 0)
+#define OS_TASK_KERNEL    (1U << 1)
+/* 只读聚合项，不是进程，也不是有效的终止目标。 */
+#define OS_KERNEL_WORKERS_PID UINT64_MAX
 typedef struct os_task_info {
     os_versioned_header_t hdr;
     uint64_t pid;
-    uint64_t tid; /* Zero queries the complete process. */
+    uint64_t tid; /* 零表示查询整个进程。 */
     uint64_t create_time_ns;
     uint64_t runtime_ns;
     uint64_t rss_bytes;
@@ -61,7 +63,7 @@ typedef struct os_task_info {
 typedef struct os_process_terminate {
     os_versioned_header_t hdr;
     uint64_t pid;
-    uint64_t create_time_ns; /* Match the confirmed snapshot, not a stale row. */
+    uint64_t create_time_ns; /* 必须匹配已确认的快照，不能使用过期条目。 */
 } os_process_terminate_t;
 
 typedef struct os_thread_terminate {
@@ -71,7 +73,7 @@ typedef struct os_thread_terminate {
     uint64_t create_time_ns;
 } os_thread_terminate_t;
 
-/* Stable read-only process snapshot used by system monitors. */
+/* 系统监视器使用的稳定只读进程快照。 */
 typedef struct os_process_snapshot {
     os_versioned_header_t hdr;
     uint64_t pid;
@@ -106,9 +108,8 @@ typedef struct os_thread_enumerate {
     os_thread_snapshot_t info;
 } os_thread_enumerate_t;
 
-/* PROCESS_EXEC passes the live libc descriptor table through the new image's
- * auxiliary vector.  Kernel handles remain the ownership boundary; these
- * records only preserve the user-space fd mapping and its local metadata. */
+/* PROCESS_EXEC 通过新映像的辅助向量传递当前 libc 描述符表。内核句柄仍是所有权
+ * 边界；这些记录仅保留用户态 fd 映射及其本地元数据。 */
 #define OS_EXEC_FD_LIMIT      256U
 #define OS_EXEC_FD_PATH_MAX   256U
 #define OS_EXEC_FD_SOCKET     (1U << 0)

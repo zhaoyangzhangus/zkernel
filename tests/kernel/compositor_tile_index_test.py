@@ -12,6 +12,8 @@ while depth:
     depth += (source[end] == '{') - (source[end] == '}')
     end += 1
 function = source[start:end]
+release_start = source.index('static void compositor_release_window_snapshot(')
+release = source[release_start:source.index('\n}', release_start) + 2]
 harness = r'''
 #include <assert.h>
 #include <stdbool.h>
@@ -19,15 +21,25 @@ harness = r'''
 #include <string.h>
 #define WINDOW_DAMAGE_MAX_SNAPSHOT_RECTS 16
 typedef struct { unsigned x0,y0,x1,y1; } Rect;
-typedef struct { void *reference,*section; unsigned identifier; } compositor_window_view_t;
+typedef struct { void *reference,*section; unsigned identifier; void *controls,*caption; } compositor_window_view_t;
+static unsigned caption_mask;
+static void caption_text_put(void *caption){
+ unsigned id=(unsigned)(uintptr_t)caption;assert(id>=1&&id<=4&&!(caption_mask&(1U<<id)));
+ caption_mask|=1U<<id;
+}
 typedef struct {
- bool damage_full_captured,damage_tiles_captured,drag_blit_valid;
+ bool damage_full_captured,damage_tiles_captured,drag_blit_valid,animations;
  unsigned damage_count,window_count,dragging_identifier;
  Rect damage_rects[16]; compositor_window_view_t windows[4];
 } compositor_snapshot_t;
 static compositor_snapshot_t g_compositor_snapshot;
 static struct { unsigned display_width,display_height; } g_window_server={1920,1080};
 static unsigned floor_index,removed_id,expected_count,expected_ids[4],metadata_ids[4],builds,puts,releases;
+static unsigned document_puts,document_mask;
+static void window_control_document_put(void *document){
+ unsigned id=(unsigned)(uintptr_t)document;assert(id>=1&&id<=4&&!(document_mask&(1U<<id)));
+ document_mask|=1U<<id;++document_puts;
+}
 static void window_surface_snapshot_release(compositor_window_view_t *v){assert(v->reference);++releases;}
 static unsigned compositor_snapshot_tiles_to_rects(compositor_snapshot_t *s,unsigned n){
  (void)n;s->damage_rects[0]=(Rect){0,0,64,64};return 1;
@@ -45,31 +57,47 @@ static bool compositor_tile_metadata_build(compositor_snapshot_t *s){
  }
  return true;
 }
-static void compositor_build_occlusion_floor_cache(compositor_snapshot_t *s){
- assert(builds==1);for(unsigned i=0;i<s->window_count;i++)assert(metadata_ids[i]==s->windows[i].identifier);
-}
 static bool compositor_build_render_plan(compositor_snapshot_t *s){
  assert(builds==1);for(unsigned i=0;i<s->window_count;i++)assert(metadata_ids[i]==s->windows[i].identifier);
  return true;
 }
-''' + function + r'''
-static void run(unsigned floor,unsigned remove,unsigned drag){
+''' + release + '\n' + function + r'''
+static void run(unsigned floor,unsigned remove,unsigned drag,bool animated){
  memset(&g_compositor_snapshot,0,sizeof(g_compositor_snapshot));
- builds=puts=releases=0;floor_index=floor;removed_id=remove;expected_count=0;
+ builds=puts=releases=document_puts=document_mask=caption_mask=0;floor_index=floor;removed_id=remove;expected_count=0;
  g_compositor_snapshot.window_count=4;g_compositor_snapshot.damage_count=1;
  g_compositor_snapshot.dragging_identifier=drag;
+ g_compositor_snapshot.animations=animated;
  g_compositor_snapshot.damage_rects[0]=(Rect){32,32,64,64};
  for(unsigned i=0;i<4;i++){
   unsigned id=10+i;
-  g_compositor_snapshot.windows[i]=(compositor_window_view_t){(void*)(uintptr_t)(i+1),(void*)(uintptr_t)(i+1),id};
-  if(i>=floor&&(id!=remove||id==drag))expected_ids[expected_count++]=id;
+  g_compositor_snapshot.windows[i]=(compositor_window_view_t){.reference=(void*)(uintptr_t)(i+1),
+   .section=(void*)(uintptr_t)(i+1),.identifier=id,.controls=(void*)(uintptr_t)(i+1),
+   .caption=(void*)(uintptr_t)(i+1)};
+  if((animated||i>=floor)&&(id!=remove||id==drag))expected_ids[expected_count++]=id;
  }
  compositor_snapshot_plan();assert(builds==1&&puts==4-expected_count&&releases==puts);
+ assert(document_puts==puts&&caption_mask==document_mask);
+ for(unsigned i=0;i<expected_count;++i){
+  compositor_window_view_t *view=g_compositor_snapshot.windows+i;
+  assert(view->controls==(void*)(uintptr_t)(view->identifier-9));
+  assert(view->caption==view->controls);
+  compositor_release_window_snapshot(view);
+ }
+ assert(document_puts==4&&document_mask==30&&caption_mask==30&&puts==4&&releases==4);
+ /* 已压缩的源槽位和已释放的目标再次清理，不能重复释放任何资源。 */
+ for(unsigned i=0;i<4;++i){
+  compositor_release_window_snapshot(&g_compositor_snapshot.windows[i]);
+  assert(!g_compositor_snapshot.windows[i].reference&&!g_compositor_snapshot.windows[i].controls);
+  assert(!g_compositor_snapshot.windows[i].caption&&!g_compositor_snapshot.windows[i].section);
+ }
+ assert(document_puts==4&&puts==4&&releases==4&&caption_mask==30);
 }
 int main(void){
- run(1,0,13); /* Lower covered window removed; shell/cube indices shift. */
- run(0,11,13); /* Sparse intersection filter, not just a prefix removal. */
- run(0,0,0);run(3,0,0);run(0,13,13);return 0;
+ run(1,0,13,false); /* Lower covered window removed; shell/cube indices shift. */
+ run(0,11,13,false); /* Sparse intersection filter, not just a prefix removal. */
+ run(0,0,0,false);run(3,0,0,false);run(0,13,13,false);
+ run(3,0,0,true);run(3,11,0,true);return 0;
 }
 '''
 with tempfile.TemporaryDirectory(prefix='liteos-tile-index-') as directory:

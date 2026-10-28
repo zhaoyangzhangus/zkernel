@@ -8,9 +8,9 @@ import tempfile
 root = Path(__file__).resolve().parents[2]
 source = (root/'kernel/fs/vfs/core.c').read_text()
 header = (root/'include/uapi/file.h').read_text()
-layout = header[header.index('enum os_file_type {'):header.index('/* Enumerate one direct child')]
+layout = header[header.index('enum os_file_type {'):header.index('typedef struct os_file_enumerate {')]
 append = source[source.index('static size_t vfs_file_name_length('):source.index('typedef struct vfs_directory_collection')]
-helpers = source[source.index('static const char *vfs_mount_child_name('):source.index('/* The current VFS stores files')]
+helpers = source[source.index('static const char *vfs_mount_child_name('):source.index('kstatus_t vfs_enumerate_kernel_batch(')]
 mount_limit = int(re.search(r'#define VFS_FAT32_MOUNT_LIMIT (\d+)U',
                            (root/'kernel/fs/vfs/internal.h').read_text()).group(1))
 program = r'''

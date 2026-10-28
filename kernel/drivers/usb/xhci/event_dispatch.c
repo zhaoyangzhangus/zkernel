@@ -1,7 +1,6 @@
 #include "internal.h"
 
-/* REFACTOR_P8_XHCI_EVENT_DISPATCH_OWNER: Event TRB classification and
- * protocol handoff are isolated from controller lifecycle/publication. */
+/* REFACTOR_P8_XHCI_EVENT_DISPATCH_OWNER：Event TRB 分类和协议移交与控制器生命周期/发布流程分离。 */
 
 #define XHCI_PORT_STATUS_CHANGE_TYPE 34U
 #define XHCI_PORT_REGISTER_BASE      0x400U
@@ -56,7 +55,7 @@ bool xhci_process_event_ring(xhci_state_t *state,
         }
     }
 
-    /* Hub status is reconciled only as a consequence of an xHCI event. */
+    /* 仅在收到 xHCI 事件后协调 Hub 状态。 */
     if (topology_event && xhci_topology_hub_configured() &&
         xhci_hub_runtime_reconcile(state, ops->hub_runtime)) {
         consumed = true;
@@ -71,7 +70,7 @@ bool xhci_drain_startup_events(xhci_state_t *state,
                                const xhci_event_dispatch_ops_t *ops) {
     if (state == 0 || !state->initialized || ops == 0) return false;
 
-    /* Startup topology is bounded; a clean Hub status TD remains NAKed. */
+    /* 启动拓扑处理有界；无变化的 Hub 状态 TD 会继续保持 NAK。 */
     for (uint32_t pass = 0U; pass < 32U; ++pass) {
         if (!xhci_event_pending(state)) return true;
         (void)xhci_process_event_ring(state, XHCI_RING_TRB_COUNT, ops);

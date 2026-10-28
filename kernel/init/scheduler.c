@@ -28,6 +28,7 @@ static BOOLEAN scheduler_fail_at(const kernel_init_scheduler_hooks_t *hooks,
 #define scheduler_fail(hooks, message) \
     scheduler_fail_at((hooks), (message), __FILE__, __LINE__)
 
+#if OS_REALTEST || OS_DEBUG_SERIAL
 #define SCHED_BENCH_SAMPLES 64U
 #define SCHED_BENCH_BATCH 256U
 
@@ -90,7 +91,7 @@ static bool scheduler_benchmark_queue_class(uint8_t class_id,
         threads[index].current_cpu = (uint16_t)cpu_id;
     }
 
-    /* Warm the allocator, branch predictors, and queue metadata first. */
+    /* 先预热分配器、分支预测器和队列元数据。 */
     for (uint32_t index = 0U; index < SCHED_BENCH_BATCH; ++index) {
         if (!sched_enqueue_bootstrap(&threads[index])) return false;
     }
@@ -304,6 +305,8 @@ static bool scheduler_benchmark_local_wake(void) {
     return sched_runnable_count() == 0U;
 }
 
+#endif
+
 static BOOLEAN canonical_scheduler_self_test(void) {
     static thread_t fair_threads[300];
     thread_t thread;
@@ -340,7 +343,7 @@ static BOOLEAN canonical_scheduler_self_test(void) {
     kernel_perf_emit_scope("scheduler.wake_to_running", benchmark_start);
     if (atomic_load_explicit(&thread.state, memory_order_relaxed) != THREAD_RUNNING) return 0;
     realtest_checkpoint("SCHED_CORE_STAGE_WAKE_OK");
-    /* Do not let the bootstrap fixture affect the fair-tree count below. */
+    /* 不要让启动夹具影响下方的公平调度树计数。 */
     sched_block_current();
     if (atomic_load_explicit(&thread.state, memory_order_relaxed) != THREAD_BLOCKED) return 0;
     realtest_checkpoint("SCHED_CORE_STAGE_REBLOCK_OK");
@@ -418,7 +421,7 @@ static BOOLEAN canonical_object_handle_self_test(void) {
         handle_close(&table, handle) != K_OK ||
         handle_lookup(&table, handle, 0U, &lookup) != K_ENOENT) return 0;
     object_put(lookup);
-    /* Exercise close-on-exec across a chunk boundary in the real kernel. */
+    /* 在真实内核中测试跨分块边界的 close-on-exec。 */
     handle_t exec_handles[300];
     for (uint32_t index = 0U; index < 300U; ++index) {
         if (handle_create_with_flags(&table, &object, 0x3U,
@@ -485,8 +488,7 @@ static BOOLEAN canonical_vm_self_test(void) {
     if (benchmark_status != K_OK ||
         x86_translate_page(parent->root_table, address, &parent_physical, 0) != K_OK) goto cleanup;
 
-    /* The page is now resident; this isolates the VMA tree lookup from the
-     * first-fault allocation path. */
+    /* 页面现在已常驻；此测试将 VMA 树查找与首次缺页分配路径隔离。 */
     benchmark_start = telemetry_timestamp();
     benchmark_status = vm_handle_fault(
         parent, &(vm_fault_info_t){address, VM_PROT_READ, 0});
@@ -553,8 +555,7 @@ static BOOLEAN canonical_vm_self_test(void) {
     shared_bytes[0] = 0xC3U;
     if (shared_child_bytes[0] != 0xC3U) goto cleanup;
 
-    /* Regression: Chrome/PartitionAlloc reserves terabyte-scale sparse
-     * regions and changes their protection before faulting any pages in. */
+    /* 回归测试：Chrome/PartitionAlloc 会预留 TB 级稀疏区域，并在页面缺页前修改其保护属性。 */
     if (vm_space_create(&sparse_space) != K_OK ||
         vm_object_create_anon(sparse_size, &sparse_object) != K_OK ||
         vm_map_object(sparse_space, sparse_object, &sparse_address,
@@ -570,8 +571,7 @@ static BOOLEAN canonical_vm_self_test(void) {
         goto cleanup;
     }
 
-    /* Randomized sparse page access exercises anon-page index insertion and
-     * hits through the shared backing API. */
+    /* 随机稀疏页面访问通过共享后备 API 测试匿名页索引插入和命中。 */
     if (vm_object_create_shared(PAGE_SIZE * index_test_pages,
                                 &index_object) != K_OK) {
         goto cleanup;
@@ -674,6 +674,8 @@ BOOLEAN kernel_init_scheduler(const OS_BOOT_INFO *boot_info,
     realtest_checkpoint("SCHED_CORE_TEST_OK");
     realtest_checkpoint("SCHED_CORE_BENCH_BEGIN");
     kernel_perf_emit_scope("scheduler.core", benchmark_start);
+#if OS_REALTEST || OS_DEBUG_SERIAL
+    /* 合成计时循环属于诊断启动，不应进入桌面关键路径。功能性调度器测试在每个构建中保留。 */
     if (!scheduler_benchmark_queue_paths()) {
         return scheduler_fail(hooks, "OS_SCHED_BENCH_FAIL\r\n");
     }
@@ -684,6 +686,7 @@ BOOLEAN kernel_init_scheduler(const OS_BOOT_INFO *boot_info,
         return scheduler_fail(hooks, "OS_SCHED_WAKE_BENCH_FAIL\r\n");
     }
     hooks->write("OS_SCHED_BENCH_OK\r\n");
+#endif
     realtest_checkpoint("SCHED_CORE_BENCH_OK");
     realtest_checkpoint("SCHED_CORE_REPORT_BEGIN");
     hooks->write("OS_SCHED_CORE_OK\r\n");
@@ -728,7 +731,7 @@ BOOLEAN kernel_init_scheduler(const OS_BOOT_INFO *boot_info,
         return scheduler_fail(hooks, "OS_CONTEXT_SWITCH_TEST_FAIL\r\n");
     }
     hooks->write("OS_CONTEXT_SWITCH_OK\r\n");
-    /* Idle CPUs poll pending wakeups before HLT to close the lost-IPI window. */
+    /* 空闲 CPU 在执行 HLT 前轮询待处理唤醒，以关闭 IPI 丢失窗口。 */
     kernel_debug_stage(OS_DEBUG_PHASE_REFACTOR_4,
                        OS_DEBUG_STEP_PROGRESS, 6U);
     kernel_debug_stage(OS_DEBUG_PHASE_SCHEDULER,
@@ -768,7 +771,7 @@ BOOLEAN kernel_init_scheduler(const OS_BOOT_INFO *boot_info,
                        OS_DEBUG_STEP_PROGRESS, 4U);
     kernel_debug_stage(OS_DEBUG_PHASE_REFACTOR_6,
                        OS_DEBUG_STEP_PROGRESS, 5U);
-    /* Page-fault entry now hands CR2/error data to the MM policy owner. */
+    /* 缺页入口现在将 CR2/错误信息交给 MM 策略所有者。 */
     kernel_debug_stage(OS_DEBUG_PHASE_REFACTOR_6,
                        OS_DEBUG_STEP_PROGRESS, 6U);
     kernel_debug_stage(OS_DEBUG_PHASE_REFACTOR_2,

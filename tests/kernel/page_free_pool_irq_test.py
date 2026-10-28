@@ -15,7 +15,9 @@ program = '#include "' + str(root / 'kernel/mm/phys/internal.h') + '"\n' + r'''
 static page_t page;
 static bool irq_enabled,initial_irq,pooled;
 static unsigned preempt_depth,initial_depth,cpu,order_now;
-static unsigned saves,restores,pool_calls,buddy_calls,unprotected;
+static unsigned saves,restores,pool_calls,buddy_calls,unprotected,pool_held;
+void pool_cpu_lock(uint32_t c){assert(c==cpu&&!pool_held&&preempt_depth==initial_depth+1);pool_held=1;}
+void pool_cpu_unlock(uint32_t c){assert(c==cpu&&pool_held);pool_held=0;}
 static uint64_t test_irq_save(void) {
     assert(preempt_depth==initial_depth);
     uint64_t flags=irq_enabled?1ULL<<9:0;
@@ -34,13 +36,13 @@ static uint32_t test_current_cpu(void) {
 }
 bool pool_free_small(page_t *head,uint8_t order,uint32_t owner) {
     assert(head==&page&&order==order_now&&owner==cpu);
-    assert(preempt_depth==initial_depth+1);++pool_calls;
+    assert(preempt_depth==initial_depth+1&&pool_held);++pool_calls;
     if(irq_enabled)++unprotected;
     return pooled;
 }
 void free_legacy_slow(page_t *head,uint8_t order) {
     assert(head==&page&&order==order_now);
-    assert(irq_enabled==initial_irq&&preempt_depth==initial_depth);
+    assert(irq_enabled==initial_irq&&preempt_depth==initial_depth&&!pool_held);
     ++buddy_calls;
 }
 #define page_pool_irq_save test_irq_save
@@ -73,7 +75,8 @@ int main(void) {
         assert(irq_enabled==initial_irq&&preempt_depth==initial_depth);
         ++cases;
     }
-    assert(old_unprotected>0);
+    /* All nonzero orders now bypass CPU pools and return directly to Buddy. */
+    assert(old_unprotected==0&&PAGE_POOL_SMALL_MAX_ORDER==0);
     printf("Nonzero page free: %u actual orders/CPUs/nested-preempt/IRQ/fallback cases; exact old pool/Buddy routing, every state restored; %u old unmasked pool calls rejected\n",cases,old_unprotected);
 }
 '''

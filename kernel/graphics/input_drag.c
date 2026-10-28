@@ -1,9 +1,8 @@
 #include "internal.h"
 
-/* REFACTOR_P7A_INPUT_DRAG_OWNER: retained drag and resize geometry policy. */
+/* REFACTOR_P7A_INPUT_DRAG_OWNER：保留式拖动和缩放几何策略。 */
 
-/* Drag capture is input state. All mutations stay here so a cancellation
- * cannot leave an identifier, resize edge, or retained-copy flag behind. */
+/* 拖动捕获属于输入状态。所有修改都集中在此处，使取消操作不会遗留标识符、缩放边缘或保留复制标志。 */
 void window_input_reset_drag_locked(void) {
     g_window_server.dragging_identifier = 0U;
     g_window_server.drag_offset_x = 0;
@@ -61,15 +60,13 @@ static __attribute__((unused)) bool window_drag_reuse_available_locked(
            g_window_server.composite_framebuffer != 0 &&
            g_window_server.composite_framebuffer !=
                g_window_server.framebuffer &&
-           g_window_server.count != 0U &&
-           g_window_server.windows[g_window_server.count - 1U] == window;
+           g_window_server.scene.count != 0U &&
+           g_window_server.scene.children[g_window_server.scene.count - 1U] == window;
 }
 
 /*
- * Retained dragging is valid only when old_x/old_y still describes the
- * pixels currently stored in composite_framebuffer. More than one HID report
- * can be consumed before a frame is composed, so an intermediate logical
- * position must not be reused as if it had already been presented.
+ * 仅当 old_x/old_y 仍描述 composite_framebuffer 当前保存的像素时，保留内容拖动才有效。
+ * 一帧完成合成前可能消费多份 HID 报告，因此不得将中间逻辑位置误当成已呈现内容再次复用。
  */
 bool window_drag_reuse_safe_locked(
     const window_server_window_t *window,
@@ -244,9 +241,8 @@ bool window_resize_locked(window_server_window_t *window,
 }
 
 /*
- * Apply one accumulated X/Y motion burst to an active Ring0 decoration
- * capture. Only drag/resize is consumed by Ring0; ordinary pointer motion is
- * still routed through the normal per-axis path in input_motion.c.
+ * 将累积的一组 X/Y 移动应用到活动的 Ring0 装饰区捕获。Ring0 仅处理拖动/调整大小；普通
+ * 指针移动仍通过 input_motion.c 中常规的逐轴路径路由。
  */
 bool window_route_drag_motion_batch_locked(
     const window_motion_batch_t *batch) {

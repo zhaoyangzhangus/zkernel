@@ -6,9 +6,9 @@ import tempfile
 root = Path(__file__).resolve().parents[2]
 source = (root/'kernel/graphics/input_router.c').read_text()
 begin = source.index('static bool window_route_relative_pointer_locked(')
-end = source.index('/* Exclusive client capture', begin)
+end = source.index('static window_server_window_t *window_route_pointer_scene_locked(', begin)
 helper = source[begin:end]
-assert source.count('window_route_relative_pointer_locked(event)') == 2
+assert source.count('window_route_relative_pointer_locked(event)') == 1
 program = r'''
 #include <assert.h>
 #include <stdbool.h>

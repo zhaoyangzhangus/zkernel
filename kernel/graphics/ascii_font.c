@@ -1,4 +1,5 @@
 #include <ascii_font.h>
+#include <uapi/font.h>
 
 #include "ascii_font_internal.h"
 
@@ -9,14 +10,13 @@
 #include <kernel/vfs.h>
 
 /*
- * The kernel reads the TrueType file after the root volume is mounted.  It
- * keeps the outline tables resident and rasterizes the requested ASCII face
- * into an A8 cache.  No pre-rendered glyph array is linked into the kernel.
+ * 根卷挂载后，内核读取 TrueType 文件，保留轮廓表常驻，并将请求的 ASCII 字体光栅化到
+ * A8 缓存中。内核不链接预先栅格化的字形数组。
  */
-#define ASCII_FONT_FILE_PATH       "/etc/fonts/default.ttf"
+#define ASCII_FONT_FILE_PATH       OS_FONT_DEFAULT_PATH
 #define ASCII_FONT_MAX_FILE_BYTES  (2U * 1024U * 1024U)
-#define ASCII_FONT_MAX_DIMENSION   64U
-#define ASCII_FONT_MAX_CACHE_BYTES (512U * 1024U)
+#define ASCII_FONT_MAX_DIMENSION   96U
+#define ASCII_FONT_MAX_CACHE_BYTES (1024U * 1024U)
 #define ASCII_FONT_SUPERSAMPLE     4U
 
 static ascii_font_parser_t g_ascii_font_parser;
@@ -27,6 +27,9 @@ static uint8_t *g_ascii_font_user_scaled;
 static uint32_t g_ascii_font_user_width;
 static uint32_t g_ascii_font_user_height;
 static spinlock_t g_ascii_font_user_lock;
+
+/* 系统共享的中文后备字面：标题、正文及菜单统一通过 ui_font_copy_glyph 查询。 */
+static ascii_font_parser_t g_ui_font_parser;
 
 static ascii_font_point_t font_midpoint(ascii_font_point_t left,
                                         ascii_font_point_t right) {
@@ -44,8 +47,7 @@ static void font_test_line(ascii_font_point_t from, ascii_font_point_t to,
     int64_t intersection;
 
     if ((from.y > sample_y) == (to.y > sample_y) || from.y == to.y) return;
-    /* The crossing stays between the endpoint x coordinates, including
-     * integer division's truncation. Only a straddling segment needs it. */
+    /* 即使考虑整数除法截断，交点仍位于两个端点的 x 坐标之间。仅跨过采样点的线段需要计算交点。 */
     if (from.x <= sample_x && to.x <= sample_x) return;
     if (from.x > sample_x && to.x > sample_x) {
         *inside = !*inside;
@@ -61,9 +63,8 @@ static void font_test_quadratic(ascii_font_point_t from,
                                 ascii_font_point_t control,
                                 ascii_font_point_t to, int32_t sample_x,
                                 int32_t sample_y, bool *inside) {
-    /* Every subdivided point stays in the control-point bounds. A ray
-     * cannot cross a curve wholly above/below it or wholly to its left.
-     * Match font_test_line's strict comparisons at boundary samples. */
+    /* 所有细分点都位于控制点边界内。曲线整体位于射线上方/下方或左侧时，射线不会与其相交。
+     * 边界采样点的严格比较规则与 font_test_line 保持一致。 */
     if ((from.y <= sample_y && control.y <= sample_y && to.y <= sample_y) ||
         (from.y > sample_y && control.y > sample_y && to.y > sample_y) ||
         (from.x <= sample_x && control.x <= sample_x && to.x <= sample_x))
@@ -142,26 +143,27 @@ static bool font_outline_contains(const ascii_font_point_t *points,
     return inside;
 }
 
-static bool font_rasterize_glyph(uint16_t glyph, uint8_t *destination,
+static bool font_rasterize_from_parser(const ascii_font_parser_t *parser,
+                                 uint16_t glyph, uint8_t *destination,
                                  uint32_t width, uint32_t height) {
     ascii_font_point_t points[ASCII_FONT_MAX_POINTS];
     uint16_t contour_ends[ASCII_FONT_MAX_CONTOURS];
     uint32_t point_count = 0U;
     uint32_t contour_count = 0U;
-    int32_t em_height = (int32_t)g_ascii_font_parser.ascender -
-                        (int32_t)g_ascii_font_parser.descender;
+    int32_t em_height = (int32_t)parser->ascender -
+                        (int32_t)parser->descender;
     int32_t scale = (int32_t)(((uint64_t)height << 16U) /
                               (uint32_t)em_height);
     int64_t advance = (int64_t)ascii_font_parser_advance_width(
-        &g_ascii_font_parser, glyph) * scale;
+        parser, glyph) * scale;
     int64_t origin_x = ((int64_t)width * 65536 - advance) / 2 +
         (int64_t)ascii_font_parser_left_side_bearing(
-            &g_ascii_font_parser, glyph) * scale;
+            parser, glyph) * scale;
     int64_t baseline = (int64_t)height * 65536 +
-        (int64_t)g_ascii_font_parser.descender * scale;
+        (int64_t)parser->descender * scale;
 
     if (!ascii_font_parser_decode_simple_glyph(
-            &g_ascii_font_parser, glyph, points, contour_ends,
+            parser, glyph, points, contour_ends,
             &point_count, &contour_count)) {
         return false;
     }
@@ -225,6 +227,12 @@ static bool font_rasterize_glyph(uint16_t glyph, uint8_t *destination,
     return true;
 }
 
+static bool font_rasterize_glyph(uint16_t glyph, uint8_t *destination,
+                                 uint32_t width, uint32_t height) {
+    return font_rasterize_from_parser(&g_ascii_font_parser, glyph,
+                                       destination, width, height);
+}
+
 static bool font_build_cache(uint32_t width, uint32_t height,
                              uint8_t **output, size_t *output_size) {
     uint64_t glyph_bytes;
@@ -284,38 +292,15 @@ bool ascii_font_set_size(uint32_t width, uint32_t height) {
 }
 
 bool ascii_font_load(void) {
-    file_t *file = 0;
-    uint8_t *storage = 0;
-    uint64_t file_size;
-    uint64_t bytes_read = 0U;
-    kstatus_t status;
+    void *storage = 0;
+    size_t file_size = 0U;
 
     if (g_ascii_font_parser.file != 0) {
         return ascii_font_set_size(ASCII_FONT_DEFAULT_WIDTH,
                                    ASCII_FONT_DEFAULT_HEIGHT);
     }
-    status = vfs_open_kernel(ASCII_FONT_FILE_PATH, VFS_OPEN_READ, 0U, &file);
-    if (status != K_OK || file == 0 || file->vnode == 0) {
-        if (file != 0) vfs_close(file);
-        return false;
-    }
-    file_size = file->vnode->size;
-    if (file_size < 12U || file_size > ASCII_FONT_MAX_FILE_BYTES ||
-        file_size > SIZE_MAX) {
-        vfs_close(file);
-        return false;
-    }
-    storage = (uint8_t *)kmalloc((size_t)file_size, 0U);
-    if (storage == 0) {
-        vfs_close(file);
-        return false;
-    }
-    status = vfs_read_kernel(file, storage, (size_t)file_size, &bytes_read);
-    vfs_close(file);
-    if (status != K_OK || bytes_read != file_size) {
-        kfree(storage);
-        return false;
-    }
+    if (vfs_load_file_kernel(ASCII_FONT_FILE_PATH, 12U, ASCII_FONT_MAX_FILE_BYTES,
+                             &storage, &file_size) != K_OK) return false;
     if (!ascii_font_parser_init(&g_ascii_font_parser, storage,
                                 (size_t)file_size)) {
         kfree(storage);
@@ -358,6 +343,33 @@ uint32_t ascii_font_width(void) {
 
 uint32_t ascii_font_height(void) {
     return g_ascii_font_height;
+}
+
+bool ui_font_load(void) {
+    if (g_ui_font_parser.file) return true;
+    void *storage=0;size_t size=0;
+    if (vfs_load_file_kernel(OS_FONT_FALLBACK_PATH,12U,8U*1024U*1024U,
+                             &storage,&size)!=K_OK) return false;
+    ascii_font_parser_t parser={0};
+    if (!ascii_font_parser_init(&parser,storage,size)) {kfree(storage);return false;}
+    g_ui_font_parser=parser;
+    return true;
+}
+
+bool ui_font_copy_glyph(uint32_t code, uint32_t width, uint32_t height,
+                        uint8_t *destination, size_t capacity) {
+    if (!destination || !width || !height || width > ASCII_FONT_MAX_DIMENSION ||
+        height > ASCII_FONT_MAX_DIMENSION || capacity < (size_t)width * height ||
+        code > 0x10ffffU || (code >= 0xd800U && code <= 0xdfffU)) return false;
+    /* 默认字体负责拉丁文字和标点，缺失时再查询中文字体。 */
+    const ascii_font_parser_t *parser = &g_ascii_font_parser;
+    uint16_t glyph = parser->file ? ascii_font_parser_glyph_for_code(parser, code) : 0U;
+    if (!glyph) {
+        parser = &g_ui_font_parser;
+        glyph = parser->file ? ascii_font_parser_glyph_for_code(parser, code) : 0U;
+    }
+    if (!glyph) return false;
+    return font_rasterize_from_parser(parser, glyph, destination, width, height);
 }
 
 static void font_user_cache_lock(void) {

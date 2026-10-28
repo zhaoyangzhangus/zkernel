@@ -56,6 +56,10 @@ subprocess.run(['python3', str(root / 'tests/user/vulkan_video_hardware_format_t
                check=True)
 subprocess.run(['python3', str(root / 'tests/user/vulkan_video_decoder_lifecycle_test.py')],
                check=True)
+subprocess.run(['python3', str(root / 'tests/user/vulkan_video_device_sharing_test.py')],
+               check=True)
+subprocess.run(['python3', str(root / 'tests/user/vulkan_video_packet_pool_test.py')],
+               check=True)
 subprocess.run(['python3', str(root / 'tests/user/vulkan_video_frame_layout_test.py')],
                check=True)
 subprocess.run(['python3', str(root / 'tests/user/vulkan_video_queue_selection_test.py')],

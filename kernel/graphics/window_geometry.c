@@ -17,10 +17,11 @@ bool window_caption_button_rect(uint32_t flags, int32_t x, int32_t y,
                                 int32_t *out_x, int32_t *out_y) {
     if (!window_client_decorations(flags) && !window_standard_caption(flags))
         return window_title_button_rect(x, y, width, button, out_x, out_y);
-    if (!window_standard_caption(flags) || width < 96U ||
+    if (!window_standard_caption(flags) || width < 3U*os_window_caption_button_width(flags) ||
         !out_x || !out_y || button < WINDOW_TITLE_BUTTON_MINIMIZE ||
         button > WINDOW_TITLE_BUTTON_CLOSE) return false;
-    int64_t left = (int64_t)x + window_outer_width(width, flags) - (4U - button) * 32U;
+    int64_t left = (int64_t)x + window_outer_width(width, flags) -
+        (4U - button)*os_window_caption_button_width(flags);
     if (left < INT32_MIN || left > INT32_MAX) return false;
     *out_x = (int32_t)left;
     *out_y = y;
@@ -75,7 +76,11 @@ bool window_client_drag_region(uint32_t flags, int32_t window_x,
         return false;
     }
 
-    /* Keep the app's search/menu/path and close controls clickable. */
+    /* 文件管理器的路径栏可编辑，不得把点击路径栏当作拖动窗口。 */
+    if ((flags & OS_WINDOW_DARK_CAPTION) != 0U)
+        return relative_x >= 48 && relative_x < 140;
+
+    /* 保留应用的搜索、菜单、路径及关闭控件点击区域。 */
     if ((relative_x >= 45 && relative_x < 155) ||
         (relative_x >= 300 &&
          relative_x < (int64_t)window_width - 150)) {

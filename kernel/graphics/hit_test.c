@@ -2,8 +2,8 @@
 #include <uapi/chrome_caption.h>
 
 window_server_window_t *window_scene_hit_test_locked(uint32_t x, uint32_t y) {
-    for (uint32_t index = g_window_server.count; index != 0U; --index) {
-        window_server_window_t *window = g_window_server.windows[index - 1U];
+    for (uint32_t index = g_window_server.scene.count; index != 0U; --index) {
+        window_server_window_t *window = g_window_server.scene.children[index - 1U];
         int64_t relative_x;
         int64_t relative_y;
         uint32_t outer_width;

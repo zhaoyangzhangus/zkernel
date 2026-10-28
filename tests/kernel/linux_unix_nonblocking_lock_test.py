@@ -60,6 +60,15 @@ static int pipe_write(void *end, const void *data, uint64_t size,
                       uint64_t timeout, uint64_t *bytes) {
     return pipe_read(end, (void*)data, size, timeout, bytes);
 }
+static unsigned linux_unix_channel_pipe_limit(void *context,unsigned n) {
+    (void)context;return n;
+}
+static int pipe_read_limited(void *end,void *data,uint64_t size,uint64_t timeout,
+                            uint64_t *bytes,unsigned (*limit)(void*,unsigned),
+                            void *context) {
+    assert(limit==linux_unix_channel_pipe_limit && context);
+    return pipe_read(end,data,size,timeout,bytes);
+}
 static int64_t linux_copy_status(kstatus_t status) { return status; }
 ''' + body('linux_socket_timeout') + '\n' + body('linux_pipe_status') + '\n'
 names = ('linux_sendmsg', 'linux_recvmsg', 'linux_unix_sendto',
@@ -68,7 +77,8 @@ for index, name in enumerate(names):
     text = body(name)
     mutex_call = call(text, 'kmutex_lock(&channel->')
     suffix = text[text.index(mutex_call) + len(mutex_call):]
-    pipe_call = call(suffix, 'pipe_write(' if index in (0, 2, 5) else 'pipe_read(')
+    pipe_call = call(suffix, 'pipe_write(' if index in (0, 2, 5) else
+                     'pipe_read_limited(' if index == 1 else 'pipe_read(')
     entry_decl = ('linux_fd_entry_t *entry = &value;' if index in (2, 3)
                   else 'linux_fd_entry_t entry = value;')
     program += f'''

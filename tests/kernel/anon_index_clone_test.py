@@ -1,6 +1,7 @@
 """Run production anonymous-index clone against the real red-black tree code."""
 from pathlib import Path
 import argparse
+import resource
 import subprocess
 import tempfile
 
@@ -36,11 +37,15 @@ typedef struct {
     unsigned lock; anon_page_node_t *pages; rb_root_t page_index;
 } anon_store_t;
 typedef struct {
+    unsigned flags;
     uint64_t size; struct { struct { void *anon_root; } anon; } u;
     atomic_uint_fast64_t populated_pages;
 } vm_object_t;
+#define VM_OBJECT_FLAG_MAP_OWNED 2U
 static long fail_at=-1;
+static bool persistent_failure=true;
 static unsigned attempts, live_nodes, held, comparisons;
+static unsigned locked_attempts;
 static unsigned count_adds,count_stores;
 static inline uint64_t count_add(atomic_uint_fast64_t *value,uint64_t count,memory_order order) {
     ++count_adds;return atomic_fetch_add_explicit(value,count,order);
@@ -50,10 +55,12 @@ static inline void count_store(atomic_uint_fast64_t *value,uint64_t count,memory
 }
 static void *kmalloc(size_t n, unsigned flags) {
     (void)flags;
-    if ((long)attempts++ == fail_at) return 0;
+    locked_attempts += held != 0;
+    long attempt=(long)attempts++;
+    if (fail_at>=0 && (persistent_failure?attempt>=fail_at:attempt==fail_at)) return 0;
     void *p=malloc(n); assert(p); ++live_nodes; return p;
 }
-static void kfree(void *p) { assert(p && live_nodes); --live_nodes; free(p); }
+static void kfree(void *p) { assert(p && live_nodes && !held); --live_nodes; free(p); }
 static void vm_store_lock(unsigned *lock) { assert(!*lock && !held); *lock=1; ++held; }
 static void vm_store_unlock(unsigned *lock) { assert(*lock && held==1); *lock=0; --held; }
 static kstatus_t vm_object_create_anon(size_t size, vm_object_t **out) {
@@ -119,8 +126,14 @@ int main(void) {
     vm_object_t *source=0,*copy=0;
     assert(vm_object_create_anon(1ULL<<46,&source)==K_OK);
     assert(vm_object_clone_anon(source,&copy)==K_OK && !held && !live_nodes);
+    assert(!(copy->flags & VM_OBJECT_FLAG_MAP_OWNED));
     assert(count_stores==1 && !count_adds);
     vm_object_put(copy);
+    /* An emptied store can retain an older nonzero sizing sample. */
+    atomic_store(&source->populated_pages,17);fail_at=0;attempts=0;
+    assert(vm_object_clone_anon(source,&copy)==K_OK && copy && !held && !live_nodes);
+    assert(!atomic_load(&copy->populated_pages) && attempts==1);
+    vm_object_put(copy);atomic_store(&source->populated_pages,0);fail_at=-1;
     page_t *pages=calloc(n,sizeof(*pages)); assert(pages);
     anon_store_t *store=source->u.anon.anon_root;
     for(unsigned i=0;i<n;++i) {
@@ -143,10 +156,13 @@ int main(void) {
     assert(attempts==n && comparisons>n*10);
     unsigned searches=comparisons;atomic_store(&baseline->populated_pages,n);
     vm_object_put(baseline);refs(pages,n,1);
-    attempts=comparisons=count_adds=count_stores=0;started=clock();
+    source->flags |= VM_OBJECT_FLAG_MAP_OWNED;
+    attempts=comparisons=count_adds=count_stores=locked_attempts=0;started=clock();
     assert(vm_object_clone_anon(source,&copy)==K_OK && !held);
+    assert(copy->flags & VM_OBJECT_FLAG_MAP_OWNED);
     double after=(double)(clock()-started)*1000/CLOCKS_PER_SEC;
     assert(attempts==n && comparisons==0 && live_nodes==2*n);
+    assert(!locked_attempts);
     assert(count_stores==1 && !count_adds);
     assert(atomic_load(&copy->populated_pages)==n); refs(pages,n,2);
     unsigned count=0; anon_store_t *target=copy->u.anon.anon_root;
@@ -172,16 +188,81 @@ int main(void) {
         assert(count_stores==1 && !count_adds);
     }
     fail_at=-1;
+    /* Simulate faults/discards between the relaxed sizing sample and lock
+     * acquisition. The locked tree, never the hint, defines clone contents. */
+    const unsigned hints[]={0,1,n/2,n-1,n,n+17};
+    for(unsigned h=0;h<sizeof(hints)/sizeof(*hints);++h){
+        unsigned hint=hints[h];atomic_store(&source->populated_pages,hint);
+        attempts=locked_attempts=count_stores=0;
+        assert(vm_object_clone_anon(source,&copy)==K_OK && copy && !held);
+        assert(atomic_load(&copy->populated_pages)==n && count_stores==1);
+        assert(attempts==(hint>n?hint:n));
+        assert(locked_attempts==(hint<n?n-hint:0));
+        count=0;target=copy->u.anon.anon_root;
+        verify(store->page_index.root,target->page_index.root,0,&count);assert(count==n);
+        refs(pages,n,2);vm_object_put(copy);refs(pages,n,1);assert(live_nodes==n);
+    }
+    /* Deficit allocation can fail after some page refs were copied. */
+    atomic_store(&source->populated_pages,2);
+    for(unsigned f=2;f<6;++f){
+        fail_at=f;attempts=locked_attempts=count_stores=0;copy=0;
+        assert(vm_object_clone_anon(source,&copy)==K_ENOMEM && !copy && !held);
+        assert(live_nodes==n && locked_attempts==f-1 && count_stores==1);refs(pages,n,1);
+    }
+    fail_at=-1;atomic_store(&source->populated_pages,n);
+    /* Optional reservation must not turn one transient allocation failure
+     * into fork failure. Existing reserved nodes remain usable. */
+    persistent_failure=false;
+    for(unsigned i=0;i<sizeof(failures)/sizeof(failures[0]);++i){
+        fail_at=failures[i];attempts=locked_attempts=count_stores=0;
+        assert(vm_object_clone_anon(source,&copy)==K_OK && copy && !held);
+        assert(attempts==n+1 && locked_attempts==n-(unsigned)fail_at);
+        assert(atomic_load(&copy->populated_pages)==n && count_stores==1);
+        count=0;target=copy->u.anon.anon_root;
+        verify(store->page_index.root,target->page_index.root,0,&count);assert(count==n);
+        refs(pages,n,2);vm_object_put(copy);refs(pages,n,1);assert(live_nodes==n);
+    }
+    /* Concurrent discards can leave the sizing hint larger than the tree.
+     * Permanent OOM after all needed nodes are reserved must still succeed. */
+    persistent_failure=true;atomic_store(&source->populated_pages,n+17);
+    fail_at=n;attempts=locked_attempts=count_stores=0;
+    assert(vm_object_clone_anon(source,&copy)==K_OK && copy && !held);
+    assert(attempts==n+1 && !locked_attempts && count_stores==1);
+    count=0;target=copy->u.anon.anon_root;
+    verify(store->page_index.root,target->page_index.root,0,&count);assert(count==n);
+    refs(pages,n,2);vm_object_put(copy);refs(pages,n,1);assert(live_nodes==n);
+    fail_at=-1;atomic_store(&source->populated_pages,n);
     printf("100000 pages: reinsertion %u comparisons %.2fms; topology clone 0 comparisons %.2fms\n",
            searches,before,after);
     vm_object_put(source); refs(pages,n,0); assert(!live_nodes); free(pages);
-    puts("anon index clone: single unlocked count publication for empty/100000-node/partial-failure copies, destructor count, topology/parent/color/ref invariants passed");
+    puts("anon index clone: 100000 off-lock node reservations, six sizing hints/transient failures, persistent OOM rollback, surplus/empty-tree recovery and exact topology/ref ownership passed");
 }
 '''
 with tempfile.TemporaryDirectory(prefix='liteos-anon-index-clone-') as directory:
     path = Path(directory)
-    flags = ['-fsanitize=address,undefined', '-fno-omit-frame-pointer'] if args.sanitize else []
+    flags = ['-fsanitize=address,undefined', '-fno-omit-frame-pointer', '-fno-pie', '-no-pie'] if args.sanitize else []
     subprocess.run(['cc', '-O2', '-std=c11', '-Wall', '-Wextra', '-Werror', *flags,
                     '-I', str(root / 'include'), '-x', 'c', '-', '-o',
                     str(path / 'test')], input=program, text=True, check=True)
     subprocess.run([str(path / 'test')], check=True)
+    negative = program.replace('if (copy != 0) *spare = copy->next;\n    else copy = kmalloc(sizeof(*copy), 0);',
+                               'copy = kmalloc(sizeof(*copy), 0);')
+    assert negative != program
+    subprocess.run(['cc', '-O2', '-std=c11', '-Wall', '-Wextra', '-Werror', *flags,
+                    '-I', str(root / 'include'), '-x', 'c', '-', '-o',
+                    str(path / 'test')], input=negative, text=True, check=True)
+    result = subprocess.run([str(path / 'test')], capture_output=True, text=True,
+                            preexec_fn=lambda: resource.setrlimit(resource.RLIMIT_CORE, (0, 0)))
+    assert result.returncode != 0 and 'Assertion' in result.stderr
+    print('Negative control rejected: clone allocates every index node under source lock')
+    negative = program.replace('if (node == 0) break;',
+                               'if (node == 0) { status=K_ENOMEM; goto cleanup; }')
+    negative = negative.replace('    while (spare != 0) {', 'cleanup:\n    while (spare != 0) {')
+    assert negative != program
+    subprocess.run(['cc', '-O2', '-std=c11', '-Wall', '-Wextra', '-Werror', *flags,
+                    '-I', str(root / 'include'), '-x', 'c', '-', '-o',
+                    str(path / 'test')], input=negative, text=True, check=True)
+    result = subprocess.run([str(path / 'test')], capture_output=True, text=True,
+                            preexec_fn=lambda: resource.setrlimit(resource.RLIMIT_CORE, (0, 0)))
+    assert result.returncode != 0 and 'Assertion' in result.stderr
+    print('Negative control rejected: optional reserve failure aborts a recoverable clone')

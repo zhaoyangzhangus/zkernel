@@ -6,7 +6,7 @@ import tempfile
 root = Path(__file__).resolve().parents[2]
 for name in ('gshell', 'notepad', 'imageview', 'taskmgr'):
     assert 'user_client_chrome_app_icon(' not in (root / 'user/desktop' / name / 'main.c').read_text()
-assert 'user_client_chrome_app_icon(' not in (root / 'user/services/networkd/manager.c').read_text()
+assert 'user_client_chrome_app_icon(' not in (root / 'user/desktop/settings/main.c').read_text()
 assert 'fm4_search_icon(12U, FM4_HEADER_ICON_Y' not in (root / 'user/desktop/fileman/main.c').read_text()
 program = r'''
 #include <assert.h>

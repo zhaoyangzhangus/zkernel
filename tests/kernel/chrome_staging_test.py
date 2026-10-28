@@ -46,6 +46,7 @@ class ChromeStaging(unittest.TestCase):
             out = base / 'chromium/out/Default'
             build = base / 'build'
             esp = build / 'esp'
+            bundle = esp / 'usr/apps/chrome'
             out.mkdir(parents=True)
             (out/'args.gn').write_text('native_os_runtime = "system"\nenable_vulkan = false\nproprietary_codecs = false\n')
             (build/'elf').mkdir(parents=True)
@@ -106,15 +107,17 @@ class ChromeStaging(unittest.TestCase):
             first = run()
             self.assertEqual(first.returncode, 0, first.stderr)
             self.assertIn('CHROME_BINARY_STAGE=updated', first.stdout)
-            targets = [esp / 'sbin' / name for name in
+            targets = [bundle / name for name in
                        ['chrome', 'resources.pak', 'icudtl.dat', 'chrome_sandbox']]
             targets += [esp / 'etc/fonts/NotoSansCJK-Regular.ttc',
                         esp / 'etc/fonts/NotoSansCJK-LICENSE', build / 'chrome-staging.manifest']
-            targets += [esp / 'sbin' / name for name in
+            targets += [bundle / name for name in
                         ['locales/en-US.pak', 'resources/nested/.hidden', 'MEIPreload/manifest.json']]
-            alias = esp / 'sbin/resources/alias'
+            self.assertFalse((esp / 'sbin/chrome').exists())
+            self.assertEqual((bundle / 'chrome-start').read_bytes(), b'launcher fixture')
+            alias = bundle / 'resources/alias'
             alias_before = (alias.lstat().st_ino, alias.lstat().st_mtime_ns, os.readlink(alias))
-            retained = esp / 'sbin/resources/retained'
+            retained = bundle / 'resources/retained'
             retained.write_bytes(b'keep destination-only files')
             # Include the destination-only file in the initial manifest.
             self.assertEqual(run().returncode, 0)
@@ -129,15 +132,15 @@ class ChromeStaging(unittest.TestCase):
             nested = out / 'resources/nested/.hidden'
             nested.write_bytes(b'changed nested resource')
             self.assertEqual(run().returncode, 0)
-            self.assertEqual((esp / 'sbin/resources/nested/.hidden').read_bytes(), nested.read_bytes())
+            self.assertEqual((bundle / 'resources/nested/.hidden').read_bytes(), nested.read_bytes())
             nested.chmod(0o600)
             self.assertEqual(run().returncode, 0)
-            self.assertEqual((esp / 'sbin/resources/nested/.hidden').stat().st_mode & 0o7777, 0o600)
+            self.assertEqual((bundle / 'resources/nested/.hidden').stat().st_mode & 0o7777, 0o600)
             (out / 'resources/alias').unlink()
             (out / 'resources/alias').symlink_to('../locales/en-US.pak')
             self.assertEqual(run().returncode, 0)
             self.assertEqual(os.readlink(alias), '../locales/en-US.pak')
-            nested_target = esp / 'sbin/resources/nested/.hidden'
+            nested_target = bundle / 'resources/nested/.hidden'
             nested_before = (nested_target.stat().st_ino, nested_target.stat().st_mtime_ns,
                              nested_target.read_bytes())
             manifest = build / 'chrome-staging.manifest'
@@ -155,7 +158,7 @@ class ChromeStaging(unittest.TestCase):
             self.assertEqual(run().returncode, 0)
             (out / 'resources.pak').write_bytes(b'new resources')
             self.assertEqual(run().returncode, 0)
-            resource = esp / 'sbin/resources.pak'
+            resource = bundle / 'resources.pak'
             self.assertEqual(resource.read_bytes(), b'new resources')
             resource.chmod(0o600)
             self.assertEqual(run().returncode, 0)

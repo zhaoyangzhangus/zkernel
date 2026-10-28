@@ -16,7 +16,7 @@ class QMPClient:
         self._sequence = 0
         try:
             self.sock.settimeout(timeout)
-            self.sock.connect(str(path or ROOT / 'build/chrome-debug-qmp.sock'))
+            self.sock.connect(str(path or ROOT / 'build/qemu-qmp.sock'))
             timeout = self.sock.gettimeout()
             deadline = time.monotonic() + timeout if timeout is not None else None
             greeting = self._read(deadline)
@@ -80,7 +80,7 @@ class QMPClient:
                     raise ValueError('QMP response has no result')
                 return reply['return']
         except QMPCommandError:
-            # A rejected command does not invalidate the transport.
+            # 命令被拒绝不会使传输连接失效。
             raise
         except BaseException:
             self.close()
@@ -104,16 +104,21 @@ class QMPClient:
         self.close()
 
     def move(self, x, y):
+        # QMP acknowledges host enqueueing, not guest HID consumption. Large
+        # rapid bursts can merge across the homing/placement direction change
+        # while Chrome is closing, so a later click misses its target. Keep
+        # reports small and allow each to drain before the next report.
         for dx, dy in [(-2500, -1500), (x, y)]:
             while dx or dy:
-                a = max(-100, min(100, dx))
-                b = max(-100, min(100, dy))
+                a = max(-80, min(80, dx))
+                b = max(-80, min(80, dy))
                 self.command('input-send-event', {'events': [
                     {'type': 'rel', 'data': {'axis': 'x', 'value': a}},
                     {'type': 'rel', 'data': {'axis': 'y', 'value': b}}]})
                 dx -= a
                 dy -= b
-                time.sleep(.02)
+                time.sleep(.15)
+            time.sleep(.3)
 
     def click(self, x, y, button='left'):
         self.move(x, y)

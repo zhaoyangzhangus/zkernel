@@ -19,6 +19,20 @@ static bool fair_before(const thread_t *left, const thread_t *right) {
     return (uintptr_t)left < (uintptr_t)right;
 }
 
+bool scheduler_fair_current_wins(const run_queue_t *queue) {
+    const thread_t *current = queue->current;
+    /* 在记入当前线程执行尾段后调用。必须保留与 RB 树完全相同的比较规则，
+     * 包括 TID/地址平局处理；RT 始终优先。已入队、阻塞或正在迁移的当前线程
+     * 必须走完整路径。 */
+    return current != 0 && current != queue->idle &&
+           current->sched_class == SCHED_CLASS_FAIR &&
+           !current->migration_pending &&
+           (current->sched.flags & SCHED_ENTITY_ENQUEUED) == 0U &&
+           atomic_load_explicit(&current->state, memory_order_relaxed) == THREAD_RUNNING &&
+           queue->rt_bitmap == 0U && queue->fair_leftmost != 0 &&
+           fair_before(current, queue->fair_leftmost);
+}
+
 void scheduler_update_min_vruntime(run_queue_t *queue) {
     bool found = queue->fair_leftmost != 0;
     uint64_t candidate = found ? queue->fair_leftmost->sched.vruntime : 0U;
@@ -30,16 +44,36 @@ void scheduler_update_min_vruntime(run_queue_t *queue) {
             candidate = current->sched.vruntime;
         found = true;
     }
-    /* Idle and dequeue must not reset the fair clock. Otherwise each new
-     * renderer starts at zero and runs until it catches up with the browser. */
+    /* 空闲和出队操作不得重置公平时钟。否则每个新渲染线程都会从零开始运行，
+     * 直到追上浏览器线程为止。 */
     if (found && candidate > queue->min_vruntime)
         queue->min_vruntime = candidate;
 }
 
+void scheduler_prepare_fair_migration(const run_queue_t *source, thread_t *thread) {
+    if (thread->sched_class != SCHED_CLASS_FAIR ||
+        (thread->sched.flags & SCHED_ENTITY_VRUNTIME_RELATIVE) != 0U) return;
+    /* 每个 CPU 的公平时钟起点各不相同。只携带未偿还的服务负债，不传递旧 CPU 的
+     * 绝对时钟值。休眠线程不会获得额外额度，与常规插入时的下限策略一致。 */
+    uint64_t floor = source->min_vruntime;
+    thread->sched.vruntime = thread->sched.vruntime > floor ?
+                            thread->sched.vruntime - floor : 0U;
+    thread->sched.flags |= SCHED_ENTITY_VRUNTIME_RELATIVE;
+}
+
+void scheduler_restore_fair_migration(run_queue_t *target, thread_t *thread) {
+    if ((thread->sched.flags & SCHED_ENTITY_VRUNTIME_RELATIVE) == 0U) return;
+    scheduler_update_min_vruntime(target);
+    uint64_t floor = target->min_vruntime;
+    uint64_t debt = thread->sched.vruntime;
+    thread->sched.vruntime = debt > UINT64_MAX - floor ? UINT64_MAX : floor + debt;
+    thread->sched.flags &= (uint16_t)~SCHED_ENTITY_VRUNTIME_RELATIVE;
+}
+
 static void fair_insert(run_queue_t *queue, thread_t *thread) {
     scheduler_update_min_vruntime(queue);
-    /* Bound the advantage of new threads and stale sleepers. Never forgive
-     * CPU time already charged to a runnable thread ahead of the floor. */
+    /* 限制新线程和长期休眠线程的优势。不能免除已记入且领先于下限的可运行线程
+     * CPU 时间。 */
     if (thread->sched.vruntime < queue->min_vruntime)
         thread->sched.vruntime = queue->min_vruntime;
     rb_node_t *parent = 0;
@@ -103,9 +137,13 @@ void initialize_thread(thread_t *thread, uint64_t tid, uint8_t class_id,
     refcount_init(&thread->object.refs, 1U);
     atomic_init(&thread->state, THREAD_READY);
     atomic_init(&thread->remote_wake_queued, false);
+    atomic_init(&thread->priority_queued, false);
+    thread->priority_next = 0;
+    atomic_init(&thread->priority_request, 0U);
     atomic_init(&thread->remote_wake_lock, 0U);
     atomic_init(&thread->block_epoch, 0U);
     atomic_init(&thread->start_pending, false);
+    atomic_init(&thread->exit_defer_count, 0U);
     atomic_init(&thread->blocked_waiter, 0);
     atomic_init(&thread->command_ack, 0U);
     thread->tid = tid;
@@ -129,9 +167,13 @@ void sched_initialize_new_thread(thread_t *thread, uint32_t cpu_id,
 
     atomic_init(&thread->state, THREAD_NEW);
     atomic_init(&thread->remote_wake_queued, false);
+    atomic_init(&thread->priority_queued, false);
+    thread->priority_next = 0;
+    atomic_init(&thread->priority_request, 0U);
     atomic_init(&thread->remote_wake_lock, 0U);
     atomic_init(&thread->block_epoch, 0U);
     atomic_init(&thread->start_pending, false);
+    atomic_init(&thread->exit_defer_count, 0U);
     atomic_init(&thread->blocked_waiter, 0);
     atomic_init(&thread->command_ack, 0U);
     thread->sched_class = SCHED_CLASS_FAIR;
@@ -172,6 +214,7 @@ void sched_initialize_test_thread(thread_t *thread, uint64_t tid,
 void enqueue_local_raw(scheduler_cpu_t *cpu, thread_t *thread) {
     if ((thread->sched.flags & SCHED_ENTITY_ENQUEUED) != 0 ||
         atomic_load_explicit(&thread->state, memory_order_relaxed) != THREAD_READY) return;
+    scheduler_restore_fair_migration(&cpu->queue, thread);
     if (thread->sched_class == SCHED_CLASS_RT) {
         list_add_tail(&cpu->queue.rt_queues[thread->rt_priority],
                       &thread->sched.rt_node);

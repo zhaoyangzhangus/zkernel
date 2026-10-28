@@ -30,6 +30,20 @@ typedef struct os_net_set_ipv4_config {
     uint8_t reserved[3];
 } os_net_set_ipv4_config_t;
 
+/* PCI 网卡逐项枚举；活动网卡标记用于关联当前网络配置。 */
+#define OS_NET_ADAPTER_ACTIVE 1U
+typedef struct os_net_adapter {
+    os_versioned_header_t hdr;
+    uint32_t index;
+    uint32_t count;
+    uint32_t flags;
+    uint16_t segment;
+    uint16_t vendor;
+    uint16_t device;
+    uint8_t bus,slot,function,subclass;
+    uint16_t reserved;
+} os_net_adapter_t;
+
 #define OS_NET_EVENT_LINK_CHANGED 1U
 
 typedef struct os_net_event {

@@ -176,8 +176,8 @@ static void cpu_pit_write(uint16_t port, uint8_t value) {
     __asm__ volatile ("outb %0, %w1" : : "a"(value), "d"(port));
 }
 
-/* BSP-only, before timers/threads start. Channel 2 does not alter PIT IRQ0.
- * Bound polling so a platform without a legacy PIT cannot hang boot. */
+/* 仅在 BSP 上执行，发生在定时器和线程启动前。通道 2 不会修改 PIT IRQ0。
+ * 采用受限轮询，避免没有传统 PIT 的平台在启动时卡住。 */
 static uint64_t cpu_tsc_pit_sample(void) {
     const uint32_t latch = 29829U;
     uint8_t saved = cpu_pit_read(0x61U);

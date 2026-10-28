@@ -52,8 +52,8 @@ struct libc_pthread {
 
 static void pthread_release_tls(pthread_t thread);
 
-/* Keep pthread_mutex_t's historical one-word ABI.  Recursive ownership is
- * process-local metadata keyed by the public mutex address. */
+/* 保持 pthread_mutex_t 历史上的单字 ABI。递归所有权信息保存在进程内元数据中，
+ * 并以公开互斥量地址作为键。 */
 typedef struct pthread_mutex_metadata {
     pthread_mutex_t *mutex;
     int type;
@@ -67,13 +67,15 @@ typedef struct pthread_mutex_metadata {
 #define LIBC_LOCK_STATE_FREE 0U
 #define LIBC_LOCK_STATE_LOCKED 1U
 #define LIBC_LOCK_STATE_CONTENDED 2U
-/* Preserve the one-word ABI and static zero initializer. Only ownership-
- * tracking mutexes need the side table; normal mutexes must never serialize
- * behind its allocator or an unrelated recursive lock. */
+/* 保留单字 ABI 和静态零初始化方式。只有跟踪所有权的互斥量需要旁路表；
+ * 普通互斥量绝不能因旁路表分配器或无关的递归锁而串行等待。 */
 #define LIBC_MUTEX_METADATA_BIT 0x80000000U
+#define LIBC_MUTEX_SHARED_BIT 0x40000000U
 
 static volatile uint64_t g_key_bitmap;
 static void (*g_key_destructors[PTHREAD_KEYS_MAX])(void *);
+/* 奇数代表示已分配，偶数代表示已删除。分配状态和标识必须在一个 atomic 字中发布，
+ * 以支持无锁 TLS 访问。 */
 static uint32_t g_key_generation[PTHREAD_KEYS_MAX];
 static volatile uint32_t g_key_lock;
 static void *g_main_specific[PTHREAD_KEYS_MAX];
@@ -146,7 +148,7 @@ static void thread_lifecycle_unlock(pthread_t thread) {
     __atomic_store_n(&thread->lifecycle_lock, 0U, __ATOMIC_RELEASE);
 }
 
-/* The caller must hold detached_lock(). */
+/* 调用方必须持有 detached_lock()。 */
 static void detached_list_add_locked(pthread_t thread) {
     if (thread == 0) return;
     thread_lifecycle_lock(thread);
@@ -165,7 +167,7 @@ static void detached_list_add(pthread_t thread) {
     detached_unlock();
 }
 
-/* Reclaim detached records only after the kernel has published THREAD_DEAD. */
+/* 仅在内核发布 THREAD_DEAD 后回收已分离线程记录。 */
 static void detached_reap(void) {
     pthread_t self = pthread_self();
 
@@ -213,7 +215,7 @@ static void detached_reap(void) {
             continue;
         }
 
-        /* The exit flag can precede kernel publication; retry on a later API. */
+        /* 退出标志可能早于内核状态发布；留待后续 API 调用时重试。 */
         detached_lock();
         thread_lifecycle_lock(candidate);
         candidate->cleanup = false;
@@ -236,9 +238,8 @@ int __libc_thread_init(void) {
                                sizeof("OS_LIBC_THREAD_INIT_ENTER\n") - 1U);
     g_main_context.thread = &g_main_thread;
     g_main_thread.context = &g_main_context;
-    /* The dynamic linker switches to the Linux syscall ABI immediately before
-     * entering the CRT entry point.  Use arch_prctl for that first TLS setup;
-     * native THREAD_CONTEXT would otherwise be interpreted as a Linux syscall.
+    /* 动态链接器会在进入 CRT 入口前切换到 Linux 系统调用 ABI。首次设置 TLS 时使用
+     * arch_prctl；否则原生 THREAD_CONTEXT 会被当作 Linux 系统调用解释。
      */
     int64_t probe = __libc_linux_syscall6(OS_SYS_DEBUG_QUERY, 0U, 0U, 0U, 0U,
                                           0U, 0U);
@@ -257,9 +258,8 @@ int __libc_thread_init(void) {
             pthread_startup_debug_mark("OS_LIBC_THREAD_GETFS_OK\n",
                                        sizeof("OS_LIBC_THREAD_GETFS_OK\n") - 1U);
             uint64_t *tcb = (uint64_t *)(uintptr_t)fs_base;
-            /* fs:0 is the TLS self pointer required by Chromium's
-             * local-exec TLS ABI; keep pthread_t in the private slot at
-             * fs:32. */
+            /* Chromium 的 local-exec TLS ABI 要求 fs:0 保存 TLS 自指针；
+             * pthread_t 保存在 fs:32 的私有槽位中。 */
             tcb[0] = fs_base;
             tcb[4] = (uint64_t)(uintptr_t)&g_main_thread;
             return 0;
@@ -299,7 +299,7 @@ static int pthread_status_error(int64_t status) {
     int saved_errno;
     int error;
     if (status >= 0) return 0;
-    /* pthread APIs return errors directly and must not clobber errno. */
+    /* pthread API 直接返回错误码，不得改写 errno。 */
     saved_errno = errno;
     (void)__libc_status_result(status);
     error = errno != 0 ? errno : EIO;
@@ -319,34 +319,43 @@ static uint64_t linux_futex_timeout_pointer(uint64_t timeout_ns,
     return (uint64_t)(uintptr_t)timeout;
 }
 
-static int futex_wait(volatile uint32_t *address, uint32_t expected,
-                      uint64_t timeout_ns) {
+static int futex_wait_mode(volatile uint32_t *address, uint32_t expected,
+                           uint64_t timeout_ns, bool shared) {
     if (pthread_linux_personality()) {
         struct timespec timeout;
         uint64_t timeout_pointer = linux_futex_timeout_pointer(
             timeout_ns, &timeout);
         return pthread_status_error(__libc_linux_syscall6(
             LINUX_SYS_FUTEX, (uint64_t)(uintptr_t)address,
-            LINUX_FUTEX_WAIT | LINUX_FUTEX_PRIVATE_FLAG, expected,
+            LINUX_FUTEX_WAIT | (shared ? 0U : LINUX_FUTEX_PRIVATE_FLAG), expected,
             timeout_pointer, 0U, 0U));
     }
     return pthread_status_error(__libc_native_syscall6(
         OS_SYS_FUTEX_WAIT, (uint64_t)(uintptr_t)address, expected,
-        timeout_ns, 0U, 0U, 0U));
+        timeout_ns, shared ? OS_FUTEX_FLAG_SHARED : 0U, 0U, 0U));
 }
 
-static int futex_wake(volatile uint32_t *address, uint32_t count) {
+static int futex_wait(volatile uint32_t *address, uint32_t expected,
+                      uint64_t timeout_ns) {
+    return futex_wait_mode(address, expected, timeout_ns, false);
+}
+
+static int futex_wake_mode(volatile uint32_t *address, uint32_t count, bool shared) {
     if (pthread_linux_personality()) {
         int64_t status = __libc_linux_syscall6(
             LINUX_SYS_FUTEX, (uint64_t)(uintptr_t)address,
-            LINUX_FUTEX_WAKE | LINUX_FUTEX_PRIVATE_FLAG, count,
+            LINUX_FUTEX_WAKE | (shared ? 0U : LINUX_FUTEX_PRIVATE_FLAG), count,
             0U, 0U, 0U);
         return status < 0 ? pthread_status_error(status) : 0;
     }
     int64_t status = __libc_native_syscall6(OS_SYS_FUTEX_WAKE,
                                      (uint64_t)(uintptr_t)address, count,
-                                     0U, 0U, 0U, 0U);
+                                     shared ? OS_FUTEX_FLAG_SHARED : 0U, 0U, 0U, 0U);
     return status < 0 ? pthread_status_error(status) : 0;
+}
+
+static int futex_wake(volatile uint32_t *address, uint32_t count) {
+    return futex_wake_mode(address, count, false);
 }
 
 static void key_lock(void) {
@@ -374,8 +383,8 @@ static void run_key_destructors(pthread_t thread) {
             void *value = 0;
             void (*destructor)(void *) = 0;
 
-            /* Snapshot one slot under the key lock, then call user code
-             * without the lock so destructors may use key APIs. */
+            /* 在键锁保护下获取一个槽位的快照，再于解锁后调用用户代码，
+             * 以便析构函数可以使用键 API。 */
             key_lock();
             if (key_is_valid_locked(key) &&
                 __atomic_load_n(&generations[key], __ATOMIC_ACQUIRE) ==
@@ -614,9 +623,8 @@ static void mutex_metadata_lock(void) {
             return;
         }
 
-        /* State 2 means the owner must wake one sleeper when it releases the
-         * lock. Keep that state when a woken waiter takes ownership so a
-         * chain of sleepers cannot be stranded behind an uncontended unlock. */
+        /* 状态 2 表示所有者释放锁时必须唤醒一个休眠者。被唤醒的等待者接管锁后仍保留
+         * 此状态，避免一串等待者滞留在看似无竞争的解锁操作之后。 */
         if (expected == LIBC_LOCK_STATE_LOCKED) {
             expected = LIBC_LOCK_STATE_LOCKED;
             if (!__atomic_compare_exchange_n(
@@ -651,7 +659,7 @@ static uint32_t mutex_metadata_bucket_index(const pthread_mutex_t *mutex) {
     return (uint32_t)value & (MUTEX_METADATA_BUCKET_COUNT - 1U);
 }
 
-/* The caller must hold g_mutex_metadata_lock. */
+/* 调用方必须持有 g_mutex_metadata_lock。 */
 static pthread_mutex_metadata_t *mutex_metadata_find_locked(
     pthread_mutex_t *mutex) {
     uint32_t bucket = mutex_metadata_bucket_index(mutex);
@@ -663,7 +671,7 @@ static pthread_mutex_metadata_t *mutex_metadata_find_locked(
     return 0;
 }
 
-/* The caller must hold g_mutex_metadata_lock. */
+/* 调用方必须持有 g_mutex_metadata_lock。 */
 static pthread_mutex_metadata_t *mutex_metadata_remove_locked(
     pthread_mutex_t *mutex) {
     uint32_t bucket = mutex_metadata_bucket_index(mutex);
@@ -727,7 +735,7 @@ int pthread_mutexattr_setprotocol(pthread_mutexattr_t *attribute,
                                   int protocol) {
     if (attribute == 0) return pthread_invalid();
     if (protocol != 0 && protocol != PTHREAD_PRIO_INHERIT) return EINVAL;
-    /* The current System futex/mutex ABI has no priority-inheritance state. */
+    /* 当前 System futex/互斥锁 ABI 不包含优先级继承状态。 */
     return protocol == PTHREAD_PRIO_INHERIT ? ENOTSUP : 0;
 }
 
@@ -747,14 +755,11 @@ int pthread_mutex_init(pthread_mutex_t *mutex,
     if (process_shared == PTHREAD_PROCESS_SHARED &&
         type != PTHREAD_MUTEX_NORMAL) return ENOTSUP;
 
-    /* Metadata is private to this libc image, so the public mutex layout stays
-     * compatible with the original one-word state and static initializer.
+    /* 元数据仅属于此 libc 映像，因此公开互斥锁布局仍兼容原有的单字状态和静态初始化器。
      *
-     * pthread_mutex_init() receives storage whose previous bytes are not part
-     * of the new mutex.  In particular, Chromium embeds this opaque object in
-     * a C++ class without zero-initializing it first.  Do not interpret the
-     * incoming state word as a live lock and return EBUSY; initialization must
-     * replace it below. */
+     * pthread_mutex_init() 接收的存储区域中，原有字节不属于新互斥锁。特别是 Chromium
+     * 会将此不透明对象嵌入 C++ 类中，而不会预先将其清零。不得把传入的状态字视为
+     * 正在使用的锁并返回 EBUSY；后续初始化必须覆盖该状态。 */
     mutex_metadata_lock();
     entry = mutex_metadata_find_locked(mutex);
     if (type == PTHREAD_MUTEX_RECURSIVE || type == PTHREAD_MUTEX_ERRORCHECK) {
@@ -778,7 +783,9 @@ int pthread_mutex_init(pthread_mutex_t *mutex,
     }
     __atomic_store_n(&mutex->state,
         (type == PTHREAD_MUTEX_RECURSIVE || type == PTHREAD_MUTEX_ERRORCHECK) ?
-            LIBC_MUTEX_METADATA_BIT : LIBC_LOCK_STATE_FREE, __ATOMIC_RELEASE);
+            LIBC_MUTEX_METADATA_BIT :
+            (process_shared == PTHREAD_PROCESS_SHARED ? LIBC_MUTEX_SHARED_BIT : LIBC_LOCK_STATE_FREE),
+        __ATOMIC_RELEASE);
     mutex_metadata_unlock();
     free(removed);
     return 0;
@@ -789,7 +796,7 @@ int pthread_mutex_destroy(pthread_mutex_t *mutex) {
     if (mutex == 0) return pthread_invalid();
     mutex_metadata_lock();
     if ((__atomic_load_n(&mutex->state, __ATOMIC_ACQUIRE) &
-         ~LIBC_MUTEX_METADATA_BIT) != LIBC_LOCK_STATE_FREE) {
+         ~(LIBC_MUTEX_METADATA_BIT | LIBC_MUTEX_SHARED_BIT)) != LIBC_LOCK_STATE_FREE) {
         mutex_metadata_unlock();
         return EBUSY;
     }
@@ -808,9 +815,9 @@ static int mutex_try_acquire(pthread_mutex_t *mutex, bool try_only,
 
     if ((__atomic_load_n(&mutex->state, __ATOMIC_ACQUIRE) &
          LIBC_MUTEX_METADATA_BIT) == 0U) {
-        expected = LIBC_LOCK_STATE_FREE;
+        expected = __atomic_load_n(&mutex->state, __ATOMIC_RELAXED) & LIBC_MUTEX_SHARED_BIT;
         return __atomic_compare_exchange_n(&mutex->state, &expected,
-            acquired_state, false, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED) ?
+            acquired_state | expected, false, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED) ?
                 0 : EBUSY;
     }
     expected = LIBC_MUTEX_METADATA_BIT;
@@ -854,8 +861,8 @@ static int mutex_try_acquire(pthread_mutex_t *mutex, bool try_only,
 static int mutex_wait_contended(pthread_mutex_t *mutex, uint64_t timeout_ns) {
     for (;;) {
         uint32_t state = __atomic_load_n(&mutex->state, __ATOMIC_ACQUIRE);
-        uint32_t metadata = state & LIBC_MUTEX_METADATA_BIT;
-        uint32_t lock_state = state & ~LIBC_MUTEX_METADATA_BIT;
+        uint32_t metadata = state & (LIBC_MUTEX_METADATA_BIT | LIBC_MUTEX_SHARED_BIT);
+        uint32_t lock_state = state & ~(LIBC_MUTEX_METADATA_BIT | LIBC_MUTEX_SHARED_BIT);
         if (lock_state == LIBC_LOCK_STATE_FREE) return EAGAIN;
         if (lock_state == LIBC_LOCK_STATE_LOCKED) {
             uint32_t expected = state;
@@ -868,8 +875,8 @@ static int mutex_wait_contended(pthread_mutex_t *mutex, uint64_t timeout_ns) {
         } else if (lock_state != LIBC_LOCK_STATE_CONTENDED) {
             return EINVAL;
         }
-        return futex_wait(&mutex->state, metadata | LIBC_LOCK_STATE_CONTENDED,
-                          timeout_ns);
+        return futex_wait_mode(&mutex->state, metadata | LIBC_LOCK_STATE_CONTENDED,
+                               timeout_ns, (metadata & LIBC_MUTEX_SHARED_BIT) != 0U);
     }
 }
 
@@ -932,11 +939,12 @@ int pthread_mutex_unlock(pthread_mutex_t *mutex) {
 
     if ((__atomic_load_n(&mutex->state, __ATOMIC_ACQUIRE) &
          LIBC_MUTEX_METADATA_BIT) == 0U) {
+        uint32_t shared = __atomic_load_n(&mutex->state, __ATOMIC_RELAXED) & LIBC_MUTEX_SHARED_BIT;
         previous_state = __atomic_exchange_n(
-            &mutex->state, LIBC_LOCK_STATE_FREE, __ATOMIC_RELEASE);
-        if (previous_state == LIBC_LOCK_STATE_FREE) return EPERM;
-        return previous_state == LIBC_LOCK_STATE_CONTENDED ?
-            futex_wake(&mutex->state, 1U) : 0;
+            &mutex->state, shared, __ATOMIC_RELEASE);
+        if ((previous_state & ~LIBC_MUTEX_SHARED_BIT) == LIBC_LOCK_STATE_FREE) return EPERM;
+        return (previous_state & ~LIBC_MUTEX_SHARED_BIT) == LIBC_LOCK_STATE_CONTENDED ?
+            futex_wake_mode(&mutex->state, 1U, shared != 0U) : 0;
     }
     mutex_metadata_lock();
     entry = mutex_metadata_find_locked(mutex);
@@ -1036,9 +1044,8 @@ int pthread_cond_destroy(pthread_cond_t *condition) {
     return condition == 0 ? pthread_invalid() : 0;
 }
 
-/* POSIX requires a condition wait to release the mutex completely.  Keep the
- * recursive depth in the private metadata and restore it after the wait so a
- * recursive mutex has the same ownership contract on both sides. */
+/* POSIX 要求条件变量等待完全释放互斥锁。将递归深度保存在私有元数据中，并在等待后
+ * 恢复，以确保递归互斥锁在等待前后的所有权约定一致。 */
 static int mutex_release_for_condition(pthread_mutex_t *mutex,
                                        uint32_t *depth) {
     pthread_mutex_metadata_t *entry;
@@ -1164,10 +1171,10 @@ int pthread_key_create(pthread_key_t *key, void (*destructor)(void *)) {
         if ((__atomic_load_n(&g_key_bitmap, __ATOMIC_RELAXED) & bit) == 0U) {
             uint32_t generation =
                 __atomic_load_n(&g_key_generation[index], __ATOMIC_RELAXED) + 1U;
-            if (generation == 0U) generation = 1U;
-            __atomic_store_n(&g_key_generation[index], generation, __ATOMIC_RELEASE);
+            /* 空闲键使用偶数令牌；下一个奇数令牌非零。 */
             g_key_destructors[index] = destructor;
             __atomic_fetch_or(&g_key_bitmap, bit, __ATOMIC_RELEASE);
+            __atomic_store_n(&g_key_generation[index], generation, __ATOMIC_RELEASE);
             *key = index;
             key_unlock();
             return 0;
@@ -1183,11 +1190,12 @@ int pthread_key_delete(pthread_key_t key) {
         key_unlock();
         return EINVAL;
     }
+    uint32_t generation = __atomic_load_n(&g_key_generation[key], __ATOMIC_RELAXED);
+    __atomic_store_n(&g_key_generation[key], generation + 1U, __ATOMIC_RELEASE);
     __atomic_fetch_and(&g_key_bitmap, ~(1ULL << key), __ATOMIC_RELEASE);
     g_key_destructors[key] = 0;
-    /* The initial thread normally uses g_main_thread.specific.  Clear both
-     * representations so a key can be deleted and reused without exposing
-     * the previous value. */
+    /* 初始线程通常使用 g_main_thread.specific。清除两种存储形式，以便删除并重用键时
+     * 不会暴露先前的值。 */
     __atomic_store_n(&g_main_specific[key], 0, __ATOMIC_RELAXED);
     __atomic_store_n(&g_main_specific_generation[key], 0U, __ATOMIC_RELEASE);
     __atomic_store_n(&g_main_thread.specific[key], 0, __ATOMIC_RELAXED);
@@ -1196,16 +1204,13 @@ int pthread_key_delete(pthread_key_t key) {
     return 0;
 }
 
-/* Key allocation/deletion is serialized, but values belong to the calling
- * thread. Do not serialize every allocator TLS access across all CPUs. A
- * generation check on both sides of the slot access rejects deleted/reused
- * keys; atomic metadata access also makes concurrent deletion well-defined. */
+/* 键的分配和删除会串行化，但值属于调用线程。不要在所有 CPU 上串行化每次 TLS 访问。
+ * 在访问槽位前后检查代数，可拒绝已删除或重用的键；原子元数据访问也能明确定义并发
+ * 删除时的行为。 */
 static bool key_generation_snapshot(pthread_key_t key, uint32_t *generation) {
-    if (key >= PTHREAD_KEYS_MAX ||
-        ((__atomic_load_n(&g_key_bitmap, __ATOMIC_ACQUIRE) >> key) & 1U) == 0U)
-        return false;
+    if (key >= PTHREAD_KEYS_MAX) return false;
     *generation = __atomic_load_n(&g_key_generation[key], __ATOMIC_ACQUIRE);
-    return true;
+    return (*generation & 1U) != 0U;
 }
 
 static bool key_generation_matches(pthread_key_t key, uint32_t generation) {
@@ -1517,9 +1522,8 @@ int pthread_create(pthread_t *thread, const pthread_attr_t *attribute,
         if (attribute->stack_address == 0) (void)munmap(mapping_base, mapping_size);
         return EOVERFLOW;
     }
-    /* A newly scheduled entry has no CALL-pushed return address.  Start it
-     * at 8 mod 16 so the first C function observes the SysV ABI entry
-     * alignment (the exec entry point itself remains 16-byte aligned). */
+    /* 新调度的入口没有 CALL 压入的返回地址。将其起始地址设为模 16 余 8，使首个 C
+     * 函数满足 SysV ABI 入口对齐要求（exec 入口本身仍按 16 字节对齐）。 */
     stack_top = (((uintptr_t)stack + stack_extent) & ~(uintptr_t)0x0fU) -
                 sizeof(uint64_t);
     if (stack_top <= (uintptr_t)stack) {
@@ -1606,8 +1610,7 @@ int pthread_join(pthread_t thread, void **result) {
     }
     if (thread == pthread_self()) return EDEADLK;
 
-    /* Claim join ownership before waiting so a second joiner cannot free the
-     * same record after the first waiter completes. */
+    /* 等待前先声明 join 所有权，避免第一个等待者完成后，第二个 join 调用方释放同一记录。 */
     thread_lifecycle_lock(thread);
     if (thread->joined || thread->detached || thread->cleanup) {
         thread_lifecycle_unlock(thread);
@@ -1630,7 +1633,7 @@ int pthread_join(pthread_t thread, void **result) {
     if (result != 0) *result = (void *)(uintptr_t)wait_result.value;
     (void)__libc_native_syscall6(OS_SYS_HANDLE_CLOSE, thread->handle,
                           0U, 0U, 0U, 0U, 0U);
-    /* Owned stacks are reclaimed by the kernel after the context switch. */
+    /* 所有权属于线程的栈会在上下文切换后由内核回收。 */
     pthread_release_tls(thread);
     free(thread->context);
     free(thread);
@@ -1664,10 +1667,9 @@ void pthread_exit(void *result) {
     if (thread != 0) {
         run_key_destructors(thread);
         /*
-         * The record and its FS context stay live until a joining caller (or
-         * a deferred detached-thread reaper) observes WAIT_ONE completion.
-         * In particular, neither the current user stack nor the FS object may
-         * be unmapped/freed before THREAD_EXIT switches to another context.
+         * 在线程 join 调用方（或延迟的分离线程回收器）观察到 WAIT_ONE 完成前，线程记录
+         * 及其 FS 上下文必须保持有效。尤其是在 THREAD_EXIT 切换到其他上下文前，不得取消
+         * 映射或释放当前用户栈及 FS 对象。
          */
         __atomic_store_n(&thread->exited, true, __ATOMIC_RELEASE);
     }
@@ -1719,7 +1721,7 @@ int pthread_getattr_np(pthread_t thread, pthread_attr_t *attribute) {
     if (thread == 0 || attribute == 0) return pthread_invalid();
     if (pthread_attr_init(attribute) != 0) return pthread_invalid();
     if (thread == &g_main_thread) {
-        /* Keep this in sync with the initial stack mapping in exec.c. */
+        /* 此处必须与 exec.c 中的初始栈映射保持一致。 */
         attribute->stack_address = (void *)(uintptr_t)
             OS_LINUX_USER_STACK_BASE;
         attribute->stack_size = (size_t)OS_LINUX_USER_STACK_SIZE;

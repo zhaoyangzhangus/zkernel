@@ -1,4 +1,4 @@
-/* REFACTOR_SYSCALL_IMAGE_OWNER: bounded user PNG validation and decoding. */
+/* REFACTOR_SYSCALL_IMAGE_OWNER：有界用户 PNG 验证和解码。 */
 
 #include <arch/x86_64/uaccess.h>
 #include <kernel/kmem.h>

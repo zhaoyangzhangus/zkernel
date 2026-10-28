@@ -6,6 +6,8 @@
 
 #include "../../runtime/text.h"
 #include "../../runtime/caption.h"
+#include "../../runtime/caption_tree.h"
+#include "../../runtime/clipboard.h"
 
 #define SHELL_LINE_CAPACITY 256U
 #define SHELL_OUTPUT_LINES 128U
@@ -19,6 +21,9 @@
 #define SHELL_MAX_ARGUMENTS 8U
 #define SHELL_PATH_CAPACITY 256U
 #define SHELL_DISPLAY_CAPACITY (SHELL_LINE_CAPACITY + SHELL_PATH_CAPACITY + 16U)
+#define SHELL_CAPTION_TITLE "终端"
+/* 背景和输入最多四个节点；标题栏需要根节点、标题和三个窗口按钮。 */
+#define SHELL_TREE_FIXED_NODES (4U + 5U)
 #define SHELL_WINDOW_BACKGROUND OS_THEME_SURFACE
 #define SHELL_INPUT_BACKGROUND  OS_THEME_FIELD
 #define SHELL_INPUT_BORDER      OS_THEME_BORDER
@@ -46,7 +51,7 @@ typedef struct shell_launch_context {
 } shell_launch_context_t;
 
 static shell_window_t g_shell = {
-    OS_INVALID_HANDLE, 0U, 0U, 0U, 0, "SHELL", SHELL_WINDOW_BACKGROUND,
+    OS_INVALID_HANDLE, 0U, 0U, 0U, 0, "终端", SHELL_WINDOW_BACKGROUND,
 };
 static char g_command[SHELL_LINE_CAPACITY];
 static size_t g_command_length;
@@ -71,65 +76,16 @@ static bool handle_event(const os_window_event_t *event);
 static os_exec_fd_map_t g_exec_fd_map;
 static uint32_t g_display_width;
 static uint32_t g_display_height;
-static uint32_t *g_target;
 static uint32_t g_target_width;
 static uint32_t g_target_height;
-static bool g_damage_full;
-static uint32_t g_damage_x;
-static uint32_t g_damage_y;
-static uint32_t g_damage_width;
-static uint32_t g_damage_height;
+static os_control_node_t g_nodes[SHELL_OUTPUT_LINES*2U+SHELL_TREE_FIXED_NODES];
+/* 输出、输入和标题均按最大有效字节预留，不含各自的结束符。 */
+static char g_tree_text[SHELL_OUTPUT_LINES*(SHELL_LINE_CAPACITY-1U)+
+                        SHELL_DISPLAY_CAPACITY-1U+sizeof(SHELL_CAPTION_TITLE)-1U];
+static os_window_control_tree_t g_tree;
+static uint32_t g_node_count,g_text_used,g_caption_height;
 static uint8_t g_file_buffer[128];
 static char g_display_line[SHELL_DISPLAY_CAPACITY];
-
-static void shell_damage_all(void) {
-    g_damage_full = true;
-    g_damage_x = 0U;
-    g_damage_y = 0U;
-    g_damage_width = g_shell.width;
-    g_damage_height = g_shell.height;
-}
-
-static void shell_damage_rect(uint32_t x, uint32_t y,
-                              uint32_t width, uint32_t height) {
-    uint32_t right;
-    uint32_t bottom;
-    if (g_damage_full || width == 0U || height == 0U) return;
-    if (x >= g_shell.width || y >= g_shell.height) return;
-    if (width > g_shell.width - x) width = g_shell.width - x;
-    if (height > g_shell.height - y) height = g_shell.height - y;
-    right = x + width;
-    bottom = y + height;
-    if (g_damage_width == 0U || g_damage_height == 0U) {
-        g_damage_x = x;
-        g_damage_y = y;
-        g_damage_width = width;
-        g_damage_height = height;
-        return;
-    }
-    if (x < g_damage_x) g_damage_x = x;
-    if (y < g_damage_y) g_damage_y = y;
-    if (right > g_damage_x + g_damage_width) {
-        g_damage_width = right - g_damage_x;
-    }
-    if (bottom > g_damage_y + g_damage_height) {
-        g_damage_height = bottom - g_damage_y;
-    }
-}
-
-static void shell_damage_reset(void) {
-    g_damage_full = false;
-    g_damage_x = 0U;
-    g_damage_y = 0U;
-    g_damage_width = 0U;
-    g_damage_height = 0U;
-}
-
-static void shell_damage_input_line(void) {
-    uint32_t y = g_input_y;
-    shell_damage_rect(0U, y, g_shell.width,
-                      g_shell.height - y);
-}
 
 static int64_t stat_path(const char *path, os_file_info_t *info);
 static bool file_exists(const char *path);
@@ -254,19 +210,31 @@ static void clear_output(void) {
 
 static void fill_rect(uint32_t x, uint32_t y, uint32_t width, uint32_t height,
                       uint32_t color) {
-    if (g_target == 0 || x >= g_target_width || y >= g_target_height) return;
+    if (x >= g_target_width || y >= g_target_height || !width || !height) return;
     if (width > g_target_width - x) width = g_target_width - x;
     if (height > g_target_height - y) height = g_target_height - y;
-    for (uint32_t row = 0U; row < height; ++row) {
-        for (uint32_t column = 0U; column < width; ++column) {
-            g_target[(uint64_t)(y + row) * g_target_width + x + column] = color;
-        }
-    }
+    if (g_node_count>=sizeof(g_nodes)/sizeof(g_nodes[0])) return;
+    uint32_t index=g_node_count++;
+    g_nodes[index]=(os_control_node_t){.identifier=index+1U,
+        .parent=index?0:OS_CONTROL_NO_PARENT,.kind=OS_CONTROL_CONTAINER,
+        .flags=index?OS_CONTROL_POINTER_PASSTHROUGH:OS_CONTROL_CLIP_CHILDREN,
+        .x=(int32_t)x,.y=(int32_t)y,.width=(int32_t)width,.height=(int32_t)height,
+        .background=color,.foreground=SHELL_OUTPUT_TEXT,.font_size=ui_text_size()};
 }
 
 static void draw_text(uint32_t x, uint32_t y, const char *text, uint32_t color) {
-    ui_text_draw(g_target, g_target_width, g_target_width, g_target_height,
-                     (int32_t)x, (int32_t)y, text, color);
+    uint32_t length=0;
+    while (length+1U<SHELL_DISPLAY_CAPACITY && text[length]) ++length;
+    if (!length || x>=g_target_width || y>=g_target_height ||
+        g_node_count>=sizeof(g_nodes)/sizeof(g_nodes[0]) ||
+        length>sizeof(g_tree_text)-g_text_used) return;
+    uint32_t index=g_node_count++;
+    g_nodes[index]=(os_control_node_t){.identifier=index+1U,.parent=0,.kind=OS_CONTROL_TEXT,.value=OS_CONTROL_TEXT_APP_SELECTION,
+        .flags=OS_CONTROL_BACKGROUND_ALPHA|OS_CONTROL_POINTER_PASSTHROUGH|OS_CONTROL_INHERIT_FONT,
+        .x=(int32_t)x,.y=(int32_t)y,.width=(int32_t)(g_target_width-x),
+        .height=(int32_t)OS_TEXT_HEIGHT,.foreground=color,
+        .text_offset=g_text_used,.text_length=length};
+    __builtin_memcpy(g_tree_text+g_text_used,text,length);g_text_used+=length;
 }
 
 static void build_prompt(char *buffer) {
@@ -276,7 +244,7 @@ static void build_prompt(char *buffer) {
     append_text(buffer, SHELL_DISPLAY_CAPACITY, "# ");
 }
 
-/* The input display includes both a path and a command, unlike output rows. */
+/* 输入显示同时包含路径和命令，与输出行不同。 */
 static uint32_t shell_display_length(const char *text) {
     uint32_t length = 0U;
     if (text == 0) return 0U;
@@ -285,14 +253,15 @@ static uint32_t shell_display_length(const char *text) {
 }
 
 static uint32_t shell_text_width(const char *text, size_t length) {
-    uint32_t measured;
-    uint64_t fallback;
-
     if (text == 0 || length == 0U) return 0U;
-    measured = ui_text_measure_range(text, length);
-    if (measured != 0U) return measured;
-    fallback = (uint64_t)length * OS_TEXT_WIDTH;
-    return fallback > UINT32_MAX ? UINT32_MAX : (uint32_t)fallback;
+    uint64_t width=0;
+    for (size_t offset=0;offset<length;) {
+        size_t used;
+        uint32_t code=os_utf8_next(text+offset,length-offset,&used);
+        width+=os_control_text_cell_width(code,ui_text_size());
+        offset+=used?used:1U;
+    }
+    return width>UINT32_MAX?UINT32_MAX:(uint32_t)width;
 }
 
 static void draw_input_line(void) {
@@ -323,8 +292,7 @@ static void draw_input_line(void) {
     if (available_width <= 2U) return;
     cursor_prefix_width = shell_text_width(g_display_line, cursor_position);
     if (cursor_prefix_width > available_width - 2U) {
-        /* Prefix widths are monotonic for the left-to-right shell input.
-         * Binary search avoids measuring every character on each key event. */
+        /* shell 输入前缀宽度从左到右单调递增。二分查找可避免每次按键事件都测量所有字符。 */
         low = 0U;
         high = cursor_position;
         while (low < high) {
@@ -357,10 +325,10 @@ static void draw_input_line(void) {
             }
         }
     }
-    ui_text_draw_clipped(g_target, g_target_width, g_target_width,
-                             g_target_height, (int32_t)input_x,
-                             (int32_t)input_y, input_right,
-                             g_display_line + view_start, SHELL_INPUT_TEXT);
+    draw_text(input_x,input_y,g_display_line+view_start,SHELL_INPUT_TEXT);
+    /* 文本右侧保留与输入命中、水平滚动一致的边距。 */
+    if (g_node_count && g_nodes[g_node_count-1U].kind==OS_CONTROL_TEXT)
+        g_nodes[g_node_count-1U].width=(int32_t)available_width;
     if (cursor_width < available_width) {
         fill_rect(input_x + cursor_width, input_y, 2U, OS_TEXT_HEIGHT,
                   SHELL_CURSOR);
@@ -368,7 +336,7 @@ static void draw_input_line(void) {
 }
 
 static uint32_t shell_scroll_maximum(uint32_t visible) {
-    /* No input row exists when the viewport cannot display even one line. */
+    /* 视口连一行都无法显示时，不创建输入行。 */
     uint32_t rows = g_output_count +
                     (visible != 0U && !g_foreground_wait ? 1U : 0U);
     return rows > visible ? rows - visible : 0U;
@@ -426,36 +394,36 @@ static void draw_terminal(void) {
 
 static void update_window(void) {
     os_window_update_t request = {0};
-    request.flags = OS_WINDOW_CAPTION_HEIGHT(user_caption_height());
+    uint32_t caption=user_caption_height();
+    request.flags = OS_WINDOW_CAPTION_HEIGHT(caption);
     if (g_shell.identifier == 0U) return;
-    if (!g_damage_full && (g_damage_width == 0U || g_damage_height == 0U)) {
-        return;
-    }
+    if (caption==g_caption_height) return;
     request.hdr.size = sizeof(request);
     request.hdr.version = OS_SYSCALL_ABI_VERSION;
     request.identifier = g_shell.identifier;
-    if (g_damage_full) {
-        request.width = g_shell.width;
-        request.height = g_shell.height;
-    } else {
-        request.x = (int32_t)g_damage_x;
-        request.y = (int32_t)g_damage_y;
-        request.width = g_damage_width;
-        request.height = g_damage_height;
-    }
-    (void)gshell_syscall_one(OS_SYS_WINDOW_UPDATE, (uint64_t)&request);
-    shell_damage_reset();
+    request.width=g_shell.width;request.height=g_shell.height;
+    if (gshell_syscall_one(OS_SYS_WINDOW_UPDATE,(uintptr_t)&request)==0)
+        g_caption_height=caption;
 }
 
 static void render_window(void) {
-    g_target = g_shell.pixels;
     g_target_width = g_shell.width;
     g_target_height = g_shell.height;
-    if (g_target == 0) return;
-    if (!g_damage_full && (g_damage_width == 0U || g_damage_height == 0U)) {
-        shell_damage_all();
-    }
+    if (!g_target_width || !g_target_height) return;
+    g_node_count=g_text_used=0;
     draw_terminal();
+    if (!user_caption_tree(g_nodes,&g_node_count,sizeof(g_nodes)/sizeof(*g_nodes),g_tree_text,&g_text_used,
+            sizeof(g_tree_text),(user_caption_layout_t){.title=SHELL_CAPTION_TITLE,.width=g_shell.width,
+                .height=user_caption_height(),.font=ui_text_size()})) {
+        g_tree.count=0;return;
+    }
+    os_window_control_tree_t tree={.hdr={sizeof(tree),OS_SYSCALL_ABI_VERSION},
+        .identifier=g_shell.identifier,.count=g_node_count,.nodes=(uintptr_t)g_nodes,
+        .text=(uintptr_t)g_tree_text,.text_size=g_text_used};
+    if (gshell_syscall_one(OS_SYS_WINDOW_CONTROL_TREE,(uintptr_t)&tree)!=0) {
+        g_tree.count=0;return;
+    }
+    g_tree=tree;
     update_window();
 }
 
@@ -470,7 +438,7 @@ static bool create_window(int32_t x, int32_t y, uint32_t width,
     request.height = height;
     request.flags = OS_WINDOW_VISIBLE |
                     OS_WINDOW_RESIZABLE |
-                    OS_WINDOW_STANDARD_CAPTION_CONTROLS;
+                    OS_WINDOW_STANDARD_CAPTION_CONTROLS | OS_WINDOW_CAPTION_HEIGHT(user_caption_height());
     request.background = g_shell.color;
     for (uint32_t i = 0U; i < 31U && g_shell.title[i] != '\0'; ++i) {
         request.title[i] = g_shell.title[i];
@@ -496,12 +464,13 @@ static bool setup_windows(void) {
         info.width < 320U || info.height < 240U) return false;
     g_display_width = info.width;
     g_display_height = info.height;
-    /* Keep the shell as a normal centered app window.  The compositor does
-     * not add a titlebar; all visible chrome belongs to this surface. */
+    /* 使用紧凑的居中初始窗口；标题栏和边框由合成器统一绘制。 */
     shell_width = info.width * 3U / 4U;
     shell_height = info.height * 3U / 4U;
     if (shell_width < 640U && info.width > 640U) shell_width = 640U;
     if (shell_height < 420U && info.height > 420U) shell_height = 420U;
+    if (shell_width > 800U) shell_width = 800U;
+    if (shell_height > 500U) shell_height = 500U;
     if (!create_window((int32_t)((info.width - shell_width) / 2U),
                        (int32_t)((info.height - shell_height) / 2U),
                        shell_width, shell_height)) return false;
@@ -559,8 +528,8 @@ static bool is_shell_space(char character) {
     return character == ' ' || character == '\t';
 }
 
-/* Tokenize in place.  Quoting is useful for builtins now and keeps the
- * command line compatible with a future argv-aware process_exec ABI. */
+/* 就地分词。引号转义现在可用于内建命令，也使命令行与未来支持 argv 的 process_exec
+ * ABI 保持兼容。 */
 static bool shell_tokenize(char *line, char **arguments, uint32_t *count,
                            bool *background) {
     uint32_t read_index = 0U;
@@ -577,6 +546,11 @@ static bool shell_tokenize(char *line, char **arguments, uint32_t *count,
     *background = false;
     while (line[read_index] != '\0') {
         char character = line[read_index++];
+        /* 引号和转义也可以开始新参数，必须在消费它们前记录写入位置。 */
+        if (!in_argument && !is_shell_space(character) && character != '&') {
+            argument_start = write_index;
+            in_argument = true;
+        }
         if (escaped) {
             line[write_index++] = character;
             escaped = false;
@@ -623,98 +597,45 @@ static bool shell_tokenize(char *line, char **arguments, uint32_t *count,
             }
             continue;
         }
-        if (!in_argument) {
-            argument_start = write_index;
-            in_argument = true;
-        }
         line[write_index++] = character;
     }
     if (escaped || in_single_quote || in_double_quote) return false;
     if (in_argument) {
         if (argument_count >= SHELL_MAX_ARGUMENTS) return false;
-        line[write_index++] = '\0';
         arguments[argument_count++] = line + argument_start;
     }
+    /* 最后一个参数只写一次终止符，输入缓冲区无需额外预留一个字节。 */
     line[write_index] = '\0';
     *count = argument_count;
     return true;
 }
 
-static void remove_last_path_component(char *path) {
-    uint32_t length = 0U;
-    if (path == 0) return;
-    while (path[length] != '\0') ++length;
-    if (length <= 1U) {
-        path[0] = '/';
-        path[1] = '\0';
-        return;
-    }
-    while (length > 1U && path[length - 1U] != '/') --length;
-    path[length > 1U ? length - 1U : 1U] = '\0';
-}
-
-static bool resolve_path(const char *input, char *path) {
-    char combined[SHELL_PATH_CAPACITY];
-    uint32_t read_index = 0U;
-    uint32_t write_index = 0U;
-
-    if (input == 0 || input[0] == '\0' || path == 0) return false;
-    combined[0] = '\0';
-    if (input[0] == '/') {
-        append_text(combined, SHELL_PATH_CAPACITY, input);
-    } else {
-        append_text(combined, SHELL_PATH_CAPACITY, g_cwd);
-        if (combined[text_length(combined) - 1U] != '/') {
-            append_character(combined, SHELL_PATH_CAPACITY, '/');
-        }
-        append_text(combined, SHELL_PATH_CAPACITY, input);
-    }
-    path[0] = '/';
-    path[1] = '\0';
-    write_index = 1U;
-    while (combined[read_index] != '\0') {
-        uint32_t segment_start;
-        uint32_t segment_length;
-        while (combined[read_index] == '/') ++read_index;
-        if (combined[read_index] == '\0') break;
-        segment_start = read_index;
-        while (combined[read_index] != '\0' && combined[read_index] != '/') ++read_index;
-        segment_length = read_index - segment_start;
-        if (segment_length == 1U && combined[segment_start] == '.') continue;
-        if (segment_length == 2U && combined[segment_start] == '.' &&
-            combined[segment_start + 1U] == '.') {
-            remove_last_path_component(path);
-            write_index = text_length(path);
-            continue;
-        }
-        if (text_length(path) > 1U) {
-            append_character(path, SHELL_PATH_CAPACITY, '/');
-            write_index = text_length(path);
-        }
-        if (text_length(path) + segment_length >= SHELL_PATH_CAPACITY) return false;
-        for (uint32_t index = 0U; index < segment_length; ++index) {
-            path[write_index] = combined[segment_start + index];
-            ++write_index;
-        }
-        path[write_index] = '\0';
-        write_index = text_length(path);
-    }
-    return path[0] != '\0';
-}
-
 static bool make_program_path(const char *argument, char *path) {
-    static const char *const prefixes[] = { "/sbin/", "/bin/", "/native/", "/" };
+    static const char *const prefixes[] = { "/sbin/", "/bin/", "/" };
     char candidate[SHELL_LINE_CAPACITY];
     bool has_slash = false;
     if (argument == 0 || argument[0] == '\0' || path == 0) return false;
-    for (uint32_t index = 0U; argument[index] != '\0'; ++index) {
-        if (argument[index] == '/') {
-            has_slash = true;
-            break;
-        }
+    uint32_t length = 0U;
+    while (length + 1U < SHELL_LINE_CAPACITY && argument[length] != '\0') {
+        if (argument[length] == '/') has_slash = true;
+        ++length;
     }
-    if (has_slash || argument[0] == '.') return resolve_path(argument, path);
-    if (resolve_path(argument, candidate) && file_exists(candidate)) {
+    if (argument[length] != '\0') return false;
+    if (has_slash || argument[0] == '.' || file_exists(argument)) {
+        copy_text(path, argument);
+        return true;
+    }
+    /* 图形、命令行和诊断应用统一按同名目录查找；Chrome 命令经过启动器。 */
+    candidate[0] = '\0';
+    append_text(candidate, SHELL_LINE_CAPACITY, "/usr/apps/");
+    for (uint32_t index = 0U; argument[index] != '\0'; ++index)
+        append_character(candidate, SHELL_LINE_CAPACITY, lower_ascii(argument[index]));
+    append_character(candidate, SHELL_LINE_CAPACITY, '/');
+    for (uint32_t index = 0U; argument[index] != '\0'; ++index)
+        append_character(candidate, SHELL_LINE_CAPACITY, lower_ascii(argument[index]));
+    if (text_equals_ignore_case(argument, "chrome"))
+        append_text(candidate, SHELL_LINE_CAPACITY, "-start");
+    if (file_exists(candidate)) {
         copy_text(path, candidate);
         return true;
     }
@@ -763,16 +684,15 @@ static bool finish_text_line(char *line, uint32_t *line_length) {
 }
 
 static void command_cat(const char *argument) {
-    char path[SHELL_LINE_CAPACITY];
     char line[SHELL_LINE_CAPACITY] = {0};
     os_handle_t handle = OS_INVALID_HANDLE;
     uint32_t line_length = 0U;
     uint64_t total = 0U;
-    if (!resolve_path(argument, path)) {
+    if (argument == 0 || argument[0] == '\0') {
         append_output("USAGE: CAT FILE");
         return;
     }
-    if (gshell_syscall_four(OS_SYS_FILE_OPEN, (uint64_t)path,
+    if (gshell_syscall_four(OS_SYS_FILE_OPEN, (uint64_t)argument,
                             OS_FILE_OPEN_READ, 0U,
                             (uint64_t)&handle) < 0 ||
         handle == OS_INVALID_HANDLE) {
@@ -836,12 +756,7 @@ static bool file_exists(const char *path) {
 }
 
 static void command_ls(const char *argument) {
-    char directory[SHELL_LINE_CAPACITY];
-    const char *requested = argument != 0 && argument[0] != '\0' ? argument : g_cwd;
-    if (!resolve_path(requested, directory)) {
-        append_output("LS: INVALID PATH");
-        return;
-    }
+    const char *directory = argument != 0 && argument[0] != '\0' ? argument : g_cwd;
     if (!directory_exists(directory)) {
         if (file_exists(directory)) {
             append_output(directory);
@@ -976,7 +891,6 @@ static bool read_program_output(os_handle_t handle, bool mirror_serial) {
             (uint64_t)(uintptr_t)&bytes);
         if (status == -110 || status == -11) {
             if (dirty) {
-                shell_damage_all();
                 render_window();
                 dirty = false;
             }
@@ -999,7 +913,6 @@ static bool read_program_output(os_handle_t handle, bool mirror_serial) {
         if (append_text_chunk(g_file_buffer, bytes, line, &line_length)) dirty = true;
         if (++chunks == SHELL_OUTPUT_EVENT_BUDGET) {
             if (dirty) {
-                shell_damage_all();
                 render_window();
                 dirty = false;
             }
@@ -1009,7 +922,6 @@ static bool read_program_output(os_handle_t handle, bool mirror_serial) {
     }
     if (finish_text_line(line, &line_length)) dirty = true;
     if (dirty) {
-        shell_damage_all();
         render_window();
     }
     return success;
@@ -1047,12 +959,11 @@ static bool launch_program_foreground(shell_launch_context_t *context) {
     context->output_write = OS_INVALID_HANDLE;
     context->redirect_output = false;
     g_foreground_wait = true;
-    shell_damage_all();
     render_window();
     output_success = read_program_output(
         pipe.read_handle,
-        text_equals_ignore_case(context->path, "/sbin/chrome-start") ||
-        text_equals_ignore_case(context->path, "/sbin/chrome"));
+        text_equals_ignore_case(context->path, "/usr/apps/chrome/chrome-start") ||
+        text_equals_ignore_case(context->path, "/usr/apps/chrome/chrome"));
     (void)gshell_syscall_one(OS_SYS_HANDLE_CLOSE, pipe.read_handle);
     for (;;) {
         int64_t result = gshell_syscall_three(
@@ -1082,7 +993,7 @@ static bool launch_program_background(shell_launch_context_t *context) {
 }
 
 static void reap_background_children(void) {
-    /* Foreground waits own their PID: a GUI callback must never reap it. */
+    /* 前台等待操作拥有其 PID：GUI 回调绝不能回收该进程。 */
     if (g_foreground_wait) return;
     for (uint32_t n = 0; n < SHELL_BACKGROUND_REAP_BUDGET &&
                          g_background_children != 0U; ++n) {
@@ -1106,8 +1017,7 @@ static bool launch_program(const char *path, char **program_arguments,
         argument_count == 0U || argument_count > SHELL_MAX_ARGUMENTS) {
         return false;
     }
-    /* Both launch paths snapshot this stack through fork. No permanent
-     * context array, artificial launch limit or shared child stack is needed. */
+    /* 两条启动路径都会通过 fork 快照此栈。无需永久上下文数组、人为启动上限或共享子进程栈。 */
     copy_text(context->path, path);
     for (uint32_t index = 0U; index < argument_count; ++index) {
         copy_text(context->argument_storage[index], program_arguments[index]);
@@ -1156,7 +1066,7 @@ static void append_command_echo(void) {
             }
             count = low;
         }
-        /* Keep a UTF-8 codepoint together, even in a one-glyph-wide viewport. */
+        /* 即使视口宽度只容纳一个字形，也要保持 UTF-8 码点完整。 */
         while (count != 0U && offset + count < length &&
                ((uint8_t)g_display_line[offset + count] & 0xC0U) == 0x80U) --count;
         if (count == 0U) {
@@ -1191,17 +1101,18 @@ static void command_echo(char **arguments, uint32_t count) {
 }
 
 static void command_cd(char **arguments, uint32_t count) {
-    char path[SHELL_LINE_CAPACITY];
     const char *target = count == 1U ? "/" : arguments[1];
     if (count > 2U) {
         append_output("USAGE: CD [DIRECTORY]");
         return;
     }
-    if (!resolve_path(target, path) || !directory_exists(path)) {
+    if (gshell_syscall_one(OS_SYS_FILE_CHDIR, (uint64_t)(uintptr_t)target) != 0) {
         append_output("CD: DIRECTORY NOT FOUND");
         return;
     }
-    copy_text(g_cwd, path);
+    if (gshell_syscall_two(OS_SYS_FILE_GETCWD, (uint64_t)(uintptr_t)g_cwd,
+                          sizeof(g_cwd)) <= 0)
+        append_output("CD: CANNOT READ CURRENT DIRECTORY");
 }
 
 static int64_t file_path_operation(uint64_t syscall_number, const char *path,
@@ -1216,13 +1127,12 @@ static int64_t file_path_operation(uint64_t syscall_number, const char *path,
 }
 
 static void command_stat(char **arguments, uint32_t count) {
-    char path[SHELL_LINE_CAPACITY];
     os_file_info_t info = {0};
     if (count != 2U) {
         append_output("USAGE: STAT FILE");
         return;
     }
-    if (!resolve_path(arguments[1], path) || stat_path(path, &info) < 0) {
+    if (stat_path(arguments[1], &info) < 0) {
         append_output("STAT: PATH NOT FOUND");
         return;
     }
@@ -1238,13 +1148,11 @@ static void command_stat(char **arguments, uint32_t count) {
 }
 
 static void command_mkdir(char **arguments, uint32_t count) {
-    char path[SHELL_LINE_CAPACITY];
     if (count != 2U) {
         append_output("USAGE: MKDIR DIRECTORY");
         return;
     }
-    if (!resolve_path(arguments[1], path) ||
-        file_path_operation(OS_SYS_FILE_MKDIR, path, 0755U) < 0) {
+    if (file_path_operation(OS_SYS_FILE_MKDIR, arguments[1], 0755U) < 0) {
         append_output("MKDIR: FAILED");
         return;
     }
@@ -1252,14 +1160,12 @@ static void command_mkdir(char **arguments, uint32_t count) {
 }
 
 static void command_touch(char **arguments, uint32_t count) {
-    char path[SHELL_LINE_CAPACITY];
     os_handle_t handle = OS_INVALID_HANDLE;
     if (count != 2U) {
         append_output("USAGE: TOUCH FILE");
         return;
     }
-    if (!resolve_path(arguments[1], path) ||
-        gshell_syscall_four(OS_SYS_FILE_OPEN, (uint64_t)path,
+    if (gshell_syscall_four(OS_SYS_FILE_OPEN, (uint64_t)arguments[1],
                             OS_FILE_OPEN_READ | OS_FILE_OPEN_WRITE |
                             OS_FILE_OPEN_CREATE, 0666U, (uint64_t)&handle) < 0 ||
         handle == OS_INVALID_HANDLE) {
@@ -1271,13 +1177,11 @@ static void command_touch(char **arguments, uint32_t count) {
 }
 
 static void command_remove(char **arguments, uint32_t count) {
-    char path[SHELL_LINE_CAPACITY];
     if (count != 2U) {
         append_output("USAGE: RM PATH");
         return;
     }
-    if (!resolve_path(arguments[1], path) ||
-        file_path_operation(OS_SYS_FILE_REMOVE, path, 0U) < 0) {
+    if (file_path_operation(OS_SYS_FILE_REMOVE, arguments[1], 0U) < 0) {
         append_output("RM: FAILED");
         return;
     }
@@ -1423,7 +1327,7 @@ static void execute_command(void) {
         bool open_command = text_equals_ignore_case(arguments[0], "open");
         command_program(arguments, count, open_command || background);
     } else if (text_equals_ignore_case(arguments[0], "true")) {
-        /* A successful no-op is useful in scripts once command sequencing is added. */
+        /* 加入命令串联功能后，成功的无操作对脚本也有用。 */
     } else if (text_equals_ignore_case(arguments[0], "false")) {
         append_output("FALSE");
     } else if (text_equals_ignore_case(arguments[0], "exit")) {
@@ -1518,6 +1422,42 @@ static void insert_command_text(const char *text) {
     g_command[g_command_length] = '\0';
 }
 
+/* 终端保留 Ctrl+C 中断语义，文本复制/粘贴使用 Ctrl+Shift+C/V。 */
+static void shell_copy_selection(void) {
+    if (shell_has_selection()) {
+        size_t first=g_input_anchor<g_command_cursor?g_input_anchor:g_command_cursor;
+        size_t last=g_input_anchor>g_command_cursor?g_input_anchor:g_command_cursor;
+        (void)ui_clipboard_copy(gshell_syscall_one,g_command+first,last-first);
+    } else if (g_output_anchor!=SIZE_MAX && g_output_anchor!=g_output_selection_end) {
+        size_t first=g_output_anchor<g_output_selection_end?g_output_anchor:g_output_selection_end;
+        size_t last=g_output_anchor>g_output_selection_end?g_output_anchor:g_output_selection_end;
+        char *text=malloc(SHELL_OUTPUT_LINES*SHELL_LINE_CAPACITY);
+        if (!text) return;
+        size_t used=0;
+        for (uint32_t row=0;row<g_output_count;++row) {
+            const char *line=shell_output_line(row);size_t length=text_length(line);
+            size_t base=(size_t)row*SHELL_LINE_CAPACITY;
+            for (size_t i=0;i<length;++i)
+                if (base+i>=first && base+i<last)text[used++]=line[i];
+            if (row+1U<g_output_count && first<base+length && last>base+SHELL_LINE_CAPACITY)
+                text[used++]='\n';
+        }
+        if (used)(void)ui_clipboard_copy(gshell_syscall_one,text,used);
+        free(text);
+    }
+}
+static void shell_paste_selection(void) {
+    size_t selected=shell_has_selection()?(g_input_anchor>g_command_cursor?
+        g_input_anchor-g_command_cursor:g_command_cursor-g_input_anchor):0U;
+    size_t length=0;
+    char *text=ui_clipboard_paste(gshell_syscall_one,SHELL_LINE_CAPACITY-1U-(g_command_length-selected),&length);
+    if (!text)return;
+    /* 粘贴不执行命令，多行和控制字符转换为空格。 */
+    for (size_t i=0;i<length;++i)
+        if ((unsigned char)text[i]<32U || (unsigned char)text[i]==127U)text[i]=' ';
+    insert_command_text(text);free(text);
+}
+
 static void insert_command_character(char character) {
     char text[2] = {character, '\0'};
     insert_command_text(text);
@@ -1549,8 +1489,9 @@ static void complete_command(void) {
         "help", "about", "status", "version", "clear", "echo", "pwd", "cd",
         "ls", "dir", "cat", "history", "which", "type", "open", "run", "exit",
         "true", "false", "deviced", "logd", "crashd", "audiod", "gshell",
-        "notepad", "fileman", "fm", "taskmgr", "netmgr", "imageview", "dyn-gfx",
-        "libc-test",
+        "notepad", "fileman", "fm", "taskmgr", "settings", "imageview", "dyn-gfx",
+        "libc-test", "nasm", "ndisasm", "wget", "linux-events-test",
+        "fat-fsync-probe", "taskmgr-cpu-probe", "tcp-wake-probe",
     };
     uint32_t start = (uint32_t)g_command_cursor;
     uint32_t matches = 0U;
@@ -1580,7 +1521,6 @@ static void complete_command(void) {
 static bool handle_key(const os_window_event_t *event) {
     const os_input_event_t *input = event != 0 ? &event->input : 0;
     char character;
-    bool full_damage = false;
     /* EVENT_READ 已按 g_shell.identifier 过滤；不要因某个输入后端未回填
      * event.identifier 而丢弃本来属于 shell 的按键。 */
     if (event == 0 || event->type != OS_WINDOW_EVENT_INPUT ||
@@ -1594,14 +1534,19 @@ static bool handle_key(const os_window_event_t *event) {
         return false;
     }
     if (input->value == OS_INPUT_VALUE_RELEASE) return false;
-    /* A foreground child still owns command execution. Keep window/font
-     * controls responsive without recursively launching another command. */
+    /* 前台子进程仍拥有命令执行权。保持窗口/字体控件响应，但不要递归启动另一条命令。 */
     if (g_foreground_wait &&
         !(g_ctrl && (input->code == 0x2EU || input->code == 0x2DU ||
                      input->code == 0x14U || input->code == (uint32_t)'Q')))
         return false;
-    if (g_output_scroll) { g_output_scroll = 0U; full_damage = true; }
-    if (g_output_anchor != SIZE_MAX) { g_output_anchor = SIZE_MAX; full_damage = true; }
+    if (g_ctrl && g_shift && (input->code==0x06U || input->code=='C')) {
+        shell_copy_selection();render_window();return true;
+    }
+    if (g_ctrl && g_shift && (input->code==0x19U || input->code=='V')) {
+        shell_paste_selection();render_window();return true;
+    }
+    if (g_output_scroll) { g_output_scroll = 0U; }
+    if (g_output_anchor != SIZE_MAX) { g_output_anchor = SIZE_MAX; }
     bool navigation = input->code == 0x4AU || input->code == 0x4DU ||
         input->code == 0x4FU || input->code == 0x50U || input->code == 0x51U || input->code == 0x52U;
     if (navigation) {
@@ -1610,10 +1555,8 @@ static bool handle_key(const os_window_event_t *event) {
     }
     if (g_ctrl && input->code == 0x2EU) {
         (void)ui_text_adjust(1);
-        full_damage = true;
     } else if (g_ctrl && input->code == 0x2DU) {
         (void)ui_text_adjust(-1);
-        full_damage = true;
     } else if (g_ctrl && (input->code == 0x14U || input->code == (uint32_t)'Q')) {
         gshell_exit(0U);
     } else if (g_ctrl &&
@@ -1621,20 +1564,18 @@ static bool handle_key(const os_window_event_t *event) {
         g_command_cursor = 0U;
     } else if (g_ctrl && (input->code == 0x08U || input->code == (uint32_t)'E')) {
         g_command_cursor = g_command_length;
+
     } else if (g_ctrl && (input->code == 0x06U || input->code == (uint32_t)'C')) {
         if (g_command_length != 0U) append_output("^C");
         clear_command_line();
-        full_damage = true;
     } else if (g_ctrl && (input->code == 0x0FU || input->code == (uint32_t)'L')) {
         clear_output();
-        full_damage = true;
     } else if (g_ctrl && (input->code == 0x18U || input->code == (uint32_t)'U')) {
         clear_command_line();
     } else if (g_ctrl && (input->code == 0x07U || input->code == (uint32_t)'G')) {
         delete_command_character();
     } else if (input->code == 0x28U || input->code == 0x58U) {
         execute_command();
-        full_damage = true;
     } else if (input->code == 0x2AU) {
         backspace_command_character();
     } else if (input->code == 0x4FU) {
@@ -1653,16 +1594,10 @@ static bool handle_key(const os_window_event_t *event) {
         history_next();
     } else if (input->code == 0x2BU) {
         complete_command();
-        /* Multiple matches append output rows; a unique completion only
-         * changes the input line, but the conservative full path keeps both
-         * cases correct without a command-result return value. */
-        full_damage = true;
     } else if (!g_ctrl) {
         character = key_to_ascii(input->code, g_shift);
         if (character != '\0') insert_command_character(character);
     }
-    if (full_damage) shell_damage_all();
-    else shell_damage_input_line();
     render_window();
     return true;
 }
@@ -1741,21 +1676,45 @@ static bool handle_shell_mouse(const os_window_event_t *event) {
             g_output_selection_end = next;
         }
     } else return false;
-    shell_damage_all();
     render_window();
     return true;
 }
 
+/* 根节点语义不随选区刷新变化；拖选中的移动和释放也不能因重绘被丢弃。 */
+static bool shell_control_event_valid(const os_control_event_t *event) {
+    if (os_control_event_node(&g_tree,g_nodes,event)) return true;
+    bool stable_action = event->action==OS_CONTROL_KEY ||
+        (g_mouse_selecting && (event->action==OS_CONTROL_UP || event->action==OS_CONTROL_MOVE));
+    return g_tree.count && stable_action && event->target==1U &&
+        event->node_index==0U && event->node_kind==OS_CONTROL_CONTAINER &&
+        event->user_data==0U && event->tree_revision && event->tree_revision<=g_tree.revision;
+}
+
 static bool handle_event(const os_window_event_t *event) {
     uint64_t pixels;
+    os_window_event_t translated;
 
     if (event == 0) return false;
+    if (event->type==OS_WINDOW_EVENT_CONTROL) {
+        if (!shell_control_event_valid(&event->control)) return false;
+        translated=*event;translated.type=OS_WINDOW_EVENT_INPUT;
+        translated.input=(os_input_event_t){.code=event->control.code,.value=event->control.value};
+        switch (event->control.action) {
+        case OS_CONTROL_KEY: translated.input.type=OS_INPUT_EVENT_KEY;break;
+        case OS_CONTROL_WHEEL: case OS_CONTROL_MOVE:
+            translated.input.type=OS_INPUT_EVENT_RELATIVE;break;
+        case OS_CONTROL_DOWN: case OS_CONTROL_UP:
+            translated.input.type=OS_INPUT_EVENT_BUTTON;break;
+        default:return false;
+        }
+        event=&translated;
+    }
     if (event->type == OS_WINDOW_EVENT_MINIMIZED) {
         g_mouse_selecting = 0U;
         return true;
     }
 
-    /* V2.3 cooperative close */
+    /* V2.3 协作式关闭 */
     if (event->type ==
         OS_WINDOW_EVENT_CLOSE_REQUEST) {
 
@@ -1769,7 +1728,6 @@ static bool handle_event(const os_window_event_t *event) {
         g_shell.width = event->resize.width;
         g_shell.height = event->resize.height;
         g_mouse_selecting = 0U;
-        shell_damage_all();
         render_window();
         return true;
     }
@@ -1779,7 +1737,6 @@ static bool handle_event(const os_window_event_t *event) {
         event->input.code == OS_INPUT_REL_WHEEL &&
         event->input.value != 0 && g_ctrl) {
         (void)ui_text_adjust(event->input.value > 0 ? 1 : -1);
-        shell_damage_all();
         render_window();
         return true;
     }
@@ -1787,13 +1744,14 @@ static bool handle_event(const os_window_event_t *event) {
 }
 
 __attribute__((noreturn)) void gshell_entry(void) {
-    if (!ui_text_init(OS_TEXT_DEFAULT_SIZE) ||
+    if (gshell_syscall_two(OS_SYS_FILE_GETCWD, (uint64_t)(uintptr_t)g_cwd,
+                           sizeof(g_cwd)) <= 0 ||
+        !ui_text_init(OS_TEXT_DEFAULT_SIZE) ||
         !setup_windows()) gshell_exit(1U);
     append_output("GRAPHICAL SHELL READY");
     append_output("WINDOW CONTENT IS COMPOSITED BY KERNEL");
     append_output("TYPE HELP FOR COMMANDS");
     append_output("CTRL +/- FONT  CTRL+WHEEL FONT");
-    shell_damage_all();
     render_window();
     for (;;) {
         reap_background_children();

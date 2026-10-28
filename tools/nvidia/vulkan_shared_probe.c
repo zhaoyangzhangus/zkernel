@@ -39,8 +39,8 @@ int vulkan_shared_support(VkPhysicalDevice gpu) {
     return supported;
 }
 
-/* A presentation preflight: real GPU DMA into the compositor's own surface.
- * No memcpy, pixel conversion, or CPU fill is used to produce the surface. */
+/* 呈现预检：由真实 GPU DMA 写入合成器自己的 surface。
+ * 生成 surface 时不使用 memcpy、像素转换或 CPU 填充。 */
 static int shared_surface(VkPhysicalDevice gpu,VkDevice device,VkQueue queue,
                          uint32_t family,int hold_window,int render) {
     int status=1,fd=-1;
@@ -165,7 +165,7 @@ cleanup:
     if(pool)vkDestroyCommandPool(device,pool,NULL);
     if(buffer)vkDestroyBuffer(device,buffer,NULL);
     if(memory)vkFreeMemory(device,memory,NULL);
-    /* Keep the shared owner/mapping alive until the GPU import is released. */
+    /* GPU 释放导入对象前，保持共享所有者/映射存活。 */
     if(fd>=0)close(fd);
     return status;
 }

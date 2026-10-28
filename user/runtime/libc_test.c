@@ -408,15 +408,143 @@ static int test_environment_and_time(void) {
            getcwd(cwd, sizeof(cwd)) != 0 && strcmp(cwd, "/") == 0;
 }
 
+/* 独立运行，覆盖共享映射经 VM、页缓存和文件后端的真实回写。 */
+/* 完整走编辑器的临时文件替换流程，并保留旧只读句柄验证 inode 身份。 */
+static int test_file_replace(bool case_aliases) {
+    char directory[] = "/save-check-XXXXXX";
+    char path[128] = {0}, alias[128] = {0}, temporary[128] = {0};
+    const char *stage = "replace-directory";
+    int old = -1, fresh = -1, writer = -1;
+    DIR *listing = 0;
+    bool success = false;
+    char data[16] = {0};
+    if (!mkdtemp(directory)) return libc_test_detail_fail(stage);
+    snprintf(path, sizeof(path), "%s/sample.txt", directory);
+    snprintf(alias, sizeof(alias), "%s/%s", directory, case_aliases ? "SAMPLE.TXT" : "sample.txt");
+    snprintf(temporary, sizeof(temporary), "%s/.np-save-test.tmp", directory);
+    stage = "replace-original";
+    writer = open(path, O_CREAT | O_EXCL | O_WRONLY, 0600);
+    if (writer < 0 || write(writer, "original", 8) != 8 || fsync(writer) != 0) goto cleanup;
+    if (close(writer) != 0) { writer = -1; goto cleanup; }
+    writer = -1;
+    old = open(path, O_RDONLY);
+    if (old < 0) goto cleanup;
+    for (unsigned pass = 0; pass < 3; ++pass) {
+        stage = "replace-temporary";
+        writer = open(temporary, O_CREAT | O_EXCL | O_WRONLY, 0600);
+        if (writer < 0 || write(writer, "updated!", 8) != 8 || fsync(writer) != 0) goto cleanup;
+        if (close(writer) != 0) { writer = -1; goto cleanup; }
+        writer = -1;
+        stage = "replace-rename";
+        if (rename(temporary, pass & 1U ? alias : path) != 0) goto cleanup;
+        stage = "replace-old-inode";
+        if (pread(old, data, 8, 0) != 8 || memcmp(data, "original", 8)) goto cleanup;
+        if (fresh >= 0) { close(fresh); fresh = -1; }
+        fresh = open(alias, O_RDONLY);
+        stage = "replace-new-inode";
+        if (fresh < 0 || pread(fresh, data, 8, 0) != 8 || memcmp(data, "updated!", 8)) goto cleanup;
+        stage = "replace-enumeration";
+        listing = opendir(directory);
+        if (!listing) goto cleanup;
+        unsigned entries = 0;
+        struct dirent *entry;
+        while ((entry = readdir(listing)) != 0) {
+            if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, "..")) continue;
+            if (strcmp(entry->d_name, "sample.txt") && strcmp(entry->d_name, "SAMPLE.TXT")) goto cleanup;
+            ++entries;
+        }
+        if (closedir(listing) != 0) { listing = 0; goto cleanup; }
+        listing = 0;
+        if (entries != 1) goto cleanup;
+        printf("OS_FILE_REPLACE_OK pass=%u\n", pass);
+    }
+    stage = "replace-delete";
+    if (unlink(alias) != 0) goto cleanup;
+    stage = "replace-deleted-open-inode";
+    if (pread(fresh, data, 8, 0) != 8 || memcmp(data, "updated!", 8)) goto cleanup;
+    listing = opendir(directory);
+    if (!listing) goto cleanup;
+    struct dirent *entry;
+    while ((entry = readdir(listing)) != 0)
+        if (strcmp(entry->d_name, ".") && strcmp(entry->d_name, "..")) goto cleanup;
+    success = true;
+cleanup:
+    if (listing && closedir(listing) != 0) success = false;
+    if (writer >= 0) close(writer);
+    if (fresh >= 0) close(fresh);
+    if (old >= 0) close(old);
+    unlink(temporary);
+    unlink(path);
+    if (rmdir(directory) != 0) success = false;
+    return success ? 1 : libc_test_detail_fail(stage);
+}
+
+static int test_file_writeback(void) {
+    enum { page_size = 4096, pages = 64, length = pages * page_size - 17 };
+    char path[] = "/writeback-XXXXXX";
+    unsigned char observed[page_size];
+    unsigned char *mapping = MAP_FAILED;
+    int descriptor = mkstemp(path);
+    const char *stage = "writeback-create";
+    bool success = false;
+    if (descriptor < 0) goto cleanup;
+    stage = "writeback-size";
+    if (ftruncate(descriptor, length) != 0) goto cleanup;
+    stage = "writeback-map";
+    mapping = mmap(0, length, PROT_READ | PROT_WRITE, MAP_SHARED, descriptor, 0);
+    if (mapping == MAP_FAILED) goto cleanup;
+    for (unsigned page = 0; page < pages; ++page) {
+        size_t count = page == pages - 1U ? page_size - 17U : page_size;
+        memset(mapping + page * page_size, (int)(page + 32U), count);
+    }
+    /* 同一范围同步两次，中间再次修改已常驻的可写页。第二次写入不一定触发缺页。 */
+    for (unsigned pass = 0; pass < 2U; ++pass) {
+        if (pass != 0U) {
+            for (unsigned page = 7U; page < 26U; ++page)
+                memset(mapping + page * page_size, (int)(page + 128U), page_size);
+        }
+        stage = pass == 0U ? "writeback-first-sync" : "writeback-repeat-sync";
+        if (msync(mapping + 7U * page_size, 19U * page_size, MS_SYNC) != 0)
+            goto cleanup;
+        stage = pass == 0U ? "writeback-first-data" : "writeback-repeat-data";
+        for (unsigned page = 7U; page < 26U; ++page) {
+            if (pread(descriptor, observed, page_size, (off_t)page * page_size) != page_size)
+                goto cleanup;
+            for (unsigned byte = 0; byte < page_size; ++byte)
+                if (observed[byte] != page + (pass == 0U ? 32U : 128U)) goto cleanup;
+        }
+        printf("OS_WRITEBACK_RANGE_OK pass=%u\n", pass);
+    }
+    stage = "writeback-full-sync";
+    if (msync(mapping, length, MS_SYNC) != 0 || fsync(descriptor) != 0) goto cleanup;
+    stage = "writeback-full-data";
+    for (unsigned page = 0; page < pages; ++page) {
+        size_t count = page == pages - 1U ? page_size - 17U : page_size;
+        unsigned value = page + (page >= 7U && page < 26U ? 128U : 32U);
+        if (pread(descriptor, observed, count, (off_t)page * page_size) != (ssize_t)count)
+            goto cleanup;
+        for (unsigned byte = 0; byte < count; ++byte)
+            if (observed[byte] != value) goto cleanup;
+    }
+    success = true;
+cleanup:
+    if (!success) (void)libc_test_detail_fail(stage);
+    if (mapping != MAP_FAILED && munmap(mapping, length) != 0) success = false;
+    if (descriptor >= 0) {
+        if (close(descriptor) != 0) success = false;
+        if (unlink(path) != 0) success = false;
+    }
+    return success;
+}
+
 static int test_virtual_memory(void) {
     unsigned char *mapping;
     unsigned char *madvise_mapping;
     size_t page_size = (size_t)sysconf(_SC_PAGESIZE);
     if (page_size != 4096U || getpagesize() != 4096) return 0;
 
-    /* Linux permits MADV_DONTNEED on untouched pages and across adjacent
-     * VMAs with different protections. PartitionAlloc relies on both when
-     * releasing/decommitting its reserved address-space ranges. */
+    /* Linux 允许对未触碰页面及保护属性不同的相邻 VMA 使用 MADV_DONTNEED。
+     * PartitionAlloc 在释放或反提交预留的地址空间范围时依赖这两项行为。 */
     madvise_mapping = (unsigned char *)mmap(
         0, page_size * 3U, PROT_READ | PROT_WRITE,
         MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
@@ -569,10 +697,9 @@ static int test_linux_resolved_ids(void) {
     uint32_t effective_gid = UINT32_MAX;
     uint32_t saved_gid = UINT32_MAX;
 
-    /* The normal libc-test image is a native System ELF.  Keep this Linux
-     * personality regression active for the Chromium-style PT_INTERP image,
-     * while allowing the native suite to run without manufacturing Linux
-     * syscall traps that the native dispatcher must reject. */
+    /* 普通 libc-test 映像是原生 System ELF。针对 Chromium 风格 PT_INTERP 映像保留此
+     * Linux personality 回归测试，同时允许原生套件运行时不必伪造原生分发器必须拒绝的
+     * Linux 系统调用陷阱。 */
     if (__libc_linux_syscall6(OS_SYS_DEBUG_QUERY, 0U, 0U, 0U, 0U, 0U,
                               0U) != -38LL) {
         return 1;
@@ -633,7 +760,7 @@ static int test_linux_proc_fd_directory(void) {
     DIR *directory = 0;
     struct dirent *entry;
 
-    /* The native libc-test image has no Linux procfs personality. */
+    /* 原生 libc-test 映像不具备 Linux procfs personality。 */
     if (__libc_linux_syscall6(OS_SYS_DEBUG_QUERY, 0U, 0U, 0U, 0U, 0U,
                               0U) != -38LL) {
         return 1;
@@ -686,8 +813,8 @@ static int test_linux_native_socket_messages(void) {
     char byte = 0;
     int descriptor;
 
-    /* An explicitly native socket must remain usable even in a Linux-
-     * personality process, although libc socket() now returns a Linux fd. */
+    /* 即使进程处于 Linux personality，显式创建的原生 socket 仍必须可用，尽管 libc 的
+     * socket() 此时返回 Linux fd。 */
     if (__libc_linux_syscall6(OS_SYS_DEBUG_QUERY, 0U, 0U, 0U, 0U, 0U,
                               0U) != -38LL) {
         return 1;
@@ -732,9 +859,9 @@ static int test_linux_fd_dup_identity(void) {
     }
     if (first_free_linux_fd < 0) goto fail;
 
-    /* Keep a native handle at the first free Linux fd number.  The next
-     * Linux socketpair is relocated by __libc_adopt_linux_fd(); a subsequent
-     * dup() must also keep its public fd equal to its kernel Linux fd. */
+    /* 在第一个空闲 Linux fd 编号处保留一个原生句柄。后续 Linux socketpair 会由
+     * __libc_adopt_linux_fd() 重新定位；再执行 dup() 时，公开 fd 也必须与内核 Linux fd
+     * 保持一致。 */
     while (native_count < native_limit) {
         int descriptor = create_explicit_native_udp_socket(O_CLOEXEC);
         if (descriptor < 0) goto fail;
@@ -804,9 +931,8 @@ static int test_connected_ipv4_udp_binding(void) {
     int wildcard_sender = -1;
     ssize_t result;
 
-    /* POSIX connect() on an unbound datagram socket assigns the local
-     * endpoint before a subsequent send() uses the connected peer.  This is
-     * the exact path Chromium's UDP DNS socket takes. */
+    /* POSIX connect() 会为尚未绑定的数据报 socket 分配本地端点，之后 send() 才使用已
+     * 连接的对端。这正是 Chromium 的 UDP DNS socket 所走的路径。 */
     receiver = socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
     sender = socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
     if (receiver < 0 || sender < 0) goto fail;
@@ -825,8 +951,8 @@ static int test_connected_ipv4_udp_binding(void) {
     }
     result = send(sender, &payload, sizeof(payload), 0);
     if (result != (ssize_t)sizeof(payload)) goto fail;
-    /* recvfrom() must populate a zero-initialized source-address buffer.
-     * DNS uses precisely this call after poll reports its UDP reply. */
+    /* recvfrom() 必须填充已清零的源地址缓冲区。DNS 在 poll 报告收到 UDP 回复后正是
+     * 通过此调用读取数据。 */
     result = recvfrom(receiver, &received, sizeof(received), MSG_DONTWAIT,
                       (struct sockaddr *)&source_address, &source_length);
     if (result != (ssize_t)sizeof(received) || received != payload ||
@@ -837,8 +963,8 @@ static int test_connected_ipv4_udp_binding(void) {
     (void)close(sender);
     sender = -1;
 
-    /* Chromium may reserve a port with INADDR_ANY before connect().  The
-     * connected socket still needs a concrete source address for wire I/O. */
+    /* Chromium 可能先用 INADDR_ANY 预留端口再调用 connect()。已连接的 socket 仍需要
+     * 具体源地址才能执行网络收发。 */
     wildcard_sender = socket(AF_INET,
                              SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
     if (wildcard_sender < 0 ||
@@ -874,9 +1000,8 @@ static int test_linux_epoll_syscall_arguments(void) {
     struct epoll_event events[1] = {0};
     int descriptor;
 
-    /* epoll_* is exposed through the Linux varargs syscall wrapper.  Keep
-     * this before the broad compatibility suite so a missing argument-count
-     * entry cannot be hidden by a later environment failure. */
+    /* epoll_* 通过 Linux 可变参数系统调用封装公开。将此测试放在广泛兼容性套件之前，
+     * 避免缺失参数计数项的问题被后续环境故障掩盖。 */
     if (__libc_linux_syscall6(OS_SYS_DEBUG_QUERY, 0U, 0U, 0U, 0U, 0U,
                               0U) != -38LL) {
         return 1;
@@ -896,10 +1021,9 @@ static int test_linux_futex_wait_bitset_private(void) {
     void *mapping;
     long result;
 
-    /* Abseil uses WAIT_BITSET with PRIVATE and CLOCK_REALTIME even for an
-     * infinite wait.  A mismatched value makes this a non-blocking probe.
-     * Start with an untouched anonymous page to cover private-futex demand
-     * faulting without requiring a physical-address lookup. */
+    /* 即使是无限等待，Abseil 也会使用带 PRIVATE 和 CLOCK_REALTIME 的 WAIT_BITSET。
+     * 使用不匹配的值可使探测不阻塞。从未触碰的匿名页开始，以覆盖私有 futex 按需缺页，
+     * 而无需查询物理地址。 */
     if (__libc_linux_syscall6(OS_SYS_DEBUG_QUERY, 0U, 0U, 0U, 0U, 0U,
                               0U) != -38LL) {
         return 1;
@@ -952,7 +1076,7 @@ static int test_ipv4_ephemeral_binding(void) {
                         0U, 0U, 0U, 0U, 0U) < 0 ||
         (network.flags & OS_NET_STATUS_LINK_UP) == 0U ||
         network.ipv4_address == 0U) {
-        /* The libc suite also runs without a NIC; that is not a binding bug. */
+        /* libc 套件也会在没有网卡时运行；这不属于绑定错误。 */
         return 1;
     }
 
@@ -963,9 +1087,8 @@ static int test_ipv4_ephemeral_binding(void) {
     peer.sin_family = AF_INET;
     peer.sin_port = htons(9U);
     peer.sin_addr.s_addr = htonl(destination);
-    /* The first nonblocking connect may only enqueue ARP.  Retry briefly so
-     * the regression also observes the first TCP packet after neighbor
-     * resolution instead of validating the local bind and stopping there. */
+    /* 首次非阻塞 connect 可能只将 ARP 请求入队。短暂重试，以便回归测试也能观察到邻居
+     * 解析后的首个 TCP 报文，而不只是验证本地绑定后就结束。 */
     for (unsigned int attempt = 0U; attempt < 8U; ++attempt) {
         struct timespec retry = {0, 10000000L};
         int connect_status;
@@ -1020,7 +1143,7 @@ static int test_poll_and_name_resolution(void) {
     struct sockaddr_in socket_address = {0};
     socklen_t socket_address_length = sizeof(socket_address);
 
-    descriptor = open("/etc/vfsmap.tst", O_RDONLY);
+    descriptor = open("/EFI/OS/vfsmap.tst", O_RDONLY);
     if (descriptor < 0) return 0;
     event.fd = descriptor;
     event.events = POLLIN;
@@ -1158,15 +1281,15 @@ static int test_command_line_and_glob(void) {
         getopt_long(4, arguments, "", options, &long_index) != -1) {
         return libc_test_detail_fail("command-line-options");
     }
-    if (glob("/etc/*.tst", 0, 0, &matches) != 0 || matches.gl_pathc != 1U ||
-        matches.gl_pathv == 0 || strcmp(matches.gl_pathv[0], "/etc/vfsmap.tst") != 0) {
+    if (glob("/EFI/OS/*.tst", 0, 0, &matches) != 0 || matches.gl_pathc != 1U ||
+        matches.gl_pathv == 0 || strcmp(matches.gl_pathv[0], "/EFI/OS/vfsmap.tst") != 0) {
         globfree(&matches);
         return libc_test_detail_fail("command-line-glob");
     }
     globfree(&matches);
-    if (glob("/etc/no-such-*.tst", GLOB_NOCHECK, 0, &matches) != 0 ||
+    if (glob("/EFI/OS/no-such-*.tst", GLOB_NOCHECK, 0, &matches) != 0 ||
         matches.gl_pathc != 1U || strcmp(matches.gl_pathv[0],
-                                         "/etc/no-such-*.tst") != 0) {
+                                         "/EFI/OS/no-such-*.tst") != 0) {
         globfree(&matches);
         return libc_test_detail_fail("command-line-nocheck");
     }
@@ -1296,7 +1419,7 @@ static void *key_reuse_entry(void *argument) {
     pthread_key_t key = (pthread_key_t)(uintptr_t)argument;
     if (pthread_setspecific(key, (void *)0xCAFEU) != 0) {
         g_key_reuse_failed = 1;
-        /* Wake a parent that is waiting for the worker to publish state. */
+        /* 唤醒正在等待工作线程发布状态的父进程。 */
         g_key_reuse_ready = 1;
         (void)pthread_cond_signal(&g_key_reuse_condition);
         return 0;
@@ -1515,7 +1638,7 @@ static int test_c11_recursive_mutex(void) {
     if (mtx_trylock(&mutex) != thrd_success) goto cleanup;
     ++lock_depth;
 
-    /* Each unlock releases one recursive level, including the trylock level. */
+    /* 每次解锁释放一层递归锁，包括 trylock 获取的那一层。 */
     if (mtx_unlock(&mutex) != thrd_success) goto cleanup;
     --lock_depth;
     if (mtx_unlock(&mutex) != thrd_success) goto cleanup;
@@ -1783,11 +1906,11 @@ cleanup:
         mutex_locked = 0;
     }
     if (thread_active) {
-        /* A failed detach leaves ownership with this test, so join it. */
+        /* detach 失败时线程仍归本测试所有，因此需要 join。 */
         (void)thrd_join(thread, 0);
         thread_active = 0;
     } else if (detached) {
-        /* The worker has released the mutex before it can be detached. */
+        /* 工作线程会先释放互斥锁，然后才允许 detach。 */
         while (!state.completed) thrd_yield();
     }
     if (condition_initialized) cnd_destroy(&state.condition);
@@ -2221,8 +2344,8 @@ static int test_process_exit_group(void) {
 
     (void)close(ready_pipe[1]);
     ready_pipe[1] = -1;
-    /* Keep local read ends open until reaping so timeout cleanup writes can
-     * never raise SIGPIPE if the child exits between the poll and write. */
+    /* 回收子进程前保持本地读端打开，避免子进程在 poll 与 write 之间退出时，超时清理
+     * 写入触发 SIGPIPE。 */
 
     for (unsigned int attempt = 0U; attempt < 2000U; ++attempt) {
         ssize_t result = read(ready_pipe[0], &token, sizeof(token));
@@ -2251,7 +2374,7 @@ static int test_process_exit_group(void) {
     }
 
     if (!child_reaped) {
-        /* Let the worker return if the exit-group regression is present. */
+        /* 如果存在 exit-group 回归，则允许工作线程返回。 */
         (void)write(stop_pipe[1], "S", 1U);
         (void)write(control_pipe[1], "X", 1U);
         child_reaped = wait_for_child_exit_bounded(child, &wait_status,
@@ -2388,8 +2511,8 @@ static int test_cloexec_exec(void) {
     char environment_text[] = "OS_EXEC_ENV=ok";
     char *arguments[5];
     char *environment[] = {environment_text, 0};
-    int inherited = open("/etc/vfsmap.tst", O_RDONLY);
-    int closed = open("/etc/vfsmap.tst", O_RDONLY | O_CLOEXEC);
+    int inherited = open("/EFI/OS/vfsmap.tst", O_RDONLY);
+    int closed = open("/EFI/OS/vfsmap.tst", O_RDONLY | O_CLOEXEC);
     int wait_status = 0;
     pid_t child;
     if (inherited < 0 || closed < 0) {
@@ -2399,7 +2522,7 @@ static int test_cloexec_exec(void) {
     }
     (void)snprintf(inherited_text, sizeof(inherited_text), "%d", inherited);
     (void)snprintf(closed_text, sizeof(closed_text), "%d", closed);
-    arguments[0] = "/sbin/libc-test";
+    arguments[0] = "/usr/apps/libc-test/libc-test";
     arguments[1] = "--fd-check";
     arguments[2] = inherited_text;
     arguments[3] = closed_text;
@@ -2431,7 +2554,7 @@ static int run_nasm_once(const char *source, const char *output) {
     pid_t child = fork();
     if (child < 0) return 0;
     if (child == 0) {
-        (void)execve("/sbin/nasm", arguments, environ);
+        (void)execve("/usr/apps/nasm/nasm", arguments, environ);
         _exit(127);
     }
     return waitpid(child, &wait_status, 0) == child && WIFEXITED(wait_status) &&
@@ -2643,7 +2766,7 @@ static int test_extended_runtime(void) {
         return libc_test_detail_fail("extended-vector-io");
     }
 
-    entry_count = scandir("/etc", &entries, 0, alphasort);
+    entry_count = scandir("/EFI/OS", &entries, 0, alphasort);
     if (entry_count <= 0 || entries == 0) {
         return libc_test_detail_fail("extended-scandir");
     }
@@ -2655,7 +2778,7 @@ static int test_extended_runtime(void) {
     free(entries);
 
     {
-        FILE *stream = fopen("/etc/vfsmap.tst", "r");
+        FILE *stream = fopen("/EFI/OS/vfsmap.tst", "r");
         ssize_t length;
         bool closed = false;
         bool failed = stream == 0;
@@ -2815,7 +2938,7 @@ static int test_process_shared_sync(void) {
 }
 
 static int test_files(void) {
-    const char *path = "/etc/vfsmap.tst";
+    const char *path = "/EFI/OS/vfsmap.tst";
     char bytes[6] = {0};
     char resolved[PATH_MAX];
     char scanned[32];
@@ -2911,7 +3034,7 @@ static int test_files(void) {
         return libc_test_detail_fail("files-dup2-cloexec");
     }
 
-    directory_descriptor = open("/etc", O_RDONLY | O_DIRECTORY);
+    directory_descriptor = open("/EFI/OS", O_RDONLY | O_DIRECTORY);
     if (directory_descriptor < 0 ||
         fstatat(directory_descriptor, "vfsmap.tst", &at_status, 0) != 0 ||
         !S_ISREG(at_status.st_mode) || at_status.st_size != 5 ||
@@ -2934,8 +3057,7 @@ static int test_files(void) {
         else (void)close(directory_descriptor);
         return libc_test_detail_fail("files-fdopendir");
     }
-    /* The first entry is implementation-defined; only verify fdopendir made
-     * a usable directory stream. */
+    /* 第一项由实现定义；这里只验证 fdopendir 创建了可用的目录流。 */
     if (directory_result == 0 || closedir(fd_directory) != 0) {
         return libc_test_detail_fail("files-readdir-r");
     }
@@ -3032,7 +3154,7 @@ static int test_files(void) {
     }
     free(allocated);
 
-    directory = opendir("/etc");
+    directory = opendir("/EFI/OS");
     if (directory == 0) return libc_test_detail_fail("files-opendir");
     while ((entry = readdir(directory)) != 0) {
         if (entry->d_name[0] != '\0') found_entry = 1;
@@ -3085,7 +3207,7 @@ done:
 static bool test_statfs_output_layout(void) {
     struct {
         uint64_t before;
-        uint64_t words[15]; /* x86-64 statfs: 120 bytes, not statvfs's 112. */
+        uint64_t words[15]; /* x86-64 statfs 为 120 字节，statvfs 则为 112 字节。 */
         uint64_t after;
     } output;
     memset(&output, 0xa5, sizeof(output));
@@ -3113,6 +3235,16 @@ int main(int argc, char **argv) {
     struct timespec now = {0};
     long parsed;
 
+    if (argc >= 2 && argv != 0 && strcmp(argv[1], "--replace-check") == 0) {
+        if (!test_file_replace(true)) return libc_test_fail("file-replace");
+        printf("OS_FILE_REPLACE_DELETE_OK\n");
+        return 0;
+    }
+    if (argc >= 2 && argv != 0 && strcmp(argv[1], "--writeback-check") == 0) {
+        if (!test_file_writeback()) return libc_test_fail("file-writeback");
+        printf("OS_FILE_WRITEBACK_OK\n");
+        return 0;
+    }
     if (argc >= 2 && argv != 0 && strcmp(argv[1], "--fd-check") == 0) {
         return test_exec_descriptor_child(argc, argv);
     }
@@ -3131,10 +3263,9 @@ int main(int argc, char **argv) {
     if (argc < 1 || argv == 0 || !test_strings()) {
         return libc_test_fail("strings");
     }
-    /* Run the Linux-personality pointer-safety regression before the larger
-     * native compatibility suite.  A Linux image may still stop later on an
-     * unrelated compatibility gap, but that must not hide getresuid/getresgid
-     * coverage.  Native images skip inside the test itself. */
+    /* 在规模更大的原生兼容性套件前运行 Linux personality 指针安全回归测试。Linux 映像
+     * 之后仍可能因无关的兼容性缺口而停止，但不能因此漏测 getresuid/getresgid。原生映像
+     * 会在测试内部跳过此项。 */
     if (!test_linux_resolved_ids()) return libc_test_fail("linux-resolved-ids");
     if (!test_linux_sysconf_cpu_count()) {
         return libc_test_fail("linux-sysconf-cpu-count");

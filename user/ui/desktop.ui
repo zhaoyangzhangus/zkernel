@@ -1,0 +1,20 @@
+<!-- 桌面按钮声明应用目录；程序和图标必须来自同一应用包。 -->
+<container wallpaper="/usr/apps/desktop/wall.png" id="desktop" layout="column" background="surface" padding="18" flags="justify-end clip"
+           border-width="2" border-color="#661A73E8" radius="8">
+  <container id="dock" layout="row" height="84" gap="8" flags="justify-center align-center">
+    <button id="fileman" width="88" height="68" text="FILEMAN"
+            app-directory="/usr/apps/fileman" program="fileman" icon="icon.png"/>
+    <button id="gshell" width="88" height="68" text="SHELL"
+            app-directory="/usr/apps/gshell" program="gshell" icon="icon.png"/>
+    <button id="notepad" width="88" height="68" text="NOTEPAD"
+            app-directory="/usr/apps/notepad" program="notepad" icon="icon.png"/>
+    <button id="settings" width="88" height="68" text="设置"
+            app-directory="/usr/apps/settings" program="settings" icon="icon.png"/>
+    <button id="taskmgr" width="88" height="68" text="TASK MANAGER"
+            app-directory="/usr/apps/taskmgr" program="taskmgr" icon="icon.png"/>
+    <button id="chrome" width="88" height="68" text="CHROME"
+            app-directory="/usr/apps/chrome" program="chrome-start" icon="icon.png"/>
+    <button id="imageview" width="88" height="68" text="图片查看器"
+            app-directory="/usr/apps/imageview" program="imageview" icon="icon.png"/>
+  </container>
+</container>

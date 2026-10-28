@@ -36,13 +36,21 @@ enum {K_OK,K_ENAMETOOLONG};
 static vfs_fat32_mount_t g_fat32_mounts[VFS_FAT32_MOUNT_LIMIT];
 static vnode_t **g_vfs_nodes;
 static uint32_t g_vfs_node_capacity;
+static uint32_t unused_bucket[1],unused_next[1];
+static uint32_t *g_vfs_fat_buckets=unused_bucket,*g_vfs_fat_next=unused_next;
+static void vfs_namespace_insert_locked(vnode_t *v,uint32_t slot){(void)v;(void)slot;}
+static void vfs_namespace_remove_locked(vnode_t *v){(void)v;}
 static const char *request;
 static unsigned request_routes;
+static unsigned total_routes;
+static unsigned long compared_characters;
 static uint32_t g_vfs_next_free_node;
 static unsigned lock_depth;
+static unsigned eviction_probes;
+static unsigned lock_calls;
 static bool remount_after_drop;
 static vnode_t *replacement_after_drop;
-static void vfs_lock(void){assert(!lock_depth);++lock_depth;}
+static void vfs_lock(void){assert(!lock_depth);++lock_depth;++lock_calls;}
 static void vfs_unlock(void){assert(lock_depth==1);--lock_depth;}
 static void object_put(void *p){
  assert(!lock_depth);++((vnode_t*)p)->drops;
@@ -54,6 +62,7 @@ static void object_put(void *p){
 }
 '''
 for signature in ('size_t vfs_string_length(',
+                  'static uint32_t vfs_fat_name_bucket(',
                   'static bool vfs_path_range_equals(',
                   'static bool vfs_volatile_path(',
                   'static bool vfs_mount_matches('):
@@ -62,6 +71,7 @@ program += function('vfs_fat32_mount_t *vfs_fat32_mount_for_path(').replace(
     'vfs_fat32_mount_for_path(', 'production_mount_for_path(')
 program += r'''
 static vfs_fat32_mount_t *vfs_fat32_mount_for_path(const char *p,char *r){
+    ++total_routes;
     if(p==request)++request_routes;
     return production_mount_for_path(p,r);
 }
@@ -74,7 +84,9 @@ static bool vfs_fat32_relative_path(const char *p, char *r) {
 }
 '''
 if 'static bool vfs_fat_relative_path_equal(' in source:
-    program += function('static bool vfs_fat_relative_path_equal(')
+    program += function('static bool vfs_fat_relative_path_equal(').replace(
+        'char a = left_relative[index], b = right[suffix + index];',
+        '++compared_characters; char a = left_relative[index], b = right[suffix + index];')
 program += r'''
 /* Previous identity wrapper retained only as a test oracle. */
 static bool vfs_fat_path_equal(const char *left,const char *right){
@@ -82,13 +94,17 @@ static bool vfs_fat_path_equal(const char *left,const char *right){
  return m&&vfs_fat_relative_path_equal(relative,vfs_string_length(relative),m,right);
 }
 '''
-program += function('static vnode_t *vfs_find_fat_node_locked(')
+# 线性路径仍用于挂载根；本测试保留它作为名称比较和路由对照。
+program += function('static vnode_t *vfs_find_fat_node_locked(').replace(
+    'bool indexed = relative_length != 0U && g_vfs_node_capacity != 0U;',
+    'bool indexed = false;')
 program += function('static void vfs_set_node_slot_locked(')
 program += function('static bool vfs_path_matches_subtree_prefix(')
 program += function('static kstatus_t vfs_rekey_cached_subtree_locked(')
 # Exercise the actual post-delete eviction loop, including lock/reference order.
 remove_start = source.index('kstatus_t vfs_remove_typed_kernel(')
-detach_start = source.index('        for (;;) {', remove_start)
+detach_start = source.index('        if (mounted_victim != 0) {',
+                            source.index('/* 删除磁盘目录项后同步摘除规范 vnode', remove_start))
 opening = source.index('{', detach_start)
 depth = 1
 detach_end = opening + 1
@@ -97,6 +113,8 @@ while depth:
     detach_end += 1
 detach = source[detach_start:detach_end]
 assert 'candidate != mounted_victim' in detach
+detach = detach.replace('vnode_t *candidate = g_vfs_nodes[node_index];',
+                        '++eviction_probes; vnode_t *candidate = g_vfs_nodes[node_index];')
 program += 'static void detach_matching(vnode_t *mounted_victim){\n' + detach + '\n}\n'
 program += r'''
 static bool previous_relative_equal(const char *left,size_t length,const char *right){
@@ -140,7 +158,24 @@ int main(void) {
         snprintf(b[i].path,sizeof(b[i].path),"/profile/%05u",i);
         b[i].fat32_node=true; v[i].fs_private=&b[i]; g_vfs_nodes[i]=&v[i];
     }
-    check("/PROFILE/32767",&v[n-1]); check("/profile/missing",0);
+    total_routes=0;compared_characters=0;check("/PROFILE/32767",&v[n-1]);
+    assert(total_routes==2);
+    /* 固定输入下统计实际字符访问，而不是用易受宿主负载影响的耗时断言。 */
+    unsigned long forward_characters=0;
+    const char *expected="PROFILE/32767";
+    for(unsigned i=0;i<n;++i)for(size_t j=0;expected[j];++j){
+        char a=expected[j],c=b[i].path[j+1];
+        if(a>='A'&&a<='Z')a=(char)(a-'A'+'a');
+        if(c>='A'&&c<='Z')c=(char)(c-'A'+'a');
+        ++forward_characters;
+        if(a!=c)break;
+    }
+    assert(compared_characters>0&&compared_characters*4<forward_characters);
+    printf("32768 shared-directory nodes: compared characters %lu -> %lu\n",
+           forward_characters,compared_characters);
+    total_routes=0;check("/profile/missing",0);
+    assert(total_routes==1);
+    puts("32768 cached FAT nodes: hit mount routes 32769 -> 2; absent-name routes 32769 -> 1");
     /* A detached inode can remain alive for old handles, not for new opens. */
     b[n-1].detached=true;check("/PROFILE/32767",0);
     strcpy(b[n-2].path,b[n-1].path);check("/PROFILE/32767",&v[n-2]);
@@ -223,6 +258,21 @@ int main(void) {
         }
     }
     printf("Filesystem identity: %u pairs over all %u mount slots; old cross-filesystem alias rejected, same-filesystem aliases preserved\n",identities,VFS_FAT32_MOUNT_LIMIT);
+    /* 大注册表中的首、中、尾槽位只扫描到命中位置；空目标完全不获取锁。 */
+    g_vfs_node_capacity=n;
+    for(unsigned i=0;i<n;++i)g_vfs_nodes[i]=&v[i];
+    const unsigned positions[]={0,n/2,n-1};
+    for(unsigned k=0;k<3;++k){
+        unsigned index=positions[k];
+        v[index].drops=0;eviction_probes=0;lock_calls=0;
+        detach_matching(&v[index]);
+        assert(eviction_probes==index+1&&lock_calls==1&&v[index].drops==1);
+        assert(!g_vfs_nodes[index]&&!lock_depth);
+        detach_matching(0);
+        assert(eviction_probes==index+1&&lock_calls==1);
+        g_vfs_nodes[index]=&v[index];
+    }
+    puts("FAT eviction: 32768-node first/middle/last hits avoid the second full scan; uncached target takes no lock or probes");
     unsigned eviction_cases=0;
     for(unsigned alias=0;alias<2;++alias)for(unsigned remount=0;remount<2;++remount){
         g_vfs_node_capacity=VFS_FAT32_MOUNT_LIMIT;g_vfs_next_free_node=VFS_FAT32_MOUNT_LIMIT;
@@ -237,7 +287,13 @@ int main(void) {
         strcpy(b[8].path,b[7].path);
         b[7].detached=true;b[8].detached=false;
         request_routes=0;remount_after_drop=remount;
-        detach_matching(&v[7]);detach_matching(&v[7]);detach_matching(0);
+        eviction_probes=0;lock_calls=0;
+        detach_matching(&v[7]);
+        assert(eviction_probes==8&&lock_calls==1);
+        detach_matching(&v[7]);
+        assert(eviction_probes==8+VFS_FAT32_MOUNT_LIMIT&&lock_calls==2);
+        detach_matching(0);
+        assert(eviction_probes==8+VFS_FAT32_MOUNT_LIMIT&&lock_calls==2);
         assert(request_routes==0&&g_vfs_next_free_node==7);
         for(unsigned i=0;i<VFS_FAT32_MOUNT_LIMIT;++i){
             assert(v[i].drops==(unsigned)(i==7));

@@ -35,6 +35,7 @@ enum nv_rm_failure_stage {
 };
 
 static nv_gpu_device_t g_nv_gpu;
+static atomic_uint_fast64_t g_nv_vram_bytes;
 static nv_rm_screen_info_t g_nv_screen_info;
 
 void nv_rm_driver_set_screen_info(uint64_t physical_base, uint32_t width,
@@ -188,12 +189,14 @@ NV_RM_WEAK void nv_rm_vendor_frontend_close(void *file)
 
 static void nv_rm_driver_reset(void)
 {
+    atomic_store_explicit(&g_nv_vram_bytes,0U,memory_order_release);
     g_nv_gpu = (nv_gpu_device_t){0};
     g_nv_gpu.state = NV_GPU_NEW;
 }
 
 static void nv_rm_driver_fail(uint32_t stage, kstatus_t status)
 {
+    atomic_store_explicit(&g_nv_vram_bytes,0U,memory_order_release);
     g_nv_gpu.failure_stage = stage;
     g_nv_gpu.failure_status = status;
     g_nv_gpu.state = NV_GPU_FAILED;
@@ -381,9 +384,16 @@ kstatus_t nv_rm_driver_probe(void)
         "OS_NVIDIA_PHASE4_HAL_READY BLACKWELL GB205\r\n");
 #if OS_NVIDIA_PHASE5
     g_nv_gpu.state = NV_GPU_GSP_READY;
+    atomic_store_explicit(&g_nv_vram_bytes,result.vram_bytes,memory_order_release);
     kernel_serial_write_serial_only("OS_NVIDIA_GSP_READY\r\n");
 #endif
     return K_OK;
+}
+
+uint64_t nv_rm_driver_memory_bytes(const pci_device_t *device)
+{
+    uint64_t bytes=atomic_load_explicit(&g_nv_vram_bytes,memory_order_acquire);
+    return bytes && device==g_nv_gpu.pci ? bytes : 0U;
 }
 
 const nv_gpu_device_t *nv_rm_driver_current(void)

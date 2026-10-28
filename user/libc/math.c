@@ -184,8 +184,7 @@ long double rintl(long double value) {
 }
 
 long double nearbyintl(long double value) {
-    /* System currently advertises errno-only math error handling, so the
-     * FE_INEXACT distinction from rint() is not externally observable. */
+    /* System 当前仅声明通过 errno 处理数学错误，因此 rint() 的 FE_INEXACT 区别对外不可见。 */
     return x87_round_current(value);
 }
 
@@ -556,9 +555,8 @@ long double nanl(const char *tag) {
     return __builtin_nanl("");
 }
 
-/* Keep the product and addend in x87 extended precision until the final
- * conversion.  This supplies a fused result without a compiler-runtime
- * dependency (an explicit __builtin_fma call would otherwise recurse here). */
+/* 在最终转换前，以 x87 扩展精度保留乘积和加数。这样无需依赖编译器运行时即可得到
+ * 融合结果（否则显式调用 __builtin_fma 会递归回到此处）。 */
 long double fmal(long double left, long double right, long double addend) {
     long double product;
 
@@ -593,7 +591,7 @@ static long double erf_series(long double value) {
     return 1.12837916709551257389615890312154517L * sum;
 }
 
-/* Numerical Recipes' bounded complementary-error-function approximation. */
+/* Numerical Recipes 中有界的互补误差函数近似算法。 */
 static long double erfc_positive(long double value) {
     long double t;
     long double polynomial;

@@ -1,4 +1,4 @@
-/* REFACTOR_SYSCALL_VM_OWNER: user virtual-memory syscall policy. */
+/* REFACTOR_SYSCALL_VM_OWNER：用户虚拟内存系统调用策略。 */
 
 #include <arch/x86_64/uaccess.h>
 #include <kernel/console.h>
@@ -9,6 +9,8 @@
 #include <kernel/vm.h>
 #include <uapi/file.h>
 #include <uapi/memory.h>
+#include <uapi/cpu_usage.h>
+#include <kernel/sched.h>
 #include <uapi/mm.h>
 #include <uapi/syscall.h>
 
@@ -34,6 +36,15 @@ int64_t syscall_memory_info(uint64_t output_pointer, uint64_t unused1,
     info.page_size = PAGE_SIZE;
     return copy_to_user((void __user *)(uintptr_t)output_pointer,
                         &info, sizeof(info));
+}
+
+int64_t syscall_cpu_get_usage(uint64_t pointer,uint64_t a,uint64_t b,uint64_t c,uint64_t d,uint64_t e) {
+    (void)a;(void)b;(void)c;(void)d;(void)e;
+    if (!current_process()) return K_EPERM;
+    if (!pointer) return K_EINVAL;
+    os_cpu_usage_t info;
+    kstatus_t status=sched_usage_query(&info);
+    return status==K_OK ? copy_to_user((void __user *)(uintptr_t)pointer,&info,sizeof(info)) : status;
 }
 
 uint32_t translate_vm_protection(uint32_t protection) {

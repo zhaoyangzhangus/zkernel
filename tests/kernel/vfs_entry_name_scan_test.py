@@ -7,12 +7,12 @@ import resource
 root = Path(__file__).resolve().parents[2]
 source = (root / 'kernel/fs/vfs/core.c').read_text()
 header = (root / 'include/uapi/file.h').read_text()
-layout = header[header.index('enum os_file_type {'):header.index('/* Enumerate one direct child')]
+layout = header[header.index('enum os_file_type {'):header.index('typedef struct os_file_enumerate {')]
 append = source[source.index('static bool vfs_append_entry('):source.index('typedef struct vfs_directory_collection')]
 name_length = source[source.index('static size_t vfs_file_name_length('):source.index('static bool vfs_append_entry(')]
 name_length = name_length.replace('    size_t length = 0U;',
                                 '    if (name == incoming) ++scans; else ++candidate_scans;\n    size_t length = 0U;')
-equals = source[source.index('static bool vfs_path_range_equals('):source.index('/* Memory-backed /tmp')]
+equals = source[source.index('static bool vfs_path_range_equals('):source.index('static uint32_t vfs_free_node_slot_locked(')]
 old = append.replace('vfs_append_entry(', 'previous_append(').replace(
     '    size_t name_length = vfs_file_name_length(entry->name);\n'
     '    if (name_length >= OS_FILE_NAME_MAX) return false;\n', '')

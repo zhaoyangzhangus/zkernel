@@ -1,4 +1,4 @@
-"""Actual unified motion merge versus the original relative/pointer algorithms."""
+"""真实输入合并：方向屏障、无损加法、队列顺序和边界覆盖。"""
 from pathlib import Path
 import subprocess
 import tempfile
@@ -22,6 +22,11 @@ static int32_t add(int32_t a,int32_t b) {
     __int128 sum=(__int128)a+b;
     return sum>INT32_MAX ? INT32_MAX : sum<INT32_MIN ? INT32_MIN : (int32_t)sum;
 }
+static bool lossless(int32_t a,int32_t b) {
+    if(a && b && ((a<0)!=(b<0)))return false;
+    __int128 total=(__int128)a+b;
+    return total>=INT32_MIN && total<=INT32_MAX;
+}
 static bool oracle(input_event_t *events,unsigned write,unsigned count,const input_event_t *in) {
     if(!in || !count) return false;
     if(in->type==INPUT_EVENT_RELATIVE) {
@@ -29,6 +34,7 @@ static bool oracle(input_event_t *events,unsigned write,unsigned count,const inp
             input_event_t *q=&events[(write+INPUT_CORE_CAPACITY-1-offset)%INPUT_CORE_CAPACITY];
             if(q->type!=INPUT_EVENT_RELATIVE)break;
             if(q->device_id==in->device_id && q->flags==in->flags && q->code==in->code) {
+                if(!lossless(q->value,in->value))return false;
                 q->value=add(q->value,in->value); q->timestamp=in->timestamp; return true;
             }
         }
@@ -37,6 +43,8 @@ static bool oracle(input_event_t *events,unsigned write,unsigned count,const inp
             input_event_t *q=&events[(write+INPUT_CORE_CAPACITY-1-offset)%INPUT_CORE_CAPACITY];
             if(q->type!=INPUT_EVENT_POINTER || q->code)break;
             if(q->device_id!=in->device_id || q->flags!=in->flags)continue;
+            if(!lossless(q->value2,in->value2) || !lossless(q->value3,in->value3) ||
+               !lossless(q->value4,in->value4))return false;
             q->value2=add(q->value2,in->value2); q->value3=add(q->value3,in->value3);
             q->value4=add(q->value4,in->value4); q->timestamp=in->timestamp; return true;
         }
@@ -58,6 +66,13 @@ static input_event_t event(unsigned id,unsigned scenario) {
 }
 int main(void) {
     assert(input_core_init()); input_event_t original[INPUT_CORE_CAPACITY],expected[INPUT_CORE_CAPACITY];
+    /* 按钮是强制屏障，即使两侧移动方向完全一致也不能跨越。 */
+    g_input.count=2;g_input.write=2;
+    g_input.events[0]=(input_event_t){.type=INPUT_EVENT_POINTER,.value2=1};
+    g_input.events[1]=(input_event_t){.type=INPUT_EVENT_POINTER,.code=1};
+    input_event_t boundary={.type=INPUT_EVENT_POINTER,.value2=1};
+    bool wanted=false,result=input_coalesce_motion(&boundary);
+    assert(result==wanted);
     const unsigned counts[]={0,1,INPUT_COALESCE_THRESHOLD-1,INPUT_COALESCE_THRESHOLD,
                              INPUT_COALESCE_THRESHOLD+1,INPUT_CORE_CAPACITY-1,INPUT_CORE_CAPACITY};
     unsigned cases=0;
@@ -95,6 +110,7 @@ int main(void) {
     }
     assert(input_core_pending()==INPUT_CORE_CAPACITY);
     in=event(INPUT_CORE_CAPACITY-1,1); in.device_id=INPUT_CORE_CAPACITY-1; in.timestamp=999999;
+    in.value2=1;in.value3=in.value4=0;
     assert(input_core_push(&in)==K_OK && input_core_pending()==INPUT_CORE_CAPACITY);
     assert(!input_core_dropped());
     for(unsigned i=0;i<INPUT_CORE_CAPACITY;++i) {
@@ -106,7 +122,7 @@ int main(void) {
         assert(input_core_pop(&out)==K_OK && !memcmp(&out,&wanted,sizeof(out)));
     }
     assert(!input_core_pending() && !depth);
-    printf("Input merge: %u original-oracle cases, all ring offsets, mixed devices/flags/axes, key/button/type boundaries, saturating deltas and unchanged count/order passed\n",cases);
+    printf("Input merge: %u independent-oracle cases, all ring offsets, mixed devices/flags/axes, direction/button/type boundaries, lossless deltas and unchanged count/order passed\n",cases);
 }
 '''
 with tempfile.TemporaryDirectory(prefix='liteos-input-merge-') as directory:

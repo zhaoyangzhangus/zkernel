@@ -21,13 +21,14 @@ spacing_end = function.index('    if (stride == 0U) stride = 1U;', spacing_begin
 spacing_end += len('    if (stride == 0U) stride = 1U;\n')
 spacing = function[spacing_begin:spacing_end]
 reference = function.replace(scan, old_scan).replace(spacing, '')
-reference = reference.replace('    /* Cursor invalidation', spacing + '\n    /* Cursor invalidation')
+reference = reference.replace('    if (!file->CursorValid) {',
+                              spacing + '\n    if (!file->CursorValid) {', 1)
 reference = reference.replace('UINT32 start = file->FirstCluster;', 'UINT32 start;')
-reference = reference.replace('    /* Checkpoint spacing', '''    if (!file->CursorValid || logical_cluster < file->CursorLogicalStart) {
+reference = reference.replace('    for (UINT32 hops = 0;', '''    if (!file->CursorValid || logical_cluster < file->CursorLogicalStart) {
         start = file->FirstCluster;
         logical = 0U;
     }
-    /* Checkpoint spacing''')
+    for (UINT32 hops = 0;''', 1)
 reference = reference.replace('locate_file_cluster(', 'reference_locate_file_cluster(', 1)
 reference = reference.replace('    UINT64 cluster_bytes',
                               '    ++spacing_calculations;\n    UINT64 cluster_bytes')
@@ -45,7 +46,7 @@ harness = r'''
 typedef uint32_t UINT32;
 typedef uint64_t UINT64;
 typedef int BOOLEAN;
-typedef struct { UINT32 ClusterCount,BytesPerSector,SectorsPerCluster; } OS_FAT32;
+typedef struct { UINT32 ClusterCount,BytesPerSector,SectorsPerCluster; BOOLEAN Fat3Available; } OS_FAT32;
 typedef struct { OS_FAT32 *FileSystem; UINT32 FirstCluster;
  BOOLEAN CursorValid; UINT32 CursorLogicalStart,CursorPhysicalStart,CursorLength;
  UINT32 SeekCacheCount,SeekCacheNext,SeekLogical[8],SeekPhysical[8],SeekLength[8];
@@ -59,8 +60,8 @@ static unsigned extent_mode;
 static BOOLEAN fat32_cluster_valid(const OS_FAT32*f,UINT32 c){
  return c>=2 && c<=f->ClusterCount+1;
 }
-static UINT32 fat32_extent_length(const OS_FAT32*f,UINT32 c){
- (void)f;return extent_mode ? 4U-(c-2U)%8U : 1U;
+static UINT32 fat32_extent_length(const OS_FAT32*f,UINT32 c,UINT32 maximum){
+ (void)f;(void)maximum;return extent_mode ? 4U-(c-2U)%8U : 1U;
 }
 static BOOLEAN fat32_read_next_cluster(const OS_FAT32*f,UINT32 c,UINT32*out){
  ++walks;*out=extent_mode ? c+(((c-2U)%8U==3U)?5U:1U) : c+2;
@@ -236,10 +237,9 @@ with tempfile.TemporaryDirectory(prefix='liteos-fat-seek-') as directory:
                     '-x', 'c', '-', '-o', str(binary)],
                    input=harness + function + reference + main, text=True, check=True)
     subprocess.run([str(binary)], check=True, timeout=60)
-    # Negative control: restore the previous routing, keeping every other
-    # implementation line and oracle unchanged. It must fail the no-scan gate.
-    guard = function.index('    /* The current extent already resolves')
-    guard_end = function.index('    /* Cursor invalidation', guard)
+    # 负对照只移除当前区间的快速命中路径，必须触发重复探测断言。
+    guard = function.index('    if (file->CursorValid &&')
+    guard_end = function.index('    if (!file->CursorValid) {', guard)
     previous = function[:guard] + function[guard_end:]
     control = pathlib.Path(directory) / 'previous'
     control_main = main.replace('assert(hint_visits==0 && walks==old_walks);',

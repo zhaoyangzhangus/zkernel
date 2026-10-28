@@ -33,7 +33,7 @@ typedef struct {
  os_window_event_t events[64];atomic_bool registry_removed;wait_queue_t event_waitq;
  unsigned refs;
 } window_server_window_t;
-static struct {uint32_t count;window_server_window_t *windows[64];wait_queue_t event_waitq;} g_window_server;
+static struct {struct {uint32_t count;window_server_window_t *children[64];} scene;wait_queue_t event_waitq;} g_window_server;
 static bool initialized=true,lookup_closes=false;
 static unsigned locked,waits,gets,released_refs,mode;
 static window_server_window_t *target;
@@ -44,7 +44,7 @@ static kstatus_t window_server_lookup(uint32_t id,window_server_window_t **out){
  assert(!locked);
  if(!target || target->identifier!=id)return K_ENOENT;
  ++gets;++target->refs;*out=target;
- if(lookup_closes){atomic_store(&target->registry_removed,true);g_window_server.count=0;}
+ if(lookup_closes){atomic_store(&target->registry_removed,true);g_window_server.scene.count=0;}
  return K_OK;
 }
 static void window_server_put(window_server_window_t *w){assert(!locked && w->refs>1);--w->refs;++released_refs;}
@@ -52,14 +52,14 @@ static kstatus_t wait_on_queue(wait_queue_t *queue,bool (*predicate)(void*),void
  assert(!locked && timeout);++waits;
  if(mode==4){
   assert(queue==&g_window_server.event_waitq);
-  g_window_server.windows[0]->event_count=1;
+  g_window_server.scene.children[0]->event_count=1;
   assert(predicate(context));return K_OK;
  }
  assert(target && queue==&target->event_waitq && target->refs==2);
  if(mode==3)return K_ECANCELED;
  if(atomic_load(&target->registry_removed)){assert(predicate(context));return K_OK;}
  // Empty/spurious checks do not need the registry once a reference is held.
- g_window_server.count=0;
+ g_window_server.scene.count=0;
  for(unsigned i=0;i<100;++i)assert(!predicate(context));
  if(mode==0)return K_ETIMEDOUT;
  if(mode==1){target->event_count=1;assert(predicate(context));return K_OK;}
@@ -73,7 +73,7 @@ static void setup(window_server_window_t *w,process_t *owner){
  atomic_init(&w->registry_removed,false);
  w->events[0]=(os_window_event_t){.identifier=7,.type=OS_WINDOW_EVENT_INPUT,.input.timestamp=123};
  w->events[63]=(os_window_event_t){.identifier=7,.type=OS_WINDOW_EVENT_INPUT,.input.timestamp=456};
- target=w;g_window_server.windows[0]=w;g_window_server.count=1;
+ target=w;g_window_server.scene.children[0]=w;g_window_server.scene.count=1;
  lookup_closes=false;mode=waits=gets=released_refs=0;
 }
 int main(void){
@@ -83,7 +83,7 @@ int main(void){
  w.event_count=1;assert(window_is_signaled(&w));w.event_count=0;
  atomic_store(&w.registry_removed,true);assert(window_is_signaled(&w));
  // Readiness uses the removal marker even with an unrelated/absent registry.
- g_window_server.count=64;memset(g_window_server.windows,0,sizeof(g_window_server.windows));
+ g_window_server.scene.count=64;memset(g_window_server.scene.children,0,sizeof(g_window_server.scene.children));
  for(unsigned i=0;i<100000;++i)assert(window_is_signaled(&w));
  initialized=false;assert(!window_is_signaled(&w));initialized=true;
  setup(&w,&owner);memset(&out,0xa5,sizeof(out));unchanged=out;

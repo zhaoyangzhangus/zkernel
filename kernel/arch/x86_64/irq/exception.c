@@ -64,6 +64,34 @@ static bool exception_is_user_process_fault(
            frame->vector != 3U;
 }
 
+/* 未处理的同步故障会使整个地址空间失效，而不只是单个工作线程。若故障线程承担了 GPU
+ * 服务或其他进程级角色，让同进程的其他线程继续运行会使 IPC 和互斥锁等待者永久受阻。
+ * 已解决的延迟缺页、UAccess 修复和调试器陷阱不会到达此处。 */
+static __noreturn void exception_exit_user_process(uint64_t vector) {
+    uint32_t signal;
+    switch (vector) {
+    case 0U:  /* 除法错误 */
+    case 16U: /* x87 浮点异常 */
+    case 19U: /* SIMD 浮点异常 */
+        signal = OS_SIGFPE;
+        break;
+    case 6U:
+        signal = OS_SIGILL;
+        break;
+    case 17U:
+        signal = OS_SIGBUS;
+        break;
+    default:
+        signal = OS_SIGSEGV;
+        break;
+    }
+    /* 中断门已清除 IF。此路径仅处理用户态故障且不会返回，也不持有缺页处理锁；但拆除
+     * 过程可能等待远端调度器和页表 shootdown，因此必须确保它们的 IPI 可送达。与已解决
+     * 的故障不同，此路径不会进入 SWAPGS 收尾代码。 */
+    __asm__ volatile ("sti" : : : "memory");
+    process_exit_signal(signal);
+}
+
 static void record_user_opcode(const arch_trap_frame_t *frame) {
     uint8_t bytes[8] = {0};
     if (frame == 0 || (frame->cs & 3U) != 3U ||
@@ -91,8 +119,7 @@ static bool exception_process_is_chrome(const process_t *process) {
     return true;
 }
 
-/* Keep enough Ring3 state to identify a recoverable user fault without
- * entering the general crash-dump path. */
+/* 保留足够的 Ring3 状态，以便识别可恢复的用户故障，而无需进入通用崩溃转储路径。 */
 static void record_user_context(const arch_trap_frame_t *frame,
                                 const thread_t *thread) {
     uint64_t stack[8] = {0};
@@ -154,10 +181,8 @@ static void record_user_context(const arch_trap_frame_t *frame,
     }
     exception_write("\r\n");
 
-    /* On a Chrome UD2, R15 often points at the fatal-check message. Preserve
-     * a short bounded text sample instead of assuming it is a particular
-     * library structure; the image is stripped and that assumption can hide
-     * the actual failing subsystem. */
+    /* Chrome 执行 UD2 时，R15 通常指向致命检查消息。保留一段有界的短文本样本，不要
+     * 假设它属于某种特定库结构；映像已剥离符号，这类假设可能掩盖真正故障的子系统。 */
     if (frame->vector != 6U || !exception_process_is_chrome(
             thread != 0 ? thread->process : 0)) return;
     exception_write("OS_CHROME_UD2_R15_TEXT ptr=");
@@ -189,12 +214,13 @@ static void record_user_context(const arch_trap_frame_t *frame,
 }
 
 static void exception_stop_exiting_user(bool from_user, process_t *process) {
-    /* Running siblings can reach a trap before their next syscall boundary.
-     * Exit is already published: do not populate or retry user mappings for
-     * a dying process. Kernel/UAccess faults retain their normal fixup path. */
+    /* 正在运行的同进程线程可能在下一个系统调用边界前触发陷阱。退出状态已经发布，
+     * 不要再为即将终止的进程填充或重试用户映射。内核/UAccess 故障仍走常规修复路径。 */
     if (from_user && process != 0 &&
         atomic_load_explicit(&process->state, memory_order_acquire) ==
             PROCESS_EXITING) {
+        /* 与致命进程终止相同的不可返回用户态边界。 */
+        __asm__ volatile ("sti" : : : "memory");
         thread_exit(process->exit_code);
     }
 }
@@ -202,12 +228,10 @@ static void exception_stop_exiting_user(bool from_user, process_t *process) {
 static bool exception_resolve_page_fault(const arch_trap_frame_t *frame,
                                          vaddr_t address, bool from_user,
                                          bool from_uaccess) {
-    /* The gate clears IF. User-copy faults in an unlocked syscall can do
-     * backing I/O too: retaining IF=0 there stalls device and wake IPIs.
-     * Restore only the caller's enabled state, at a recognized UAccess site
-     * with the syscall scheduling guard still active. Locked/TLB/kernel
-     * faults keep the original gate policy. Always restore IF=0 before the
-     * exception epilogue (in particular its SWAPGS). */
+    /* 中断门会清除 IF。未加锁系统调用中的用户拷贝故障也可能执行后备 I/O；此处保持
+     * IF=0 会阻塞设备和唤醒 IPI。仅在已识别的 UAccess 位置且系统调用调度保护仍有效时，
+     * 恢复调用方原有的开中断状态。持锁、TLB 和内核故障仍遵循原有中断门策略。异常收尾
+     * 前（尤其是 SWAPGS 前）始终恢复 IF=0。 */
     bool allow_interrupts = (frame->rflags & (1ULL << 9)) != 0U &&
         (from_user || (from_uaccess && x86_syscall_active_fast() &&
                        !sched_preempt_disabled() && !x86_tlb_shootdown_active()));
@@ -276,7 +300,7 @@ void x86_interrupt_dispatch(arch_trap_frame_t *frame) {
                 exception_write("\r\n");
                 record_user_context(frame, thread);
                 record_user_opcode(frame);
-                thread_exit(K_EACCES);
+                exception_exit_user_process(frame->vector);
             }
         }
     }
@@ -300,7 +324,7 @@ void x86_interrupt_dispatch(arch_trap_frame_t *frame) {
             exception_write("\r\n");
             record_user_context(frame, thread);
             record_user_opcode(frame);
-            thread_exit(K_EACCES);
+            exception_exit_user_process(frame->vector);
         }
     }
 

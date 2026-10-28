@@ -6,8 +6,8 @@ import tempfile
 root = Path(__file__).resolve().parents[2]
 source = (root / 'kernel/fs/vfs/core.c').read_text()
 remove = source[source.index('kstatus_t vfs_remove_typed_kernel('):source.index('kstatus_t vfs_open_kernel(')]
-equals = source[source.index('static bool vfs_path_range_equals('):source.index('/* Memory-backed /tmp')]
-slots = source[source.index('static void vfs_set_node_slot_locked('):source.index('/* /tmp is volatile')]
+equals = source[source.index('static bool vfs_path_range_equals('):source.index('static uint32_t vfs_free_node_slot_locked(')]
+slots = source[source.index('static void vfs_set_node_slot_locked('):source.index('static bool vfs_volatile_path(')]
 exact = '''        if (backend->path[path_length] != 0 ||
             !vfs_path_range_equals(backend->path, path_length, path, path_length)) continue;'''
 child = "                if (child_backend->path[path_length] == '/' &&"
@@ -35,6 +35,8 @@ typedef struct {void *filesystem;} vfs_fat32_mount_t;
 typedef struct {unsigned type;} os_file_info_t;
 static vnode_t *g_vfs_nodes[16];
 static uint32_t g_vfs_node_capacity=16,g_vfs_next_free_node;
+static void vfs_namespace_insert_locked(vnode_t *v,uint32_t slot){(void)v;(void)slot;}
+static void vfs_namespace_remove_locked(vnode_t *v){(void)v;}
 static unsigned depth,locks,drops,gets,scans,cases,avoided;
 static const char *request;
 static size_t vfs_string_length(const char *p){

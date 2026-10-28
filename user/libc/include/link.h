@@ -2,8 +2,8 @@
 
 #include <elf.h>
 
-/* The System ELF declarations live in elf.h; this header supplies the
- * glibc-compatible include path and ElfW() macro expected by POSIX code. */
+/* System ELF 声明位于 elf.h；此头文件提供 POSIX 代码所需的 glibc 兼容包含路径和
+ * ElfW() 宏。 */
 #ifndef ElfW
 #define ElfW(type) Elf64_##type
 #endif

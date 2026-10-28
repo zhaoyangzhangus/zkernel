@@ -11,7 +11,7 @@
 #include "internal.h"
 #include <arch/x86_64/syscall_internal.h>
 
-/* Definition shared with clock.c through the private scheduler header. */
+/* 通过私有调度器头文件与 clock.c 共用的定义。 */
 scheduler_cpu_t g_cpus[MAX_CPUS];
 static thread_t g_idle_threads[MAX_CPUS];
 uint32_t g_cpu_count;
@@ -38,24 +38,33 @@ typedef struct sched_wake_delay {
     uint64_t publish_to_request_ns, request_to_interrupt_ns, request_send;
 } sched_wake_delay_t;
 static volatile uint64_t g_sched_wake_trace_tid;
-/* Opt-in diagnostic threshold, not a scheduling policy knob. Default keeps
- * the historical 10ms gate; bounded finer sampling localizes sub-frame waits. */
+/* 可选诊断阈值，不是调度策略参数。默认保留原有的 10ms 门限；
+ * 有界的精细采样可定位帧间隔以下的等待。 */
 static volatile uint64_t g_sched_wake_trace_threshold_ns = 10000000ULL;
 static sched_wake_trace_t g_sched_wake_trace;
 static volatile sched_wake_delay_t g_sched_wake_delays[16];
 static atomic_flag g_sched_wake_trace_guard = ATOMIC_FLAG_INIT;
 static volatile uint64_t g_sched_preempt_callers[MAX_CPUS];
-/* Worst sampled READY interval: duration, owner tid/pid, syscall, preemption,
- * outer guard caller, TLB guard, class, block epoch, CPU, selected tid,
- * active syscall number, argument0 and user RIP. */
+/* READY 状态下采样到的最长间隔：持续时间、所属 tid/pid、系统调用、抢占状态、
+ * 外层保护区调用方、TLB 保护区、类别、阻塞代数、CPU、选中 tid、
+ * 当前系统调用号、argument0 和用户 RIP。 */
 static volatile uint64_t g_sched_wake_stall[14];
-/* Same owner fields as READY stall, followed by interrupted RIP/RFLAGS and
- * origin TSC. Unlike READY stall this measures a published inbox wait. */
+/* 字段与 READY 停滞记录中的所有者信息相同，后接被中断的 RIP/RFLAGS 和起始 TSC。
+ * 与 READY 停滞不同，此记录测量已发布邮箱命令的等待时间。 */
 static volatile uint64_t g_sched_inbox_stall[17];
-/* Worst actual noncoalesced reschedule send during the bounded trial:
- * duration ns, source CPU, target CPU, start/end TSC, accepted, attempts.
- * Global maximum, not necessarily the same event as a wake-delay record. */
+/* 有界试验期间实际发送且未合并的最慢重新调度请求：持续时间（ns）、源 CPU、
+ * 目标 CPU、起止 TSC、是否接受、尝试次数。此为全局最大值，不一定对应
+ * 唤醒延迟记录中的同一事件。 */
 static volatile uint64_t g_sched_ipi_send[7];
+
+/* 内核工作线程没有用户返回帧。统一验证所属进程和栈边界，避免把内核栈
+ * 内容误记成系统调用参数；诊断禁用时不会进入此路径。 */
+static arch_trap_frame_t *scheduler_trace_user_frame(const thread_t *thread) {
+    if (thread == 0 || thread->process == 0 ||
+        thread->kernel_stack_top < sizeof(arch_trap_frame_t)) return 0;
+    return (arch_trap_frame_t *)(uintptr_t)
+        (thread->kernel_stack_top - sizeof(arch_trap_frame_t));
+}
 
 static uint64_t scheduler_trace_threshold_ns(void) {
     uint64_t value = g_sched_wake_trace_threshold_ns;
@@ -80,10 +89,7 @@ void sched_trace_inbox_stall(uint64_t now_tsc, uint64_t rip, uint64_t rflags) {
             (current == 0 || current->tid != trace->tid)) {
             bool active = x86_syscall_active_fast();
             bool preempt = sched_preempt_disabled();
-            arch_trap_frame_t *frame = active && current != 0 &&
-                current->process != 0 && current->kernel_stack_top >= sizeof(*frame) ?
-                (arch_trap_frame_t *)(uintptr_t)
-                    (current->kernel_stack_top-sizeof(*frame)) : 0;
+            arch_trap_frame_t *frame = active ? scheduler_trace_user_frame(current) : 0;
             uint64_t values[17] = {
                 elapsed, current != 0 ? current->tid : 0U,
                 current != 0 && current->process != 0 ? current->process->pid : 0U,
@@ -99,9 +105,14 @@ void sched_trace_inbox_stall(uint64_t now_tsc, uint64_t rip, uint64_t rflags) {
     atomic_flag_clear_explicit(&g_sched_wake_trace_guard, memory_order_release);
 }
 
+uint64_t scheduler_trace_reschedule_begin(void) {
+    return g_sched_wake_trace_tid != 0U ? x86_read_tsc() : 0U;
+}
+
 void scheduler_trace_reschedule_send(uint32_t cpu_id, uint64_t started,
                                       bool accepted, uint32_t attempts) {
-    if (g_sched_wake_trace_tid == 0U || cpu_id >= g_cpu_count) return;
+    /* 若探测在发送过程中启用，此操作没有有效的起始时间。 */
+    if (started == 0U || g_sched_wake_trace_tid == 0U || cpu_id >= g_cpu_count) return;
     uint64_t finished = x86_read_tsc();
     if (finished < started ||
         atomic_flag_test_and_set_explicit(&g_sched_wake_trace_guard,
@@ -143,10 +154,8 @@ void sched_trace_wake_stall(uint64_t now_tsc) {
             g_sched_wake_stall[8] = g_sched_wake_trace.epoch;
             g_sched_wake_stall[9] = cpu_id;
             g_sched_wake_stall[10] = g_sched_wake_trace_tid;
-            arch_trap_frame_t *frame = g_sched_wake_stall[3] && current != 0 &&
-                current->process != 0 && current->kernel_stack_top >= sizeof(*frame) ?
-                (arch_trap_frame_t *)(uintptr_t)
-                    (current->kernel_stack_top-sizeof(*frame)) : 0;
+            arch_trap_frame_t *frame = g_sched_wake_stall[3] ?
+                scheduler_trace_user_frame(current) : 0;
             g_sched_wake_stall[11] = frame != 0 ? frame->rax : 0U;
             g_sched_wake_stall[12] = frame != 0 ? frame->rdi : 0U;
             g_sched_wake_stall[13] = frame != 0 ? frame->rip : 0U;
@@ -162,11 +171,11 @@ static void scheduler_trace_notify(thread_t *thread) {
                                           memory_order_acquire)) return;
     uint64_t epoch = atomic_load_explicit(&thread->block_epoch, memory_order_relaxed);
     if (g_sched_wake_trace.tid != thread->tid || g_sched_wake_trace.epoch != epoch) {
-        arch_trap_frame_t *frame = (arch_trap_frame_t *)
-            (uintptr_t)(thread->kernel_stack_top - sizeof(*frame));
+        arch_trap_frame_t *frame = scheduler_trace_user_frame(thread);
         g_sched_wake_trace = (sched_wake_trace_t){
             .tid=thread->tid, .epoch=epoch, .notified=x86_read_tsc(),
-            .number=frame->rax, .argument0=frame->rdi,
+            .number=frame != 0 ? frame->rax : 0U,
+            .argument0=frame != 0 ? frame->rdi : 0U,
             .source_cpu=x86_current_cpu_index(), .target_cpu=thread->owner_cpu};
     }
     atomic_flag_clear_explicit(&g_sched_wake_trace_guard, memory_order_release);
@@ -196,17 +205,16 @@ void scheduler_trace_reschedule_request(uint32_t cpu_id, bool send) {
         g_sched_wake_trace.source_cpu != cpu_id &&
         g_sched_wake_trace.target_cpu == cpu_id) {
         g_sched_wake_trace.requested = x86_read_tsc();
-        /* 1 = coalesced into existing pending request; 2 = send attempted.
-         * This does not claim hardware delivery or a successful send. */
+        /* 1 = 合并到已有待处理请求；2 = 已尝试发送。
+         * 这并不表示硬件已完成投递，也不表示发送成功。 */
         g_sched_wake_trace.request_send = send ? 2U : 1U;
     }
     atomic_flag_clear_explicit(&g_sched_wake_trace_guard, memory_order_release);
 }
 
 void scheduler_trace_reschedule_interrupt(uint32_t cpu_id) {
-    /* Disabled unless a bounded browser probe selects one thread. Observe
-     * the first target IPI only; coalesced/unrelated later IPIs must not
-     * replace evidence of an earlier syscall/critical-section deferral. */
+    /* 除非有界浏览器探测明确选中某线程，否则禁用。只观察目标 CPU 收到的首个 IPI；
+     * 后续合并或无关的 IPI 不能覆盖此前系统调用/临界区延迟的证据。 */
     if (g_sched_wake_trace_tid == 0U || cpu_id >= g_cpu_count ||
         atomic_flag_test_and_set_explicit(&g_sched_wake_trace_guard,
                                           memory_order_acquire)) return;
@@ -293,9 +301,9 @@ static void scheduler_trace_run(thread_t *thread) {
 static bool scheduler_command_drain_local(uint32_t cpu_id,
                                          scheduler_cpu_t *cpu,
                                          bool publish_snapshot);
-static bool scheduler_command_ack_step(uint32_t cpu_id,
-                                       scheduler_cpu_t *cpu,
-                                       thread_t *thread,
+static void scheduler_command_release_enqueue_local(scheduler_cpu_t *cpu,
+                                                     thread_t *thread);
+static bool scheduler_command_ack_step(thread_t *thread,
                                        uint32_t source_limit,
                                        uint32_t ack_mask,
                                        uint32_t ack_value,
@@ -308,19 +316,16 @@ void sched_mark_initial_placement(thread_t *thread) {
 }
 
 /*
- * Idle is a real scheduler target, but it is not created through the normal
- * thread creation path and therefore has no saved context at boot.  Seed a
- * synthetic context so a blocked thread can always switch to an interruptible
- * idle loop, even before the first live idle->thread transition captures the
- * AP/BSP startup loop.
+ * Idle 是真实的调度目标，但它不是通过常规线程创建路径建立的，因此启动时没有已保存
+ * 的上下文。预置一个合成上下文，使阻塞线程始终能切换到可中断的 idle 循环，即使
+ * AP/BSP 启动循环尚未经历首次实际的 idle->thread 切换并保存上下文。
  */
 static __attribute__((noreturn)) void scheduler_idle_main(void *argument) {
     (void)argument;
     for (;;) {
         /*
-         * A request can be published in the short CLI window between two
-         * HLT cycles. Poll before sleeping so a lost IPI cannot strand a
-         * READY thread on this idle CPU.
+         * 请求可能在两次 HLT 之间短暂关闭中断的窗口内发布。休眠前先轮询，
+         * 避免 IPI 丢失后 READY 线程滞留在此空闲 CPU 上。
          */
         if (x86_smp_take_reschedule_request() ||
             sched_runnable_count() != 0U) {
@@ -338,18 +343,9 @@ static __attribute__((noreturn)) void scheduler_idle_main(void *argument) {
 
 static void scheduler_init_idle_context(thread_t *idle,
                                         vaddr_t stack_top) {
-    uintptr_t switch_stack;
     if (idle == 0 || stack_top < sizeof(uint64_t) ||
         (stack_top & 0x0FU) != 0U) return;
-    switch_stack = (uintptr_t)stack_top - sizeof(uint64_t);
-    *(uint64_t *)switch_stack = (uint64_t)(uintptr_t)&x86_kernel_thread_start;
-    idle->arch.switch_ctx.rsp = switch_stack;
-    idle->arch.switch_ctx.rbx = 0U;
-    idle->arch.switch_ctx.rbp = 0U;
-    idle->arch.switch_ctx.r12 = (uint64_t)(uintptr_t)&scheduler_idle_main;
-    idle->arch.switch_ctx.r13 = 0U;
-    idle->arch.switch_ctx.r14 = stack_top;
-    idle->arch.switch_ctx.r15 = 0U;
+    x86_prepare_kernel_thread(&idle->arch, stack_top, scheduler_idle_main, 0);
 }
 
 /*
@@ -404,16 +400,16 @@ uint64_t scheduler_lock(spinlock_t *lock) {
     return flags;
 }
 
-/* Reaper entry points may use a real lock because deferred context drains them. */
+/* 延迟上下文会处理回收入口，因此这些入口可以使用普通锁。 */
 void scheduler_unlock(spinlock_t *lock, uint64_t flags) {
     atomic_store_explicit(&lock->state, 0U, memory_order_release);
     scheduler_irq_restore(flags);
 }
 
 /*
- * exec_start_ns is a runtime-accounting anchor, not a lifetime timestamp.
- * Keep it valid only while its thread owns the CPU.  The owner IRQ boundary
- * also serializes this with the state and current-thread transition.
+ * exec_start_ns 是运行时间记账基准，不是生命周期时间戳。
+ * 仅在线程占用 CPU 期间保持其有效。所属 CPU 的中断边界也会将此操作与状态及
+ * current-thread 转换串行化。
  */
 static void scheduler_accounting_transition(run_queue_t *queue,
                                             thread_t *current, thread_t *next) {
@@ -467,6 +463,7 @@ void sched_cpu_init(uint32_t cpu_id) {
     atomic_init(&cpu->queue_snapshot, 0U);
     atomic_init(&cpu->command_pending, false);
     atomic_init(&cpu->remote_wake_head, 0);
+    atomic_init(&cpu->priority_head, 0);
     atomic_init(&cpu->need_resched, false);
     atomic_init(&cpu->command_release_pending, false);
     atomic_init(&cpu->reap_deferred_queued, false);
@@ -517,6 +514,31 @@ bool sched_set_boot_kernel_stack(vaddr_t stack_top) {
     if (!scheduler_current_cpu(&cpu_id)) return false;
     g_cpus[cpu_id].idle_stack_top = stack_top;
     return true;
+}
+
+static bool scheduler_command_channel_try_push(sched_cmd_channel_t *channel,
+    thread_t *thread, uint32_t op, uint32_t generation, bool *overflowed);
+
+static bool scheduler_remote_command_try_push_once(
+    uint32_t source_cpu, uint32_t target_cpu, thread_t *thread,
+    uint32_t op, uint32_t generation) {
+    if (source_cpu >= g_cpu_count || target_cpu >= g_cpu_count ||
+        source_cpu == target_cpu || thread == 0) return false;
+    scheduler_cpu_t *target = &g_cpus[target_cpu];
+    if (target->command_inbox == 0 || !object_try_get(thread)) return false;
+    bool overflowed = false;
+    bool queued = scheduler_command_channel_try_push(
+        &target->command_inbox[source_cpu], thread, op, generation, &overflowed);
+    if (overflowed) ++g_cpus[source_cpu].command_ring_full_count;
+    if (queued) {
+        atomic_store_explicit(&target->command_pending, true, memory_order_release);
+        return true;
+    }
+    /* 此引用从未转移。延迟执行 put：调用方已屏蔽中断，而且并发的最后一个所有者
+     * 可能已经退出。 */
+    scheduler_command_release_enqueue_local(&g_cpus[source_cpu], thread);
+    (void)x86_smp_request_reschedule(target_cpu);
+    return false;
 }
 
 static bool scheduler_remote_command_try_push(
@@ -592,28 +614,34 @@ static bool sched_enqueue_internal(thread_t *thread, bool notify_local) {
      */
     if ((thread->sched.flags & SCHED_ENTITY_INITIAL_PLACEMENT) != 0) {
         cpu_id = scheduler_choose_cpu(thread, current_cpu);
-        thread->sched.flags &= (uint16_t)~SCHED_ENTITY_INITIAL_PLACEMENT;
     }
     scheduler_cpu_t *cpu = &g_cpus[cpu_id];
 
     if (cpu_id != current_cpu) {
         if (cpu->command_inbox == 0) return false;
         uint64_t irq_flags = scheduler_irq_save();
-        /* Publish ownership before the destination can consume the command. */
+        uint16_t previous_owner = thread->owner_cpu;
+        bool initial = (thread->sched.flags & SCHED_ENTITY_INITIAL_PLACEMENT) != 0;
+        /* 在目标 CPU 消费命令前发布所有权。 */
         thread->owner_cpu = (uint16_t)cpu_id;
+        thread->sched.flags &= (uint16_t)~SCHED_ENTITY_INITIAL_PLACEMENT;
         bool queued = scheduler_remote_command_try_push(
             current_cpu, cpu_id, thread, SCHED_CMD_ENQUEUE, 0U);
+        if (!queued) {
+            thread->owner_cpu = previous_owner;
+            if (initial) thread->sched.flags |= SCHED_ENTITY_INITIAL_PLACEMENT;
+        }
         scheduler_irq_restore(irq_flags);
         if (queued) {
             (void)x86_smp_request_reschedule(cpu_id);
             return true;
         }
-        thread->owner_cpu = (uint16_t)current_cpu;
         return false;
     }
 
     uint64_t queue_flags = scheduler_irq_save();
     uint32_t before = cpu->queue.nr_running;
+    thread->sched.flags &= (uint16_t)~SCHED_ENTITY_INITIAL_PLACEMENT;
     thread->owner_cpu = (uint16_t)cpu_id;
     thread->current_cpu = (uint16_t)cpu_id;
     enqueue_local(cpu, thread);
@@ -624,10 +652,9 @@ static bool sched_enqueue_internal(thread_t *thread, bool notify_local) {
     scheduler_irq_restore(queue_flags);
     if (notify) {
         /*
-         * Remote CPUs always need an IPI.  Normal local enqueue also uses a
-         * self-IPI so a real current thread observes prompt preemption.  The
-         * boot-only caller disables that local notification explicitly while
-         * the BSP is still executing on its unsaved bootstrap continuation.
+         * 远端 CPU 始终需要 IPI。常规本地入队也会发送 self-IPI，使当前实际运行的线程
+         * 能及时响应抢占。BSP 仍在未保存上下文的启动续执行路径中时，
+         * 仅启动阶段的调用方会显式关闭该本地通知。
          */
         (void)x86_smp_request_reschedule(cpu_id);
     }
@@ -668,8 +695,7 @@ kstatus_t sched_start_thread(thread_t *thread) {
     }
 
     uint32_t previous_owner = thread->owner_cpu;
-    /* First placement honors both affinity and the global runnable-load
-     * snapshot; later starts retain their established owner CPU. */
+    /* 首次放置同时遵循亲和性和全局可运行负载快照；后续启动沿用已确定的所属 CPU。 */
     uint32_t target_cpu = scheduler_choose_start_cpu(thread, current_cpu);
     if (!scheduler_cpu_available(target_cpu)) {
         atomic_store_explicit(&thread->start_pending, false,
@@ -686,17 +712,21 @@ kstatus_t sched_start_thread(thread_t *thread) {
         }
         uint64_t irq_flags = scheduler_irq_save();
         thread->owner_cpu = (uint16_t)target_cpu;
-        bool queued = scheduler_remote_command_try_push(
+        bool initial = (thread->sched.flags & SCHED_ENTITY_INITIAL_PLACEMENT) != 0U;
+        thread->sched.flags &= (uint16_t)~SCHED_ENTITY_INITIAL_PLACEMENT;
+        bool queued = scheduler_remote_command_try_push_once(
             current_cpu, target_cpu, thread, SCHED_CMD_START, 0U);
-        scheduler_irq_restore(irq_flags);
         if (queued) {
-            thread->sched.flags &= (uint16_t)~SCHED_ENTITY_INITIAL_PLACEMENT;
+            /* 目标 CPU 可能已经开始运行此线程。发布所有权后不要再修改其调度标志。 */
+            scheduler_irq_restore(irq_flags);
             (void)x86_smp_request_reschedule(target_cpu);
             return K_OK;
         }
         thread->owner_cpu = (uint16_t)previous_owner;
+        if (initial) thread->sched.flags |= SCHED_ENTITY_INITIAL_PLACEMENT;
         atomic_store_explicit(&thread->start_pending, false,
                               memory_order_release);
+        scheduler_irq_restore(irq_flags);
         return K_EBUSY;
     }
 
@@ -743,8 +773,8 @@ bool sched_publish_running(thread_t *thread) {
     unsigned state = atomic_load_explicit(&thread->state,
                                           memory_order_relaxed);
     bool published = false;
-    /* A return from schedule() is proof this thread is executing now.  Heal
-     * stale BLOCKED/READY metadata before it can return to user mode. */
+    /* 从 schedule() 返回即可证明此线程正在运行。在返回用户态前修复过期的
+     * BLOCKED/READY 元数据。 */
     if (cpu->queue.current == thread) {
         if (state == THREAD_RUNNING) {
             published = true;
@@ -756,6 +786,15 @@ bool sched_publish_running(thread_t *thread) {
     }
     scheduler_irq_restore(irq_flags);
     return published;
+}
+
+/* 必须在所属 CPU 的状态发布中断事务内执行。仅在调用方检查会与恢复运行的线程进入
+ * I/O 保护区发生竞争。已发布的栈等待者也必须在回收前完成所属方清理。 */
+static bool scheduler_exit_can_publish(thread_t *thread) {
+    return atomic_load_explicit(&thread->exit_defer_count,
+                                memory_order_acquire) == 0U &&
+           atomic_load_explicit(&thread->blocked_waiter,
+                                memory_order_acquire) == 0;
 }
 
 bool sched_publish_dead(thread_t *thread) {
@@ -771,6 +810,11 @@ bool sched_publish_dead(thread_t *thread) {
         atomic_store_explicit(&thread->command_ack, 0U,
                               memory_order_relaxed);
         uint64_t irq_flags = scheduler_irq_save();
+        uint32_t sending_cpu;
+        if (!scheduler_current_cpu(&sending_cpu) || sending_cpu != current_cpu) {
+            scheduler_irq_restore(irq_flags);
+            return false;
+        }
         bool queued = scheduler_remote_command_try_push(
             current_cpu, owner_cpu, thread, SCHED_CMD_EXIT,
             SCHED_CMD_STATE_ACK);
@@ -779,11 +823,10 @@ bool sched_publish_dead(thread_t *thread) {
         (void)x86_smp_request_reschedule(owner_cpu);
         unsigned acknowledgement;
         for (;;) {
-            /* The owner may be waiting for an acknowledgement from us too.
-             * Drain our inbox while waiting, rather than relying on syscall
-             * exit to service the IPI and creating a cross-CPU wait cycle. */
+            /* 所属 CPU 也可能正在等待我们的确认。等待期间排空本地邮箱，
+             * 不要依赖系统调用退出时处理 IPI，否则会形成跨 CPU 等待环。 */
             bool acknowledged = scheduler_command_ack_step(
-                current_cpu, &g_cpus[current_cpu], thread, g_cpu_count,
+                thread, g_cpu_count,
                 SCHED_CMD_STATE_ACK, SCHED_CMD_STATE_ACK, true);
             acknowledgement = atomic_load_explicit(&thread->command_ack,
                                                     memory_order_acquire);
@@ -795,12 +838,19 @@ bool sched_publish_dead(thread_t *thread) {
                                     memory_order_acquire) == THREAD_DEAD;
     }
 
-    scheduler_cpu_t *cpu = &g_cpus[current_cpu];
     uint64_t queue_flags = scheduler_irq_save();
+    uint32_t locked_cpu;
+    if (!scheduler_current_cpu(&locked_cpu) ||
+        !scheduler_cpu_available(locked_cpu) || thread->owner_cpu != locked_cpu) {
+        scheduler_irq_restore(queue_flags);
+        return false;
+    }
+    scheduler_cpu_t *cpu = &g_cpus[locked_cpu];
     unsigned state = atomic_load_explicit(&thread->state, memory_order_relaxed);
     bool current = cpu->queue.current == thread;
     bool published = state != THREAD_DEAD && state != THREAD_BLOCKED &&
-                     (state != THREAD_RUNNING || current);
+                     (state != THREAD_RUNNING || current) &&
+                     scheduler_exit_can_publish(thread);
     if (published) {
         if (state == THREAD_READY && !current) dequeue_local(cpu, thread);
         atomic_store_explicit(&thread->state, THREAD_DEAD,
@@ -828,8 +878,8 @@ static bool scheduler_complete_wake_local(
     atomic_store_explicit(&thread->state, THREAD_READY, memory_order_release);
 
     /*
-     * A just-blocking current thread has not completed its context switch yet.
-     * schedule() will observe READY and enqueue it on the same rq.
+    * 刚进入阻塞状态的当前线程尚未完成上下文切换。
+    * schedule() 会观察到 READY，并将其加入同一运行队列。
      */
     if (cpu->queue.current != thread) {
         enqueue_local_raw(cpu, thread);
@@ -845,8 +895,8 @@ static bool scheduler_capture_block_epoch(
     if (thread == 0 || block_epoch == 0) return false;
 
     /*
-     * Take a consistent {epoch,state} snapshot.  The double epoch read keeps a
-     * delayed wake from being retargeted to a later blocking episode.
+    * 获取一致的 {epoch,state} 快照。两次读取 epoch 可避免延迟唤醒被重定向到
+    * 后续的阻塞阶段。
      */
     for (;;) {
         uint32_t before =
@@ -878,8 +928,8 @@ static inline bool scheduler_command_publish_snapshot(
     slot->object = (uintptr_t)thread;
     slot->op = op;
     slot->generation = generation;
-    /* Source-owned tail publishes the complete message. The acquired head
-     * snapshot may be stale, but can only conservatively report a full ring. */
+    /* 由源端独占的尾索引负责发布完整消息。获取到的头索引快照可能过期，
+     * 但只会保守地将环报告为已满。 */
     atomic_store_explicit(tail_index, tail + 1U, memory_order_release);
     return true;
 }
@@ -985,7 +1035,7 @@ static bool scheduler_remote_command_push(
             return true;
         }
 
-        /* The target already owns the pending work and will drain it. */
+        /* 目标 CPU 已拥有待处理工作，并会负责排空。 */
         (void)x86_smp_request_reschedule(target_cpu);
         __asm__ volatile ("pause");
     }
@@ -1027,10 +1077,16 @@ static bool scheduler_transfer_local(
 
     scheduler_cpu_t *target = &g_cpus[target_cpu];
     if (target->command_inbox == 0) return false;
+    uint64_t previous_vruntime = thread->sched.vruntime;
+    bool was_relative = (thread->sched.flags & SCHED_ENTITY_VRUNTIME_RELATIVE) != 0U;
+    scheduler_prepare_fair_migration(&source->queue, thread);
     thread->owner_cpu = (uint16_t)target_cpu;
-    if (!scheduler_remote_command_try_push(
+    if (!scheduler_remote_command_try_push_once(
             source_cpu, target_cpu, thread, SCHED_CMD_ENQUEUE, 0U)) {
         thread->owner_cpu = (uint16_t)source_cpu;
+        thread->sched.vruntime = previous_vruntime;
+        if (!was_relative)
+            thread->sched.flags &= (uint16_t)~SCHED_ENTITY_VRUNTIME_RELATIVE;
         return false;
     }
     (void)x86_smp_request_reschedule(target_cpu);
@@ -1056,8 +1112,8 @@ static void scheduler_migrate_local(
         return;
     }
 
+    thread->migration_target_cpu = (uint16_t)target_cpu;
     if (source->queue.current == thread || state == THREAD_RUNNING) {
-        thread->migration_target_cpu = (uint16_t)target_cpu;
         thread->migration_pending = true;
         return;
     }
@@ -1069,11 +1125,49 @@ static void scheduler_migrate_local(
     if (state == THREAD_READY) {
         if (!scheduler_transfer_local(source_cpu, source, thread, target_cpu)) {
             thread->owner_cpu = (uint16_t)source_cpu;
+            thread->migration_pending = true;
             enqueue_local_raw(source, thread);
+            atomic_store_explicit(&source->need_resched, true, memory_order_release);
         }
     } else if (g_cpus[target_cpu].command_inbox != 0) {
+        /* 阻塞线程可能在唤醒前再次迁移。保留其相对负载，直到最终目标 CPU 将其插入队列。 */
+        scheduler_prepare_fair_migration(&source->queue, thread);
         thread->owner_cpu = (uint16_t)target_cpu;
     }
+}
+
+static bool scheduler_stage_handoff(scheduler_cpu_t *cpu, thread_t *thread) {
+    thread_t *next = pick_next_local(cpu);
+    if (thread == 0 || thread != cpu->queue.current ||
+        !thread->migration_pending || thread->arch.switch_ctx.rsp == 0U ||
+        atomic_load_explicit(&thread->state, memory_order_relaxed) != THREAD_RUNNING ||
+        next == 0 || next == thread || next->arch.switch_ctx.rsp == 0U ||
+        cpu->switch_handoff != 0) return false;
+    atomic_store_explicit(&thread->state, THREAD_READY, memory_order_relaxed);
+    thread->migration_pending = false;
+    scheduler_prepare_fair_migration(&cpu->queue, thread);
+    cpu->switch_handoff = thread;
+    return true;
+}
+
+/* 在新栈上由上下文切换汇编调用，此时中断已屏蔽。
+ * 发布远端入队后不得再访问旧栈。 */
+void scheduler_finish_handoff(void) {
+    uint32_t cpu_id;
+    if (!scheduler_current_cpu(&cpu_id)) return;
+    scheduler_cpu_t *cpu = &g_cpus[cpu_id];
+    thread_t *thread = cpu->switch_handoff;
+    if (thread == 0) return;
+    cpu->switch_handoff = 0;
+    uint32_t target = thread->migration_target_cpu;
+    if (!scheduler_transfer_local(cpu_id, cpu, thread, target)) {
+        /* 发布失败时同时保留可运行线程和迁移意图。其已保存的续执行状态现在可在
+         * 此 CPU 上安全运行。 */
+        thread->migration_pending = true;
+        enqueue_local_raw(cpu, thread);
+        atomic_store_explicit(&cpu->need_resched, true, memory_order_release);
+    }
+    if (cpu->queue_snapshot_dirty) scheduler_publish_queue_snapshot(cpu);
 }
 
 static inline void scheduler_thread_mailbox_lock(thread_t *thread) {
@@ -1093,8 +1187,8 @@ static inline void scheduler_thread_mailbox_unlock(thread_t *thread) {
 static inline void scheduler_command_release_enqueue_locked(
     scheduler_cpu_t *cpu,
     thread_t *thread) {
-    /* Caller holds the thread mailbox lock and serializes the CPU FIFO with
-     * local IRQs disabled. Publish only the empty-to-nonempty transition. */
+    /* 调用方持有线程邮箱锁，并通过关闭本地中断串行化 CPU FIFO。
+     * 仅发布从空到非空的状态转换。 */
     if (thread->command_release_count != 0U) {
         ++thread->command_release_count;
         return;
@@ -1122,6 +1216,10 @@ static void scheduler_command_release_enqueue_local(
     scheduler_thread_mailbox_unlock(thread);
 }
 
+static void scheduler_command_release_background(void *argument) {
+    object_put(argument);
+}
+
 static void scheduler_command_release_drain(uint32_t cpu_id) {
     if (cpu_id >= g_cpu_count) return;
     scheduler_cpu_t *cpu = &g_cpus[cpu_id];
@@ -1133,11 +1231,10 @@ static void scheduler_command_release_drain(uint32_t cpu_id) {
     for (;;) {
         uint64_t queue_flags = scheduler_irq_save();
         uint32_t local_cpu;
-        /* Popping is IRQ-serialized and strictly local; destruction is not.
-         * The last command ref can free a VM and perform TLB shootdowns.
-         * Leave both the FIFO and its pending bit intact until an unlocked,
-         * interruptible continuation on its owner CPU can do that work.
-         * Recheck ownership on every pop: object_put may block or migrate. */
+        /* 弹出操作由中断串行化且严格在本地执行；销毁操作则不是。
+         * 最后一个命令引用可能释放 VM 并执行 TLB shootdown。
+         * 在所属 CPU 上由未加锁、可中断的续执行路径完成这些工作前，
+         * 保持 FIFO 和待处理位不变。每次弹出都重新检查所有权：object_put 可能阻塞或迁移。 */
         if ((queue_flags & (1ULL << 9)) == 0U || sched_preempt_disabled() ||
             x86_tlb_shootdown_active() ||
             !scheduler_current_cpu(&local_cpu) || local_cpu != cpu_id) {
@@ -1164,7 +1261,28 @@ static void scheduler_command_release_drain(uint32_t cpu_id) {
         scheduler_irq_restore(queue_flags);
 
         if (thread == 0) return;
-        while (count-- != 0U) object_put(thread);
+        if (count == 0U) continue;
+        if (!deferred_background_worker_started()) {
+            while (count-- != 0U) object_put(thread);
+            continue;
+        }
+        /* 将此分离批次的一个自有引用保留到最后。即使其他 CPU 上的所有者并发释放
+         * 其余所有引用，之前的 put 也不会销毁对象。无需分配内存，也无需为每个引用
+         * 单独创建工作项。 */
+        while (count > 1U) {
+            object_put(thread);
+            --count;
+        }
+        if (!deferred_background_schedule(scheduler_command_release_background,
+                                          thread)) {
+            /* 队列已满：将最后一个引用留在当前 CPU 的 FIFO 中。两次 put 之间发生抢占
+             * 可能已迁移当前调用方。绝不让输入路径承担开销大的最终销毁操作。 */
+            queue_flags = scheduler_irq_save();
+            uint32_t retry_cpu = x86_current_cpu_index();
+            scheduler_command_release_enqueue_local(&g_cpus[retry_cpu], thread);
+            scheduler_irq_restore(queue_flags);
+            return;
+        }
     }
 }
 
@@ -1221,12 +1339,14 @@ static void scheduler_command_consume_local(
         } else if (message.op == SCHED_CMD_REMOVE ||
                    message.op == SCHED_CMD_STOP ||
                    message.op == SCHED_CMD_EXIT) {
-            if (cpu->queue.current != thread) dequeue_local_raw(cpu, thread);
             if (message.op == SCHED_CMD_EXIT) {
                 unsigned state = atomic_load_explicit(&thread->state,
                                                       memory_order_relaxed);
                 bool state_changed = false;
-                if (state == THREAD_NEW || state == THREAD_READY) {
+                if ((state == THREAD_NEW || state == THREAD_READY) &&
+                    scheduler_exit_can_publish(thread)) {
+                    if (cpu->queue.current != thread)
+                        dequeue_local_raw(cpu, thread);
                     atomic_store_explicit(&thread->state, THREAD_DEAD,
                                           memory_order_release);
                     state_changed = true;
@@ -1238,6 +1358,8 @@ static void scheduler_command_consume_local(
                                                SCHED_CMD_STATE_CHANGED : 0U),
                                           memory_order_release);
                 }
+            } else if (cpu->queue.current != thread) {
+                dequeue_local_raw(cpu, thread);
             }
             if (message.op == SCHED_CMD_REMOVE &&
                 (message.generation & SCHED_CMD_REMOVE_ACK) != 0U) {
@@ -1250,8 +1372,14 @@ static void scheduler_command_consume_local(
                 cpu_id, cpu, thread, message.generation);
         }
     } else if (message.op == SCHED_CMD_START) {
-        /* A stale start must not strand a future caller behind the gate. */
+        /* 过期的启动请求不能让后续调用方一直卡在门控处。 */
         atomic_store_explicit(&thread->start_pending, false,
+                              memory_order_release);
+    } else if (message.op == SCHED_CMD_EXIT &&
+               (message.generation & SCHED_CMD_STATE_ACK) != 0U) {
+        /* 路由完成后目标已迁移。应通过确认拒绝请求，而不是让发送方无限等待；
+         * 绝不触碰新所属 CPU 的队列。 */
+        atomic_store_explicit(&thread->command_ack, SCHED_CMD_STATE_ACK,
                               memory_order_release);
     }
 
@@ -1273,8 +1401,8 @@ static inline void scheduler_command_drain_ring_local(
         atomic_load_explicit(tail_index, memory_order_acquire);
     uint32_t consumed = head;
 
-    /* Consume the captured batch only. Release slots after all callbacks,
-     * retaining the producer/consumer ownership and wraparound protocol. */
+    /* 仅消费已捕获的批次。所有回调完成后才释放槽位，以维持生产者/消费者所有权
+     * 和回绕协议。 */
     while (consumed != tail) {
         sched_cmd_t message = slots[consumed & slot_mask];
         ++consumed;
@@ -1339,7 +1467,7 @@ static void scheduler_remote_wake_drain(uint32_t cpu_id, scheduler_cpu_t *cpu) {
                                                 memory_order_acquire);
     while (thread != 0) {
         scheduler_thread_mailbox_lock(thread);
-        /* Snapshot and complete before releasing the node for reuse. */
+        /* 先获取快照并完成处理，再释放节点供后续复用。 */
         thread_t *next = thread->remote_wake_next;
         uint32_t epoch = thread->remote_wake_epoch;
         if (thread->owner_cpu == cpu_id) {
@@ -1347,10 +1475,49 @@ static void scheduler_remote_wake_drain(uint32_t cpu_id, scheduler_cpu_t *cpu) {
         }
         atomic_store_explicit(&thread->remote_wake_queued, false,
                               memory_order_relaxed);
-        /* Transfer the mailbox reference before releasing its existing lock;
-         * no second lock acquisition or object destruction is needed here. */
+        /* 释放现有锁前先转移邮箱引用；此处无需再次获取锁，也无需销毁对象。 */
         scheduler_command_release_enqueue_locked(cpu, thread);
         scheduler_thread_mailbox_unlock(thread);
+        thread = next;
+    }
+}
+
+/* 不等待远端腾出槽位，也不分配内存。每个线程至多占一个节点及一个引用。
+ * 调用方持有线程邮箱锁；迁移转发时沿用已有引用。 */
+static void scheduler_priority_link(scheduler_cpu_t *cpu, thread_t *thread) {
+    thread_t *head = atomic_load_explicit(&cpu->priority_head, memory_order_acquire);
+    do {
+        thread->priority_next = head;
+    } while (!atomic_compare_exchange_weak_explicit(
+        &cpu->priority_head, &head, thread, memory_order_release, memory_order_acquire));
+    atomic_store_explicit(&cpu->command_pending, true, memory_order_release);
+}
+
+static void scheduler_priority_drain(uint32_t cpu_id, scheduler_cpu_t *cpu) {
+    thread_t *thread = atomic_exchange_explicit(&cpu->priority_head, 0,
+                                                memory_order_acquire);
+    while (thread != 0) {
+        scheduler_thread_mailbox_lock(thread);
+        thread_t *next = thread->priority_next;
+        uint32_t target = thread->owner_cpu;
+        unsigned state = atomic_load_explicit(&thread->state, memory_order_acquire);
+        if (state != THREAD_DEAD && target != cpu_id && scheduler_cpu_available(target)) {
+            /* 线程已迁移；不能修改旧 CPU 的运行队列，也不能丢弃最新更新。 */
+            scheduler_priority_link(&g_cpus[target], thread);
+            scheduler_thread_mailbox_unlock(thread);
+            (void)x86_smp_request_reschedule(target);
+        } else {
+            if (state != THREAD_DEAD && target == cpu_id) {
+                uint32_t payload = atomic_load_explicit(&thread->priority_request,
+                                                         memory_order_relaxed);
+                scheduler_apply_priority_local(cpu, thread,
+                    (uint8_t)(payload >> SCHED_CMD_CLASS_SHIFT), (uint8_t)payload);
+            }
+            thread->priority_next = 0;
+            atomic_store_explicit(&thread->priority_queued, false, memory_order_release);
+            scheduler_command_release_enqueue_locked(cpu, thread);
+            scheduler_thread_mailbox_unlock(thread);
+        }
         thread = next;
     }
 }
@@ -1367,6 +1534,7 @@ static bool scheduler_command_drain_local_limit(
     }
 
     scheduler_remote_wake_drain(cpu_id, cpu);
+    scheduler_priority_drain(cpu_id, cpu);
     if (source_limit > MAX_CPUS) source_limit = MAX_CPUS;
     for (uint32_t source = 0U; source < source_limit; ++source) {
         if (source == cpu_id) continue;
@@ -1418,10 +1586,9 @@ static bool scheduler_local_wake_requires_preempt(
     unsigned current_state =
         atomic_load_explicit(&current->state, memory_order_relaxed);
     if (current == thread || current_state != THREAD_RUNNING) return true;
-    /* A local FAIR wake has no reschedule IPI. Request a choice at the
-     * next safe boundary, just as a timer does for competing FAIR tasks.
-     * schedule() accounts the current syscall tail before choosing; do
-     * not compare an uncharged current vruntime here or preempt RT. */
+    /* 本地 FAIR 唤醒不会发送重新调度 IPI。与时钟处理竞争中的 FAIR 任务相同，
+     * 在下一个安全边界请求重新选择。schedule() 会在选择前记入当前系统调用尾段，
+     * 此处不要比较尚未记账的当前 vruntime，也不要抢占 RT 任务。 */
     if (thread->sched_class == SCHED_CLASS_FAIR)
         return current->sched_class == SCHED_CLASS_FAIR;
     if (thread->sched_class != SCHED_CLASS_RT) return false;
@@ -1462,10 +1629,10 @@ void sched_wake(thread_t *thread) {
     scheduler_cpu_t *cpu = &g_cpus[cpu_id];
 
     /*
-     * Remote blocked wake: no target-rq lock in the common path.
+    * 远端阻塞唤醒：常见路径不获取目标运行队列锁。
      *
-     * Disable local IRQs only around the source-owned producer index so the
-     * same physical CPU cannot re-enter this SPSC producer from an interrupt.
+    * 仅在访问源端独占的生产者索引时关闭本地中断，避免同一物理 CPU 从中断上下文
+    * 重入此 SPSC 生产者。
      */
     if (cpu_id != caller_cpu) {
         if (caller_cpu >= g_cpu_count || caller_cpu >= MAX_CPUS ||
@@ -1551,8 +1718,8 @@ static void scheduler_schedule_internal(bool commands_already_drained) {
     }
     thread_t *current = cpu->queue.current;
     bool current_transferred = false;
-    /* Charge the tail since the last timer tick before enqueueing or
-     * migrating current. Short blocking/yielding bursts must not run free. */
+    /* 入队或迁移当前线程前，先记入上次时钟节拍之后的执行时间。
+     * 短暂的阻塞/让出 CPU 不能成为逃避记账的途径。 */
     (void)scheduler_account_current(&cpu->queue,
                                     x86_tsc_to_ns(x86_read_tsc()));
     unsigned current_state = THREAD_DEAD;
@@ -1562,7 +1729,8 @@ static void scheduler_schedule_internal(bool commands_already_drained) {
         if (current_state == THREAD_RUNNING &&
             !current->migration_pending &&
             (current->sched.flags & SCHED_ENTITY_ENQUEUED) == 0U &&
-            cpu->queue.nr_running == 0U) {
+            (cpu->queue.nr_running == 0U ||
+             scheduler_fair_current_wins(&cpu->queue))) {
             if (cpu->queue_snapshot_dirty) {
                 scheduler_publish_queue_snapshot(cpu);
             }
@@ -1578,11 +1746,7 @@ static void scheduler_schedule_internal(bool commands_already_drained) {
                 !scheduler_affinity_allows(current, target_cpu)) {
                 current->migration_pending = false;
             } else {
-                atomic_store_explicit(&current->state, THREAD_READY,
-                                      memory_order_relaxed);
-                current->migration_pending = false;
-                current_transferred = scheduler_transfer_local(
-                    cpu_id, cpu, current, target_cpu);
+                current_transferred = scheduler_stage_handoff(cpu, current);
             }
         }
         if (!current_transferred &&
@@ -1641,9 +1805,8 @@ static void scheduler_schedule_internal(bool commands_already_drained) {
         x86_cpu_local_t *local = x86_cpu_local_current();
         if (local != 0) {
             /*
-             * A syscall may explicitly block and call schedule().  Keep
-             * that fact with the thread so the next thread on this CPU does
-             * not inherit the caller's syscall-only interrupt policy.
+             * 系统调用可能显式阻塞并调用 schedule()。在线程上保留此信息，
+             * 避免此 CPU 上的下一个线程继承调用方仅适用于系统调用的中断策略。
              */
             current->arch.syscall_active = local->SyscallActive;
             local->SyscallActive = next == cpu->queue.idle ? 0U :
@@ -1664,7 +1827,8 @@ static void scheduler_schedule_internal(bool commands_already_drained) {
         paddr_t cr3 = paddr_make(x86_cr3_value(
             root, next->process != 0 && next->process->vm != 0 ?
                 next->process->vm->pcid : 0U));
-        x86_switch_context_root(&current->arch.switch_ctx, &next->arch.switch_ctx, cr3);
+        x86_switch_context_root(&current->arch.switch_ctx, &next->arch.switch_ctx,
+                                cr3, current_transferred);
     }
     scheduler_irq_restore(irq_flags);
     /* 回收可能发起跨 CPU TLB shootdown，必须在 IF=1 时执行。 */
@@ -1703,7 +1867,7 @@ void schedule(void) {
 }
 
 void sched_preempt_disable(void) {
-    /* GS is CPU-private: one local RMW is enough, no locked atomic needed. */
+    /* GS 是 CPU 私有的：一次本地读改写即可，无需 locked atomic。 */
     if (g_sched_wake_trace_tid != 0U && !x86_preempt_disabled_fast()) {
         uint32_t cpu_id = x86_current_cpu_index();
         if (cpu_id < MAX_CPUS)
@@ -1727,11 +1891,10 @@ bool sched_preempt_disabled(void) {
 }
 
 /*
- * Pop one thread whose CPU has already switched away from its old stack/CR3.
+ * 弹出一个线程；其 CPU 已经切离旧栈/CR3。
  *
- * This helper intentionally accepts an explicit CPU id: once the originating
- * CPU has reached its post-switch continuation, the actual object/VM teardown
- * may safely execute on the global deferred worker.
+ * 此辅助函数刻意接收显式 CPU ID：一旦源 CPU 到达切换后的续执行路径，
+ * 实际对象/VM 清理即可安全地交由全局延迟工作线程执行。
  */
 static thread_t *scheduler_reap_pop_cpu(uint32_t cpu_id) {
     if (cpu_id >= g_cpu_count) return 0;
@@ -1753,9 +1916,8 @@ static thread_t *scheduler_reap_pop_cpu(uint32_t cpu_id) {
         thread->reap_next = 0;
 
         /*
-         * From this point the FIFO no longer owns the entry.
-         * EXECUTION_REF itself continues to protect thread lifetime until
-         * thread_release_execution_ref() finishes.
+         * 从此处开始，FIFO 不再拥有该条目。
+         * 在 thread_release_execution_ref() 完成前，EXECUTION_REF 本身仍保护线程生命周期。
          */
         thread->sched.flags &= (uint16_t)~SCHED_ENTITY_REAP_QUEUED;
     }
@@ -1782,8 +1944,8 @@ static bool scheduler_reap_cpu_pending(uint32_t cpu_id) {
     return pending;
 }
 
-static void scheduler_reap_drain_cpu(uint32_t cpu_id) {
-    for (;;) {
+static void scheduler_reap_drain_cpu_budget(uint32_t cpu_id, uint32_t budget) {
+    while (budget-- != 0U) {
         thread_t *thread =
             scheduler_reap_pop_cpu(cpu_id);
 
@@ -1792,13 +1954,16 @@ static void scheduler_reap_drain_cpu(uint32_t cpu_id) {
         }
 
         /*
-         * No scheduler lock is held here; the reaper lock is only
-         * used to protect this deferred FIFO.
+         * 此处未持有调度器锁；回收锁仅用于保护此延迟 FIFO。
          *
-         * This may destroy process VM objects and issue TLB shootdowns.
+         * 此操作可能销毁进程 VM 对象并发起 TLB shootdown。
          */
         thread_release_execution_ref(thread);
     }
+}
+
+static void scheduler_reap_drain_cpu(uint32_t cpu_id) {
+    scheduler_reap_drain_cpu_budget(cpu_id, UINT32_MAX);
 }
 
 static void scheduler_reap_deferred_work(void *argument);
@@ -1824,16 +1989,19 @@ static void scheduler_reap_schedule_deferred(uint32_t cpu_id) {
     }
 
     /*
-     * This function can be reached from LAPIC hard IRQ context, therefore
-     * only the IRQ-safe deferred producer is legal here.
+    * 此函数可能从 LAPIC 硬中断上下文调用，因此此处只能使用中断安全的延迟工作生产者。
      */
-    if (!deferred_try_schedule(
-            scheduler_reap_deferred_work,
-            (void *)(uintptr_t)cpu_id)) {
+    bool queued = deferred_background_schedule(scheduler_reap_deferred_work,
+                                               (void *)(uintptr_t)cpu_id);
+    /* 可选后台工作线程尚未创建时，引导线程可能会执行回收。一旦该线程存在，清理队列满时不得
+     * 将工作退回输入路径。 */
+    if (!queued && !deferred_background_worker_started())
+        queued = deferred_try_schedule(scheduler_reap_deferred_work,
+                                      (void *)(uintptr_t)cpu_id);
+    if (!queued) {
 
         /*
-         * Queue full: keep the reaper entries intact and permit the next
-         * timer/schedule boundary to retry.
+         * 队列已满：保留回收器条目，并允许在下一个定时器/调度边界重试。
          */
         atomic_store_explicit(
             &cpu->reap_deferred_queued,
@@ -1852,14 +2020,15 @@ static void scheduler_reap_deferred_work(void *argument) {
         &g_cpus[cpu_id];
 
     /*
-     * We are now in ordinary Ring0 worker context with interrupts enabled.
-     * The originating CPU had already completed the actual context switch
-     * before this item was published.
+    * 此时已处于普通 Ring0 工作线程上下文，且中断已开启。在发布此工作项前，源 CPU 已完成
+    * 实际上下文切换。
      */
-    scheduler_reap_drain_cpu(cpu_id);
+    /* 销毁过程可能释放进程 VM 并等待远端 TLB。每个工作项释放一个引用，以保证后台任务之间的
+     * 公平性（启动早期回退路径中也包括设备任务）。 */
+    scheduler_reap_drain_cpu_budget(cpu_id, 1U);
 
     /*
-     * Drop the coalescing ownership only after the current drain completes.
+    * 当前队列排空后，才释放合并请求的所有权。
      */
     atomic_store_explicit(
         &cpu->reap_deferred_queued,
@@ -1867,15 +2036,15 @@ static void scheduler_reap_deferred_work(void *argument) {
         memory_order_release);
 
     /*
-     * Close:
+    * 关闭流程：
      *
-     * drain sees empty
+    * 排空操作发现队列为空
      *       ↓
-     * CPU queues another DEAD thread while queued==true
+    * queued==true 时 CPU 又将一个 DEAD 线程入队
      *       ↓
-     * worker clears queued
+    * 工作线程清除 queued
      *
-     * race.
+    * 由此产生竞争。
      */
     if (scheduler_reap_cpu_pending(cpu_id)) {
         scheduler_reap_schedule_deferred(cpu_id);
@@ -1900,27 +2069,25 @@ void sched_finish_switch(void) {
     if ((flags & (1ULL << 9)) == 0 || sched_preempt_disabled() ||
         x86_tlb_shootdown_active()) {
         /*
-         * Typical case:
+         * 典型情况：
          *
-         * timer IRQ
+         * 定时器 IRQ
          *   -> sched_tick()
          *   -> schedule()
-         *   -> context switch
+         *   -> 上下文切换
          *
-         * The old stack/CR3 is already inactive, but we are still inside the
-         * restored interrupt call chain.  VM/TLB teardown must therefore be
-         * deferred rather than simply discarded.
+         * 旧栈/CR3 已不再活动，但当前仍处于恢复后的中断调用链中。因此 VM/TLB 拆除必须延迟，
+         * 不能直接丢弃。
          */
         scheduler_reap_schedule_deferred(cpu_id);
         return;
     }
 
-    /*
-     * Normal process/kernel scheduling boundary: teardown can execute
-     * synchronously.
-     */
+    /* 允许执行拆除的上下文不一定能容忍延迟：输入/合成器线程也会经过此边界返回。 */
     scheduler_command_release_drain(cpu_id);
-    scheduler_reap_drain_cpu(cpu_id);
+    if (deferred_background_worker_started())
+        scheduler_reap_schedule_deferred(cpu_id);
+    else scheduler_reap_drain_cpu(cpu_id);
 }
 
 void sched_block_current(void) {
@@ -1973,8 +2140,7 @@ bool sched_state_transition_self_test(void) {
         return false;
     }
 
-    /* Remote EXIT acknowledgement distinguishes publication from an already
-     * terminal thread so only the winning terminator commits the exit status. */
+    /* 远端 EXIT 确认用于区分“已发布”与“已终止”线程，因此只有成功完成终止的线程才能提交退出状态。 */
     thread_t remote_exit = {0};
     scheduler_cpu_t remote_cpu = {0};
     atomic_init(&remote_exit.state, THREAD_READY);
@@ -2013,28 +2179,35 @@ static bool scheduler_command_drain_local(
         cpu_id, cpu, g_cpu_count, publish_snapshot);
 }
 
+static void scheduler_command_ack_drain_locked(uint32_t cpu_id,
+                                               scheduler_cpu_t *cpu,
+                                               uint32_t source_limit) {
+    (void)scheduler_command_drain_local_limit(
+        cpu_id, cpu, source_limit, false);
+    if (cpu->queue_snapshot_dirty) scheduler_publish_queue_snapshot(cpu);
+}
+
 /*
- * Progress a remote acknowledgement wait by servicing this CPU's inbox.
- * Reschedule IPIs can defer command draining until syscall exit, but the
- * caller may itself be stuck in that syscall waiting for the remote owner.
- * Keeping this path identical to the normal local drain also preserves the
- * per-CPU SPSC consumer ownership and IRQ serialization.
+ * 通过处理此 CPU 的收件箱，推进远端确认等待。重新调度 IPI 可能会将命令排空延迟到系统调用退出时，
+ * 但调用方本身可能正卡在该系统调用中等待远端所有者。此路径与常规本地排空保持一致，也能保留每 CPU
+ * SPSC 消费者所有权及中断串行化。
  */
-static bool scheduler_command_ack_step(uint32_t cpu_id,
-                                       scheduler_cpu_t *cpu,
-                                       thread_t *thread,
+static bool scheduler_command_ack_step(thread_t *thread,
                                        uint32_t source_limit,
                                        uint32_t ack_mask,
                                        uint32_t ack_value,
                                        bool drain_releases) {
-    if (cpu == 0 || thread == 0 || cpu_id >= MAX_CPUS) return false;
+    if (thread == 0) return false;
 
     uint64_t irq_flags = scheduler_irq_save();
-    (void)scheduler_command_drain_local_limit(
-        cpu_id, cpu, source_limit, false);
-    if (cpu->queue_snapshot_dirty) scheduler_publish_queue_snapshot(cpu);
+    uint32_t cpu_id;
+    /* 等待中的发送方可能在循环迭代之间迁移。绝不能在另一 CPU 上排空此前采样 CPU 的 SPSC 收件箱。 */
+    bool current = scheduler_current_cpu(&cpu_id) &&
+                   scheduler_cpu_available(cpu_id);
+    if (current)
+        scheduler_command_ack_drain_locked(cpu_id, &g_cpus[cpu_id], source_limit);
     scheduler_irq_restore(irq_flags);
-    if (drain_releases) scheduler_command_release_drain(cpu_id);
+    if (current && drain_releases) scheduler_command_release_drain(cpu_id);
 
     return (atomic_load_explicit(&thread->command_ack,
                                  memory_order_acquire) & ack_mask) == ack_value;
@@ -2071,8 +2244,7 @@ bool sched_remote_remove_ack_self_test(void) {
     cpu0.queue.current = &thread0;
     cpu1.queue.current = &thread1;
 
-    /* Each CPU waits for the other's REMOVE acknowledgement. Exercise both
-     * ring capacities and index wrap through the actual local drain. */
+    /* 每个 CPU 都等待另一方的 REMOVE 确认。通过实际本地排空路径测试两种环形队列容量和索引回绕。 */
     atomic_store_explicit(&cpu0_channels[1].primary.head, UINT32_MAX,
                           memory_order_relaxed);
     atomic_store_explicit(&cpu0_channels[1].primary.tail, UINT32_MAX,
@@ -2092,12 +2264,18 @@ bool sched_remote_remove_ack_self_test(void) {
     atomic_store_explicit(&cpu0.command_pending, true, memory_order_release);
     atomic_store_explicit(&cpu1.command_pending, true, memory_order_release);
 
-    bool cpu0_still_waiting = !scheduler_command_ack_step(
-        0U, &cpu0, &thread1, 2U, UINT32_MAX, generation, false);
-    bool cpu1_unblocked = scheduler_command_ack_step(
-        1U, &cpu1, &thread0, 2U, UINT32_MAX, generation, false);
-    bool cpu0_unblocked = scheduler_command_ack_step(
-        0U, &cpu0, &thread1, 2U, UINT32_MAX, generation, false);
+    /* 依次模拟两个所有者，但不将任一合成队列伪装成当前硬件 CPU 的收件箱。测试共享的加锁排空路径。 */
+    uint64_t flags = scheduler_irq_save();
+    scheduler_command_ack_drain_locked(0U, &cpu0, 2U);
+    bool cpu0_still_waiting = atomic_load_explicit(
+        &thread1.command_ack, memory_order_acquire) != generation;
+    scheduler_command_ack_drain_locked(1U, &cpu1, 2U);
+    bool cpu1_unblocked = atomic_load_explicit(
+        &thread0.command_ack, memory_order_acquire) == generation;
+    scheduler_command_ack_drain_locked(0U, &cpu0, 2U);
+    bool cpu0_unblocked = atomic_load_explicit(
+        &thread1.command_ack, memory_order_acquire) == generation;
+    scheduler_irq_restore(flags);
     return cpu0_still_waiting && cpu1_unblocked && cpu0_unblocked &&
            atomic_load_explicit(&cpu0_channels[1].primary.head,
                                 memory_order_acquire) == 0U &&
@@ -2141,7 +2319,7 @@ static bool scheduler_command_channel_self_test(thread_t *thread) {
     bool overflowed = false;
     if (scheduler_command_channel_try_push(&channel, thread, SCHED_CMD_WAKE,
             99U, &overflowed) || !overflowed) return false;
-    /* Primary capacity cannot bypass older messages still in overflow. */
+    /* 主队列不能越过仍在溢出队列中的较早消息。 */
     atomic_store_explicit(&channel.primary.head, primary_start + SCHED_CMD_SLOTS,
                           memory_order_release);
     if (scheduler_command_channel_try_push(&channel, thread, SCHED_CMD_WAKE,
@@ -2186,7 +2364,7 @@ bool sched_remote_wake_self_test(void) {
     }
     if (scheduler_command_ring_try_pop(&ring, &message)) return false;
 
-    /* Exercise slot reuse across the 32-bit producer/consumer wrap. */
+    /* 测试生产者/消费者 32 位计数回绕时的槽位复用。 */
     atomic_store_explicit(&ring.head, UINT32_MAX - 3U, memory_order_relaxed);
     atomic_store_explicit(&ring.tail, UINT32_MAX - 3U, memory_order_relaxed);
     for (uint32_t index = 0U; index < SCHED_CMD_SLOTS * 2U; ++index) {
@@ -2334,16 +2512,11 @@ static bool scheduler_remote_wake_benchmark(void) {
     sched_initialize_new_thread(&thread, target_cpu, true);
     uintptr_t stack_top = ((uintptr_t)stack + sizeof(stack)) &
                           ~(uintptr_t)15U;
-    uintptr_t switch_stack = stack_top - sizeof(uint64_t);
-    *(uint64_t *)switch_stack = (uint64_t)(uintptr_t)&x86_kernel_thread_start;
     thread.kernel_stack_base = stack;
     thread.kernel_stack_top = stack_top;
     thread.kernel_stack_size = sizeof(stack);
-    thread.arch.switch_ctx.rsp = switch_stack;
-    thread.arch.switch_ctx.r12 =
-        (uint64_t)(uintptr_t)&scheduler_remote_benchmark_worker;
-    thread.arch.switch_ctx.r13 = 0U;
-    thread.arch.switch_ctx.r14 = stack_top;
+    x86_prepare_kernel_thread(&thread.arch, stack_top,
+                              scheduler_remote_benchmark_worker, 0);
     atomic_init(&g_remote_benchmark_stop, false);
     atomic_init(&g_remote_benchmark_waiting, false);
     atomic_init(&g_remote_benchmark_runs, 0U);
@@ -2523,9 +2696,8 @@ kstatus_t sched_set_affinity(thread_t *thread, const cpumask_t *mask) {
     if (!scheduler_select_cpu_mask(&requested, current_cpu, &target_cpu) ||
         !scheduler_cpu_available(target_cpu) ||
         !scheduler_affinity_mask_allows(&requested, target_cpu)) return K_EINVAL;
-    /* A failed preflight must not replace the live affinity. Ordinary chooser
-     * callers retain their current-CPU fallback; affinity updates require an
-     * explicitly selected, available member of the requested mask. */
+    /* 预检查失败时不得替换当前有效亲和性。普通选择调用方仍回退到当前 CPU；亲和性更新则必须显式
+     * 选择请求掩码中可用的成员。 */
     thread->affinity = requested;
 
     unsigned state = atomic_load_explicit(&thread->state, memory_order_acquire);
@@ -2559,27 +2731,38 @@ void sched_set_effective_priority(thread_t *thread, uint8_t class_id,
     if (thread == 0 || g_cpu_count == 0 ||
         (class_id != SCHED_CLASS_RT && class_id != SCHED_CLASS_FAIR) ||
         (class_id == SCHED_CLASS_RT && rt_priority >= RT_PRIORITY_LEVELS)) return;
+    uint64_t queue_flags = scheduler_irq_save();
     uint32_t current_cpu;
-    if (!scheduler_current_cpu(&current_cpu)) return;
-    uint32_t cpu_id = scheduler_cpu_available(thread->owner_cpu) ?
-                      thread->owner_cpu : current_cpu;
-    scheduler_cpu_t *cpu = &g_cpus[cpu_id];
-
-    if (cpu_id != current_cpu) {
-        if (cpu->command_inbox == 0) return;
-        uint32_t payload = ((uint32_t)class_id << SCHED_CMD_CLASS_SHIFT) |
-                           (uint32_t)rt_priority;
-        uint64_t irq_flags = scheduler_irq_save();
-        bool queued = scheduler_remote_command_try_push(
-            current_cpu, cpu_id, thread, SCHED_CMD_SET_PRIORITY, payload);
-        scheduler_irq_restore(irq_flags);
-        if (queued) (void)x86_smp_request_reschedule(cpu_id);
+    if (!scheduler_current_cpu(&current_cpu)) {
+        scheduler_irq_restore(queue_flags);
         return;
     }
-
-    uint64_t queue_flags = scheduler_irq_save();
-    scheduler_apply_priority_local(cpu, thread, class_id, rt_priority);
+    scheduler_thread_mailbox_lock(thread);
+    uint32_t cpu_id = thread->owner_cpu;
+    if (!scheduler_cpu_available(cpu_id) ||
+        atomic_load_explicit(&thread->state, memory_order_acquire) == THREAD_DEAD) {
+        scheduler_thread_mailbox_unlock(thread);
+        scheduler_irq_restore(queue_flags);
+        return;
+    }
+    uint32_t payload = ((uint32_t)class_id << SCHED_CMD_CLASS_SHIFT) | rt_priority;
+    bool notify = false;
+    if (cpu_id == current_cpu) {
+        /* 旧邮箱可能仍位于迁移前的 CPU；覆盖其负载，避免以后重放旧捐赠。 */
+        atomic_store_explicit(&thread->priority_request, payload, memory_order_release);
+        scheduler_apply_priority_local(&g_cpus[cpu_id], thread, class_id, rt_priority);
+    } else if (atomic_load_explicit(&thread->priority_queued, memory_order_relaxed)) {
+        atomic_store_explicit(&thread->priority_request, payload, memory_order_release);
+        /* 已发布的节点或正在消费的批次负责前进，不为重复更新发送 IPI。 */
+    } else if (object_try_get(thread)) {
+        atomic_store_explicit(&thread->priority_request, payload, memory_order_release);
+        atomic_store_explicit(&thread->priority_queued, true, memory_order_release);
+        scheduler_priority_link(&g_cpus[cpu_id], thread);
+        notify = true;
+    }
+    scheduler_thread_mailbox_unlock(thread);
     scheduler_irq_restore(queue_flags);
+    if (notify) (void)x86_smp_request_reschedule(cpu_id);
 }
 
 thread_t *sched_current_thread(void) {
@@ -2617,7 +2800,7 @@ void sched_remove(thread_t *thread) {
         (void)x86_smp_request_reschedule(cpu_id);
         if (unowned) {
             while (!scheduler_command_ack_step(
-                current_cpu, &g_cpus[current_cpu], thread, g_cpu_count,
+                thread, g_cpu_count,
                 UINT32_MAX, generation, true)) {
                 __asm__ volatile ("pause");
             }
@@ -2638,9 +2821,8 @@ uint32_t sched_runnable_count(void) {
     uint32_t runnable = scheduler_snapshot_runnable(cpu);
 
     /*
-     * A remote wake is scheduler work even before the owner CPU has converted
-     * BLOCKED -> READY and inserted the thread into its local runqueue.
-     * This preserves the existing timer/idle fallback if an IPI is delayed.
+    * 即使所有者 CPU 尚未将 BLOCKED 转为 READY 并将线程加入本地运行队列，远端唤醒仍属于调度工作。
+    * 如果 IPI 延迟，这也能保留现有的定时器/空闲回退机制。
      */
     if (runnable == 0U &&
         atomic_load_explicit(&cpu->command_pending, memory_order_acquire)) {

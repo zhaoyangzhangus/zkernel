@@ -95,17 +95,17 @@ bool linux_phase13_realtest(void) {
     bool success = false;
 
     if (process_create(0, &process) != K_OK ||
-        phase13_load_path("/sbin/linux-events-test", process, &info,
+        phase13_load_path("/usr/apps/linux-events-test/linux-events-test", process, &info,
                           &stack_pointer) != K_OK) {
         kernel_serial_write_serial_only("OS_P13_IMAGE_LOAD_FAIL\r\n");
         goto cleanup;
     }
     kernel_serial_write_serial_only("OS_P13_IMAGE_LOAD_PASS\r\n");
-    process_set_name(process, "/sbin/linux-events-test");
+    process_set_name(process, "/usr/apps/linux-events-test/linux-events-test");
     /* This acceptance runner loads the ELF directly instead of calling
      * execve(), so seed the path normally recorded by the exec path. */
-    __builtin_memcpy(process->linux_exe, "/sbin/linux-events-test",
-                     sizeof("/sbin/linux-events-test"));
+    __builtin_memcpy(process->linux_exe, "/usr/apps/linux-events-test/linux-events-test",
+                     sizeof("/usr/apps/linux-events-test/linux-events-test"));
     if (!info.linux_abi ||
         thread_create_user_suspended(process, info.entry, stack_pointer, 0, 0,
                                      &thread) != K_OK) {

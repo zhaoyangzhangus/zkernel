@@ -2,8 +2,8 @@
 #include <kernel/realtest.h>
 #include "internal.h"
 
-/* REFACTOR_P8_XHCI_CONTROL_TRANSFER_OWNER: EP0 control-transfer TRB
- * submission, completion matching, and timeout diagnostics stay together. */
+/* REFACTOR_P8_XHCI_CONTROL_TRANSFER_OWNER：EP0 控制传输 TRB 提交、完成匹配和
+ * 超时诊断集中在同一所有者中。 */
 
 #define XHCI_RING_TRB_COUNT 256U
 #define XHCI_TRB_CYCLE (1U << 0)
@@ -74,8 +74,8 @@ bool xhci_submit_control_transfer_device(
                                     direction_in, XHCI_TRB_CYCLE)) {
         return false;
     }
-    /* xHCI 0.96 reserves the Setup TRB Transfer Type bits. Newer controllers
-     * use them to describe the following data stage, as required by xHCI 1.0. */
+    /* xHCI 0.96 将 Setup TRB 的 Transfer Type 位保留。较新的控制器按 xHCI 1.0 要求，
+     * 使用这些位描述后续数据阶段。 */
     if (state->hci_version < 0x0100U) {
         ring[index].control &= ~(3U << 16);
     }
@@ -84,16 +84,15 @@ bool xhci_submit_control_transfer_device(
                 &ring[index + 1U],
                 xhci_dma_address(&device->descriptor_buffer.mapping),
                 length, direction_in, XHCI_TRB_CYCLE)) return false;
-        /* This implementation emits one Data TRB followed by Status.  For
-         * xHCI 1.0+, the final TRB of a TD has TD Size == 0. */
+        /* 此实现依次发出一个 Data TRB 和一个 Status TRB。对 xHCI 1.0 及更新版本，
+         * TD 的最后一个 TRB 的 TD Size 为 0。 */
         uint32_t td_size = 0U;
         if (state->hci_version < 0x0100U) td_size = length >> 10;
         if (td_size > 0x1FU) td_size = 0x1FU;
         ring[index + 1U].status &= ~XHCI_TRB_TD_SIZE_MASK;
         ring[index + 1U].status |= td_size << XHCI_TRB_TD_SIZE_SHIFT;
-        /* An IN control data stage must report a short packet so the xHC can
-         * advance to the status TRB when the device ends on a short packet.
-         * This is required for ordinary USB2 devices as well as AMD xHCI. */
+        /* IN 控制数据阶段必须报告短包，使设备以短包结束时 xHC 能推进到 Status TRB。
+         * 普通 USB2 设备和 AMD xHCI 都需要此设置。 */
         if (direction_in) {
             ring[index + 1U].control |=
                 XHCI_TRB_INTERRUPT_ON_SHORT_PACKET;
@@ -116,8 +115,8 @@ bool xhci_submit_control_transfer_device(
                               (uint32_t)device->device_slot * sizeof(uint32_t));
     *doorbell = 1U;
     __asm__ volatile ("mfence" : : : "memory");
-    /* A posted MMIO write is not guaranteed to reach the xHC before the CPU
-     * starts polling memory. Read back the same doorbell as Linux does. */
+    /* 已提交的 MMIO 写入不保证在 CPU 开始轮询内存前到达 xHC。与 Linux 相同，
+     * 读回同一个 doorbell。 */
     (void)*doorbell;
     uint64_t deadline = xhci_controller_timeout_deadline(5000000000ULL);
     for (;;) {
@@ -136,14 +135,13 @@ bool xhci_submit_control_transfer_device(
         }
         if ((uint8_t)(event.control >> XHCI_TRB_SLOT_SHIFT) != device->device_slot ||
             ((event.control >> XHCI_TRB_ENDPOINT_SHIFT) & 0x1FU) != 1U) {
-            /* 褰撳墠鎺у埗浼犺緭鍙秷璐规湰璁惧 EP0锛屽叾浠栦簨浠朵氦缁欑粺涓€杞鍣ㄣ€?*/
+            /* 当前控制传输只消费本设备的 EP0 事件；其他事件交给统一轮询器处理。 */
             (void)xhci_defer_event(state, &event);
             continue;
         }
         uint32_t completion = event.status >> XHCI_COMPLETION_SHIFT;
-        /* ISP reports a short data-stage event before the control status
-         * stage.  It is an intermediate completion, not completion of the
-         * request; wait for the status-stage TRB. */
+        /* ISP 会在控制 Status 阶段前报告数据阶段短包事件。这只是中间完成，不代表请求
+         * 已完成；继续等待 Status 阶段 TRB。 */
         if (length != 0U && event.parameter == data_trb_address &&
             completion == XHCI_COMPLETION_SHORT_PACKET) {
             dma_sync_for_cpu(&device->descriptor_buffer.mapping);

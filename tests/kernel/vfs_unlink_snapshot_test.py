@@ -60,6 +60,7 @@ static void *kmalloc(size_t n,unsigned flags){
  if(allocation_fail)return NULL;
  assert(n<=sizeof(disk));void *p=malloc(n);assert(p);++live;return p;
 }
+static void *kzalloc(size_t n,unsigned flags){void *p=kmalloc(n,flags);if(p)memset(p,0,n);return p;}
 static void kfree(void *p){
  assert(!locked&&(!backend_locked||b.detached));if(p){assert(live);--live;++releases;free(p);}
 }
@@ -136,7 +137,12 @@ static bool fat32_remove_path_typed(void *f,const char *p,int directory){
  if(remove_fail)return false;
  exists=false;return true;
 }
-''' + '\n'.join(function(backend, signature) for signature in (
+static bool kmalloc_try_grow(void *p,size_t n){(void)p;(void)n;return false;}
+static kstatus_t page_memory_get_stats(uint64_t *total,uint64_t *available){
+ *total=1000;*available=750;return K_OK;
+}
+''' + backend[backend.index('struct {\n    uint64_t failures;'):
+              backend.index('static kstatus_t vfs_memory_reserve(')] + '\n'.join(function(backend, signature) for signature in (
     'static kstatus_t vfs_memory_reserve(',
     'kstatus_t vfs_memory_backend_read(',
     'kstatus_t vfs_memory_backend_write(',

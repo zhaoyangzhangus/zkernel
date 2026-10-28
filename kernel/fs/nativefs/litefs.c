@@ -2,7 +2,6 @@
 #include <kernel/crc32.h>
 #include <kernel/string.h>
 #include <kernel/kmem.h>
-#include <kernel/vfs.h>
 
 #define LITEFS_INODE_USED 1U
 #define LITEFS_INODES_PER_BLOCK (JOURNAL_BLOCK_SIZE / sizeof(litefs_inode_disk_t))
@@ -440,28 +439,6 @@ kstatus_t litefs_fsync(litefs_t *filesystem) {
     return filesystem->storage.flush(filesystem->storage.context);
 }
 
-static kstatus_t litefs_vfs_read(void *context, uint64_t offset, void *buffer,
-                                 size_t length, uint64_t *bytes) {
-    litefs_file_context_t *file = (litefs_file_context_t *)context;
-    return file == 0 ? K_EINVAL : litefs_read_file(file->filesystem,
-                                                   file->inode_index, offset,
-                                                   buffer, length, bytes);
-}
-
-static kstatus_t litefs_vfs_write(void *context, uint64_t offset,
-                                  const void *buffer, size_t length,
-                                  uint64_t *bytes) {
-    litefs_file_context_t *file = (litefs_file_context_t *)context;
-    return file == 0 ? K_EINVAL : litefs_write_file(file->filesystem,
-                                                    file->inode_index, offset,
-                                                    buffer, length, bytes);
-}
-
-static kstatus_t litefs_vfs_fsync(void *context) {
-    litefs_file_context_t *file = (litefs_file_context_t *)context;
-    return file == 0 ? K_EINVAL : litefs_fsync(file->filesystem);
-}
-
 typedef struct litefs_test_disk {
     uint8_t volatile_blocks[64][JOURNAL_BLOCK_SIZE];
     uint8_t durable_blocks[64][JOURNAL_BLOCK_SIZE];
@@ -470,7 +447,6 @@ typedef struct litefs_test_disk {
 
 static litefs_test_disk_t g_litefs_test_disk;
 static litefs_t g_litefs_test_filesystem;
-static litefs_file_context_t g_litefs_test_file;
 
 static kstatus_t litefs_test_read(void *context, uint64_t block, void *buffer,
                                   size_t length) {
@@ -526,7 +502,6 @@ bool litefs_self_test(void) {
     uint8_t result[sizeof(sample) + sizeof(world) - 2U];
     uint8_t saved_super[JOURNAL_BLOCK_SIZE];
     uint8_t saved_inode[JOURNAL_BLOCK_SIZE];
-    file_t *file = 0;
     if (completed) return true;
     litefs_zero(&g_litefs_test_disk, sizeof(g_litefs_test_disk));
     if (litefs_format(&storage, 64U) != K_OK ||
@@ -602,19 +577,7 @@ bool litefs_self_test(void) {
     litefs_test_power_cycle(&g_litefs_test_disk);
 
     if (litefs_mount(&g_litefs_test_filesystem, &storage, 64U) != K_OK) return false;
-    g_litefs_test_file.filesystem = &g_litefs_test_filesystem;
-    g_litefs_test_file.inode_index = inode_index;
-    if (vfs_register_backend_file("/native/litefs-test", sizeof(result), 0100666U,
-                                  litefs_vfs_read, litefs_vfs_write,
-                                  litefs_vfs_fsync, &g_litefs_test_file) != K_OK ||
-        vfs_open_kernel("/native/litefs-test", VFS_OPEN_READ, 0U,
-                        &file) != K_OK ||
-        vfs_read_kernel(file, result, sizeof(result), &bytes) != K_OK ||
-        bytes != sizeof(result)) {
-        if (file != 0) vfs_close(file);
-        return false;
-    }
-    vfs_close(file);
+    /* 自检只使用私有测试盘，不向用户文件系统注册永久入口。 */
     completed = true;
     return true;
 }

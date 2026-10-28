@@ -49,10 +49,9 @@ void quick_exit(int status) {
 }
 
 void _exit(int status) {
-    /* The same DSO serves native System services and Linux-personality
-     * Chromium.  OS_SYS_PROCESS_EXIT is syscall 1 in the native ABI, but
-     * Linux syscall 1 is write; probe through a native-only high syscall to
-     * select the correct exit ABI before issuing the terminal call. */
+    /* 同一个 DSO 同时服务 System 原生服务和 Linux 兼容模式下的 Chromium。
+     * OS_SYS_PROCESS_EXIT 在原生 ABI 中是系统调用 1，而 Linux 系统调用 1 是 write；
+     * 发出终止调用前，先通过原生专用的高位系统调用探测并选择正确的退出 ABI。 */
     int64_t native_probe = __libc_linux_syscall6(
         OS_SYS_DEBUG_QUERY, 0U, 0U, 0U, 0U, 0U, 0U);
     if (native_probe == -38LL) {

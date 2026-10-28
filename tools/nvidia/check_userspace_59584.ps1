@@ -1,8 +1,9 @@
 [CmdletBinding()]
 param(
-    [string]$Root = 'build/nvidia/phase9/compat/linux',
-    [string]$Manifest = 'build/nvidia/phase9/compat/userspace-595.84.json',
-    [string]$PackageRoot = ''
+    [string]$Root = 'build/nvidia/userspace',
+    [string]$Manifest = 'build/nvidia/userspace-595.84.json',
+    [string]$PackageRoot = '',
+    [string]$AppRoot = ''
 )
 
 Set-StrictMode -Version Latest
@@ -24,6 +25,22 @@ function Invoke-Readelf([string]$Tool, [string[]]$Arguments) {
     $output = @(& $Tool @Arguments 2>&1 | ForEach-Object { $_.ToString() })
     if ($LASTEXITCODE -ne 0) { Fail-Check "readelf failed for $($Arguments[-1])" }
     return $output
+}
+
+# App deployment has a different topology from the rename-only host cache.
+# Use the shared checker for manifest remapping, hashes, ELF and symbol closure.
+if (-not [string]::IsNullOrWhiteSpace($AppRoot)) {
+    $python = Get-Command python3 -ErrorAction SilentlyContinue
+    if ($null -eq $python) { $python = Get-Command python -ErrorAction Stop }
+    $checkArguments = @((Join-Path $PSScriptRoot 'check_userspace_59584.py'),
+        '--app-root', (Resolve-RepoPath $AppRoot),
+        '--manifest', (Resolve-RepoPath $Manifest))
+    if (-not [string]::IsNullOrWhiteSpace($PackageRoot)) {
+        $checkArguments += @('--package-root', (Resolve-RepoPath $PackageRoot))
+    }
+    & $python.Source @checkArguments
+    if ($LASTEXITCODE -ne 0) { Fail-Check 'app-private userspace closure failed' }
+    return
 }
 
 $root = Resolve-RepoPath $Root

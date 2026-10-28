@@ -14,7 +14,7 @@ typedef struct wait_delay_diagnostic {
 } wait_delay_diagnostic_t;
 static volatile uint64_t g_wait_delay_tid;
 static volatile wait_delay_diagnostic_t g_wait_delays[32];
-/* Called under the timeout lock: no extra lock or allocation in wake paths. */
+/* 在超时锁保护下调用：唤醒路径不额外加锁或分配内存。 */
 static void wait_record_delay(const waiter_t *waiter, uint64_t resumed) {
     if (waiter->thread->tid != g_wait_delay_tid ||
         waiter->diagnostic_claimed_tsc == 0U) return;
@@ -43,8 +43,7 @@ static void wait_start_diagnostic(waiter_t *waiter) {
 }
 
 static uint64_t wait_resume_timestamp(const waiter_t *waiter) {
-    /* Only the owner writes started_tsc. Claimed_tsc may still be changing
-     * under the timeout lock after an unrelated scheduler wake. */
+    /* 只有所有者会写 started_tsc。无关调度唤醒后，claimed_tsc 仍可能在超时锁下变化。 */
     return waiter->diagnostic_started_tsc != 0U ? x86_read_tsc() : 0U;
 }
 
@@ -94,6 +93,14 @@ static void waiter_unlink_locked(waiter_t *waiter) {
     if (waiter->timeout_node.next != &waiter->timeout_node) {
         wait_remove(&waiter->timeout_node);
     }
+}
+
+/* 仅由所有者执行清理，同时持有超时锁和所有已订阅队列锁。
+ * 先解除链接，再清除取消路径可观察到的栈关联。 */
+static void waiter_detach_owner_locked(waiter_t *waiter) {
+    waiter_unlink_locked(waiter);
+    atomic_store_explicit(&waiter->thread->blocked_waiter, 0,
+                          memory_order_release);
 }
 
 static wait_subscription_t *subscription_from_node(list_head_t *node) {
@@ -174,7 +181,7 @@ static void wait_state_and_queues_unlock(wait_queue_t *const *queues,
 
 static void queue_pointer_sift(wait_queue_t **queues, size_t root, size_t count) {
     wait_queue_t *queue = queues[root];
-    /* root < count/2 bounds 2*root+1 without overflowing size_t. */
+    /* root < count/2 可在不使 size_t 溢出的前提下保证 2*root+1 有界。 */
     while (root < count / 2U) {
         size_t child = 2U * root + 1U;
         if (child + 1U < count &&
@@ -188,8 +195,7 @@ static void queue_pointer_sift(wait_queue_t **queues, size_t root, size_t count)
 
 static void queue_pointer_sort(wait_queue_t **queues, size_t count) {
     if (count > 16U) {
-        /* Preserve the linear already-sorted path. Large arbitrary/reversed
-         * sets use allocation-free, nonrecursive O(n log n) heap sorting. */
+        /* 保留对已排序数组的线性路径。较大的任意/逆序集合使用无需分配、非递归的 O(n log n) 堆排序。 */
         size_t ordered = 1U;
         while (ordered < count &&
                (uintptr_t)queues[ordered - 1U] <= (uintptr_t)queues[ordered]) ++ordered;
@@ -220,7 +226,7 @@ static void queue_pointer_sort(wait_queue_t **queues, size_t count) {
 static kstatus_t wait_on_sorted_queues(wait_queue_t *const *queues,
                                        size_t queue_count,
                                        bool (*predicate)(void *), void *context,
-                                       uint64_t deadline) {
+                                       uint64_t deadline, uint32_t flags) {
     thread_t *thread = sched_current_thread();
     bool can_schedule = thread != 0 &&
                         thread->object.type == KOBJECT_TYPE_THREAD &&
@@ -230,9 +236,8 @@ static kstatus_t wait_on_sorted_queues(wait_queue_t *const *queues,
                K_OK : K_ETIMEDOUT;
     }
 
-    /* A readiness callback may acquire subsystem locks (socket, GPU, ...).
-     * Never run it under the timeout/queue locks: an IRQ on a subsystem lock
-     * owner may need those same wait locks to publish a notification. */
+    /* 就绪回调可能获取子系统锁（socket、GPU 等）。绝不能在超时/队列锁下调用：
+     * 子系统锁持有者的 IRQ 可能需要同一等待锁才能发布通知。 */
     if (queue_count > WAIT_INLINE_QUEUE_COUNT) {
         bool ready = predicate(context);
         bool expired = !ready && wait_deadline_reached(deadline);
@@ -258,7 +263,7 @@ static kstatus_t wait_on_sorted_queues(wait_queue_t *const *queues,
     waiter.queue = queues[0];
     waiter.subscriptions = subscriptions;
     waiter.subscription_count = queue_count;
-    waiter.flags = 0U;
+    waiter.flags = flags;
     waiter.deadline_tsc = deadline;
     atomic_init(&waiter.state, WAITER_WAITING);
     for (size_t index = 0U; index < queue_count; ++index) {
@@ -309,18 +314,18 @@ static kstatus_t wait_on_sorted_queues(wait_queue_t *const *queues,
             break;
         }
         const uint64_t kill_bit = 1ULL << (OS_SIGKILL - 1U);
-        if ((__atomic_load_n(&thread->signal_pending, __ATOMIC_ACQUIRE) &
-             kill_bit) != 0U) {
+        if ((flags & WAIT_FLAG_UNINTERRUPTIBLE) == 0U &&
+            ((__atomic_load_n(&thread->signal_pending, __ATOMIC_ACQUIRE) &
+             kill_bit) != 0U ||
+            (__atomic_load_n(&thread->flags, __ATOMIC_ACQUIRE) &
+             THREAD_FLAG_TERMINATE_REQUEST) != 0U)) {
             /*
-             * A process-wide kill can race a RUNNING -> BLOCKED transition:
-             * the killer may observe RUNNING and leave delivery to the next
-             * syscall boundary.  Recheck after publishing BLOCKED, while the
-             * wait locks still serialize cancellation, so that signal cannot
-             * be stranded on a waiter which has not started scheduling yet.
+             * 进程 kill 或任务管理器终止线程可能与 RUNNING -> BLOCKED 转换竞争：
+             * 终止方可能观察到 RUNNING，并将信号递送延迟到下一个系统调用边界。
+             * 发布 BLOCKED 后，在等待锁仍将取消操作串行化时重新检查两个递送标记，
+             * 避免信号滞留在尚未开始调度的等待者上。
              */
-            waiter_unlink_locked(&waiter);
-            atomic_store_explicit(&thread->blocked_waiter, 0,
-                                  memory_order_release);
+            waiter_detach_owner_locked(&waiter);
             (void)sched_publish_running(thread);
             wait_state_and_queues_unlock(queues, queue_count, timeout_flags);
             result = K_ECANCELED;
@@ -334,14 +339,11 @@ static kstatus_t wait_on_sorted_queues(wait_queue_t *const *queues,
             wait_insert_tail(&g_timeout_waiters, &waiter.timeout_node);
         }
 
-        /* The sampled sequences were validated under every queue lock.
-         * A notification since the unlocked predicate forces a retry;
-         * one after publication sees this subscription, even if its wake
-         * precedes schedule(). No external predicate runs under these locks. */
+        /* 已在每个队列锁下验证采样到的序列。解锁谓词检查后到达的通知会强制重试；
+         * 发布订阅后到达的通知则能看到该订阅，即使它在 schedule() 前已唤醒。
+         * 不会在这些锁下执行外部谓词。 */
         if (wait_deadline_reached(deadline)) {
-            waiter_unlink_locked(&waiter);
-            atomic_store_explicit(&thread->blocked_waiter, 0,
-                                  memory_order_release);
+            waiter_detach_owner_locked(&waiter);
             (void)sched_publish_running(thread);
             wait_state_and_queues_unlock(queues, queue_count, timeout_flags);
             result = K_ETIMEDOUT;
@@ -351,21 +353,18 @@ static kstatus_t wait_on_sorted_queues(wait_queue_t *const *queues,
 
         schedule();
         uint64_t resumed = wait_resume_timestamp(&waiter);
-        /* The caller is running again, even if a wake/schedule race left its
-         * scheduler state stale.  Do this before dropping the stack waiter. */
+        /* 调用方已恢复运行，即使唤醒/schedule 竞争导致调度器状态过期也一样。
+         * 释放栈等待者前先完成此处理。 */
         (void)sched_publish_running(thread);
 
         timeout_flags = wait_state_and_queues_lock(queues, queue_count);
         unsigned state = atomic_load_explicit(&waiter.state, memory_order_acquire);
         if (state == WAITER_WOKEN) wait_record_delay(&waiter, resumed);
-        /* Every resumed waiter drops its subscriptions and stack association
-         * before interpreting the wake reason or retrying the predicate. */
-        waiter_unlink_locked(&waiter);
-        atomic_store_explicit(&thread->blocked_waiter, 0,
-                              memory_order_release);
+        /* 每个恢复运行的等待者都会在判断唤醒原因或重试谓词前，释放订阅和栈关联。 */
+        waiter_detach_owner_locked(&waiter);
         wait_state_and_queues_unlock(queues, queue_count, timeout_flags);
 
-        /* An unrelated scheduler wake does not claim or cancel this wait. */
+        /* 无关的调度器唤醒不会认领或取消此等待。 */
         if (state == WAITER_WAITING) continue;
         if (state == WAITER_TIMED_OUT) {
             result = K_ETIMEDOUT;
@@ -379,7 +378,7 @@ static kstatus_t wait_on_sorted_queues(wait_queue_t *const *queues,
             result = K_EIO;
             break;
         }
-        /* Wakeups are hints: release every subscription and recheck the predicate. */
+        /* 唤醒仅是提示：释放所有订阅并重新检查谓词。 */
     }
 
     if (subscriptions != inline_subscriptions) kfree(subscriptions);
@@ -406,7 +405,7 @@ kstatus_t wait_on_queues_in_place(wait_queue_t **queues, size_t count,
     }
 
     uint64_t deadline = make_deadline(timeout_ns);
-    return wait_on_sorted_queues(queues, unique_count, predicate, context, deadline);
+    return wait_on_sorted_queues(queues, unique_count, predicate, context, deadline, 0U);
 }
 
 kstatus_t wait_on_queues(wait_queue_t *const *input_queues, size_t count,
@@ -431,11 +430,20 @@ kstatus_t wait_on_queues(wait_queue_t *const *input_queues, size_t count,
 kstatus_t wait_on_queue(wait_queue_t *queue, bool (*predicate)(void *),
                         void *context, uint64_t timeout_ns) {
     if (queue == 0 || predicate == 0) return K_EINVAL;
-    /* One queue is already sorted and unique. Retain the same deadline,
-     * subscription and cancellation machinery without multi-queue setup. */
+    /* 单队列已排序且唯一。复用相同的截止时间、订阅和取消逻辑，不执行多队列初始化。 */
     wait_global_init();
     return wait_on_sorted_queues(&queue, 1U, predicate, context,
-                                 make_deadline(timeout_ns));
+                                 make_deadline(timeout_ns), 0U);
+}
+
+kstatus_t wait_on_queue_uninterruptible(wait_queue_t *queue,
+                                       bool (*predicate)(void *), void *context,
+                                       uint64_t timeout_ns) {
+    if (queue == 0 || predicate == 0) return K_EINVAL;
+    wait_global_init();
+    return wait_on_sorted_queues(&queue, 1U, predicate, context,
+                                 make_deadline(timeout_ns),
+                                 WAIT_FLAG_UNINTERRUPTIBLE);
 }
 
 static thread_t *waiter_claim_locked(waiter_t *waiter, unsigned terminal_state) {
@@ -451,8 +459,7 @@ static thread_t *waiter_claim_locked(waiter_t *waiter, unsigned terminal_state) 
 
 static thread_t *waiter_claim_pinned_locked(waiter_t *waiter, unsigned state) {
     thread_t *thread = waiter_claim_locked(waiter, state);
-    /* Owner cleanup is serialized by the timeout lock. Pin here, before
-     * that owner can resume, exit and drop its last thread reference. */
+    /* 所有者清理由超时锁串行化。在所有者恢复运行、退出并释放最后一个线程引用前，先在此固定线程。 */
     if (thread != 0) object_get(thread);
     return thread;
 }
@@ -474,10 +481,8 @@ uint32_t wake_one(wait_queue_t *queue) {
         wait_subscription_t *subscription = subscription_from_node(node);
         node = node->next;
         thread = waiter_claim_pinned_locked(subscription->waiter, WAITER_WOKEN);
-        /* Success claims this waiter; failure means it is already terminal.
-         * Detach only this queue's subscription while its lock is held, so
-         * wake_all does not repeatedly scan claimed prefixes. The owner
-         * still cleans other queues/timeouts and its blocked association. */
+        /* 成功表示认领此等待者；失败表示其已处于终态。持有当前队列锁时仅分离此队列的订阅，
+         * 使 wake_all 不必反复扫描已认领的前缀。所有者仍负责清理其他队列/超时项及阻塞关联。 */
         wait_remove(&subscription->queue_node);
         if (thread != 0) break;
     }
@@ -509,8 +514,7 @@ uint32_t wake_all(wait_queue_t *queue) {
                 threads[collected++] = thread;
             }
         }
-        /* Preserve wake_one's sequence accounting, including the last
-         * unsuccessful probe, without acquiring the locks for every thread. */
+        /* 保留 wake_one 的序列记账，包括最后一次未成功探测，同时避免为每个线程获取锁。 */
         atomic_fetch_add_explicit(&queue->sequence,
                                   collected + (collected < WAIT_WAKE_BATCH_COUNT ? 1U : 0U),
                                   memory_order_release);
@@ -531,9 +535,9 @@ bool wait_cancel_thread(thread_t *target) {
     uint64_t timeout_flags = wait_lock(&g_timeout_lock);
     waiter_t *waiter = atomic_load_explicit(&target->blocked_waiter,
                                            memory_order_acquire);
-    /* All terminal claims use the timeout lock, so an already claimed waiter
-     * cannot become WAITING again until its owner replaces the association. */
+    /* 所有终态认领都使用超时锁；因此在所有者替换关联前，已认领的等待者不会重新变为 WAITING。 */
     if (waiter == 0 ||
+        (waiter->flags & WAIT_FLAG_UNINTERRUPTIBLE) != 0U ||
         atomic_load_explicit(&waiter->state, memory_order_acquire) != WAITER_WAITING ||
         waiter->subscriptions == 0 ||
         waiter->subscription_count == 0U) {
@@ -570,9 +574,8 @@ void wait_poll_timeouts(uint64_t now_tsc) {
             }
             if (!deadline_reached(now_tsc, waiter->deadline_tsc)) continue;
             thread_t *thread = waiter_claim_pinned_locked(waiter, WAITER_TIMED_OUT);
-            /* The timeout list is owned solely by g_timeout_lock. Keep
-             * queue subscriptions for owner cleanup, but do not rescan
-             * expired entries while their threads await scheduling. */
+            /* 超时链表仅由 g_timeout_lock 管理。保留队列订阅供所有者清理，
+             * 但线程等待调度期间不要重复扫描已过期条目。 */
             wait_remove(&waiter->timeout_node);
             if (thread != 0) threads[collected++] = thread;
         }
@@ -610,9 +613,8 @@ void complete(completion_t *completion) {
 
 kstatus_t completion_wait(completion_t *completion, uint64_t timeout_ns) {
     if (completion == 0) return K_EINVAL;
-    /* Avoid timeout/queue locks for already published tokens. A failed
-     * consume is only a probe: sequence validation around the unlocked wait
-     * predicate closes the publication-to-sleep race. */
+    /* 已发布 token 无需获取超时/队列锁。消费失败仅表示探测未命中：
+     * 未加锁等待谓词前后的序列验证会关闭发布到休眠之间的竞争窗口。 */
     if (completion_try_consume(completion)) return K_OK;
     if (timeout_ns == 0U) return K_ETIMEDOUT;
     return wait_on_queue(&completion->waitq, completion_try_consume,

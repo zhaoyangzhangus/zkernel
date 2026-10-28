@@ -5,7 +5,7 @@ import tempfile
 
 root = Path(__file__).resolve().parents[2]
 source = (root / 'kernel/irq/deferred.c').read_text()
-critical = source[source.index('bool deferred_schedule_critical('):source.index('uint32_t deferred_run(')]
+critical = source[source.index('bool deferred_schedule_critical('):source.index('static void deferred_record_work(')]
 run = source[source.index('uint32_t deferred_run('):source.index('static void deferred_self_test_work(')]
 has_work = source[source.index('static bool deferred_worker_has_work_locked('):source.index('static bool deferred_worker_prepare_sleep(')]
 sleep = source[source.index('static bool deferred_worker_prepare_sleep('):source.index('static void __attribute__((noreturn))')]
@@ -126,6 +126,10 @@ static void deferred_wake_worker(void) {
 }
 static unsigned rcu_poll(unsigned budget) {
     assert(!lock_depth);atomic_fetch_add(&rcu_budget,budget);return 0;
+}
+static uint64_t x86_read_tsc(void) {return 0;}
+static void deferred_record_work(deferred_work_fn_t fn,uint64_t start) {
+    assert(fn&&!start&&!lock_depth);
 }
 static bool counted_cas(atomic_uint *state,unsigned *expected,unsigned desired,
                         memory_order success,memory_order failure) {

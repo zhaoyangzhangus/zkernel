@@ -12,9 +12,7 @@ static void rss_decrement(vm_space_t *space, size_t count) {
 }
 
 /*
- * The architecture page-table code performs the local invalidation.  This
- * wrapper owns the VM-wide bookkeeping and the error policy used by map and
- * space-lifetime operations.
+ * 架构页表代码负责本地失效。本包装层负责 VM 范围的记账，以及映射和地址空间生命周期操作。
  */
 kstatus_t vm_tlb_unmap_range(vm_space_t *space, uint64_t start, uint64_t end) {
     if (space == 0 || start >= end) return K_EINVAL;
@@ -47,8 +45,7 @@ kstatus_t vm_tlb_unmap_range(vm_space_t *space, uint64_t start, uint64_t end) {
             break;
         }
     }
-    /* Callers hold map_lock. Account the acknowledged prefix once, including
-     * when a later scan or batch fails, before they unlock or retire VMAs. */
+    /* 调用方持有 map_lock。解锁或回收 VMA 前，对已确认的前缀统一记账一次，即使后续扫描或批处理失败也如此。 */
     rss_decrement(space, total_unmapped);
     return result;
 }

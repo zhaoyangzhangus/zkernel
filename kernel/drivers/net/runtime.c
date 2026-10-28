@@ -6,6 +6,7 @@
 #include <kernel/console.h>
 #include <kernel/net_core.h>
 #include <kernel/socket.h>
+#include <kernel/string.h>
 #include <kernel/telemetry.h>
 
 #include "core_internal.h"
@@ -16,21 +17,10 @@ static uint32_t g_debug_udp_rx_logs;
 static uint32_t g_debug_udp_dispatch_logs;
 #endif
 
-static void e1000_runtime_zero(void *memory, size_t size) {
-    uint8_t *bytes = (uint8_t *)memory;
-    while (size-- != 0) *bytes++ = 0;
-}
-
-static void e1000_runtime_copy(void *destination, const void *source, size_t size) {
-    uint8_t *out = (uint8_t *)destination;
-    const uint8_t *in = (const uint8_t *)source;
-    while (size-- != 0) *out++ = *in++;
-}
-
 static bool e1000_build_tcp_reset_reply(const e1000_rx_packet_t *packet,
                                         socket_tcp_reply_t *reply) {
     if (reply == 0) return false;
-    e1000_runtime_zero(reply, sizeof(*reply));
+    memset(reply, 0, sizeof(*reply));
     if (packet == 0 || packet->protocol != SOCKET_PROTOCOL_TCP ||
         packet->payload_length > sizeof(packet->payload) ||
         (packet->flags & NET_TCP_FLAG_RST) != 0U) {
@@ -53,6 +43,17 @@ static bool e1000_build_tcp_reset_reply(const e1000_rx_packet_t *packet,
             ++reply->acknowledgement;
     }
     return true;
+}
+
+static bool e1000_tcp_self_test_peer_reply(const e1000_state_t *state,
+                                          const e1000_rx_packet_t *packet) {
+    /* PHY loopback returns our SYN-ACK to the synthetic peer. Its ACK has
+     * already been injected by e1000_tcp_loopback_peer_ack[6]; there is no
+     * peer socket to receive this SYN-ACK, and resetting it kills the test's
+     * real accepted socket. Never suppress resets on the live network. */
+    return state->phy_loopback && state->tcp_loopback_peer_enabled &&
+           state->tcp_loopback_synack_seen && packet->payload_length == 0U &&
+           packet->flags == (NET_TCP_FLAG_SYN | NET_TCP_FLAG_ACK);
 }
 
 bool e1000_unmatched_tcp_reset_self_test(void) {
@@ -84,6 +85,7 @@ bool e1000_unmatched_tcp_reset_self_test(void) {
 
 static bool e1000_enqueue_packet(e1000_state_t *state,
                                  const e1000_rx_packet_t *packet,
+                                 const uint8_t *payload,
                                  uint32_t flow_hash) {
     uint32_t queue_index;
     e1000_software_queue_t *queue;
@@ -93,43 +95,40 @@ static bool e1000_enqueue_packet(e1000_state_t *state,
     queue_index = e1000_select_software_queue(state->software_queue_count,
                                               flow_hash);
     queue = &state->software_queues[queue_index];
-    return e1000_queue_push(queue, packet);
+    return e1000_queue_push_payload(queue, packet, payload);
 }
 
 static bool e1000_send_tcp_reply(e1000_state_t *state,
                                  const e1000_rx_packet_t *packet,
                                  const socket_tcp_reply_t *reply) {
-    uint8_t frame[NET_ETHERNET_HEADER_SIZE + NET_IPV4_HEADER_SIZE +
-                  NET_TCP_HEADER_SIZE];
+    uint8_t frame[NET_ETHERNET_HEADER_SIZE + NET_IPV6_HEADER_SIZE +
+                  NET_TCP_SYN_HEADER_SIZE];
     size_t frame_length = 0U;
     if (state == 0 || packet == 0 || reply == 0 || !reply->valid) return false;
-    bool sent = net_tcp_build_ipv4(
+    bool ipv6 = packet->family == OS_AF_INET6;
+    if (!ipv6 && packet->family != OS_AF_INET4) return false;
+    kstatus_t status = ipv6 ? net_tcp_build_ipv6(
+               frame, sizeof(frame), packet->destination_mac, packet->source_mac,
+               packet->destination_address6, packet->source_address6,
+               packet->destination_port, packet->source_port,
+               reply->sequence, reply->acknowledgement, reply->flags,
+               reply->window, 0, 0U, &frame_length) : net_tcp_build_ipv4(
                frame, sizeof(frame), packet->destination_mac, packet->source_mac,
                packet->destination_address, packet->source_address,
                packet->destination_port, packet->source_port,
                reply->sequence, reply->acknowledgement, reply->flags,
-               reply->window, 0, 0U, &frame_length) == K_OK &&
-           net_device_send(&state->device, frame, frame_length) == K_OK;
-    if (sent && !state->tcp_loopback_peer_enabled && packet->payload_length != 0U) {
-        state->tcp_loopback_data_ack_seen = true;
+               reply->window, 0, 0U, &frame_length);
+    if (status == K_OK) status = net_device_send(&state->device, frame, frame_length);
+    /* Failed ACK output must reach the transport's retry owner for either
+     * family; a local TX queue being full is not successful delivery. */
+    if (ipv6) {
+        socket_tcp_ack_output_ipv6(packet->destination_address6, packet->destination_port,
+            packet->source_address6, packet->source_port, reply->flags, status);
+    } else {
+        socket_tcp_ack_output_ipv4(packet->destination_address, packet->destination_port,
+            packet->source_address, packet->source_port, reply->flags, status);
     }
-    return sent;
-}
-
-static bool e1000_send_tcp_reply6(e1000_state_t *state,
-                                  const e1000_rx_packet_t *packet,
-                                  const socket_tcp_reply_t *reply) {
-    uint8_t frame[NET_ETHERNET_HEADER_SIZE + NET_IPV6_HEADER_SIZE +
-                  NET_TCP_HEADER_SIZE];
-    size_t frame_length = 0U;
-    if (state == 0 || packet == 0 || reply == 0 || !reply->valid) return false;
-    bool sent = net_tcp_build_ipv6(
-                    frame, sizeof(frame), packet->destination_mac, packet->source_mac,
-                    packet->destination_address6, packet->source_address6,
-                    packet->destination_port, packet->source_port,
-                    reply->sequence, reply->acknowledgement, reply->flags,
-                    reply->window, 0, 0U, &frame_length) == K_OK &&
-                net_device_send(&state->device, frame, frame_length) == K_OK;
+    bool sent = status == K_OK;
     if (sent && !state->tcp_loopback_peer_enabled && packet->payload_length != 0U) {
         state->tcp_loopback_data_ack_seen = true;
     }
@@ -141,178 +140,220 @@ bool e1000_dispatch_software_queues(e1000_state_t *state) {
     if (state == 0) return false;
     for (uint32_t queue_index = 0; queue_index < state->software_queue_count;
          ++queue_index) {
-        e1000_rx_packet_t packet;
-        while (e1000_queue_pop(&state->software_queues[queue_index], &packet)) {
+        e1000_software_queue_t *queue = &state->software_queues[queue_index];
+        const e1000_rx_packet_t *packet;
+        while ((packet = e1000_queue_borrow(queue)) != 0) {
             kstatus_t status;
-            if (packet.protocol == SOCKET_PROTOCOL_TCP && packet.family == OS_AF_INET4) {
-                if ((packet.flags & NET_TCP_FLAG_SYN) != 0U &&
-                    (packet.flags & NET_TCP_FLAG_ACK) == 0U) {
+            if (packet->protocol == SOCKET_PROTOCOL_TCP && packet->family == OS_AF_INET4) {
+                if ((packet->flags & NET_TCP_FLAG_RST) != 0U) {
                     socket_tcp_reply_t reply = {0};
-                    status = socket_inject_tcp_syn_ipv4(
-                        packet.source_address, packet.source_port,
-                        packet.destination_address, packet.destination_port,
-                        packet.sequence, &reply);
+                    status = socket_inject_tcp_ack_ipv4_reply(
+                        packet->source_address, packet->source_port,
+                        packet->destination_address, packet->destination_port,
+                        packet->sequence, packet->acknowledgement, packet->flags,
+                        packet->window, &reply);
+                    if (reply.valid && !e1000_send_tcp_reply(state, packet, &reply)) status = K_EIO;
+                } else if ((packet->flags & NET_TCP_FLAG_SYN) != 0U &&
+                    (packet->flags & NET_TCP_FLAG_ACK) == 0U) {
+                    socket_tcp_reply_t reply = {0};
+                    status = socket_inject_tcp_syn_ipv4_scaled(
+                        packet->source_address, packet->source_port,
+                        packet->destination_address, packet->destination_port,
+                        packet->sequence, packet->peer_window_scale_present ?
+                            packet->peer_window_scale : -1, &reply);
+                    socket_tcp_mss_ipv4(packet->source_address, packet->source_port,
+                        packet->destination_address, packet->destination_port,
+                        packet->sequence, packet->acknowledgement, packet->flags, packet->peer_mss);
                     if (status == K_OK && reply.valid) {
                         uint8_t frame[NET_ETHERNET_HEADER_SIZE + NET_IPV4_HEADER_SIZE +
-                                      NET_TCP_HEADER_SIZE];
+                                      NET_TCP_SYN_HEADER_SIZE + 4U];
                         size_t frame_length = 0U;
-                        if (net_tcp_build_ipv4(
-                                frame, sizeof(frame), packet.destination_mac,
-                                packet.source_mac, packet.destination_address,
-                                packet.source_address, packet.destination_port,
-                                packet.source_port, reply.sequence,
-                                reply.acknowledgement, reply.flags, reply.window,
+                        int scale = socket_tcp_syn_scale_ipv4(packet->destination_address,
+                            packet->destination_port, packet->source_address, packet->source_port,
+                            reply.sequence, reply.acknowledgement);
+                        if (net_tcp_build_ipv4_scaled(
+                                frame, sizeof(frame), packet->destination_mac,
+                                packet->source_mac, packet->destination_address,
+                                packet->source_address, packet->destination_port,
+                                packet->source_port, reply.sequence,
+                                reply.acknowledgement, reply.flags, reply.window, scale,
                                 0, 0U, &frame_length) != K_OK ||
                             net_device_send(&state->device, frame, frame_length) != K_OK) {
                             status = K_EIO;
                         } else if (state->tcp_loopback_peer_enabled &&
-                                   !e1000_tcp_loopback_peer_ack(state, &packet, &reply)) {
+                                   !e1000_tcp_loopback_peer_ack(state, packet, &reply)) {
                             status = K_EIO;
                         }
                     }
-                } else if ((packet.flags & NET_TCP_FLAG_SYN) != 0U) {
+                } else if ((packet->flags & NET_TCP_FLAG_SYN) != 0U ||
+                           ((packet->flags & NET_TCP_FLAG_ACK) != 0U &&
+                            packet->payload_length == 0U &&
+                            (packet->flags & (NET_TCP_FLAG_FIN | NET_TCP_FLAG_PSH)) == 0U)) {
                     socket_tcp_reply_t reply = {0};
+                    if ((packet->flags & NET_TCP_FLAG_SYN) != 0U) {
+                        socket_tcp_scale_ipv4(packet->source_address, packet->source_port,
+                            packet->destination_address, packet->destination_port,
+                            packet->sequence, packet->acknowledgement, packet->flags,
+                            packet->peer_window_scale_present ? packet->peer_window_scale : -1);
+                        socket_tcp_mss_ipv4(packet->source_address, packet->source_port,
+                            packet->destination_address, packet->destination_port,
+                            packet->sequence, packet->acknowledgement, packet->flags, packet->peer_mss);
+                    }
                     status = socket_inject_tcp_ack_ipv4_reply(
-                        packet.source_address, packet.source_port,
-                        packet.destination_address, packet.destination_port,
-                        packet.sequence, packet.acknowledgement, packet.flags,
-                        packet.window, &reply);
+                        packet->source_address, packet->source_port,
+                        packet->destination_address, packet->destination_port,
+                        packet->sequence, packet->acknowledgement, packet->flags,
+                        packet->window, &reply);
                     if (status == K_OK && reply.valid &&
-                        !e1000_send_tcp_reply(state, &packet, &reply)) {
+                        !e1000_send_tcp_reply(state, packet, &reply)) {
                         status = K_EIO;
                     }
-                } else if ((packet.flags & NET_TCP_FLAG_ACK) != 0U &&
-                           packet.payload_length == 0U &&
-                           (packet.flags & (NET_TCP_FLAG_FIN | NET_TCP_FLAG_PSH)) == 0U) {
-                    status = socket_inject_tcp_ack_ipv4_window(
-                        packet.source_address, packet.source_port,
-                        packet.destination_address, packet.destination_port,
-                        packet.sequence, packet.acknowledgement, packet.flags,
-                        packet.window);
                 } else {
                     socket_tcp_reply_t reply = {0};
                     /* ACK is independent of payload/PSH/FIN. Complete the
                      * local send before applying receive-window policy. */
-                    if ((packet.flags & NET_TCP_FLAG_ACK) != 0U) {
+                    if ((packet->flags & NET_TCP_FLAG_ACK) != 0U) {
                         (void)socket_inject_tcp_ack_ipv4_window(
-                            packet.source_address, packet.source_port,
-                            packet.destination_address, packet.destination_port,
-                            packet.sequence, packet.acknowledgement, packet.flags,
-                            packet.window);
+                            packet->source_address, packet->source_port,
+                            packet->destination_address, packet->destination_port,
+                            packet->sequence, packet->acknowledgement, packet->flags,
+                            packet->window);
                     }
                     status = socket_inject_tcp_ipv4_reply(
-                        packet.source_address, packet.source_port,
-                        packet.destination_address, packet.destination_port,
-                        packet.sequence, packet.flags, packet.payload,
-                        packet.payload_length, &reply);
+                        packet->source_address, packet->source_port,
+                        packet->destination_address, packet->destination_port,
+                        packet->sequence, packet->flags, packet->payload,
+                        packet->payload_length, &reply);
                     /* 杩炵画鏁版嵁銆侀噸澶嶆暟鎹€佷贡搴忔暟鎹拰 FIN 閮借杩斿洖褰撳墠 ACK/绐楀彛銆?*/
-                    if (reply.valid && !e1000_send_tcp_reply(state, &packet, &reply)) {
+                    if (reply.valid && !e1000_send_tcp_reply(state, packet, &reply)) {
                         status = K_EIO;
                     }
                 }
-                if (status == K_ENOENT) {
+                if (status == K_ENOENT &&
+                    !e1000_tcp_self_test_peer_reply(state, packet)) {
                     socket_tcp_reply_t reset = {0};
-                    if (e1000_build_tcp_reset_reply(&packet, &reset) &&
-                        !e1000_send_tcp_reply(state, &packet, &reset)) {
+                    if (e1000_build_tcp_reset_reply(packet, &reset) &&
+                        !e1000_send_tcp_reply(state, packet, &reset)) {
                         status = K_EIO;
                     }
                 }
-            } else if (packet.protocol == SOCKET_PROTOCOL_TCP && packet.family == OS_AF_INET6) {
-                if ((packet.flags & NET_TCP_FLAG_SYN) != 0U &&
-                    (packet.flags & NET_TCP_FLAG_ACK) == 0U) {
+            } else if (packet->protocol == SOCKET_PROTOCOL_TCP && packet->family == OS_AF_INET6) {
+                if ((packet->flags & NET_TCP_FLAG_RST) != 0U) {
                     socket_tcp_reply_t reply = {0};
-                    status = socket_inject_tcp_syn_ipv6(
-                        packet.source_address6, packet.source_port,
-                        packet.destination_address6, packet.destination_port,
-                        packet.sequence, &reply);
+                    status = socket_inject_tcp_ack_ipv6_reply(
+                        packet->source_address6, packet->source_port,
+                        packet->destination_address6, packet->destination_port,
+                        packet->sequence, packet->acknowledgement, packet->flags,
+                        packet->window, &reply);
+                    if (reply.valid && !e1000_send_tcp_reply(state, packet, &reply)) status = K_EIO;
+                } else if ((packet->flags & NET_TCP_FLAG_SYN) != 0U &&
+                    (packet->flags & NET_TCP_FLAG_ACK) == 0U) {
+                    socket_tcp_reply_t reply = {0};
+                    status = socket_inject_tcp_syn_ipv6_scaled(
+                        packet->source_address6, packet->source_port,
+                        packet->destination_address6, packet->destination_port,
+                        packet->sequence, packet->peer_window_scale_present ?
+                            packet->peer_window_scale : -1, &reply);
+                    socket_tcp_mss_ipv6(packet->source_address6, packet->source_port,
+                        packet->destination_address6, packet->destination_port,
+                        packet->sequence, packet->acknowledgement, packet->flags, packet->peer_mss);
                     if (status == K_OK && reply.valid) {
                         uint8_t frame[NET_ETHERNET_HEADER_SIZE + NET_IPV6_HEADER_SIZE +
-                                      NET_TCP_HEADER_SIZE];
+                                      NET_TCP_SYN_HEADER_SIZE + 4U];
                         size_t frame_length = 0U;
-                        if (net_tcp_build_ipv6(
-                                frame, sizeof(frame), packet.destination_mac,
-                                packet.source_mac, packet.destination_address6,
-                                packet.source_address6, packet.destination_port,
-                                packet.source_port, reply.sequence,
-                                reply.acknowledgement, reply.flags, reply.window,
+                        int scale = socket_tcp_syn_scale_ipv6(packet->destination_address6,
+                            packet->destination_port, packet->source_address6, packet->source_port,
+                            reply.sequence, reply.acknowledgement);
+                        if (net_tcp_build_ipv6_scaled(
+                                frame, sizeof(frame), packet->destination_mac,
+                                packet->source_mac, packet->destination_address6,
+                                packet->source_address6, packet->destination_port,
+                                packet->source_port, reply.sequence,
+                                reply.acknowledgement, reply.flags, reply.window, scale,
                                 0, 0U, &frame_length) != K_OK ||
                             net_device_send(&state->device, frame, frame_length) != K_OK) {
                             status = K_EIO;
                         } else if (state->tcp_loopback_peer_enabled &&
-                                   !e1000_tcp_loopback_peer_ack6(state, &packet, &reply)) {
+                                   !e1000_tcp_loopback_peer_ack6(state, packet, &reply)) {
                             status = K_EIO;
                         }
                     }
-                } else if ((packet.flags & NET_TCP_FLAG_SYN) != 0U) {
+                } else if ((packet->flags & NET_TCP_FLAG_SYN) != 0U ||
+                           ((packet->flags & NET_TCP_FLAG_ACK) != 0U &&
+                            packet->payload_length == 0U &&
+                            (packet->flags & (NET_TCP_FLAG_FIN | NET_TCP_FLAG_PSH)) == 0U)) {
                     socket_tcp_reply_t reply = {0};
+                    if ((packet->flags & NET_TCP_FLAG_SYN) != 0U) {
+                        socket_tcp_scale_ipv6(packet->source_address6, packet->source_port,
+                            packet->destination_address6, packet->destination_port,
+                            packet->sequence, packet->acknowledgement, packet->flags,
+                            packet->peer_window_scale_present ? packet->peer_window_scale : -1);
+                        socket_tcp_mss_ipv6(packet->source_address6, packet->source_port,
+                            packet->destination_address6, packet->destination_port,
+                            packet->sequence, packet->acknowledgement, packet->flags, packet->peer_mss);
+                    }
                     status = socket_inject_tcp_ack_ipv6_reply(
-                        packet.source_address6, packet.source_port,
-                        packet.destination_address6, packet.destination_port,
-                        packet.sequence, packet.acknowledgement, packet.flags,
-                        packet.window, &reply);
+                        packet->source_address6, packet->source_port,
+                        packet->destination_address6, packet->destination_port,
+                        packet->sequence, packet->acknowledgement, packet->flags,
+                        packet->window, &reply);
                     if (status == K_OK && reply.valid &&
-                        !e1000_send_tcp_reply6(state, &packet, &reply)) {
+                        !e1000_send_tcp_reply(state, packet, &reply)) {
                         status = K_EIO;
                     }
-                } else if ((packet.flags & NET_TCP_FLAG_ACK) != 0U &&
-                           packet.payload_length == 0U &&
-                           (packet.flags & (NET_TCP_FLAG_FIN | NET_TCP_FLAG_PSH)) == 0U) {
-                    status = socket_inject_tcp_ack_ipv6_window(
-                        packet.source_address6, packet.source_port,
-                        packet.destination_address6, packet.destination_port,
-                        packet.sequence, packet.acknowledgement, packet.flags,
-                        packet.window);
                 } else {
                     socket_tcp_reply_t reply = {0};
-                    if ((packet.flags & NET_TCP_FLAG_ACK) != 0U) {
+                    if ((packet->flags & NET_TCP_FLAG_ACK) != 0U) {
                         (void)socket_inject_tcp_ack_ipv6_window(
-                            packet.source_address6, packet.source_port,
-                            packet.destination_address6, packet.destination_port,
-                            packet.sequence, packet.acknowledgement, packet.flags,
-                            packet.window);
+                            packet->source_address6, packet->source_port,
+                            packet->destination_address6, packet->destination_port,
+                            packet->sequence, packet->acknowledgement, packet->flags,
+                            packet->window);
                     }
                     status = socket_inject_tcp_ipv6_reply(
-                        packet.source_address6, packet.source_port,
-                        packet.destination_address6, packet.destination_port,
-                        packet.sequence, packet.flags, packet.payload,
-                        packet.payload_length, &reply);
-                    if (reply.valid && !e1000_send_tcp_reply6(state, &packet, &reply)) {
+                        packet->source_address6, packet->source_port,
+                        packet->destination_address6, packet->destination_port,
+                        packet->sequence, packet->flags, packet->payload,
+                        packet->payload_length, &reply);
+                    if (reply.valid && !e1000_send_tcp_reply(state, packet, &reply)) {
                         status = K_EIO;
                     }
                 }
-                if (status == K_ENOENT) {
+                if (status == K_ENOENT &&
+                    !e1000_tcp_self_test_peer_reply(state, packet)) {
                     socket_tcp_reply_t reset = {0};
-                    if (e1000_build_tcp_reset_reply(&packet, &reset) &&
-                        !e1000_send_tcp_reply6(state, &packet, &reset)) {
+                    if (e1000_build_tcp_reset_reply(packet, &reset) &&
+                        !e1000_send_tcp_reply(state, packet, &reset)) {
                         status = K_EIO;
                     }
                 }
-            } else if (packet.protocol == SOCKET_PROTOCOL_UDP && packet.family == OS_AF_INET6) {
-                status = socket_inject_udp_ipv6(packet.source_address6,
-                                                packet.source_port,
-                                                packet.destination_address6,
-                                                packet.destination_port,
-                                                packet.payload,
-                                                packet.payload_length);
-            } else if (packet.protocol == SOCKET_PROTOCOL_UDP) {
-                status = socket_inject_udp(packet.source_address,
-                                           packet.source_port,
-                                           packet.destination_address,
-                                           packet.destination_port,
-                                           packet.payload,
-                                           packet.payload_length);
+            } else if (packet->protocol == SOCKET_PROTOCOL_UDP && packet->family == OS_AF_INET6) {
+                status = socket_inject_udp_ipv6(packet->source_address6,
+                                                packet->source_port,
+                                                packet->destination_address6,
+                                                packet->destination_port,
+                                                packet->payload,
+                                                packet->payload_length);
+            } else if (packet->protocol == SOCKET_PROTOCOL_UDP) {
+                status = socket_inject_udp(packet->source_address,
+                                           packet->source_port,
+                                           packet->destination_address,
+                                           packet->destination_port,
+                                           packet->payload,
+                                           packet->payload_length);
 #if OS_DEBUG_SERIAL
                 if (g_debug_udp_dispatch_logs < 128U) {
                     kernel_serial_printf_serial_only(
                         "OS_UDP_DISPATCH src=%x:%u dst=%x:%u status=%d\r\n",
-                        packet.source_address, packet.source_port,
-                        packet.destination_address, packet.destination_port,
+                        packet->source_address, packet->source_port,
+                        packet->destination_address, packet->destination_port,
                         status);
                     ++g_debug_udp_dispatch_logs;
                 }
 #endif
             } else status = K_EINVAL;
             if (status == K_OK) received = true;
+            e1000_queue_release(queue, packet);
         }
     }
     return received;
@@ -367,18 +408,15 @@ bool e1000_process_rx_frame(e1000_state_t *state, const uint8_t *buffer,
 #endif
             /* 鍙湁閰嶇疆浜嗘湰鏈?IPv4 涓旂洰鏍囧湴鍧€鍛戒腑鏃舵墠鍥炲 ARP銆?*/
             if (!e1000_arp_reply(state, &arp_view)) received = true;
-            /* A pending TCP SYN/data segment may have been held only because
-             * this ARP entry was missing.  Flush that queue immediately after
-             * learning the peer MAC instead of waiting for another RX IRQ. */
-            uint64_t flush_now = x86_read_tsc();
-            uint64_t flush_after = x86_timeout_ns_to_tsc(
-                SOCKET_TCP_RETRANSMIT_TIMEOUT_NS);
-            /* The TSC cannot wrap during one packet dispatch in practice. */
-            flush_now += flush_after + 1U;
-            socket_tcp_poll(flush_now);
+            /* Neighbor resolution uses the bounded local retry clock. Never
+             * advance the transport clock to flush it: that consumes network
+             * retry budget and moves unrelated flights' deadlines forward. */
+            socket_tcp_poll(x86_read_tsc());
     } else if (length != 0U &&
             net_udp_parse_ipv4(buffer, length, &view) == K_OK) {
-            e1000_runtime_zero(&packet, sizeof(packet));
+            /* Only metadata is staged here. Queue admission copies the DMA
+             * payload before the caller can recycle its RX descriptor. */
+            memset(&packet, 0, offsetof(e1000_rx_packet_t, payload));
             packet.family = OS_AF_INET4;
             packet.protocol = SOCKET_PROTOCOL_UDP;
             packet.source_address = view.source_address;
@@ -397,33 +435,31 @@ bool e1000_process_rx_frame(e1000_state_t *state, const uint8_t *buffer,
             }
 #endif
             if (view.payload_length <= sizeof(packet.payload)) {
-                e1000_runtime_copy(packet.payload, view.payload, view.payload_length);
                 received = e1000_enqueue_packet(
-                    state, &packet,
+                    state, &packet, view.payload,
                     e1000_flow_hash_ipv4(view.source_address, view.destination_address,
                                          view.source_port, view.destination_port,
                                          SOCKET_PROTOCOL_UDP)) || received;
             }
     } else if (length != 0U &&
                    net_udp_parse_ipv6(buffer, length, &view6) == K_OK) {
-            e1000_runtime_zero(&packet, sizeof(packet));
+            memset(&packet, 0, offsetof(e1000_rx_packet_t, payload));
             packet.family = OS_AF_INET6;
             packet.protocol = SOCKET_PROTOCOL_UDP;
-            e1000_runtime_copy(packet.source_address6, view6.source_address, 16U);
-            e1000_runtime_copy(packet.destination_address6, view6.destination_address, 16U);
+            memcpy(packet.source_address6, view6.source_address, 16U);
+            memcpy(packet.destination_address6, view6.destination_address, 16U);
             packet.source_port = view6.source_port;
             packet.destination_port = view6.destination_port;
             packet.payload_length = view6.payload_length;
             if (view6.payload_length <= sizeof(packet.payload)) {
-                e1000_runtime_copy(packet.payload, view6.payload, view6.payload_length);
                 received = e1000_enqueue_packet(
-                    state, &packet,
+                    state, &packet, view6.payload,
                     e1000_flow_hash_ipv6(view6.source_address, view6.destination_address,
                                          view6.source_port, view6.destination_port)) || received;
             }
     } else if (length != 0U &&
                    net_tcp_parse_ipv4(buffer, length, &tcp_view) == K_OK) {
-            e1000_runtime_zero(&packet, sizeof(packet));
+            memset(&packet, 0, offsetof(e1000_rx_packet_t, payload));
             packet.family = OS_AF_INET4;
             packet.protocol = SOCKET_PROTOCOL_TCP;
             packet.flags = tcp_view.flags;
@@ -434,13 +470,15 @@ bool e1000_process_rx_frame(e1000_state_t *state, const uint8_t *buffer,
             packet.sequence = tcp_view.sequence;
             packet.acknowledgement = tcp_view.acknowledgement;
             packet.window = tcp_view.window;
-            e1000_runtime_copy(packet.source_mac, tcp_view.source_mac, 6U);
-            e1000_runtime_copy(packet.destination_mac, tcp_view.destination_mac, 6U);
+            packet.peer_mss = tcp_view.peer_mss;
+            packet.peer_window_scale = tcp_view.peer_window_scale;
+            packet.peer_window_scale_present = tcp_view.peer_window_scale_present;
+            memcpy(packet.source_mac, tcp_view.source_mac, 6U);
+            memcpy(packet.destination_mac, tcp_view.destination_mac, 6U);
             packet.payload_length = tcp_view.payload_length;
             if (tcp_view.payload_length <= sizeof(packet.payload)) {
-                e1000_runtime_copy(packet.payload, tcp_view.payload, tcp_view.payload_length);
                 received = e1000_enqueue_packet(
-                    state, &packet,
+                    state, &packet, tcp_view.payload,
                     e1000_flow_hash_ipv4(tcp_view.source_address,
                                          tcp_view.destination_address,
                                          tcp_view.source_port,
@@ -449,24 +487,26 @@ bool e1000_process_rx_frame(e1000_state_t *state, const uint8_t *buffer,
             }
     } else if (length != 0U &&
                    net_tcp_parse_ipv6(buffer, length, &tcp_view6) == K_OK) {
-            e1000_runtime_zero(&packet, sizeof(packet));
+            memset(&packet, 0, offsetof(e1000_rx_packet_t, payload));
             packet.family = OS_AF_INET6;
             packet.protocol = SOCKET_PROTOCOL_TCP;
             packet.flags = tcp_view6.flags;
-            e1000_runtime_copy(packet.source_address6, tcp_view6.source_address6, 16U);
-            e1000_runtime_copy(packet.destination_address6, tcp_view6.destination_address6, 16U);
+            memcpy(packet.source_address6, tcp_view6.source_address6, 16U);
+            memcpy(packet.destination_address6, tcp_view6.destination_address6, 16U);
             packet.source_port = tcp_view6.source_port;
             packet.destination_port = tcp_view6.destination_port;
             packet.sequence = tcp_view6.sequence;
             packet.acknowledgement = tcp_view6.acknowledgement;
             packet.window = tcp_view6.window;
-            e1000_runtime_copy(packet.source_mac, tcp_view6.source_mac, 6U);
-            e1000_runtime_copy(packet.destination_mac, tcp_view6.destination_mac, 6U);
+            packet.peer_mss = tcp_view6.peer_mss;
+            packet.peer_window_scale = tcp_view6.peer_window_scale;
+            packet.peer_window_scale_present = tcp_view6.peer_window_scale_present;
+            memcpy(packet.source_mac, tcp_view6.source_mac, 6U);
+            memcpy(packet.destination_mac, tcp_view6.destination_mac, 6U);
             packet.payload_length = tcp_view6.payload_length;
             if (tcp_view6.payload_length <= sizeof(packet.payload)) {
-                e1000_runtime_copy(packet.payload, tcp_view6.payload, tcp_view6.payload_length);
                 received = e1000_enqueue_packet(
-                    state, &packet,
+                    state, &packet, tcp_view6.payload,
                     e1000_flow_hash_ipv6(tcp_view6.source_address6,
                                          tcp_view6.destination_address6,
                                          tcp_view6.source_port,

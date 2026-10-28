@@ -255,8 +255,8 @@ Invoke-CompileIfChanged $testSource $hostObject $hostFlags
 $hostLinkArgs = @(
     '-nostdlib', '-nodefaultlibs', '-nostartfiles',
     '-Wl,--build-id=none',
-    '-Wl,-dynamic-linker,/lib64/ld-linux-x86-64.so.2',
-    '-Wl,-rpath,/compat/linux/lib/x86_64-linux-gnu:/compat/linux/lib',
+    '-Wl,-dynamic-linker,/usr/apps/p11-triangle/lib/ld-linux-x86-64.so.2',
+    '-Wl,-rpath,/usr/apps/p11-triangle/lib',
     '-Wl,--disable-new-dtags',
     '-Wl,--allow-shlib-undefined',
     ('-Wl,-rpath-link,{0}' -f $hostRunLib.Replace('\', '/')),

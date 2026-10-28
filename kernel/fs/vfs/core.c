@@ -3,6 +3,7 @@
 #include <kernel/vfs.h>
 #include <kernel/fat32.h>
 #include <kernel/string.h>
+#include <kernel/mm.h>
 #include "internal.h"
 
 #ifdef OS_KERNEL_BUILD
@@ -11,11 +12,17 @@
 
 static vnode_t *g_vfs_initial_nodes[VFS_INITIAL_NODE_CAPACITY];
 static vnode_t **g_vfs_nodes = g_vfs_initial_nodes;
+static vnode_t *g_vfs_initial_buckets[VFS_INITIAL_NODE_CAPACITY];
+static vnode_t **g_vfs_buckets = g_vfs_initial_buckets;
+static uint32_t g_vfs_initial_fat_buckets[VFS_INITIAL_NODE_CAPACITY];
+static uint32_t g_vfs_initial_fat_next[VFS_INITIAL_NODE_CAPACITY];
+static uint32_t *g_vfs_fat_buckets = g_vfs_initial_fat_buckets;
+static uint32_t *g_vfs_fat_next = g_vfs_initial_fat_next;
 static uint32_t g_vfs_node_capacity = VFS_INITIAL_NODE_CAPACITY;
 static uint32_t g_vfs_next_free_node;
 static spinlock_t g_vfs_lock;
 static atomic_uint g_vfs_init_state;
-/* Linux fstat needs distinct file identities while loading multiple DSOs. */
+/* 加载多个 DSO 时，Linux fstat 需要不同的文件标识。 */
 static atomic_uint_fast64_t g_vfs_next_inode_id;
 vfs_fat32_mount_t g_fat32_mounts[VFS_FAT32_MOUNT_LIMIT];
 
@@ -85,7 +92,12 @@ static void vfs_initialize(void) {
                                                  memory_order_acq_rel,
                                                  memory_order_acquire)) {
         atomic_init(&g_vfs_lock.state, 0U);
-        for (uint32_t i = 0; i < g_vfs_node_capacity; ++i) g_vfs_nodes[i] = 0;
+        for (uint32_t i = 0; i < g_vfs_node_capacity; ++i) {
+            g_vfs_nodes[i] = 0;
+            g_vfs_buckets[i] = 0;
+            g_vfs_fat_buckets[i] = 0U;
+            g_vfs_fat_next[i] = 0U;
+        }
         g_vfs_next_free_node = 0U;
         atomic_store_explicit(&g_vfs_init_state, 2U, memory_order_release);
         return;
@@ -95,48 +107,121 @@ static void vfs_initialize(void) {
     }
 }
 
+static uint32_t vfs_namespace_bucket(const char *path, size_t length) {
+    uint32_t hash = 2166136261U;
+    for (size_t index = 0U; index < length; ++index)
+        hash = (hash ^ (uint8_t)path[index]) * 16777619U;
+    return hash & (g_vfs_node_capacity - 1U);
+}
+
+/* 只索引末段名称：挂载点改变时，相对路径可能变化，但非根路径的末段保持不变。 */
+static uint32_t vfs_fat_name_bucket(const char *path) {
+    size_t length = vfs_string_length(path), first = 0U;
+    for (size_t i = 0U; i < length; ++i)
+        if (path[i] == '/') first = i + 1U;
+    uint32_t hash = 2166136261U;
+    for (size_t i = first; i < length; ++i) {
+        uint8_t ch = (uint8_t)path[i];
+        if (ch >= 'A' && ch <= 'Z') ch = (uint8_t)(ch - 'A' + 'a');
+        hash = (hash ^ ch) * 16777619U;
+    }
+    return hash & (g_vfs_node_capacity - 1U);
+}
+
+/* 桶中保存槽位加一，按槽位排序以保留线性查找的首项语义。 */
+static void vfs_fat_index_insert_locked(vnode_t *vnode, uint32_t slot) {
+    vfs_backend_node_t *backend = vnode != 0 ? vnode->fs_private : 0;
+    if (backend == 0 || !backend->fat32_node) return;
+    uint32_t *link = &g_vfs_fat_buckets[vfs_fat_name_bucket(backend->path)];
+    while (*link != 0U && *link - 1U < slot)
+        link = &g_vfs_fat_next[*link - 1U];
+    g_vfs_fat_next[slot] = *link;
+    *link = slot + 1U;
+}
+
+static void vfs_fat_index_remove_locked(vnode_t *vnode) {
+    vfs_backend_node_t *backend = vnode != 0 ? vnode->fs_private : 0;
+    if (backend == 0 || !backend->fat32_node) return;
+    uint32_t slot = backend->namespace_slot;
+    uint32_t *link = &g_vfs_fat_buckets[vfs_fat_name_bucket(backend->path)];
+    while (*link != 0U && *link != slot + 1U)
+        link = &g_vfs_fat_next[*link - 1U];
+    if (*link != 0U) *link = g_vfs_fat_next[slot];
+    g_vfs_fat_next[slot] = 0U;
+}
+
+/* 索引借用注册表持有的引用。桶链按槽位排序，保留存在同名节点时原先的首槽命中语义。 */
+static void vfs_namespace_insert_locked(vnode_t *vnode, uint32_t slot) {
+    vfs_backend_node_t *backend = vnode != 0 ? vnode->fs_private : 0;
+    if (backend == 0) return;
+    uint32_t bucket = vfs_namespace_bucket(backend->path, vfs_string_length(backend->path));
+    vnode_t **link = &g_vfs_buckets[bucket];
+    while (*link != 0) {
+        vfs_backend_node_t *current = (*link)->fs_private;
+        if (current->namespace_slot >= slot) break;
+        link = &current->namespace_next;
+    }
+    backend->namespace_slot = slot;
+    backend->namespace_next = *link;
+    *link = vnode;
+    vfs_fat_index_insert_locked(vnode, slot);
+}
+
+static void vfs_namespace_remove_locked(vnode_t *vnode) {
+    vfs_backend_node_t *backend = vnode != 0 ? vnode->fs_private : 0;
+    if (backend == 0) return;
+    uint32_t bucket = vfs_namespace_bucket(backend->path, vfs_string_length(backend->path));
+    vnode_t **link = &g_vfs_buckets[bucket];
+    while (*link != 0 && *link != vnode)
+        link = &((vfs_backend_node_t *)(*link)->fs_private)->namespace_next;
+    if (*link != 0) *link = backend->namespace_next;
+    backend->namespace_next = 0;
+    vfs_fat_index_remove_locked(vnode);
+}
+
 static vnode_t *vfs_find_node_locked(const char *path) {
     size_t path_length = vfs_string_length(path);
-    for (uint32_t i = 0; i < g_vfs_node_capacity; ++i) {
-        vnode_t *vnode = g_vfs_nodes[i];
+    if (g_vfs_node_capacity == 0U) return 0;
+    for (vnode_t *vnode = g_vfs_buckets[vfs_namespace_bucket(path, path_length)];
+         vnode != 0; vnode = ((vfs_backend_node_t *)vnode->fs_private)->namespace_next) {
         vfs_backend_node_t *backend = vnode != 0 ?
                                       (vfs_backend_node_t *)vnode->fs_private : 0;
         if (backend == 0) continue;
         size_t j = 0;
         while (j < path_length && path[j] == backend->path[j]) ++j;
-        /* Reject a prefix match without scanning the candidate twice. At the
-         * bound, preserve the original nonterminated-path comparison. */
+        /* 在不重复扫描候选项的情况下拒绝前缀匹配。达到上限时保留原有的
+         * 非 NUL 结尾路径比较语义。 */
         if (j == path_length && (path_length == VFS_PATH_LIMIT ||
                                  backend->path[path_length] == 0)) return vnode;
     }
     return 0;
 }
 
-/* The caller can reuse its normalized request while scanning the registry. */
+/* 扫描注册表时，调用方可复用已规范化的请求路径。 */
 static bool vfs_fat_relative_path_equal(const char *left_relative,
                                          size_t length,
                                          const vfs_fat32_mount_t *left_mount,
                                          const char *right) {
+    if (right == 0 || length >= VFS_PATH_LIMIT) return false;
+    size_t right_length = vfs_string_length(right);
+    if (right_length >= VFS_PATH_LIMIT || right_length < length) return false;
+    /* 挂载路由只移除绝对路径前缀。相对名称必须是候选路径的后缀；
+     * 先排除名称不同的节点，避免为每个缓存节点遍历全部挂载点并复制路径。 */
+    size_t suffix = right_length - length;
+    /* 同目录节点通常共享长前缀，从末尾比较可优先排除文件名不同的节点。 */
+    for (size_t remaining = length; remaining != 0U; ) {
+        size_t index = --remaining;
+        char a = left_relative[index], b = right[suffix + index];
+        if (a >= 'A' && a <= 'Z') a = (char)(a - 'A' + 'a');
+        if (b >= 'A' && b <= 'Z') b = (char)(b - 'A' + 'a');
+        if (a != b) return false;
+    }
     char right_relative[VFS_PATH_LIMIT];
     vfs_fat32_mount_t *right_mount = vfs_fat32_mount_for_path(right, right_relative);
-    /* Relative names are identities only within the same filesystem. Alias
-     * mounts of that filesystem may still share a canonical page cache. */
+    /* 相对名称只在同一文件系统内具有标识意义。该文件系统的别名挂载仍可共享规范页缓存。 */
     if (right_mount == 0 || right_mount->filesystem != left_mount->filesystem)
         return false;
-    if (length >= VFS_PATH_LIMIT) return false;
-    for (size_t index = 0U; index < length; ++index) {
-        char right_value = right_relative[index];
-        if (right_value == 0) return false;
-        char left_value = left_relative[index];
-        if (left_value >= 'A' && left_value <= 'Z') {
-            left_value = (char)(left_value - 'A' + 'a');
-        }
-        if (right_value >= 'A' && right_value <= 'Z') {
-            right_value = (char)(right_value - 'A' + 'a');
-        }
-        if (left_value != right_value) return false;
-    }
-    return right_relative[length] == 0;
+    return vfs_string_length(right_relative) == length;
 }
 
 static vnode_t *vfs_find_fat_node_locked(const char *path) {
@@ -144,12 +229,19 @@ static vnode_t *vfs_find_fat_node_locked(const char *path) {
     vfs_fat32_mount_t *mount = vfs_fat32_mount_for_path(path, relative);
     if (mount == 0) return 0;
     size_t relative_length = vfs_string_length(relative);
-    for (uint32_t index = 0U; index < g_vfs_node_capacity; ++index) {
+    /* 根路径在不同挂载别名下的末段可能不同；其他路径只访问同名桶。 */
+    bool indexed = relative_length != 0U && g_vfs_node_capacity != 0U;
+    uint32_t slot = indexed ? g_vfs_fat_buckets[vfs_fat_name_bucket(relative)] :
+        (g_vfs_node_capacity != 0U ? 1U : 0U);
+    while (slot != 0U) {
+        uint32_t index = slot - 1U;
+        slot = indexed ? g_vfs_fat_next[index] :
+            (index + 1U < g_vfs_node_capacity ? slot + 1U : 0U);
         vnode_t *vnode = g_vfs_nodes[index];
         vfs_backend_node_t *backend = vnode != 0 ?
                                       (vfs_backend_node_t *)vnode->fs_private : 0;
-        /* Registry eviction may lag behind unlink commit. Old handles retain
-         * the detached vnode, but a new open must not reuse its page cache. */
+        /* 注册表淘汰可能晚于 unlink 提交。旧句柄仍持有已分离的 vnode，
+         * 但新 open 不得复用其页缓存。 */
         if (backend != 0 && backend->fat32_node &&
             !__atomic_load_n(&backend->detached, __ATOMIC_ACQUIRE) &&
             vfs_fat_relative_path_equal(relative, relative_length,
@@ -164,8 +256,8 @@ static bool vfs_path_range_equals(const char *left, size_t left_length,
     return memcmp(left, right, left_length) == 0;
 }
 
-/* Memory-backed /tmp must not fail after a fixed number of profile files.
- * All registry reads and writes, including growth, hold g_vfs_lock. */
+/* 内存后备的 /tmp 不能因 profile 文件数量达到固定上限而失败。
+ * 所有注册表读写（包括扩容）都持有 g_vfs_lock。 */
 static uint32_t vfs_free_node_slot_locked(void) {
     for (uint32_t index = g_vfs_next_free_node; index < g_vfs_node_capacity; ++index) {
         if (g_vfs_nodes[index] == 0) {
@@ -177,22 +269,30 @@ static uint32_t vfs_free_node_slot_locked(void) {
     if (g_vfs_node_capacity > UINT32_MAX / 2U) return UINT32_MAX;
     uint32_t old_capacity = g_vfs_node_capacity;
     uint32_t new_capacity = old_capacity * 2U;
+    /* 注册表和两套索引共用一次分配，失败时完整保留旧状态。 */
     vnode_t **replacement = (vnode_t **)kzalloc(
-        (size_t)new_capacity * sizeof(*replacement), 0);
+        (size_t)new_capacity * (2U * sizeof(*replacement) + 2U * sizeof(uint32_t)), 0);
     if (replacement == 0) return UINT32_MAX;
     memcpy(replacement, g_vfs_nodes, (size_t)old_capacity * sizeof(*replacement));
     vnode_t **old_nodes = g_vfs_nodes;
     g_vfs_nodes = replacement;
     g_vfs_node_capacity = new_capacity;
+    g_vfs_buckets = replacement + new_capacity;
+    g_vfs_fat_buckets = (uint32_t *)(replacement + (size_t)new_capacity * 2U);
+    g_vfs_fat_next = g_vfs_fat_buckets + new_capacity;
+    /* 倒序插入可直接接到每个桶头，碰撞集中时也不重复遍历已有桶链。 */
+    for (uint32_t index = old_capacity; index != 0U; --index)
+        vfs_namespace_insert_locked(g_vfs_nodes[index - 1U], index - 1U);
     if (old_nodes != g_vfs_initial_nodes) kfree(old_nodes);
     return old_capacity;
 }
 
-/* Caller holds the namespace lock. The hint is a lower bound, not a
- * reservation: repeated free-slot queries must return the same slot until
- * publication. All insertion/removal paths update it here. */
+/* 调用方持有命名空间锁。该提示是下界，不是预留：发布前重复查询空槽时必须返回同一槽位。
+ * 所有插入/移除路径都在此更新提示。 */
 static void vfs_set_node_slot_locked(uint32_t index, vnode_t *vnode) {
+    vfs_namespace_remove_locked(g_vfs_nodes[index]);
     g_vfs_nodes[index] = vnode;
+    vfs_namespace_insert_locked(vnode, index);
     if (vnode == 0) {
         if (index < g_vfs_next_free_node) g_vfs_next_free_node = index;
     } else if (index == g_vfs_next_free_node) {
@@ -200,19 +300,31 @@ static void vfs_set_node_slot_locked(uint32_t index, vnode_t *vnode) {
     }
 }
 
-/* /tmp is volatile process state, not persistent user data.  Keep the whole
- * namespace off the FAT-backed root: Chromium uses both its profile and
- * anonymous/shared-memory backing files here, and FAT allocation can otherwise
- * synchronously scan the free-cluster chain on the calling UI thread. */
+/* 临时状态使用内存后备，避免 FAT 不支持符号链接和同步簇分配。
+ * 应用的 run 子目录属于应用自身；data 等其他子目录仍保存在磁盘上。 */
 static bool vfs_volatile_path(const char *path) {
-    static const char prefix[] = "/tmp";
-    const size_t prefix_length = sizeof(prefix) - 1U;
     if (path == 0) return false;
-    for (size_t i = 0U; i < prefix_length; ++i) {
-        if (path[i] != prefix[i]) return false;
+    static const char temporary[] = "/tmp";
+    size_t index = 0U;
+    while (index < sizeof(temporary) - 1U && path[index] == temporary[index]) ++index;
+    if (index == sizeof(temporary) - 1U &&
+        (path[index] == 0 || path[index] == '/')) return true;
+    static const char applications[] = "/usr/apps/";
+    for (index = 0U; index < sizeof(applications) - 1U; ++index)
+        if (path[index] != applications[index]) return false;
+    size_t first = index;
+    for (; index < VFS_PATH_LIMIT; ++index) {
+        char value = path[index];
+        if (value == '/') break;
+        if (!((value >= 'a' && value <= 'z') || (value >= 'A' && value <= 'Z') ||
+              (value >= '0' && value <= '9') || value == '-' || value == '_')) return false;
     }
-    char boundary = path[prefix_length];
-    return boundary == '\0' || boundary == '/';
+    if (index == first || index >= VFS_PATH_LIMIT - 5U) return false;
+    static const char runtime[] = "/run";
+    for (size_t offset = 0U; offset < sizeof(runtime) - 1U; ++offset)
+        if (path[index + offset] != runtime[offset]) return false;
+    char boundary = path[index + sizeof(runtime) - 1U];
+    return boundary == 0 || boundary == '/';
 }
 
 static bool vfs_mount_matches(const vfs_fat32_mount_t *mount,
@@ -326,14 +438,11 @@ kstatus_t vfs_sync_all(void) {
         if (vnode != 0) object_get(vnode);
         vfs_unlock();
         if (vnode == 0) continue;
-        vfs_vnode_lock(vnode);
-        kstatus_t status = vfs_page_cache_flush(vnode);
-        vfs_vnode_unlock(vnode);
+        kstatus_t status = vfs_page_cache_writeback(vnode);
         object_put(vnode);
         if (status != K_OK) result = status;
     }
-    /* Never hold the namespace lock across storage I/O. Mount objects stay
-     * alive for the boot lifetime; unmount only detaches their prefix. */
+    /* 存储 I/O 期间绝不持有命名空间锁。挂载对象在整个启动期间保持存活；卸载只会分离其路径前缀。 */
     for (uint32_t i = 0U; i < VFS_FAT32_MOUNT_LIMIT; ++i) {
         vfs_lock();
         OS_FAT32 *filesystem = g_fat32_mounts[i].mounted ?
@@ -345,31 +454,69 @@ kstatus_t vfs_sync_all(void) {
 }
 
 kstatus_t vfs_unmount_fat32(void) {
+    vnode_t *retired = 0;
+    char relative[VFS_PATH_LIMIT];
     vfs_initialize();
     vfs_lock();
     if (!g_fat32_mounts[0].mounted) {
         vfs_unlock();
         return K_ENOENT;
     }
+    /* 卸载与缓存摘除必须原子完成。同一路径随后挂载另一卷时，不能复用旧卷的大小和页缓存。
+     * 活动文件或映射仍引用旧卷时拒绝卸载，避免它们按路径访问新卷。 */
+    for (uint32_t index = 0U; index < g_vfs_node_capacity; ++index) {
+        vnode_t *node = g_vfs_nodes[index];
+        vfs_backend_node_t *backend = node != 0 ? node->fs_private : 0;
+        if (backend == 0 || !backend->fat32_node ||
+            vfs_fat32_mount_for_path(backend->path, relative) != &g_fat32_mounts[0]) continue;
+        if (atomic_load_explicit(&node->object.refs.value, memory_order_acquire) != 1U) {
+            vfs_unlock();
+            return K_EBUSY;
+        }
+    }
+    for (uint32_t index = 0U; index < g_vfs_node_capacity; ++index) {
+        vnode_t *node = g_vfs_nodes[index];
+        vfs_backend_node_t *backend = node != 0 ? node->fs_private : 0;
+        if (backend == 0 || !backend->fat32_node ||
+            vfs_fat32_mount_for_path(backend->path, relative) != &g_fat32_mounts[0]) continue;
+        vfs_set_node_slot_locked(index, 0);
+        /* 摘除后的索引链接临时串起待释放对象，避免锁内释放页缓存或执行磁盘 I/O。 */
+        backend->namespace_next = retired;
+        retired = node;
+    }
     g_fat32_mounts[0].prefix[0] = 0;
     g_fat32_mounts[0].filesystem = 0;
     g_fat32_mounts[0].mounted = false;
     vfs_unlock();
+    while (retired != 0) {
+        vnode_t *node = retired;
+        vfs_backend_node_t *backend = node->fs_private;
+        retired = backend->namespace_next;
+        backend->namespace_next = 0;
+        object_put(node);
+    }
     return K_OK;
 }
 
 static bool vfs_directory_exists_locked(const char *path, size_t path_length) {
-    if (path == 0 || path_length == 0U) return false;
+    if (path == 0 || path_length == 0U || path_length > VFS_PATH_LIMIT) return false;
     if (path_length == 1U && path[0] == '/') return true;
-    /* /tmp is a volatile compatibility directory even when the root image
-     * does not carry a persistent directory entry for it. */
+    /* 即使根映像中没有持久目录项，/tmp 仍是易失兼容目录。 */
     if (path_length == 4U && vfs_path_range_equals(path, path_length,
                                                    "/tmp", 4U)) {
         return true;
     }
     char relative[VFS_PATH_LIMIT];
+    char directory_path[VFS_PATH_LIMIT];
     os_file_info_t mounted_info;
-    if (vfs_fat32_stat_absolute(path, &mounted_info, relative)) {
+    /* 调用方可能只提供父目录的前缀长度；后端查询必须使用独立终止的目录路径。
+     * 达到路径上限的输入无法补终止符，只保留下面的有界内存节点查找。 */
+    if (path_length < VFS_PATH_LIMIT) {
+        memcpy(directory_path, path, path_length);
+        directory_path[path_length] = 0;
+    }
+    if (path_length < VFS_PATH_LIMIT &&
+        vfs_fat32_stat_absolute(directory_path, &mounted_info, relative)) {
         return mounted_info.type == OS_FILE_TYPE_DIRECTORY;
     }
     for (uint32_t node_index = 0U; node_index < g_vfs_node_capacity; ++node_index) {
@@ -382,7 +529,7 @@ static bool vfs_directory_exists_locked(const char *path, size_t path_length) {
                backend->path[matched] != 0 &&
                backend->path[matched] == path[matched]) ++matched;
         if (matched != path_length) continue;
-        /* No byte beyond the bounded path participates in an exact match. */
+        /* 精确匹配只比较有界路径范围内的字节。 */
         if (path_length == VFS_PATH_LIMIT || backend->path[path_length] == 0)
             return backend->directory;
         if (backend->path[path_length] == '/') return true;
@@ -446,6 +593,52 @@ kstatus_t vfs_file_stat(file_t *file, os_file_info_t *out) {
     return K_OK;
 }
 
+static bool vfs_backend_memory_space(const vfs_backend_node_t *backend) {
+    return backend != 0 && !backend->fat32_node && backend->read == 0 &&
+           backend->write == 0 && backend->truncate == 0 && backend->fsync == 0;
+}
+
+static kstatus_t vfs_memory_space(vfs_space_info_t *out) {
+    uint64_t total, available;
+    kstatus_t status = page_memory_get_stats(&total, &available);
+    if (status != K_OK) return status;
+    if (available > total || total > UINT64_MAX / PAGE_SIZE)
+        return K_EOVERFLOW;
+    *out = (vfs_space_info_t){
+        .block_size = PAGE_SIZE, .blocks = total, .blocks_free = available,
+        .type = 0x01021994U, .filesystem_id = 1U,
+        .name_max = VFS_PATH_LIMIT - 1U
+    };
+    return K_OK;
+}
+
+static kstatus_t vfs_disk_space(OS_FAT32 *filesystem, vfs_space_info_t *out) {
+    uint64_t blocks, available, block_size;
+    if (!fat32_space(filesystem, &blocks, &available, &block_size)) return K_EIO;
+    *out = (vfs_space_info_t){
+        .block_size = block_size, .blocks = blocks, .blocks_free = available,
+        .type = 0x4D44U, .filesystem_id = (uintptr_t)filesystem,
+        .name_max = VFS_PATH_LIMIT - 1U,
+    };
+    return K_OK;
+}
+
+kstatus_t vfs_file_space(file_t *file, vfs_space_info_t *out) {
+    if (file == 0 || file->object.type != KOBJECT_TYPE_FILE || file->vnode == 0)
+        return K_EBADF;
+    if (out == 0) return K_EINVAL;
+    vfs_initialize();
+    vfs_lock();
+    vfs_backend_node_t *backend = file->vnode->fs_private;
+    bool memory = vfs_backend_memory_space(backend);
+    OS_FAT32 *disk = backend != 0 && backend->fat32_node ? backend->fat_filesystem : 0;
+    vfs_unlock();
+    /* 在命名空间锁外查询。已打开但 unlink 的 RAM 文件仍持有后备文件系统；
+     * fstatfs 无需查找路径名。 */
+    return disk != 0 ? vfs_disk_space(disk, out) :
+           memory ? vfs_memory_space(out) : K_ENOSYS;
+}
+
 kstatus_t vfs_directory_path_kernel(file_t *file, char *path, size_t capacity) {
     if (file == 0 || file->object.type != KOBJECT_TYPE_FILE || file->vnode == 0)
         return K_EBADF;
@@ -471,6 +664,27 @@ kstatus_t vfs_directory_path_kernel(file_t *file, char *path, size_t capacity) {
     return status;
 }
 
+kstatus_t vfs_vnode_path_kernel(vnode_t *vnode, char *path, size_t capacity,
+                                bool *deleted) {
+    if (vnode == 0 || vnode->object.type != KOBJECT_TYPE_VNODE) return K_EBADF;
+    if (path == 0 || capacity == 0U || deleted == 0) return K_EINVAL;
+    vfs_initialize();
+    vfs_lock();
+    vfs_backend_node_t *backend = vnode->fs_private;
+    kstatus_t status = K_EIO;
+    if (backend != 0 && backend->path[0] == '/') {
+        size_t length = vfs_string_length(backend->path);
+        if (length >= capacity) status = K_ENAMETOOLONG;
+        else {
+            memcpy(path, backend->path, length + 1U);
+            *deleted = backend->detached;
+            status = K_OK;
+        }
+    }
+    vfs_unlock();
+    return status;
+}
+
 static bool vfs_path_is_subtree(const char *path, size_t path_length,
                                 const char *root, size_t root_length) {
     return (path_length == root_length &&
@@ -479,7 +693,7 @@ static bool vfs_path_is_subtree(const char *path, size_t path_length,
             vfs_path_range_equals(path, root_length, root, root_length));
 }
 
-/* Registry paths are fixed-size arrays; the root is already validated. */
+/* 注册表路径是定长数组；root 已完成验证。 */
 static bool vfs_path_matches_subtree_prefix(const char *path, const char *root,
                                             size_t root_length) {
     return root_length < VFS_PATH_LIMIT &&
@@ -494,8 +708,7 @@ static kstatus_t vfs_rekey_cached_subtree_locked(const char *old_path,
     char old_relative[VFS_PATH_LIMIT];
     vfs_fat32_mount_t *old_mount = vfs_fat32_mount_for_path(old_path, old_relative);
     size_t relative_length = old_mount != 0 ? vfs_string_length(old_relative) : 0U;
-    /* Validate the entire set before publishing any path. The namespace
-     * lock keeps both passes consistent, including mount aliases. */
+    /* 发布任何路径前先验证整个集合。命名空间锁保证两轮遍历一致，包括挂载别名。 */
     for (unsigned pass = 0U; pass < (publish ? 2U : 1U); ++pass) {
     for (uint32_t index = 0U; index < g_vfs_node_capacity; ++index) {
         vnode_t *candidate = g_vfs_nodes[index];
@@ -541,11 +754,80 @@ static kstatus_t vfs_rekey_cached_subtree_locked(const char *old_path,
         __builtin_memcpy(replacement, new_path, new_length);
         __builtin_memcpy(replacement + new_length, suffix, suffix_length);
         replacement[new_length + suffix_length] = '\0';
+        vfs_namespace_remove_locked(candidate);
         __builtin_memcpy(backend->path, replacement,
                          new_length + suffix_length + 1U);
+        vfs_namespace_insert_locked(candidate, index);
     }
     }
     return K_OK;
+}
+
+/* 替换磁盘文件前保留旧 inode 内容并关闭其原生句柄；缓存不是额外的目录项。 */
+static kstatus_t vfs_rename_fat32_cached(const char *old_path, size_t old_length,
+                                        const char *new_path, size_t new_length,
+                                        vfs_fat32_mount_t *mount,
+                                        const char *old_relative, const char *new_relative) {
+    vnode_t *retired = 0;
+    vfs_backend_node_t *backend = 0;
+    vfs_initialize();
+    vfs_lock();
+    kstatus_t status = vfs_rekey_cached_subtree_locked(
+        old_path, old_length, new_path, new_length, false);
+    if (status == K_OK) {
+        vnode_t *source = vfs_find_fat_node_locked(old_path);
+        vnode_t *target = vfs_find_fat_node_locked(new_path);
+        /* 大小写或挂载别名可能指向同一个 inode，不能退役源文件自身。 */
+        if (target != 0 && target != source) {
+            retired = target;
+            object_get(retired);
+            backend = retired->fs_private;
+        }
+    }
+    vfs_unlock();
+    if (status != K_OK) return status;
+    if (backend != 0) {
+        status = vfs_fat32_backend_prepare_unlink(backend);
+        if (status != K_OK) goto release;
+        vfs_backend_lock(backend);
+        if (!backend->directory &&
+            (!backend->unlink_prepared || backend->detached ||
+             backend->size != backend->snapshot_size ||
+             backend->content_revision != backend->snapshot_revision)) {
+            status = K_EBUSY;
+            goto abort;
+        }
+        if (backend->fat_file != 0) {
+            if (!fat32_close(backend->fat_file)) {
+                status = K_EIO;
+                goto abort;
+            }
+            backend->fat_file = 0;
+        }
+    }
+    if (!fat32_rename_path(mount->filesystem, old_relative, new_relative)) {
+        status = K_EIO;
+        if (backend != 0) goto abort;
+        goto release;
+    }
+    if (backend != 0) {
+        vfs_fat32_backend_commit_unlink_locked(backend);
+        vfs_backend_unlock(backend);
+    }
+    vfs_lock();
+    bool removed = backend != 0 && backend->namespace_slot < g_vfs_node_capacity &&
+        g_vfs_nodes[backend->namespace_slot] == retired;
+    if (removed) vfs_set_node_slot_locked(backend->namespace_slot, 0);
+    status = vfs_rekey_cached_subtree_locked(old_path, old_length, new_path, new_length, true);
+    vfs_unlock();
+    if (removed) object_put(retired);
+    goto release;
+abort:
+    vfs_backend_unlock(backend);
+    vfs_fat32_backend_abort_unlink(backend);
+release:
+    if (retired != 0) object_put(retired);
+    return status;
 }
 
 kstatus_t vfs_rename_kernel(const char *old_path, const char *new_path) {
@@ -580,25 +862,8 @@ kstatus_t vfs_rename_kernel(const char *old_path, const char *new_path) {
         if (!old_mounted || !new_mounted || old_mount != new_mount ||
             old_relative[0] == 0 ||
             new_relative[0] == 0) return K_EXDEV;
-        vfs_initialize();
-        vfs_lock();
-        kstatus_t rekey_status = vfs_rekey_cached_subtree_locked(
-            old_path, old_length, new_path, new_length, false);
-        vfs_unlock();
-        if (rekey_status != K_OK) return rekey_status;
-        if (!fat32_rename_path(old_mount->filesystem,
-                                      old_relative, new_relative)) {
-            return K_EIO;
-        }
-        /* FAT keeps the inode alive across a rename.  Rekey cached vnodes so
-         * already-open files continue to use the new path for later I/O and
-         * fstat, while fresh opens do not retain the old cache key. */
-        vfs_initialize();
-        vfs_lock();
-        rekey_status = vfs_rekey_cached_subtree_locked(old_path, old_length,
-                                                      new_path, new_length, true);
-        vfs_unlock();
-        return rekey_status;
+        return vfs_rename_fat32_cached(old_path, old_length, new_path, new_length,
+                                      old_mount, old_relative, new_relative);
     }
 
     vfs_initialize();
@@ -652,8 +917,7 @@ kstatus_t vfs_rename_kernel(const char *old_path, const char *new_path) {
         return K_EINVAL;
     }
 
-    /* Validate every descendant before changing any path, so a failed rename
-     * cannot leave a partially moved in-memory directory tree. */
+    /* 更改路径前验证所有后代，避免重命名失败后内存目录树只移动了一部分。 */
     for (uint32_t index = 0U; index < g_vfs_node_capacity; ++index) {
         vnode_t *candidate = g_vfs_nodes[index];
         vfs_backend_node_t *backend = candidate != 0 ?
@@ -673,8 +937,7 @@ kstatus_t vfs_rename_kernel(const char *old_path, const char *new_path) {
             return K_EACCES;
         }
     }
-    /* Publish replacement and source rekey under the same namespace lock.
-     * Existing opens retain their vnode references and the old contents. */
+    /* 在同一命名空间锁下发布替换项并重新设置源路径键。已有 open 仍保留 vnode 引用和旧内容。 */
     if (replaced != 0) {
         for (uint32_t index = 0U; index < g_vfs_node_capacity; ++index) {
             if (g_vfs_nodes[index] == replaced) {
@@ -698,8 +961,10 @@ kstatus_t vfs_rename_kernel(const char *old_path, const char *new_path) {
         __builtin_memcpy(replacement + new_length, backend->path + old_length,
                          suffix_length);
         replacement[new_length + suffix_length] = '\0';
+        vfs_namespace_remove_locked(candidate);
         __builtin_memcpy(backend->path, replacement,
                          new_length + suffix_length + 1U);
+        vfs_namespace_insert_locked(candidate, index);
     }
     vfs_unlock();
     if (replaced != 0) object_put(replaced);
@@ -721,8 +986,8 @@ static bool vfs_append_entry(os_file_info_t entries[VFS_DIRECTORY_ENTRY_LIMIT],
     size_t name_length = vfs_file_name_length(entry->name);
     if (name_length >= OS_FILE_NAME_MAX) return false;
     for (uint32_t index = 0U; index < *entry_count; ++index) {
-        /* The incoming length is bounded by the fixed name array. Check
-         * the candidate terminator there instead of rescanning its length. */
+        /* 输入长度受定长名称数组约束。直接检查候选名称在该位置的终止符，
+         * 无需重新扫描长度。 */
         if (entries[index].name[name_length] != 0 ||
             !vfs_path_range_equals(entries[index].name, name_length,
                                    entry->name, name_length)) {
@@ -752,7 +1017,7 @@ static BOOLEAN vfs_collect_fat_directory_entry(VOID *context, const os_file_info
     return 1;
 }
 
-/* Use one direct-child rule for both synthetic directory lookup and listing. */
+/* 合成目录查找和目录列表共用同一条直接子项判断规则。 */
 static const char *vfs_mount_child_name(const vfs_fat32_mount_t *mount,
                                         const char *path, size_t path_length,
                                         size_t *name_length) {
@@ -797,9 +1062,8 @@ static bool vfs_append_mount_children(const char *path, size_t path_length,
     return true;
 }
 
-/* The current VFS stores files by absolute path.  Derive directory entries
- * from those paths here so every user of the VFS sees the same namespace. */
-static kstatus_t vfs_enumerate_kernel_batch(const char *path, uint32_t index,
+/* 当前 VFS 按绝对路径保存文件。在此根据路径生成目录项，使所有 VFS 使用方看到相同命名空间。 */
+kstatus_t vfs_enumerate_kernel_batch(const char *path, uint32_t index,
                                             os_file_info_t *out, uint32_t capacity,
                                             uint32_t *count) {
     os_file_info_t entries[VFS_DIRECTORY_ENTRY_LIMIT];
@@ -817,7 +1081,7 @@ static kstatus_t vfs_enumerate_kernel_batch(const char *path, uint32_t index,
     directory_length = vfs_string_length(path);
     if (directory_length == 0U || directory_length >= VFS_PATH_LIMIT) return K_EINVAL;
     while (directory_length > 1U && path[directory_length - 1U] == '/') --directory_length;
-    /* Only [0, entry_count) is read; append publishes complete entries. */
+    /* 仅读取 [0, entry_count)；追加操作会完整发布目录项。 */
 
     mount = vfs_fat32_mount_for_path(path, relative);
     bool mounted_directory = false;
@@ -837,8 +1101,10 @@ static kstatus_t vfs_enumerate_kernel_batch(const char *path, uint32_t index,
         if (mounted_info.type != OS_FILE_TYPE_DIRECTORY) return K_EINVAL;
         directory_exists = true;
         vfs_directory_collection_t collection = {entries, &entry_count, false};
+        /* 由收集器判断容量耗尽，不能让底层在第 256 项静默停止，否则后续批次会误报 EOF。
+         * 重名项不占新槽，因此必须继续访问到真正的末尾或首次追加失败。 */
         fat32_visit_directory(mount->filesystem, relative,
-                                     VFS_DIRECTORY_ENTRY_LIMIT,
+                                     UINT32_MAX,
                                      vfs_collect_fat_directory_entry, &collection);
         if (collection.failed) return K_ENOMEM;
     }
@@ -856,7 +1122,9 @@ static kstatus_t vfs_enumerate_kernel_batch(const char *path, uint32_t index,
                                       (vfs_backend_node_t *)vnode->fs_private : 0;
         size_t remainder_index;
         const char *remainder;
-        if (backend == 0) continue;
+        /* FAT 缓存只保存打开 inode 的状态；磁盘枚举已经提供真实名称。
+         * 重复合并会产生大小写别名，并让已删除或已替换的 inode 重新出现在列表中。 */
+        if (backend == 0 || backend->fat32_node) continue;
         size_t matched = 0U;
         while (matched < directory_length && backend->path[matched] != 0 &&
                backend->path[matched] == path[matched]) ++matched;
@@ -955,15 +1223,16 @@ static vnode_t *vfs_create_vnode_object(vfs_backend_node_t *backend) {
     vnode->size = backend->size;
     vnode->ops = 0;
     vnode->fs_private = backend;
-    atomic_init(&vnode->lock.state, 0U);
+    io_mutex_init(&backend->write_mutex, true);
+    io_mutex_init(&vnode->lock, true);
     vnode->page_cache = 0;
     wait_queue_init(&vnode->record_lock_waitq);
     atomic_init(&vnode->record_lock_sequence, 0U);
     return vnode;
 }
 
-/* Release one idle native handle under pressure, retaining its VFS page
- * cache. A registry-only inode has no live file or mapping references. */
+/* 内存压力下释放一个空闲原生句柄，同时保留 VFS 页缓存。仅由注册表持有的 inode
+ * 没有活动文件或映射引用。 */
 static bool vfs_release_idle_fat_handle(OS_FAT32 *filesystem) {
     for (uint32_t index = 0U;; ++index) {
         vnode_t *candidate = 0;
@@ -985,7 +1254,7 @@ static bool vfs_release_idle_fat_handle(OS_FAT32 *filesystem) {
         bool released = false;
         if (backend != 0) {
             vfs_backend_lock(backend);
-            /* Recheck after pinning: a concurrent open may now own it. */
+            /* 固定引用后重新检查：并发 open 此时可能已经持有它。 */
             if (atomic_load_explicit(&candidate->object.refs.value, memory_order_acquire) == 2U &&
                 backend->fat_file != 0 && !backend->detached &&
                 backend->fat_file->FileSystem == filesystem &&
@@ -1017,8 +1286,7 @@ static kstatus_t vfs_create_fat32_vnode(const char *path,
             .type = OS_FILE_TYPE_DIRECTORY, .mode = 0040755U
         };
     } else if (known_info != 0) {
-        /* The open path already queried this entry; avoid a second directory
-         * traversal. Callers creating a new entry must pass no snapshot. */
+        /* open 路径已查询此条目，避免再次遍历目录。创建新条目的调用方不得传入快照。 */
         info = *known_info;
     } else if (!fat32_stat_path(mount->filesystem, relative, &info) ||
                info.type == OS_FILE_TYPE_UNKNOWN) {
@@ -1029,8 +1297,8 @@ static kstatus_t vfs_create_fat32_vnode(const char *path,
             .type = OS_FILE_TYPE_DIRECTORY, .mode = 0040755U
         };
     }
-    /* Cached-open fast path: no temporary allocation or native FAT handle.
-     * Still recheck after allocation below to resolve concurrent misses. */
+    /* 缓存命中快速路径：无需临时分配或原生 FAT 句柄。下方分配后仍需重新检查，
+     * 以解决并发未命中。 */
     vfs_initialize();
     vfs_lock();
     vnode_t *cached = vfs_find_fat_node_locked(path);
@@ -1041,7 +1309,7 @@ static kstatus_t vfs_create_fat32_vnode(const char *path,
         return K_OK;
     }
     vfs_unlock();
-    /* Cached-open fast path end. */
+    /* 缓存命中快速路径结束。 */
     backend = (vfs_backend_node_t *)kzalloc(sizeof(*backend), 0);
     if (backend == 0) return K_ENOMEM;
     size_t path_length = vfs_string_length(path);
@@ -1055,31 +1323,34 @@ static kstatus_t vfs_create_fat32_vnode(const char *path,
     backend->directory = info.type == OS_FILE_TYPE_DIRECTORY;
     backend->mutable_node = true;
     backend->fat32_node = true;
+    backend->fat_filesystem = mount->filesystem;
     backend->fat_file = 0;
     backend->read = backend->directory ? 0 : vfs_fat32_backend_read;
     backend->write = backend->directory ? 0 : vfs_fat32_backend_write;
     backend->fsync = backend->directory ? 0 : vfs_fat32_backend_fsync;
     backend->truncate = backend->directory ? 0 : vfs_fat32_backend_truncate;
     backend->context = backend;
-    atomic_init(&backend->io_lock.state, 0U);
+    io_mutex_init(&backend->io_lock, true);
     vnode = vfs_create_vnode_object(backend);
     if (vnode == 0) {
         kfree(backend);
         return K_ENOMEM;
     }
-    if (keep_fat_file && !backend->directory &&
+    /* 读写 inode 也保留原生句柄，避免数据库每次 I/O 都重新扫描路径并丢弃簇链索引。
+     * 可写打开原先允许不占用原生槽位；资源紧张时继续保留此行为。 */
+    if (!backend->directory &&
         !fat32_open(mount->filesystem, relative,
                            &backend->fat_file)) {
-        if (!vfs_release_idle_fat_handle(mount->filesystem) ||
-            !fat32_open(mount->filesystem, relative, &backend->fat_file)) {
+        bool opened = vfs_release_idle_fat_handle(mount->filesystem) &&
+            fat32_open(mount->filesystem, relative, &backend->fat_file);
+        if (!opened && keep_fat_file) {
             object_put(vnode);
             return K_EIO;
         }
     }
     /*
-     * Prefer a canonical FAT vnode so mmap and direct I/O share one page
-     * cache.  The registry is only a cache, though: exhausting its fixed
-     * slots must never make an otherwise valid disk file impossible to open.
+    * 优先使用规范 FAT vnode，使 mmap 和直接 I/O 共用一个页缓存。但注册表本身只是缓存：
+    * 固定槽位耗尽绝不能导致原本有效的磁盘文件无法打开。
      */
     vfs_initialize();
     vfs_lock();
@@ -1087,8 +1358,7 @@ static kstatus_t vfs_create_fat32_vnode(const char *path,
     if (existing != 0) {
         object_get(existing);
         vfs_unlock();
-        /* The canonical inode already supports coherent direct read/write.
-         * A writable open must not discard its handle and seek caches. */
+        /* 规范 inode 已支持一致的直接读写。可写 open 不能丢弃其句柄和查找缓存。 */
         object_put(vnode);
         *out = existing;
         return K_OK;
@@ -1096,10 +1366,8 @@ static kstatus_t vfs_create_fat32_vnode(const char *path,
     uint32_t slot = vfs_free_node_slot_locked();
     if (slot == UINT32_MAX) {
         /*
-         * All canonical slots are occupied.  Return this vnode uncached
-         * instead of turning the 65th distinct FAT path into K_ENOMEM.
-         * Existing cached paths remain canonical; this transient vnode is
-         * destroyed when its last file/mapping reference is released.
+         * 所有规范槽位都已占用。将此 vnode 作为未缓存对象返回，不要让第 65 个不同 FAT 路径变成 K_ENOMEM。
+         * 已有缓存路径仍保持规范；此临时 vnode 会在最后一个文件/映射引用释放时销毁。
          */
         vfs_unlock();
         *out = vnode;
@@ -1139,6 +1407,27 @@ kstatus_t vfs_register_node(vfs_backend_node_t *backend) {
     return K_OK;
 }
 
+/* 分配在锁外完成；冲突、父目录和索引发布必须属于同一个命名空间事务。
+ * 失败时在解锁后释放未发布对象，避免析构和页缓存处理进入命名空间临界区。 */
+static kstatus_t vfs_publish_memory_node(vnode_t *vnode, size_t path_length,
+                                        kstatus_t missing_parent) {
+    vfs_backend_node_t *backend = vnode->fs_private;
+    vfs_initialize();
+    vfs_lock();
+    kstatus_t status;
+    if (vfs_find_node_locked(backend->path) != 0) status = K_EEXIST;
+    else if (!vfs_parent_directory_exists_locked(backend->path, path_length))
+        status = missing_parent;
+    else {
+        uint32_t slot = vfs_free_node_slot_locked();
+        status = slot == UINT32_MAX ? K_ENOMEM : K_OK;
+        if (status == K_OK) vfs_set_node_slot_locked(slot, vnode);
+    }
+    vfs_unlock();
+    if (status != K_OK) object_put(vnode);
+    return status;
+}
+
 static kstatus_t vfs_create_memory_node(const char *path, uint32_t mode,
                                         bool directory) {
     vfs_backend_node_t *backend;
@@ -1146,8 +1435,6 @@ static kstatus_t vfs_create_memory_node(const char *path, uint32_t mode,
     char relative[VFS_PATH_LIMIT];
     os_file_info_t existing_info;
     vfs_fat32_mount_t *mount;
-    bool exists;
-    bool parent;
     if (path == 0 || path[0] != '/') return K_EINVAL;
     path_length = vfs_string_length(path);
     if (path_length <= 1U || path_length >= VFS_PATH_LIMIT ||
@@ -1163,16 +1450,6 @@ static kstatus_t vfs_create_memory_node(const char *path, uint32_t mode,
         }
         return K_OK;
     }
-    vfs_initialize();
-    vfs_lock();
-    exists = vfs_find_node_locked(path) != 0;
-    parent = vfs_parent_directory_exists_locked(path, path_length);
-    if (exists || !parent) {
-        vfs_unlock();
-        return exists ? K_EEXIST : (parent ? K_EBUSY : K_ENOTDIR);
-    }
-    vfs_unlock();
-
     backend = (vfs_backend_node_t *)kzalloc(sizeof(*backend), 0);
     if (backend == 0) return K_ENOMEM;
     for (size_t index = 0U; index <= path_length; ++index) {
@@ -1188,9 +1465,13 @@ static kstatus_t vfs_create_memory_node(const char *path, uint32_t mode,
     backend->fsync = 0;
     backend->truncate = directory ? 0 : vfs_memory_backend_truncate;
     backend->context = backend;
-    atomic_init(&backend->io_lock.state, 0U);
-    kstatus_t status = vfs_register_node(backend);
-    return status == K_EBUSY ? K_EEXIST : status;
+    io_mutex_init(&backend->io_lock, true);
+    vnode_t *vnode = vfs_create_vnode_object(backend);
+    if (vnode == 0) {
+        kfree(backend);
+        return K_ENOMEM;
+    }
+    return vfs_publish_memory_node(vnode, path_length, K_ENOTDIR);
 }
 
 kstatus_t vfs_create_kernel(const char *path, uint32_t mode, bool directory) {
@@ -1201,9 +1482,8 @@ kstatus_t vfs_mkdir_kernel(const char *path, uint32_t mode) {
     return vfs_create_memory_node(path, mode, true);
 }
 
-/* Immutable link contents are published together with their namespace entry.
- * Parent validation and collision detection share the namespace lock: a
- * failed or racing creation never exposes a partially initialized link. */
+/* 不可变链接内容与命名空间项一起发布。父目录验证和冲突检测共用命名空间锁：
+ * 创建失败或发生竞争时都不会暴露只初始化了一部分的链接。 */
 kstatus_t vfs_symlink_kernel(const char *target, const char *path) {
     char relative[VFS_PATH_LIMIT];
     size_t length = vfs_string_length(path);
@@ -1213,8 +1493,7 @@ kstatus_t vfs_symlink_kernel(const char *target, const char *path) {
     if (length >= VFS_PATH_LIMIT || target_length >= VFS_PATH_LIMIT)
         return K_ENAMETOOLONG;
     if (length <= 1U || path[length - 1U] == '/') return K_EINVAL;
-    /* FAT has no native symlink representation. Do not publish a volatile
-     * shadow inode over persistent files; /tmp is already memory-backed. */
+    /* FAT 没有原生符号链接表示。不要在持久文件上发布易失影子 inode；/tmp 已由内存后备。 */
     if (vfs_fat32_mount_for_path(path, relative) != 0) return K_EPERM;
     vfs_backend_node_t *backend = kzalloc(sizeof(*backend), 0);
     if (backend == 0) return K_ENOMEM;
@@ -1226,24 +1505,12 @@ kstatus_t vfs_symlink_kernel(const char *target, const char *path) {
     backend->data_capacity = target_length + 1U;
     backend->mode = 0120777U;
     backend->mutable_node = true;
-    atomic_init(&backend->io_lock.state, 0U);
+    io_mutex_init(&backend->io_lock, true);
     vnode_t *vnode = vfs_create_vnode_object(backend);
     if (vnode == 0) {
         kfree(backend->data); kfree(backend); return K_ENOMEM;
     }
-    vfs_initialize();
-    vfs_lock();
-    kstatus_t status;
-    if (vfs_find_node_locked(path) != 0) status = K_EEXIST;
-    else if (!vfs_parent_directory_exists_locked(path, length)) status = K_ENOENT;
-    else {
-        uint32_t slot = vfs_free_node_slot_locked();
-        status = slot == UINT32_MAX ? K_ENOMEM : K_OK;
-        if (status == K_OK) vfs_set_node_slot_locked(slot, vnode);
-    }
-    vfs_unlock();
-    if (status != K_OK) object_put(vnode);
-    return status;
+    return vfs_publish_memory_node(vnode, length, K_ENOENT);
 }
 
 kstatus_t vfs_readlink_kernel(const char *path, char *buffer, size_t capacity,
@@ -1270,14 +1537,28 @@ kstatus_t vfs_readlink_kernel(const char *path, char *buffer, size_t capacity,
     }
     size_t count = backend->size < capacity ? (size_t)backend->size : capacity;
     memcpy(buffer, backend->data, count);
-    *bytes = count; // readlink deliberately does not append a terminator.
+    *bytes = count; // readlink 按约定不追加字符串终止符。
     vfs_unlock();
     return K_OK;
 }
 
-/* Resolve components in order: collapse '..' only after expanding a preceding
- * link. Metadata/readlink operations take their own short namespace locks; no
- * backing-store lookup or allocation runs while retaining the namespace lock. */
+/* FAT 不保存符号链接，普通磁盘路径可直接查找；内存后备路径可能包含链接，必须逐段解析。 */
+bool vfs_path_needs_resolution(const char *path) {
+    if (path == 0 || path[0] != '/') return true;
+    for (size_t i = 0U; path[i] != '\0'; ++i) {
+        if (path[i] != '/') continue;
+        const char *part = path + i + 1U;
+        if (part[0] == '/' || (i != 0U && part[0] == '\0')) return true;
+        if (part[0] != '.') continue;
+        if (part[1] == '\0' || part[1] == '/') return true;
+        if (part[1] == '.' && (part[2] == '\0' || part[2] == '/')) return true;
+    }
+    char relative[VFS_PATH_LIMIT];
+    return vfs_fat32_mount_for_path(path, relative) == 0;
+}
+
+/* 按顺序解析路径分量：先展开前面的链接，再折叠 '..'。元数据/readlink 操作分别短暂获取命名空间锁；
+ * 持有命名空间锁时不执行后备存储查询或内存分配。 */
 kstatus_t vfs_resolve_path_kernel(const char *path, bool follow_final,
                                 bool allow_missing_leaf, char output[256]) {
     char pending[VFS_PATH_LIMIT], candidate[VFS_PATH_LIMIT];
@@ -1360,19 +1641,12 @@ kstatus_t vfs_stat_kernel(const char *path, os_file_info_t *out) {
         vfs_set_leaf_name(path, out->name);
         return K_OK;
     }
-    if (mount != 0) {
-        bool found = fat32_stat_path(mount->filesystem, relative, out);
-        if (found) return K_OK;
-        if (!vfs_mount_parent_exists(path, path_length)) return K_ENOENT;
-        *out = (os_file_info_t){
-            .type = OS_FILE_TYPE_DIRECTORY, .mode = 0040755U
-        };
-        vfs_set_leaf_name(path, out->name);
-        return K_OK;
-    }
     vfs_initialize();
     vfs_lock();
-    vnode_t *vnode = vfs_find_node_locked(path);
+    /* 已发布的 FAT inode 与 fstat 使用同一份元数据。命中时不再扫描磁盘目录，
+     * 也不会读到尚未写回目录项的旧长度。查询沿用卷标识和 detached 检查。 */
+    vnode_t *vnode = mount != 0 ? vfs_find_fat_node_locked(path) :
+                                vfs_find_node_locked(path);
     if (vnode != 0) {
         vfs_backend_node_t *backend = (vfs_backend_node_t *)vnode->fs_private;
         if (backend == 0) {
@@ -1383,7 +1657,7 @@ kstatus_t vfs_stat_kernel(const char *path, os_file_info_t *out) {
         vfs_unlock();
         return K_OK;
     }
-    if (vfs_directory_exists_locked(path, path_length)) {
+    if (mount == 0 && vfs_directory_exists_locked(path, path_length)) {
         *out = (os_file_info_t){0};
         out->type = OS_FILE_TYPE_DIRECTORY;
         out->mode = 0040555U;
@@ -1392,7 +1666,36 @@ kstatus_t vfs_stat_kernel(const char *path, os_file_info_t *out) {
         return K_OK;
     }
     vfs_unlock();
+    if (mount != 0) {
+        bool found = fat32_stat_path(mount->filesystem, relative, out);
+        if (found) return K_OK;
+        if (!vfs_mount_parent_exists(path, path_length)) return K_ENOENT;
+        *out = (os_file_info_t){
+            .type = OS_FILE_TYPE_DIRECTORY, .mode = 0040755U
+        };
+        vfs_set_leaf_name(path, out->name);
+        return K_OK;
+    }
     return K_ENOENT;
+}
+
+kstatus_t vfs_space_kernel(const char *path, vfs_space_info_t *out) {
+    char resolved[VFS_PATH_LIMIT], relative[VFS_PATH_LIMIT];
+    os_file_info_t info;
+    if (out == 0) return K_EINVAL;
+    kstatus_t status = vfs_resolve_path_kernel(path, true, false, resolved);
+    if (status != K_OK) return status;
+    status = vfs_stat_kernel(resolved, &info);
+    if (status != K_OK) return status;
+    vfs_fat32_mount_t *mount = vfs_fat32_mount_for_path(resolved, relative);
+    if (mount != 0) return vfs_disk_space(mount->filesystem, out);
+    vfs_initialize();
+    vfs_lock();
+    vnode_t *vnode = vfs_find_node_locked(resolved);
+    bool memory = vnode != 0 ? vfs_backend_memory_space(vnode->fs_private) :
+        vfs_volatile_path(resolved);
+    vfs_unlock();
+    return memory ? vfs_memory_space(out) : K_ENOSYS;
 }
 
 kstatus_t vfs_remove_typed_kernel(const char *path, int directory) {
@@ -1446,9 +1749,8 @@ kstatus_t vfs_remove_typed_kernel(const char *path, int directory) {
                 return K_EBUSY;
             }
         }
-        /* Native FAT refuses unlink while a raw handle is open. The snapshot
-         * now owns old-file reads, so release only at the unlink boundary.
-         * If deletion fails, subsequent I/O can reopen the unchanged path. */
+        /* 原生 FAT 在原始句柄打开时会拒绝 unlink。快照现在负责旧文件读取，因此只在 unlink 边界释放句柄。
+         * 若删除失败，后续 I/O 仍可重新打开未变化的路径。 */
         if (mounted_backend != 0 && mounted_backend->fat_file != 0) {
             if (!fat32_close(mounted_backend->fat_file)) {
                 vfs_backend_unlock(mounted_backend);
@@ -1472,11 +1774,11 @@ kstatus_t vfs_remove_typed_kernel(const char *path, int directory) {
         }
         /* 删除磁盘目录项后同步摘除规范 vnode；仍被打开的 file 引用会让
          * vnode 保持有效。同名重建的 vnode 必须保留。 */
-        for (;;) {
+        if (mounted_victim != 0) {
             vnode_t *detached = 0;
             vfs_lock();
-            /* Evict the pinned inode, never a replacement with the same name.
-             * Pointer identity also survives mount changes between passes. */
+            /* 淘汰被固定的 inode，而不是同名替代项。即使两轮操作之间挂载发生变化，
+             * 指针标识仍保持有效。 */
             for (uint32_t node_index = 0U;
                  node_index < g_vfs_node_capacity; ++node_index) {
                 vnode_t *candidate = g_vfs_nodes[node_index];
@@ -1486,8 +1788,9 @@ kstatus_t vfs_remove_typed_kernel(const char *path, int directory) {
                 break;
             }
             vfs_unlock();
-            if (detached == 0) break;
-            object_put(detached);
+            /* 发布节点时已保证每个 vnode 只占一个槽位。摘除后无需再次全表查找；
+             * 锁外释放可能触发同名重建，但新的 vnode 不能作为旧目标继续淘汰。 */
+            if (detached != 0) object_put(detached);
         }
         if (mounted_victim != 0) object_put(mounted_victim);
         return K_OK;
@@ -1505,7 +1808,7 @@ kstatus_t vfs_remove_typed_kernel(const char *path, int directory) {
             vfs_unlock();
             return K_EACCES;
         }
-        /* Validate the victim under the same namespace lock as deletion. */
+        /* 在执行删除的同一命名空间锁下验证目标项。 */
         if (directory >= 0 && backend->directory != (directory != 0)) {
             vfs_unlock();
             return directory != 0 ? K_ENOTDIR : K_EISDIR;
@@ -1559,9 +1862,23 @@ kstatus_t vfs_open_kernel(const char *path, uint32_t flags, uint32_t mode,
     char relative[VFS_PATH_LIMIT];
     vfs_fat32_mount_t *mount = vfs_fat32_mount_for_path(path, relative);
     bool mounted_path = mount != 0;
-    bool mounted_exists = mounted_path &&
+    /* 普通文件直接固定已发布的 inode，再走统一的权限、独占和截断检查。
+     * 目录可能是挂载点的隐式父目录，仍沿用后面的存在性判断。 */
+    if (mounted_path) {
+        vfs_lock();
+        vnode_t *cached = vfs_find_fat_node_locked(path);
+        if (cached != 0) {
+            vfs_backend_node_t *cached_backend = cached->fs_private;
+            if (!cached_backend->directory) {
+                object_get(cached);
+                vnode = cached;
+            }
+        }
+        vfs_unlock();
+    }
+    bool mounted_exists = vnode != 0 || (mounted_path &&
         (relative[0] == 0 ||
-         fat32_stat_path(mount->filesystem, relative, &mounted_info));
+         fat32_stat_path(mount->filesystem, relative, &mounted_info)));
     bool mounted_parent = mounted_path && !mounted_exists &&
                           vfs_mount_parent_exists(path, vfs_string_length(path));
     if (mounted_path && relative[0] == 0) {
@@ -1569,14 +1886,14 @@ kstatus_t vfs_open_kernel(const char *path, uint32_t flags, uint32_t mode,
             .type = OS_FILE_TYPE_DIRECTORY, .mode = 0040755U
         };
     }
-    if (mounted_exists || mounted_parent) {
+    existed = mounted_exists;
+    if (vnode == 0 && (mounted_exists || mounted_parent)) {
         kstatus_t mount_status = vfs_create_fat32_vnode(
             path, (flags & VFS_OPEN_WRITE) == 0U,
             mounted_exists ? &mounted_info : 0, &vnode);
         if (mount_status != K_OK) return mount_status;
-        existed = mounted_exists;
     }
-    /* A root FAT mount covers disk paths, but exact in-memory backends under
+    /* 根 FAT 挂载覆盖磁盘路径，但其下精确匹配的内存后端
      * /native remain valid namespace entries.  Look them up when the
      * mounted filesystem did not provide the requested path. */
     if (vnode == 0) {
@@ -1596,10 +1913,8 @@ kstatus_t vfs_open_kernel(const char *path, uint32_t flags, uint32_t mode,
         vfs_unlock();
     }
     /* /tmp is an implicit volatile directory so that callers can create
-     * temporary files without a persistent root-image entry.  Materialize
-     * its directory vnode on first O_DIRECTORY open; otherwise stat and
-     * parent-directory checks say it exists while open("/tmp") returns
-     * ENOENT. */
+    * 可提供没有根映像持久目录项的临时文件。首次以 O_DIRECTORY 打开时创建其目录 vnode；
+    * 否则 stat 和父目录检查会认为它存在，而 open("/tmp") 却返回 ENOENT。 */
     if (vnode == 0 && (flags & VFS_OPEN_DIRECTORY) != 0U &&
         vfs_string_length(path) == 4U &&
         vfs_path_range_equals(path, 4U, "/tmp", 4U)) {
@@ -1644,8 +1959,11 @@ kstatus_t vfs_open_kernel(const char *path, uint32_t flags, uint32_t mode,
         (!backend->directory && (flags & VFS_OPEN_DIRECTORY) != 0U) ||
         ((!backend->directory) && (flags & VFS_OPEN_READ) != 0U && backend->read == 0) ||
         ((flags & VFS_OPEN_WRITE) != 0U && backend->write == 0)) {
+        /* vnode 的最后一个引用可能在 object_put 后销毁后端；先保存错误类型。 */
+        kstatus_t failure = backend != 0 && backend->directory ? K_EISDIR :
+            (backend != 0 && (flags & VFS_OPEN_DIRECTORY) != 0U ? K_ENOTDIR : K_EACCES);
         object_put(vnode);
-        return backend != 0 && backend->directory ? K_EISDIR : K_EACCES;
+        return failure;
     }
     if ((flags & VFS_OPEN_TRUNCATE) != 0U) {
         kstatus_t truncate_status = vfs_truncate_node(vnode, 0U);
@@ -1669,6 +1987,7 @@ kstatus_t vfs_open_kernel(const char *path, uint32_t flags, uint32_t mode,
     file->flags = flags;
     file->rights = flags;
     file->private_data = 0;
+    vfs_file_position_init(file);
     *out = file;
     return K_OK;
 }

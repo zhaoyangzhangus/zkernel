@@ -1,4 +1,5 @@
 #include <kernel/net_core.h>
+#include <kernel/sched.h>
 #include <uapi/socket.h>
 
 #include "internal.h"
@@ -6,6 +7,16 @@
 #define NET_IPV4_VERSION   4U
 #define NET_IPV4_UDP       17U
 #define NET_IPV4_TCP       6U
+
+/* DF 未设置时，路由器可能对 IPv4 数据包分片。不同数据报必须使用不同的
+ * identification 值，包括不同 TCP 段及其重传。relaxed atomic 同时串行化
+ * 不同 CPU 分配的 ID；线上字段会自然按 16 位回绕。 */
+static atomic_uint g_net_ipv4_identification;
+
+static uint16_t net_next_ipv4_identification(void) {
+    return (uint16_t)atomic_fetch_add_explicit(&g_net_ipv4_identification,
+                                              1U, memory_order_relaxed);
+}
 
 static void net_copy(void *destination, const void *source, size_t length) {
     memmove(destination, source, length);
@@ -67,8 +78,8 @@ kstatus_t net_device_send(net_device_t *device, const void *frame, size_t length
 static uint32_t net_checksum_add(uint32_t sum, const uint8_t *data,
                                  size_t length) {
     while ((sum >> 16) != 0) sum = (sum & 0xFFFFU) + (sum >> 16);
-    /* Bound each batch so the 32-bit accumulator cannot overflow, even for
-     * callers of net_checksum16 with buffers larger than an IP packet. */
+    /* 限制每批数据量，避免 32 位累加器溢出，即使调用方传入的缓冲区
+     * 大于 IP 数据包也能保证安全。 */
     while (length >= 8U) {
         size_t batch = length < 65536U ? length : 65536U;
         batch &= ~(size_t)7U;
@@ -122,8 +133,8 @@ static uint16_t net_transport_checksum_ipv6(const uint8_t source_address[16],
                                             const uint8_t destination_address[16],
                                             uint8_t next_header,
                                             const uint8_t *payload, uint16_t length) {
-    /* All pseudo-header components have even lengths: accumulate directly
-     * without materializing and clearing a 40-byte temporary header. */
+    /* 伪首部的所有组成部分长度均为偶数：直接累加，无需构造并清零
+     * 一个 40 字节的临时首部。 */
     uint8_t trailer[8] = {0, 0, (uint8_t)(length >> 8), (uint8_t)length,
                          0, 0, 0, next_header};
     uint32_t sum = net_checksum_add(0, source_address, 16U);
@@ -281,7 +292,7 @@ kstatus_t net_arp_build_ipv4(uint8_t *frame, size_t capacity,
     net_copy(frame, destination_mac, 6U);
     net_copy(frame + 6U, source_mac, 6U);
     net_store_be16(frame + 12U, NET_ETHERTYPE_ARP);
-    net_store_be16(frame + 14U, 1U); /* Ethernet hardware type. */
+    net_store_be16(frame + 14U, 1U); /* Ethernet 硬件类型。 */
     net_store_be16(frame + 16U, NET_ETHERTYPE_IPV4);
     frame[18] = 6U;
     frame[19] = 4U;
@@ -335,7 +346,7 @@ kstatus_t net_udp_build_ipv4(uint8_t *frame, size_t capacity,
     ip[0] = (NET_IPV4_VERSION << 4) | 5U;
     ip[1] = 0;
     net_store_be16(ip + 2U, (uint16_t)ip_length);
-    net_store_be16(ip + 4U, 1U);
+    net_store_be16(ip + 4U, net_next_ipv4_identification());
     net_store_be16(ip + 6U, 0U);
     ip[8] = 64U;
     ip[9] = NET_IPV4_UDP;
@@ -466,6 +477,53 @@ kstatus_t net_udp_parse_ipv6(const uint8_t *frame, size_t frame_length,
     return K_OK;
 }
 
+static bool net_tcp_parse_options(const uint8_t *tcp, uint32_t header_length,
+                                  uint16_t *mss, uint8_t *window_scale,
+                                  bool *window_scale_present) {
+    *mss = 0U;
+    *window_scale = 0U;
+    *window_scale_present = false;
+    for (uint32_t offset = NET_TCP_HEADER_SIZE; offset < header_length;) {
+        uint8_t kind = tcp[offset++];
+        if (kind == 0U) break;
+        if (kind == 1U) continue;
+        if (offset >= header_length) return false;
+        uint8_t length = tcp[offset++];
+        if (length < 2U || (uint32_t)(length - 2U) > header_length - offset)
+            return false;
+        if (kind == 2U) {
+            if (length != 4U) return false;
+            uint16_t value = net_load_be16(tcp + offset);
+            if (value == 0U) return false;
+            if (*mss == 0U || value < *mss) *mss = value;
+        } else if (kind == 3U) {
+            if (length != 3U) return false;
+            if ((tcp[13] & NET_TCP_FLAG_SYN) != 0U && !*window_scale_present) {
+                /* RFC 7323 requires clamping a received shift above 14. */
+                *window_scale = tcp[offset] > 14U ? 14U : tcp[offset];
+                *window_scale_present = true;
+            }
+        }
+        offset += length - 2U;
+    }
+    return true;
+}
+
+static void net_tcp_store_syn_options(uint8_t *tcp, uint32_t header_length,
+                                       uint16_t mss, int receive_scale) {
+    if (header_length == NET_TCP_HEADER_SIZE) return;
+    tcp[12] = (uint8_t)((header_length / 4U) << 4U);
+    tcp[20] = 2U;
+    tcp[21] = 4U;
+    net_store_be16(tcp + 22U, mss);
+    if (receive_scale >= 0) {
+        tcp[24] = 1U; /* NOP aligns the three-byte WS option. */
+        tcp[25] = 3U;
+        tcp[26] = 3U;
+        tcp[27] = (uint8_t)receive_scale;
+    }
+}
+
 static void net_tcp_store_header(uint8_t *tcp, uint16_t source_port,
                                  uint16_t destination_port, uint32_t sequence,
                                  uint32_t acknowledgement, uint8_t flags,
@@ -480,22 +538,26 @@ static void net_tcp_store_header(uint8_t *tcp, uint16_t source_port,
     net_store_be16(tcp + 14U, window);
 }
 
-kstatus_t net_tcp_build_ipv4(uint8_t *frame, size_t capacity,
+kstatus_t net_tcp_build_ipv4_scaled(uint8_t *frame, size_t capacity,
                              const uint8_t source_mac[6],
                              const uint8_t destination_mac[6],
                              uint32_t source_address,
                              uint32_t destination_address,
                              uint16_t source_port, uint16_t destination_port,
                              uint32_t sequence, uint32_t acknowledgement,
-                             uint8_t flags, uint16_t window,
+                             uint8_t flags, uint16_t window, int receive_scale,
                              const void *payload, uint16_t payload_length,
                              size_t *frame_length) {
-    uint32_t tcp_length = NET_TCP_HEADER_SIZE + (uint32_t)payload_length;
+    uint32_t header_length = (flags & NET_TCP_FLAG_SYN) != 0U ?
+                             NET_TCP_SYN_HEADER_SIZE + (receive_scale >= 0 ? 4U : 0U) :
+                             NET_TCP_HEADER_SIZE;
+    uint32_t tcp_length = header_length + (uint32_t)payload_length;
     uint32_t ip_length = NET_IPV4_HEADER_SIZE + tcp_length;
     uint32_t total_length = NET_ETHERNET_HEADER_SIZE + ip_length;
     uint8_t *ip;
     uint8_t *tcp;
     if (frame == 0 || source_mac == 0 || destination_mac == 0 || frame_length == 0 ||
+        receive_scale < -1 || receive_scale > 14 ||
         (payload == 0 && payload_length != 0U) || tcp_length > UINT16_MAX ||
         ip_length > UINT16_MAX || total_length > capacity) return K_EINVAL;
     net_copy(frame, destination_mac, 6U);
@@ -505,7 +567,7 @@ kstatus_t net_tcp_build_ipv4(uint8_t *frame, size_t capacity,
     net_zero(ip, NET_IPV4_HEADER_SIZE);
     ip[0] = (NET_IPV4_VERSION << 4) | 5U;
     net_store_be16(ip + 2U, (uint16_t)ip_length);
-    net_store_be16(ip + 4U, 1U);
+    net_store_be16(ip + 4U, net_next_ipv4_identification());
     ip[8] = 64U;
     ip[9] = NET_IPV4_TCP;
     net_store_be32(ip + 12U, source_address);
@@ -514,12 +576,28 @@ kstatus_t net_tcp_build_ipv4(uint8_t *frame, size_t capacity,
     tcp = ip + NET_IPV4_HEADER_SIZE;
     net_tcp_store_header(tcp, source_port, destination_port, sequence,
                          acknowledgement, flags, window);
-    if (payload_length != 0U) net_copy(tcp + NET_TCP_HEADER_SIZE, payload, payload_length);
+    net_tcp_store_syn_options(tcp, header_length, 1460U, receive_scale);
+    if (payload_length != 0U) net_copy(tcp + header_length, payload, payload_length);
     net_store_be16(tcp + 16U, net_transport_checksum_ipv4(source_address,
                                                      destination_address,
                                                      NET_IPV4_TCP, tcp, (uint16_t)tcp_length));
     *frame_length = total_length;
     return K_OK;
+}
+
+kstatus_t net_tcp_build_ipv4(uint8_t *frame, size_t capacity,
+                             const uint8_t source_mac[6],
+                             const uint8_t destination_mac[6],
+                             uint32_t source_address, uint32_t destination_address,
+                             uint16_t source_port, uint16_t destination_port,
+                             uint32_t sequence, uint32_t acknowledgement,
+                             uint8_t flags, uint16_t window,
+                             const void *payload, uint16_t payload_length,
+                             size_t *frame_length) {
+    return net_tcp_build_ipv4_scaled(frame, capacity, source_mac, destination_mac,
+        source_address, destination_address, source_port, destination_port,
+        sequence, acknowledgement, flags, window, -1, payload, payload_length,
+        frame_length);
 }
 
 kstatus_t net_tcp_parse_ipv4(const uint8_t *frame, size_t frame_length,
@@ -558,6 +636,8 @@ kstatus_t net_tcp_parse_ipv4(const uint8_t *frame, size_t frame_length,
     view->sequence = net_load_be32(tcp + 4U);
     view->acknowledgement = net_load_be32(tcp + 8U);
     view->header_length = (uint8_t)tcp_header_length;
+    if (!net_tcp_parse_options(tcp, tcp_header_length, &view->peer_mss,
+        &view->peer_window_scale, &view->peer_window_scale_present)) return K_EIO;
     view->flags = tcp[13];
     view->window = net_load_be16(tcp + 14U);
     view->payload = tcp + tcp_header_length;
@@ -565,22 +645,26 @@ kstatus_t net_tcp_parse_ipv4(const uint8_t *frame, size_t frame_length,
     return K_OK;
 }
 
-kstatus_t net_tcp_build_ipv6(uint8_t *frame, size_t capacity,
+kstatus_t net_tcp_build_ipv6_scaled(uint8_t *frame, size_t capacity,
                              const uint8_t source_mac[6],
                              const uint8_t destination_mac[6],
                              const uint8_t source_address[16],
                              const uint8_t destination_address[16],
                              uint16_t source_port, uint16_t destination_port,
                              uint32_t sequence, uint32_t acknowledgement,
-                             uint8_t flags, uint16_t window,
+                             uint8_t flags, uint16_t window, int receive_scale,
                              const void *payload, uint16_t payload_length,
                              size_t *frame_length) {
-    uint32_t tcp_length = NET_TCP_HEADER_SIZE + (uint32_t)payload_length;
+    uint32_t header_length = (flags & NET_TCP_FLAG_SYN) != 0U ?
+                             NET_TCP_SYN_HEADER_SIZE + (receive_scale >= 0 ? 4U : 0U) :
+                             NET_TCP_HEADER_SIZE;
+    uint32_t tcp_length = header_length + (uint32_t)payload_length;
     uint32_t total_length = NET_ETHERNET_HEADER_SIZE + NET_IPV6_HEADER_SIZE + tcp_length;
     uint8_t *ip;
     uint8_t *tcp;
     if (frame == 0 || source_mac == 0 || destination_mac == 0 || source_address == 0 ||
-        destination_address == 0 || frame_length == 0 || (payload == 0 && payload_length != 0U) ||
+        destination_address == 0 || frame_length == 0 ||
+        receive_scale < -1 || receive_scale > 14 || (payload == 0 && payload_length != 0U) ||
         tcp_length > UINT16_MAX || total_length > capacity) return K_EINVAL;
     net_copy(frame, destination_mac, 6U);
     net_copy(frame + 6U, source_mac, 6U);
@@ -596,11 +680,28 @@ kstatus_t net_tcp_build_ipv6(uint8_t *frame, size_t capacity,
     tcp = ip + NET_IPV6_HEADER_SIZE;
     net_tcp_store_header(tcp, source_port, destination_port, sequence,
                          acknowledgement, flags, window);
-    if (payload_length != 0U) net_copy(tcp + NET_TCP_HEADER_SIZE, payload, payload_length);
+    net_tcp_store_syn_options(tcp, header_length, 1440U, receive_scale);
+    if (payload_length != 0U) net_copy(tcp + header_length, payload, payload_length);
     net_store_be16(tcp + 16U, net_transport_checksum_ipv6(source_address, destination_address,
                                                     NET_IPV4_TCP, tcp, (uint16_t)tcp_length));
     *frame_length = total_length;
     return K_OK;
+}
+
+kstatus_t net_tcp_build_ipv6(uint8_t *frame, size_t capacity,
+                             const uint8_t source_mac[6],
+                             const uint8_t destination_mac[6],
+                             const uint8_t source_address[16],
+                             const uint8_t destination_address[16],
+                             uint16_t source_port, uint16_t destination_port,
+                             uint32_t sequence, uint32_t acknowledgement,
+                             uint8_t flags, uint16_t window,
+                             const void *payload, uint16_t payload_length,
+                             size_t *frame_length) {
+    return net_tcp_build_ipv6_scaled(frame, capacity, source_mac, destination_mac,
+        source_address, destination_address, source_port, destination_port,
+        sequence, acknowledgement, flags, window, -1, payload, payload_length,
+        frame_length);
 }
 
 kstatus_t net_tcp_parse_ipv6(const uint8_t *frame, size_t frame_length,
@@ -634,6 +735,8 @@ kstatus_t net_tcp_parse_ipv6(const uint8_t *frame, size_t frame_length,
     view->sequence = net_load_be32(tcp + 4U);
     view->acknowledgement = net_load_be32(tcp + 8U);
     view->header_length = (uint8_t)tcp_header_length;
+    if (!net_tcp_parse_options(tcp, tcp_header_length, &view->peer_mss,
+        &view->peer_window_scale, &view->peer_window_scale_present)) return K_EIO;
     view->flags = tcp[13];
     view->window = net_load_be16(tcp + 14U);
     view->payload = tcp + tcp_header_length;
@@ -642,11 +745,15 @@ kstatus_t net_tcp_parse_ipv6(const uint8_t *frame, size_t frame_length,
 }
 
 static void net_cache_lock(spinlock_t *lock) {
+    /* RX and socket output share these short cache guards. Never let a
+     * competing local thread displace the owner while it holds the lock. */
+    sched_preempt_disable();
     spinlock_lock(lock);
 }
 
 static void net_cache_unlock(spinlock_t *lock) {
     spinlock_unlock(lock);
+    sched_preempt_enable();
 }
 
 void net_arp_cache_init(net_arp_cache_t *cache) {

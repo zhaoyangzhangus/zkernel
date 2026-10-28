@@ -1,24 +1,24 @@
 #pragma once
 
-/* Linux window command extension: width= minimized (0/1), other payload
- * fields zero. Kept separate from the general Linux syscall-number header. */
+/* Linux 窗口命令扩展：width=最小化状态（0/1），其余负载字段为零。
+ * 与通用 Linux 系统调用号头文件分开存放。 */
 #define LINUX_WINDOW_OPERATION_MINIMIZE 6U
-/* Exclusive pointer capture: width=1 acquire, width=0 release; all other
- * command fields zero. Kept here to avoid a general syscall ABI rebuild. */
+/* 独占指针捕获：width=1 表示获取，width=0 表示释放；其余命令字段为零。
+ * 放在此处，避免重建通用系统调用 ABI。 */
 #define LINUX_WINDOW_OPERATION_CAPTURE 7U
-/* Fixed 32-byte NUL-terminated title at address; length=32. */
+/* address 指向固定 32 字节、以 NUL 结尾的标题；length=32。 */
 #define LINUX_WINDOW_OPERATION_TITLE 8U
-/* width=1 compositor frame, width=0 client frame; other payload fields zero. */
+/* width=1 表示合成器边框，width=0 表示客户端边框；其余负载字段为零。 */
 #define LINUX_WINDOW_OPERATION_DECORATIONS 9U
-/* Output x/y=client screen origin, width/height=client size,
- * stride state bits: bit 0 maximized, bit 1 fullscreen.
- * All input payload fields must be zero. */
+/* 输出：x/y 为客户端屏幕原点，width/height 为客户端尺寸；
+ * stride 状态位：bit 0 表示最大化，bit 1 表示全屏。
+ * 所有输入负载字段必须为零。 */
 #define LINUX_WINDOW_OPERATION_GEOMETRY 10U
-/* width=1 maximize, width=0 restore; other payload fields zero. */
+/* width=1 表示最大化，width=0 表示还原；其余负载字段为零。 */
 #define LINUX_WINDOW_OPERATION_MAXIMIZE 11U
-/* width=1 enter fullscreen, width=0 restore; other payload fields zero. */
+/* width=1 表示进入全屏，width=0 表示还原；其余负载字段为零。 */
 #define LINUX_WINDOW_OPERATION_FULLSCREEN 12U
-/* Begin an interactive move (width=0) or resize (width=edge bits:
- * left=1, right=2, top=4, bottom=8). Requires a delivered, still-held left
- * press on an EXPLICIT_MOVE_RESIZE window. Other payload fields zero. */
+/* 开始交互式移动（width=0）或调整大小（width 为边缘位：
+ * left=1、right=2、top=4、bottom=8）。要求 EXPLICIT_MOVE_RESIZE 窗口已收到
+ * 左键按下事件且按键仍处于按下状态。其余负载字段为零。 */
 #define LINUX_WINDOW_OPERATION_INTERACTIVE 13U

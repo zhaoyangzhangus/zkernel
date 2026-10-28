@@ -8,7 +8,7 @@ source = (root / 'kernel/process/process.c').read_text()
 start = source.index('void process_detach_thread(')
 detach = source[start:source.index('static bool process_is_signaled(', start)]
 lookup = source[source.index('static thread_t *process_monitor_thread_locked('):
-                source.index('kstatus_t process_task_query(')]
+                source.index('uint64_t linux_thread_visible_tid(')]
 lookup = lookup.replace('thread_t *thread = list_entry(node,',
                         '++visits; thread_t *thread = list_entry(node,')
 fixture = r'''
@@ -28,7 +28,7 @@ typedef struct node {struct node *next,*prev;} list_head_t;
 typedef struct {
  pthread_mutex_t lock;atomic_uint state;unsigned thread_count,flags;
  int64_t exit_code;uint64_t retired_cpu_ns;
- list_head_t threads,*monitor_thread_cursor;unsigned notifications;
+ list_head_t threads,*monitor_thread_cursor,*enumeration_thread_cursor;unsigned notifications;
 } process_t;
 typedef struct {
  process_t *process;list_head_t process_node;uint64_t tid;
@@ -75,8 +75,12 @@ int main(void) {
  for(unsigned i=0;i<10000;++i)assert(find(&p,256)==items[255]);
  assert(visits==256); // one initial scan, repeated tail TID is constant-time
  assert(!find(&p,999) && visits==512);assert(find(&p,256)==items[255] && visits==512);
- remove_thread(items[0]);assert(find(&p,256)==items[255] && visits==512);
+ p.enumeration_thread_cursor=&items[255]->process_node;
+ remove_thread(items[0]);assert(!p.enumeration_thread_cursor);
+ assert(find(&p,256)==items[255] && visits==512);
+ p.enumeration_thread_cursor=&items[255]->process_node;
  remove_thread(items[255]);
+ assert(!p.enumeration_thread_cursor);
  // No early cursor assertion: a broken invalidation must reach the real UAF.
  assert(!find(&p,256));
  for(unsigned i=1;i<255;++i)remove_thread(items[i]);

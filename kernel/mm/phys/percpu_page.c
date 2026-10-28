@@ -2,6 +2,22 @@
 
 /* REFACTOR_P2_PERCPU_PAGE_OWNER: pooled state and order-zero fast paths. */
 
+typedef struct __attribute__((aligned(CACHELINE_SIZE))) {
+    spinlock_t lock;
+} page_pool_cpu_guard_t;
+static page_pool_cpu_guard_t g_pool_cpu_guards[MAX_CPUS];
+/* 仅用于内存压力诊断；分配热路径绝不访问。 */
+static atomic_uint_fast64_t g_pool_reclaim_passes;
+static atomic_uint_fast64_t g_pool_remote_borrows;
+
+void pool_cpu_lock(uint32_t cpu) {
+    spinlock_lock(&g_pool_cpu_guards[cpu].lock);
+}
+
+void pool_cpu_unlock(uint32_t cpu) {
+    spinlock_unlock(&g_pool_cpu_guards[cpu].lock);
+}
+
 static page_pool_group_t *pool_group_by_id(uint32_t id) {
     return id < g_pool_group_count ? &g_pool_groups[id] : 0;
 }
@@ -16,9 +32,8 @@ static page_pool_group_t *pool_group_for_base(uint64_t base_pfn, uint8_t order) 
     if ((base_pfn & (alignment - 1ULL)) != 0) return 0;
     uint32_t first = 0U, end = g_section_count;
     if (g_pool_sections_ordered) {
-        /* Find the first ending boundary beyond base_pfn. Rounded group
-         * ranges may overlap, so a last-start predecessor would change
-         * which section owns a shared boundary group. */
+        /* 查找第一个结束边界大于 base_pfn 的分区。对齐后的组范围可能重叠；若改为查找起始位置最近的
+         * 前驱分区，共享边界组的所有权就会改变。 */
         while (first < end) {
             uint32_t middle = first + (end - first) / 2U;
             const page_pool_section_t *section = &g_pool_sections[middle];
@@ -85,10 +100,8 @@ static uint64_t pool_group_pinned_mask(uint64_t base_pfn, uint8_t order,
 }
 
 static page_local_pool_t *pool_for_cpu(uint32_t cpu, uint8_t zone, uint8_t order) {
-    if (order == 0) {
-        return zone == PAGE_ZONE_NORMAL ? &g_o0_cache[cpu].normal : &g_o0_cache[cpu].dma32;
-    }
-    return &g_small_cache[cpu].pool[zone][order - 1U];
+    (void)order; /* 仅 0 阶分配会进入池化分配器。 */
+    return zone == PAGE_ZONE_NORMAL ? &g_o0_cache[cpu].normal : &g_o0_cache[cpu].dma32;
 }
 
 static void pool_install_base(page_local_pool_t *pool, uint64_t base_pfn,
@@ -102,7 +115,7 @@ static inline page_t *pool_slot_page(const page_local_pool_t *pool,
                                      unsigned bit, uint8_t order) {
     size_t offset = (size_t)bit << order;
     if (PAGE_LIKELY(offset < pool->contiguous_pages)) return pool->base + offset;
-    /* Adjacent physical sections need not have adjacent metadata arrays. */
+    /* 相邻物理分区的元数据数组不一定相邻。 */
     uint64_t base_pfn = page_to_phys(pool->base).value >> PAGE_SHIFT;
     return page_for_pfn(base_pfn + offset);
 }
@@ -112,8 +125,8 @@ static void pool_prepare_group_slots(page_t *base, uint8_t order) {
     uint64_t slot_pages = 1ULL << order;
     uint64_t count = (uint64_t)PAGE_POOL_GROUP_SLOTS << order;
     page_t *head = base;
-    /* The owned Buddy block has metadata for every page. Resolve contiguous
-     * sections once, carrying slot heads across disjoint metadata arrays. */
+    /* 所属 Buddy 块为每个页面都提供元数据。连续分区只解析一次，并在互不相邻的元数据数组之间传递
+     * 槽位链表头。 */
     for (uint64_t i = 0; i < count;) {
         uint64_t span = count - i;
         page_t *pages = page_span_for_pfn(base_pfn + i, &span);
@@ -123,6 +136,8 @@ static void pool_prepare_group_slots(page_t *base, uint8_t order) {
             if (index == 0) head = page;
             page->flags = index == 0 ? PAGE_COMPOUND_HEAD : PAGE_COMPOUND_TAIL;
             page->owner = PAGE_OWNER_NONE;
+            page->private_data = 0U;
+            atomic_store_explicit(&page->mapcount, -1, memory_order_relaxed);
             page->order = index == 0 ? order : 0;
             page->u.compound.head = head;
             page->u.compound.index = index;
@@ -177,8 +192,7 @@ static void pool_drain_remote(uint32_t cpu, uint8_t zone, uint8_t order,
         uint64_t bits = atomic_exchange_explicit(&group->remote_mask, 0,
                                                  memory_order_acq_rel);
         if (bits != 0) {
-            /* The owner keeps base stable throughout this drain. Resolve it
-             * only for a nonempty entry, once for the whole detached list. */
+            /* 排空期间所有者会保持 base 稳定。仅对非空条目解析一次，并供整个分离列表使用。 */
             if (pool->base != 0 && !local_base_known) {
                 local_base_pfn = page_to_phys(pool->base).value >> PAGE_SHIFT;
                 local_base_known = true;
@@ -206,7 +220,7 @@ static PAGE_NOINLINE page_t *pool_alloc_slow(uint8_t zone, uint8_t order,
         pool->free_mask = mask & (mask - 1ULL);
         page_t *page = pool_slot_page(pool, bit, order);
         if ((page->flags & PAGE_PINNED) != 0) continue;
-        atomic_store_explicit(&page->refs, 1U, memory_order_relaxed);
+        pool_prepare_allocated_page(page, order);
         return page;
     }
 
@@ -231,8 +245,7 @@ static PAGE_NOINLINE page_t *pool_alloc_slow(uint8_t zone, uint8_t order,
         lock_pages();
         page_t *block = take_from_zone_locked(zone,
                                               (uint8_t)(order + PAGE_POOL_GROUP_SHIFT));
-        /* Pool refill is an optimization, not a contiguity requirement.
-         * Fragmented memory can still satisfy the caller's smaller order. */
+        /* 补充内存池只是优化，不是连续性要求。碎片化内存仍可能满足调用方较小阶数的请求。 */
         if (block == 0) {
             page_t *single = take_from_zone_locked(zone, order);
             unlock_pages();
@@ -270,7 +283,7 @@ static PAGE_NOINLINE page_t *pool_alloc_slow(uint8_t zone, uint8_t order,
     if ((page->flags & PAGE_PINNED) != 0) {
         return pool_alloc_slow(zone, order, cpu);
     }
-    atomic_store_explicit(&page->refs, 1U, memory_order_relaxed);
+    pool_prepare_allocated_page(page, order);
     return page;
 }
 
@@ -283,7 +296,7 @@ page_t *pool_alloc_small(uint8_t zone, uint8_t order, uint32_t cpu) {
             pool->free_mask &= pool->free_mask - 1ULL;
             page_t *page = pool_slot_page(pool, bit, order);
             if ((page->flags & PAGE_PINNED) != 0) continue;
-            atomic_store_explicit(&page->refs, 1U, memory_order_relaxed);
+            pool_prepare_allocated_page(page, order);
             return page;
         }
     }
@@ -305,7 +318,7 @@ static PAGE_HOT_NOINLINE page_t *pool_alloc_o0_normal(uint32_t cpu) {
     if ((page->flags & PAGE_PINNED) != 0) {
         return pool_alloc_slow(PAGE_ZONE_NORMAL, 0, cpu);
     }
-    atomic_store_explicit(&page->refs, 1U, memory_order_relaxed);
+    pool_prepare_allocated_page(page, 0U);
     return page;
 }
 
@@ -359,8 +372,8 @@ static PAGE_NOINLINE bool pool_free_slow(page_t *page, uint8_t order, uint32_t c
 static bool pool_page_in_local_group(const page_t *page, const page_local_pool_t *pool,
                                      uint8_t order, unsigned *bit_out) {
     if (page == 0 || pool == 0 || pool->base == 0 || bit_out == 0) return false;
-    /* Only the cached metadata array permits address arithmetic. Unsigned
-     * subtraction also rejects addresses below its base without pointer UB. */
+    /* 只有缓存的元数据数组允许进行地址算术。无符号减法也能在不触发指针未定义行为的情况下，拒绝低于
+     * 基址的地址。 */
     uintptr_t metadata_delta = (uintptr_t)page - (uintptr_t)pool->base;
     if (PAGE_LIKELY(metadata_delta <
                     (size_t)pool->contiguous_pages * sizeof(page_t))) {
@@ -379,8 +392,7 @@ static bool pool_page_in_local_group(const page_t *page, const page_local_pool_t
     uint64_t slot_size = (1ULL << order) * PAGE_SIZE;
     uint64_t group_size = (uint64_t)PAGE_POOL_GROUP_SLOTS * slot_size;
     if (delta >= group_size || (delta & (slot_size - 1U)) != 0) return false;
-    /* Slots are powers of two. The range check already bounds the result
-     * below 64; avoid division in variable-order local page frees. */
+    /* 槽位数量为 2 的幂。范围检查已确保结果小于 64；可避免在可变阶本地页面释放中执行除法。 */
     *bit_out = (unsigned)(delta >> (PAGE_SHIFT + order));
     return true;
 }
@@ -422,9 +434,9 @@ static void pool_drain_one(uint32_t cpu, uint8_t zone, uint8_t order) {
         uint64_t base_pfn = page_to_phys(pool->base).value >> PAGE_SHIFT;
         page_pool_group_t *group = pool_group_for_base(base_pfn, order);
         if (group != 0) {
-            uint64_t bits = pool->free_mask |
-                atomic_exchange_explicit(&group->remote_mask, 0, memory_order_acq_rel);
-            group->free_mask |= bits;
+            /* 只有 pool_drain_remote 可以消费 remote_mask，且必须先取出已发布的收件箱节点并读取其 next
+             * 链接。生产者可能已设置标志位，但尚未发布通知。 */
+            group->free_mask |= pool->free_mask;
             if (group->free_mask != 0) {
                 pool_partial_push(pool, pool_group_id(group), group);
             }
@@ -437,11 +449,9 @@ static void pool_drain_one(uint32_t cpu, uint8_t zone, uint8_t order) {
         uint32_t id = pool_partial_pop(pool);
         page_pool_group_t *group = pool_group_by_id(id);
         if (group == 0) continue;
-        uint64_t bits = group->free_mask |
-            atomic_exchange_explicit(&group->remote_mask, 0, memory_order_acq_rel);
-        group->free_mask = bits;
-        /* Only free slots can be reclaimed or removed from the free mask.
-         * Ignore pinned pages in occupied slots, retaining tail-page checks. */
+        /* 尚未发布的远端标志位仍归生产者所有。此处提前获取它们，可能会在延迟入队前回收元数据。 */
+        uint64_t bits = group->free_mask;
+        /* 仅空闲槽位可以回收或从空闲掩码中移除。占用槽位中的固定页应忽略，但仍需保留尾页检查。 */
         uint64_t pinned = pool_group_pinned_mask(group->base_pfn, order, bits);
         group->free_mask &= ~pinned;
         if (group->free_mask == UINT64_MAX && pinned == 0) {
@@ -455,8 +465,7 @@ static void pool_drain_one(uint32_t cpu, uint8_t zone, uint8_t order) {
             free_block_locked(base, buddy_order);
             unlock_pages();
         } else {
-            /* A partly used head must not hide fully free groups behind it.
-             * Keep survivors separate so each original entry is visited once. */
+            /* 部分占用的队首不得遮住其后的全空闲组。保留独立的剩余项，以便每个原始条目只访问一次。 */
             pool_partial_push(&retained, id, group);
         }
     }
@@ -465,19 +474,54 @@ static void pool_drain_one(uint32_t cpu, uint8_t zone, uint8_t order) {
 
 void pool_drain_cpu(uint32_t cpu) {
     if (cpu >= MAX_CPUS) return;
-    /* Callers pin the current CPU, but large-order reclaim may have IRQs
-     * enabled. Do not let an interrupt mutate its local pools mid-drain. */
+    /* 调用方会固定当前 CPU，但大阶回收期间可能开启中断。排空过程中不得让中断修改该 CPU 的本地池。 */
     uint64_t irq_flags = page_pool_irq_save();
+    pool_cpu_lock(cpu);
     for (uint8_t zone = 0; zone < PAGE_ZONE_COUNT; ++zone) {
         for (uint8_t order = 0; order <= PAGE_POOL_SMALL_MAX_ORDER; ++order) {
             pool_drain_one(cpu, zone, order);
         }
     }
+    pool_cpu_unlock(cpu);
     page_pool_irq_restore(irq_flags);
 }
 
+void pool_reclaim_all(void) {
+    /* 仅用于内存压力的路径。每次只获取一个所有者保护，且不持有 Buddy 保护。远端生产者仍通过原子
+     * 收件箱发布；只有收件箱消费者可以将这些标志位并入所有者的池。 */
+    uint64_t irq_flags = page_pool_irq_save();
+    x86_preempt_disable_fast();
+    for (uint32_t cpu = 0U; cpu < MAX_CPUS; ++cpu) pool_drain_cpu(cpu);
+    atomic_fetch_add_explicit(&g_pool_reclaim_passes, 1U, memory_order_relaxed);
+    x86_preempt_enable_fast();
+    page_pool_irq_restore(irq_flags);
+}
+
+page_t *pool_alloc_remote(uint8_t order, page_alloc_flags_t flags, uint32_t requester) {
+    if (order > PAGE_POOL_SMALL_MAX_ORDER || requester >= MAX_CPUS) return 0;
+    /* 调用方固定自身并屏蔽 IRQ，且不持有池或 Buddy 保护。借用槽位仍归原池所有者；常规远端释放发布
+     * 会安全归还它，不会拆分或迁移组。 */
+    for (uint32_t cpu = 0U; cpu < MAX_CPUS; ++cpu) {
+        if (cpu == requester) continue;
+        pool_cpu_lock(cpu);
+        page_t *page = 0;
+        if ((flags & PAGE_ALLOC_DMA32) == 0U)
+            page = pool_alloc_small(PAGE_ZONE_NORMAL, order, cpu);
+        if (page == 0) page = pool_alloc_small(PAGE_ZONE_DMA32, order, cpu);
+        pool_cpu_unlock(cpu);
+        if (page != 0) {
+            atomic_fetch_add_explicit(&g_pool_remote_borrows, 1U, memory_order_relaxed);
+            return page;
+        }
+    }
+    return 0;
+}
+
 void pool_init_cpu_state(void) {
+    atomic_store_explicit(&g_pool_reclaim_passes, 0U, memory_order_relaxed);
+    atomic_store_explicit(&g_pool_remote_borrows, 0U, memory_order_relaxed);
     for (uint32_t cpu = 0; cpu < MAX_CPUS; ++cpu) {
+        spinlock_init(&g_pool_cpu_guards[cpu].lock);
         g_o0_cache[cpu].normal = (page_local_pool_t){
             .base = 0, .free_mask = 0, .partial_head = PAGE_POOL_GROUP_NONE, .contiguous_pages = 0
         };
@@ -485,13 +529,6 @@ void pool_init_cpu_state(void) {
             .base = 0, .free_mask = 0, .partial_head = PAGE_POOL_GROUP_NONE, .contiguous_pages = 0
         };
         for (uint8_t zone = 0; zone < PAGE_ZONE_COUNT; ++zone) {
-            for (uint8_t order = 1; order <= PAGE_POOL_SMALL_MAX_ORDER; ++order) {
-                page_local_pool_t *pool = pool_for_cpu(cpu, zone, order);
-                pool->base = 0;
-                pool->free_mask = 0;
-                pool->partial_head = PAGE_POOL_GROUP_NONE;
-                pool->contiguous_pages = 0;
-            }
             for (uint8_t order = 0; order <= PAGE_POOL_SMALL_MAX_ORDER; ++order) {
                 atomic_init(&g_remote_heads[cpu].head[zone][order], PAGE_POOL_GROUP_NONE);
             }
@@ -501,21 +538,31 @@ void pool_init_cpu_state(void) {
 
 
 page_t *page_alloc(uint8_t order, page_alloc_flags_t flags) {
-    /* Boot ordering guarantees allocator initialization before this API is used. */
+    /* 启动顺序保证调用此 API 前已完成分配器初始化。 */
     if (PAGE_LIKELY(order == 0 && flags == 0)) {
         uint64_t irq_flags = page_pool_irq_save();
         x86_preempt_disable_fast();
         uint32_t cpu = x86_current_cpu_index_fast();
+        if (PAGE_UNLIKELY(cpu >= MAX_CPUS)) {
+            x86_preempt_enable_fast();
+            page_pool_irq_restore(irq_flags);
+            return 0;
+        }
+        pool_cpu_lock(cpu);
         page_t *page = pool_alloc_o0_normal(cpu);
-        /* The hot path must preserve the slow path's zone fallback. COW
-         * allocations use flags == 0 and must not fail when NORMAL is
-         * exhausted while DMA32 still has usable pages. */
+        /* 热路径必须保留慢路径的内存区回退行为。COW 分配使用 flags == 0；只要 DMA32 仍有可用页面，
+         * 即使 NORMAL 已耗尽也不得失败。 */
         if (PAGE_UNLIKELY(page == 0) && cpu < MAX_CPUS) {
             page = pool_alloc_small(PAGE_ZONE_DMA32, 0U, cpu);
         }
+        pool_cpu_unlock(cpu);
         if (page != 0) page_stats_note_alloc(0U);
         x86_preempt_enable_fast();
         page_pool_irq_restore(irq_flags);
+        /* 两个 CPU 本地区都未命中并不代表内存最终耗尽。COW（flags == 0）需要与清零缺页相同的有界
+         * 本地/全局恢复流程。恢复 IRQ/抢占嵌套状态后才能重新进入。 */
+        if (PAGE_UNLIKELY(page == 0) && cpu < MAX_CPUS)
+            return page_alloc_slow(order, flags);
         return page;
     }
     return page_alloc_slow(order, flags);
@@ -531,7 +578,9 @@ void page_free(page_t *head) {
         uint64_t irq_flags = page_pool_irq_save();
         x86_preempt_disable_fast();
         uint32_t cpu = x86_current_cpu_index_fast();
+        pool_cpu_lock(cpu);
         pool_free_o0(head, cpu);
+        pool_cpu_unlock(cpu);
         x86_preempt_enable_fast();
         page_pool_irq_restore(irq_flags);
         return;

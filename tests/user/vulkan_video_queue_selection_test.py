@@ -17,6 +17,8 @@ typedef uint32_t VkVideoCodecOperationFlagsKHR;
 #define VK_QUEUE_VIDEO_ENCODE_BIT_KHR 4U
 #define VK_VIDEO_CODEC_OPERATION_DECODE_H264_BIT_KHR 1U
 #define VK_VIDEO_CODEC_OPERATION_ENCODE_H264_BIT_KHR 2U
+#define VK_VIDEO_CODEC_OPERATION_DECODE_H265_BIT_KHR 4U
+#define VK_VIDEO_CODEC_OPERATION_DECODE_AV1_BIT_KHR 8U
 typedef struct { struct { uint32_t queueCount,queueFlags; } queueFamilyProperties; } VkQueueFamilyProperties2;
 typedef struct { uint32_t videoCodecOperations; } VkQueueFamilyVideoPropertiesKHR;
 '''
@@ -26,6 +28,13 @@ int main(void) {
  VkQueueFamilyVideoPropertiesKHR v[3]={{0},{1},{2}};
  int transfer, codec;
  assert(video_choose_queue_families(q,v,3,0,&transfer,&codec)&&transfer==0&&codec==1);
+ assert(!video_choose_queue_families(q,v,3,2,&transfer,&codec));
+ v[1].videoCodecOperations=4;
+ assert(video_choose_queue_families(q,v,3,2,&transfer,&codec)&&codec==1);
+ assert(!video_choose_queue_families(q,v,3,3,&transfer,&codec));
+ v[1].videoCodecOperations=8;
+ assert(video_choose_queue_families(q,v,3,3,&transfer,&codec)&&codec==1);
+ v[1].videoCodecOperations=1;
  assert(video_choose_queue_families(q,v,3,1,&transfer,&codec)&&transfer==0&&codec==2);
  assert(!video_choose_queue_families(q,v,2,1,&transfer,&codec));
  v[2].videoCodecOperations=1;assert(!video_choose_queue_families(q,v,3,1,&transfer,&codec));

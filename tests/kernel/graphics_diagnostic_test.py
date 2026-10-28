@@ -23,12 +23,10 @@ code = r'''
 #undef printf
 ''' + f'#include "{ROOT / "kernel/graphics/internal.h"}"\n' + r'''
 #include <kernel/display.h>
-#include <kernel/qemu_stdvga.h>
 window_server_state_t g_window_server;
-static bool query_ok, flip;
+static bool query_ok;
 static uint32_t width, height, stride, format;
 static uint64_t framebuffer;
-static volatile uint32_t *front;
 static char output[1024];
 static size_t used;
 static unsigned records;
@@ -45,8 +43,6 @@ bool display_core_query(uint32_t index, uint32_t *w, uint32_t *h, uint32_t *s, u
     *w=width; *h=height; *s=stride; *f=format; return true;
 }
 uint64_t display_core_framebuffer_virtual(void) { return framebuffer; }
-bool qemu_stdvga_flip_available(void) { return flip; }
-volatile uint32_t *qemu_stdvga_front_buffer(void) { return front; }
 ''' + display + source[start:end] + r'''
 int main(void) {
     window_display_reset_locked();
@@ -59,10 +55,6 @@ int main(void) {
     assert(g_window_server.display_width==1920 && g_window_server.display_stride==2048);
     assert((uintptr_t)g_window_server.framebuffer == framebuffer);
     assert(!strcmp(output,"OS_DISPLAY_GEOMETRY width=1920 height=1080 stride=2048 format=3 fb_lo=2596069104 fb_hi=305419896\r\n"));
-    flip=true; front=(volatile uint32_t *)(uintptr_t)0x8000123456789abc;
-    reset(); assert(window_display_prepare()); assert(g_window_server.framebuffer == front);
-    front=NULL; reset(); assert(window_display_prepare());
-    assert((uintptr_t)g_window_server.framebuffer == framebuffer);
     for (unsigned invalid=0; invalid<4; ++invalid) {
         width=1920; height=1080; stride=2048; framebuffer=0x10000;
         if (invalid==0) width=0;
@@ -73,7 +65,6 @@ int main(void) {
         assert(strstr(output,"OS_WINDOW_DISPLAY_PREPARE_FAIL GEOMETRY WIDTH="));
         assert(strstr(output,"\r\n") && !strstr(output,"OS_DISPLAY_GEOMETRY"));
     }
-    window_display_set_scanout_locked(front); assert(g_window_server.framebuffer == front);
     reset(); input_event_t event={.type=INPUT_EVENT_KEY,.value=INPUT_VALUE_PRESS,.code=0x2e};
     window_server_window_t target={.identifier=UINT32_MAX};
     g_window_server.focused_identifier=7;

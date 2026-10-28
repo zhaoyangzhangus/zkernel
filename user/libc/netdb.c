@@ -9,11 +9,9 @@
 #include <uapi/syscall.h>
 
 /*
- * The kernel deliberately keeps name resolution out of the syscall ABI.  The
- * libc resolver therefore owns the small, deterministic database used by the
- * base image.  Numeric addresses and localhost are always available; an
- * /etc/hosts file extends that set without introducing a second network
- * protocol implementation in the kernel.
+ * 内核刻意不在系统调用 ABI 中提供名称解析。因此，libc 解析器管理基础映像使用的
+ * 小型确定性数据库。数字地址和 localhost 始终可用；/EFI/OS/hosts 文件可扩展此集合，
+ * 而无需在内核中引入第二套网络协议实现。
  */
 #define NETDB_HOST_BUFFER_SIZE 8192U
 #define NETDB_HOST_NAME_SIZE   256U
@@ -205,7 +203,7 @@ static bool host_state_from_hosts(const char *wanted, int family,
     int descriptor;
     ssize_t bytes;
     bool found = false;
-    descriptor = open("/etc/hosts", O_RDONLY);
+    descriptor = open("/EFI/OS/hosts", O_RDONLY);
     if (descriptor < 0) return false;
     bytes = read(descriptor, contents, sizeof(contents) - 1U);
     (void)close(descriptor);
@@ -293,7 +291,7 @@ static bool netdb_dns_read_server(uint32_t *server) {
     const char *cursor;
 
     if (server == 0) return false;
-    descriptor = open("/etc/resolv.conf", O_RDONLY);
+    descriptor = open("/EFI/OS/resolv.conf", O_RDONLY);
     if (descriptor < 0) return false;
     bytes = read(descriptor, contents, sizeof(contents) - 1U);
     (void)close(descriptor);

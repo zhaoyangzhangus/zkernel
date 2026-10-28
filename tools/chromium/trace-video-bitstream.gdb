@@ -13,7 +13,7 @@ expected=('Build ID: 364ba8b6c4ed89fc5e1e42951a2ee41f630ccb6e'
           'Build ID: 92ef122fa8ec44beedd1866b47c1bd2180669d26')
 candidate=os.environ.get('OS_VIDEO_PADDING_CANDIDATE')=='1'
 for path in ('build/nvidia/vulkan/libos-vulkan-video.so.1',
-             'build/esp/compat/linux/lib/x86_64-linux-gnu/libos-vulkan-video.so.1'):
+             'build/esp/usr/apps/chrome/lib/libos-vulkan-video.so.1'):
     if _chrome_build_id(Path(path))!=expected:
         raise gdb.GdbError('Stale video bitstream probe')
 layout=json.loads(Path('build/nvidia/vulkan/video-decode-layout.json').read_text())

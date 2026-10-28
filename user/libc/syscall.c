@@ -60,21 +60,19 @@ static volatile uint32_t g_libc_lseek_fail_debug_calls;
 static volatile uint32_t g_libc_close_fail_debug_calls;
 #endif
 /*
- * Chromium's keyed-service startup trace is emitted as five separate write(2)
- * calls.  Keep a small process-wide drain state so an old Chrome binary built
- * before the trace gate cannot turn startup into thousands of UART writes.
- * The state is intentionally only for diagnostics; it never changes the
- * return value visible to the caller.
+ * Chromium 的 keyed-service 启动跟踪会拆成五次 write(2) 调用输出。保留少量进程级
+ * 排空状态，避免旧版 Chrome 二进制在添加跟踪门控前构建，从而将启动过程变成数千次
+ * UART 写入。此状态仅用于诊断，不会改变调用方可见的返回值。
  */
 static volatile uint32_t g_libc_service_trace_drop_chunks;
 
-/* Suffix after the neutral namespace or the deployed binary's legacy one. */
+/* 中性命名空间或已部署二进制旧命名空间之后的后缀。 */
 #define LIBC_SERVICE_TRACE_PREFIX "PROFILE_SERVICE_"
 #define LIBC_SERVICE_TRACE_PREFIX_LENGTH \
     (sizeof(LIBC_SERVICE_TRACE_PREFIX) - 1U)
 #define LIBC_SERVICE_TRACE_FOLLOWUP_CHUNKS 4U
 
-/* Saturate diagnostic quotas: exhausted hot paths need no atomic writes. */
+/* 诊断额度达到上限后不再递增，耗尽额度的热路径无需执行 atomic 写入。 */
 static bool libc_trace_budget(volatile uint32_t *counter, uint32_t limit) {
     uint32_t observed = __atomic_load_n(counter, __ATOMIC_RELAXED);
     while (observed < limit) {
@@ -221,10 +219,9 @@ static bool libc_drop_service_trace_chunk(const void *buffer, size_t length) {
     return false;
 #else
     uint32_t remaining;
-    /* Complete, unconditional porting-stage markers in the deployed Chrome.
-     * Drop before entering the kernel, even after its UART budget is spent.
-     * Keep this whitelist narrow: warnings/errors and unknown markers still
-     * reach stderr, and explicit runtime tracing bypasses the gate above. */
+    /* 已部署 Chrome 中完整且无条件输出的移植阶段标记。
+     * 即使 UART 额度已耗尽，也要在进入内核前丢弃。
+     * 白名单必须保持精简：警告/错误和未知标记仍写入 stderr，显式运行时跟踪则绕过上方门控。 */
     const char *marker = 0;
     size_t marker_length = 0U;
     if (length >= 3U && memcmp(buffer, "OS_", 3U) == 0) {
@@ -315,10 +312,9 @@ static bool libc_linux_personality(void) {
 static bool g_fd_table_initialized;
 static char g_current_directory[LIBC_PATH_LIMIT] = "/";
 
-/* FAT32 does not carry POSIX permission bits.  Keep the mode requested by
- * the Linux personality for paths created during this process so stat() has
- * the same observable result as mkdir(2).  Chrome's ProcessSingleton uses a
- * 0700 temporary directory as a security check. */
+/* FAT32 不保存 POSIX 权限位。为当前进程创建的路径保留 Linux 兼容模式请求的权限，
+ * 使 stat() 的可见结果与 mkdir(2) 一致。Chrome 的 ProcessSingleton 会检查
+ * 临时目录是否为 0700。 */
 typedef struct libc_mode_override {
     bool used;
     char path[LIBC_PATH_LIMIT];
@@ -370,9 +366,8 @@ typedef struct libc_linux_timespec {
     int64_t nanoseconds;
 } libc_linux_timespec_t;
 
-/* This is the x86-64 Linux stat ABI returned by the compatibility layer.
- * It intentionally stays private: the public libc exposes the POSIX stat
- * layout below and converts at the boundary. */
+/* 这是兼容层返回的 x86-64 Linux stat ABI。
+ * 刻意保持为私有类型：libc 对外提供下方 POSIX stat 布局，并在边界处转换。 */
 typedef struct libc_linux_stat {
     uint64_t device;
     uint64_t inode;
@@ -449,7 +444,7 @@ static int libc_status_error(int64_t status) {
     return status < 0 ? libc_error(status) : 0;
 }
 
-/* Failure-only diagnostics: keep the original errno and avoid allocating. */
+/* 仅在失败时输出诊断：保留原始 errno，并避免分配内存。 */
 static void libc_tmp_open_failure(const char *stage, const char *path,
                                   int64_t status) {
     static uint32_t count;
@@ -523,12 +518,10 @@ static int adopt_linux_fd_locked(int linux_descriptor, int open_flags) {
         return result;
     }
 
-    /* The Linux kernel allocates descriptors without knowing about the
-     * native System descriptor table.  If the returned number is occupied by
-     * a native descriptor, keep each temporary Linux duplicate open while
-     * walking upward.  Closing a colliding duplicate immediately would make
-     * the kernel return the same number on the next DUP and could also make a
-     * requested F_DUPFD slot replace an existing Linux descriptor. */
+    /* Linux 内核分配描述符时并不知道 System 原生描述符表的情况。如果返回编号已被
+     * 原生描述符占用，向上查找时必须保持每个临时 Linux 副本处于打开状态。
+     * 若立即关闭冲突副本，内核下次 DUP 仍可能返回同一编号，也可能导致请求的
+     * F_DUPFD 槽位替换已有 Linux 描述符。 */
     while (duplicate_count < LIBC_FD_LIMIT) {
         int64_t duplicate;
         duplicate = __libc_linux_syscall6(
@@ -666,9 +659,8 @@ static void initialize_fd_table(void) {
     libc_fd_table_unlock();
 }
 
-/* fork() copies this lock word along with the address space.  Serialize the
- * fork snapshot with descriptor-table mutations, then release the copied lock
- * in both resulting processes before running user atfork callbacks. */
+/* fork() 会连同地址空间一起复制此锁字。先将 fork 快照与描述符表变更串行化，
+ * 再在两个新进程中释放复制得到的锁，然后运行用户 atfork 回调。 */
 void __libc_fd_table_fork_prepare(void) {
     initialize_fd_table();
     libc_fd_table_lock();
@@ -741,9 +733,8 @@ static int allocate_descriptor_locked(libc_fd_resource_t *resource,
     }
     for (unsigned int descriptor = minimum; descriptor < LIBC_FD_LIMIT; ++descriptor) {
         if (g_fd_table[descriptor].resource == 0) {
-            /* Linux exec inheritance populates the kernel's Linux fd table,
-             * not this libc table. Reserve/adopt such slots before assigning
-             * a native System handle the same numeric descriptor. */
+            /* Linux exec 继承会填充内核的 Linux fd 表，而不是此 libc 表。
+             * 为原生 System 句柄分配相同编号前，先预留/接管这些槽位。 */
             if (libc_linux_personality()) {
                 int64_t descriptor_flags = __libc_linux_syscall6(
                     LINUX_SYS_FCNTL, (uint64_t)descriptor,
@@ -1189,12 +1180,10 @@ static void fill_stat(const os_file_info_t *info, struct stat *status) {
     status->st_blocks = (blkcnt_t)((info->size + 511U) / 512U);
 }
 
-/* The native file ABI predates POSIX inode identity and therefore returns
- * zero for st_dev/st_ino.  SQLite uses the pair as its in-process lock key;
- * leaving both fields zero makes every database look like the same file.
- * System has no hard links, so a stable hash of the canonical path provides
- * the required identity for native files while keeping stat() and fstat()
- * consistent. */
+/* 原生文件 ABI 早于 POSIX inode 标识，因此 st_dev/st_ino 返回零。SQLite 使用这两个
+ * 字段作为进程内锁键；两者都为零会使所有数据库看起来都是同一个文件。
+ * System 不支持硬链接，因此可用规范路径的稳定哈希为原生文件提供所需标识，
+ * 同时保持 stat() 与 fstat() 结果一致。 */
 static void libc_set_file_identity(const char *path, struct stat *status) {
     const unsigned char *cursor = (const unsigned char *)path;
     uint64_t hash = 1469598103934665603ULL;
@@ -1241,11 +1230,9 @@ int64_t __libc_native_syscall6(uint64_t number, uint64_t argument0,
                                argument4, argument5);
 }
 
-/* Linux-compatible varargs entry point.  Chromium uses syscall() for a
- * handful of hot paths (futex, getrandom, gettid, and signal helpers) rather
- * than going through a named libc wrapper.  Linux-personality processes are
- * dispatched by the kernel based on the raw syscall number, so preserve all
- * six ABI argument slots exactly. */
+/* Linux 兼容的可变参数入口。Chromium 在少数热路径（futex、getrandom、gettid 和信号
+ * 辅助函数）中直接使用 syscall()，而不是具名 libc 封装。内核根据原始系统调用号
+ * 分发 Linux 兼容模式进程，因此必须准确保留全部六个 ABI 参数槽。 */
 static size_t linux_syscall_argument_count(long number) {
     switch ((uint64_t)number) {
     case LINUX_SYS_READ:
@@ -1355,16 +1342,14 @@ static size_t linux_syscall_argument_count(long number) {
     case LINUX_SYS_VFORK:
         return 0U;
     default:
-        /* An unsupported syscall does not need any varargs.  Avoid reading
-         * arguments that the caller did not provide before returning ENOSYS. */
+        /* 不支持的系统调用无需读取任何可变参数。返回 ENOSYS 前不要读取调用方未提供的参数。 */
         return 0U;
     }
 }
 
-/* Chromium can enter this varargs ABI from callbacks whose stack alignment is
- * not controlled by the System CRT (notably early thread/bootstrap paths).
- * GCC's realignment prologue prevents SSE stores used for the va_arg array
- * from raising #GP on an otherwise valid Linux syscall. */
+/* Chromium 可能从回调进入此可变参数 ABI，而此时栈对齐不受 System CRT 控制
+ *（尤其是早期线程和引导路径）。GCC 的重新对齐序言可避免 va_arg 数组使用的 SSE
+ * 存储指令触发 #GP，确保原本有效的 Linux 系统调用正常执行。 */
 __attribute__((force_align_arg_pointer))
 long syscall(long number, ...) {
     va_list arguments;
@@ -1740,7 +1725,7 @@ int memfd_create(const char *name, unsigned int flags) {
         errno = saved_errno;
         return -1;
     }
-    /* Keep the descriptor alive while making the backing file anonymous. */
+    /* 将后备文件设为匿名文件时，保持描述符打开。 */
     if (unlink(path) < 0) {
         int saved_errno = errno;
         (void)close(descriptor);
@@ -1783,9 +1768,8 @@ int close(int descriptor) {
         return -1;
     }
 
-    /* Keep a mapped descriptor stable through the kernel close.  Looking up
-     * the resource before taking the table lock allowed another thread to
-     * retire/reuse the slot between lookup and close. */
+    /* 在内核关闭描述符期间保持映射关系稳定。如果先于获取表锁查找资源，其他线程可能
+     * 在查找与关闭之间回收或重用该槽位。 */
     libc_fd_table_lock();
     resource = g_fd_table[descriptor].resource;
     if (resource != 0) {
@@ -1803,9 +1787,8 @@ int close(int descriptor) {
         return result;
     }
 
-    /* Direct Linux syscall users can introduce descriptors without first
-     * passing through a libc wrapper.  Adopt those only after releasing the
-     * lock, because resource_for_descriptor() performs its own locked probe. */
+    /* 直接使用 Linux 系统调用的代码可能引入未经过 libc 封装的描述符。释放锁后再接管
+     * 这些描述符，因为 resource_for_descriptor() 会自行加锁探测。 */
     libc_fd_table_unlock();
     resource = resource_for_descriptor(descriptor);
     if (resource == 0) {
@@ -1901,7 +1884,7 @@ int pipe2(int pipefd[2], int flags) {
         return -1;
     }
     if ((flags & O_CLOEXEC) != 0) {
-        /* __libc_install_pipe_handle records close-on-exec for both ends. */
+        /* __libc_install_pipe_handle 会为管道两端记录 close-on-exec 标志。 */
     }
     pipefd[0] = read_descriptor;
     pipefd[1] = write_descriptor;
@@ -2124,7 +2107,7 @@ int stat(const char *path, struct stat *status) {
 }
 
 int lstat(const char *path, struct stat *status) {
-    /* System has no symbolic-link vnode type; stat and lstat are identical. */
+    /* System 没有符号链接 vnode 类型；stat 与 lstat 的行为相同。 */
     return stat(path, status);
 }
 
@@ -2576,15 +2559,12 @@ static int duplicate_to_descriptor(int old_descriptor, int new_descriptor,
             libc_fd_resource_t *replaced =
                 g_fd_table[new_descriptor].resource;
             if (replaced->linux_fd) {
-                /* dup3 already closed the old Linux descriptor and installed
-                 * the replacement at this number.  Only release libc's
-                 * reference; close(new_descriptor) here would close the new
-                 * descriptor we just created. */
+                /* dup3 已关闭旧 Linux 描述符，并在此编号安装了替换项。这里只释放 libc
+                 * 的引用；若在此处调用 close(new_descriptor)，就会关闭刚创建的新描述符。 */
                 release_resource_reference(replaced);
             } else {
-                /* The numeric slot may have held a native System handle,
-                 * which is outside the Linux dup3 table and still needs
-                 * closing. */
+                /* 此编号槽位可能原先持有原生 System 句柄，该句柄不属于 Linux dup3 表，
+                 * 仍需将其关闭。 */
                 (void)release_descriptor(new_descriptor);
             }
             g_fd_table[new_descriptor].resource = 0;
@@ -2727,15 +2707,10 @@ int fcntl(int descriptor, int command, ...) {
     case F_GETLK:
     case F_SETLK:
     case F_SETLKW: {
-        /*
-         * System currently runs the Chromium browser as one process and does
-         * not expose a kernel-wide POSIX record-lock table.  SQLite's Unix
-         * VFS nevertheless probes and acquires these advisory locks for
-         * every database.  Treat the lock as uncontended in this mode; for
-         * F_GETLK, report the required POSIX "no conflicting lock" result.
-         * The browser's own SQLite connection state still serializes access
-         * between its threads, while this keeps sqlite3_open_v2() usable.
-         */
+        /* System 当前以单进程方式运行 Chromium 浏览器，且不提供内核级 POSIX 记录锁表。
+         * 但 SQLite 的 Unix VFS 仍会为每个数据库探测并获取这些建议锁。在此模式下将锁
+         * 视为无竞争；对于 F_GETLK，按 POSIX 要求返回“无冲突锁”。浏览器自身的 SQLite
+         * 连接状态仍会串行化线程间访问，同时保证 sqlite3_open_v2() 可用。 */
         struct flock *lock = va_arg(arguments, struct flock *);
         if (lock == 0) {
             errno = EFAULT;
@@ -2768,8 +2743,7 @@ int fcntl(int descriptor, int command, ...) {
         }
         break;
     default:
-        /* An unknown fcntl command is an invalid request, not a missing
-         * syscall; this matches the POSIX error contract. */
+        /* 未知的 fcntl 命令属于无效请求，而非缺失的系统调用；这符合 POSIX 错误约定。 */
         errno = EINVAL;
         value = -1;
         break;
@@ -2781,7 +2755,7 @@ int fcntl(int descriptor, int command, ...) {
 int ioctl(int descriptor, unsigned long request, ...) {
     (void)request;
     if (resource_for_descriptor(descriptor) == 0) return -1;
-    /* No device-specific ioctl namespace is exposed by the System ABI yet. */
+    /* System ABI 尚未公开设备专用的 ioctl 命名空间。 */
     errno = ENOTTY;
     return -1;
 }
@@ -2953,9 +2927,8 @@ int usleep(unsigned int microseconds) {
 }
 
 int pause(void) {
-    /* Avoid a busy loop in the child-side sandbox wait.  A delivered signal
-     * interrupts nanosleep when signal delivery is available; SIGKILL still
-     * terminates the process while it is sleeping. */
+    /* 避免子进程沙箱等待时忙循环。支持信号递送时，已递送的信号会中断 nanosleep；
+     * 即使进程正在休眠，SIGKILL 仍会将其终止。 */
     for (;;) {
         struct timespec request = {(time_t)3600, 0};
         if (nanosleep(&request, 0) < 0) return -1;

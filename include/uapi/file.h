@@ -5,7 +5,7 @@
 
 #define OS_FILE_NAME_MAX 64U
 
-/* FILE_OPEN flags.  The low two bits keep the original read/write ABI. */
+/* FILE_OPEN 标志。低两位沿用原有的读写 ABI。 */
 #define OS_FILE_OPEN_READ       (1U << 0)
 #define OS_FILE_OPEN_WRITE      (1U << 1)
 #define OS_FILE_OPEN_CREATE     (1U << 2)
@@ -13,7 +13,7 @@
 #define OS_FILE_OPEN_TRUNCATE   (1U << 4)
 #define OS_FILE_OPEN_APPEND     (1U << 5)
 #define OS_FILE_OPEN_DIRECTORY  (1U << 6)
-/* FILE_OPEN consumes this bit when creating the returned handle. */
+/* 创建并返回句柄时，FILE_OPEN 会使用此标志位。 */
 #define OS_FILE_OPEN_CLOEXEC    (1U << 8)
 
 enum os_file_seek_whence {
@@ -37,8 +37,7 @@ typedef struct os_file_info {
     char name[OS_FILE_NAME_MAX];
 } os_file_info_t;
 
-/* Enumerate one direct child of a directory.  A return value of -2 means
- * that index is past the end of the directory. */
+/* 枚举目录的一个直接子项。返回值为 -2 表示索引已超出目录末尾。 */
 typedef struct os_file_enumerate {
     os_versioned_header_t hdr;
     uint64_t path;
@@ -46,6 +45,18 @@ typedef struct os_file_enumerate {
     uint32_t reserved;
     os_file_info_t info;
 } os_file_enumerate_t;
+
+/* 一次扫描返回至多 32 项；返回 -2 表示到达末尾，失败时不使用 count。 */
+#define OS_FILE_ENUMERATE_BATCH_MAX 32U
+typedef struct os_file_enumerate_batch {
+    os_versioned_header_t hdr;
+    uint64_t path;
+    uint64_t entries;
+    uint32_t index;
+    uint32_t capacity;
+    uint32_t count;
+    uint32_t reserved;
+} os_file_enumerate_batch_t;
 
 typedef struct os_file_seek {
     os_versioned_header_t hdr;

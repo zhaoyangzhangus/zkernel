@@ -1,14 +1,21 @@
 """Exercise production MAP_FIXED adapter and VMA code at its former race gap."""
 from pathlib import Path
 import re
+import resource
 import subprocess
 import tempfile
+
+resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
 
 root = Path(__file__).resolve().parents[2]
 mapping = (root / 'kernel/mm/map.c').read_text().replace('#include "internal.h"', '')
 vma = (root / 'kernel/mm/vma.c').read_text()
 copy_tail = vma[vma.index('vm_area_t *vm_area_copy_tail('):
                 vma.index('vm_area_t *vm_area_split(')]
+# Tail preparation still requires the protected source VMA. Give that
+# allocator call its own fixture entry so ordinary mapping allocations can
+# assert they never run under map_lock, without weakening split coverage.
+copy_tail = copy_tail.replace('area_allocate()', 'tail_area_allocate()')
 linux = (root / 'kernel/syscall/linux.c').read_text()
 start = linux.index('static int64_t linux_mmap(')
 start = linux.index('    if ((flags & LINUX_MAP_FIXED_NOREPLACE) != 0U) {', start)
@@ -43,7 +50,8 @@ enum { VM_OBJECT_ANON, VM_OBJECT_FILE, VM_OBJECT_SHARED };
 typedef int kstatus_t;
 typedef uintptr_t vaddr_t;
 typedef struct node { struct node *next, *prev; } list_head_t;
-typedef struct { unsigned type, refs; uint64_t size, identity; } vm_object_t;
+#define VM_OBJECT_FLAG_MAP_OWNED 2U
+typedef struct { unsigned type, refs, flags; uint64_t size, identity; } vm_object_t;
 typedef struct {
     uint64_t start, end, object_offset;
     uint64_t subtree_min_start, subtree_max_end;
@@ -54,7 +62,7 @@ typedef struct {
 typedef struct {
     list_head_t area_list;
     struct { vm_area_t *root; } areas;
-    atomic_uint_fast64_t commit_pages;
+    atomic_uint_fast64_t commit_pages, advice_generation;
     unsigned generation, locked;
 } vm_space_t;
 typedef struct { vm_space_t* vm; } process_t;
@@ -62,6 +70,14 @@ static vm_space_t *process_vm_reference(process_t *p) {return p->vm;}
 static void vm_space_put(vm_space_t *p) {assert(p && !p->locked);}
 static unsigned objects_alive, areas_alive, tlb_unmaps;
 static vm_space_t *locked_space;
+static vm_space_t *allocation_race_space;
+static unsigned allocation_races;
+struct anon_page_node;
+static kstatus_t anon_page_retire_range(vm_object_t *o,uint64_t first,uint64_t end,
+                                        struct anon_page_node **out) {
+    (void)o;(void)out;assert(locked_space && first<end);return K_OK;
+}
+static void anon_page_release_retired(struct anon_page_node *pages) {assert(!locked_space && !pages);}
 static int allocations_before_failure = -1;
 static bool fail_tlb, inject_on_gap, injected;
 static uint64_t identity;
@@ -116,10 +132,22 @@ static kstatus_t vm_object_create_anon(size_t size, vm_object_t** out) {
     (*out)->size=size; (*out)->refs=1; (*out)->identity=++identity;
     ++objects_alive; return K_OK;
 }
-static vm_area_t* area_allocate(void) {
+static vm_area_t* fixture_area_allocate(void) {
+    if (allocation_race_space && !locked_space) {
+        vm_space_t *space=allocation_race_space;allocation_race_space=0;
+        vaddr_t address=target;++allocation_races;
+        assert(vm_map_object(space,0,&address,0,PAGE_SIZE,VM_PROT_USER,
+                             VM_MAP_PRIVATE|VM_MAP_FIXED)==K_OK);
+    }
     if (!allocations_before_failure) return 0;
     if (allocations_before_failure>0) --allocations_before_failure;
     vm_area_t* area=calloc(1,sizeof(*area)); assert(area); ++areas_alive; return area;
+}
+static vm_area_t* area_allocate(void) {
+    assert(!locked_space);return fixture_area_allocate();
+}
+static vm_area_t* tail_area_allocate(void) {
+    assert(locked_space);return fixture_area_allocate();
 }
 static void area_release(vm_area_t* area) {
     vm_object_put(area->object); vm_object_put(area->private_object);
@@ -187,6 +215,7 @@ static void setup(vm_space_t* space) {
     vaddr_t address=0x10000;
     assert(vm_map_object(space,0,&address,0,3*PAGE_SIZE,VM_PROT_READ|VM_PROT_WRITE,
                          VM_MAP_PRIVATE|VM_MAP_FIXED)==K_OK);
+    assert(find(space,address)->object->flags & VM_OBJECT_FLAG_MAP_OWNED);
 }
 static void cleanup(vm_space_t* space) {
     inject_on_gap=false; allocations_before_failure=-1; fail_tlb=false;
@@ -196,6 +225,19 @@ static void cleanup(vm_space_t* space) {
 int main(void) {
     vm_space_t space; setup(&space); process_t process={&space};
     cleanup(&space);
+    /* Allocation is preemptible: a competing mapping may appear before the
+     * caller acquires map_lock. Both entry points must revalidate/publish
+     * against that new state, not an earlier unlocked snapshot. */
+    for(unsigned replace=0;replace<2;++replace) {
+        allocation_race_space=&space;
+        vaddr_t address=target;
+        kstatus_t result=vm_map_object_impl(&space,0,&address,0,PAGE_SIZE,
+            VM_PROT_USER,VM_MAP_PRIVATE|VM_MAP_FIXED,replace);
+        assert(result==(replace?K_OK:K_EBUSY));
+        assert(allocation_races==replace+1&&!allocation_race_space);
+        assert(!locked_space&&areas_alive==1&&objects_alive==1&&space.commit_pages==1);
+        assert(find(&space,target));cleanup(&space);
+    }
     /* A high hint must not escape MAP_32BIT, and a full low range must fail
      * before publishing a VMA or retaining backing objects. */
     vaddr_t low=0x90000000;
@@ -296,6 +338,8 @@ int main(void) {
                           VM_PROT_USER|VM_PROT_READ|VM_PROT_WRITE)==(int64_t)target);
     vm_area_t* area=find(&space,target);
     assert(area->object==file && file->refs==2 && area->private_object);
+    assert(!(file->flags & VM_OBJECT_FLAG_MAP_OWNED));
+    assert(area->private_object->flags & VM_OBJECT_FLAG_MAP_OWNED);
     vm_object_put(file);
     cleanup(&space);
     /* Mixed replacement/unmap shapes exercise full, head, tail and middle
@@ -329,9 +373,21 @@ int main(void) {
 '''
 with tempfile.TemporaryDirectory(prefix='liteos-fixed-mapping-') as directory:
     path=Path(directory)
-    (path/'test.c').write_text(fixture)
-    subprocess.run(['cc','-std=c11','-Wall','-Wextra','-Werror','-Wno-unused-function',
-                    '-fsanitize=address,undefined','-fno-pie','-no-pie',
-                    str(path/'test.c'),'-o',str(path/'test')],check=True)
-    subprocess.run([str(path/'test')],check=True)
-print('Production MAP_FIXED race gap, native non-replacement, splitting, references, accounting and failure paths passed')
+    before_lock='    map_lock(space);\n    uint64_t address = (uint64_t)*inout_address;'
+    allocation='    vm_area_t *area = area_allocate();'
+    assert fixture.count(before_lock)==1 and fixture.count(allocation)==1
+    locked_allocation=fixture.replace(before_lock,
+        '    uint64_t address = (uint64_t)*inout_address;').replace(
+            allocation,'    map_lock(space);\n'+allocation)
+    for name,unit,broken in [('current',fixture,False),('locked-allocation',locked_allocation,True)]:
+        source_file=path/(name+'.c');binary=path/name
+        source_file.write_text(unit)
+        subprocess.run(['cc','-std=c11','-Wall','-Wextra','-Werror','-Wno-unused-function',
+                        '-fsanitize=address,undefined','-fno-pie','-no-pie',
+                        str(source_file),'-o',str(binary)],check=True)
+        result=subprocess.run([str(binary)],capture_output=True)
+        assert (result.returncode!=0)==broken,result.stderr.decode()
+        if broken:
+            assert b'!locked_space' in result.stderr,result.stderr.decode()
+            print('Negative control rejected: mapping allocation under VM lock')
+print('Production MAP_FIXED race gap, unlocked allocation/reentry, native non-replacement, splitting, references, accounting and failure paths passed')

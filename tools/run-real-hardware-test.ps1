@@ -261,9 +261,8 @@ if (-not $firmwareId) {
 
 $espPath = $null
 if ($NvidiaPhase4) {
-    # This switch is intentionally opt-in.  The ordinary real-test path keeps
-    # building the production System image; the NVIDIA path must use the
-    # strong Phase 4 vendor-RM link produced by phase4_build.ps1.
+    # 此选项刻意要求显式启用。普通真机测试路径继续构建正式 System 映像；NVIDIA 路径必须使用
+    # phase4_build.ps1 生成的完整 Phase 4 供应商 RM 链接。
     $espPath = Join-Path $projectRoot 'build\nvidia\phase4\esp'
     if ($ReuseNvidiaPhase4Build) {
         foreach ($required in @(
@@ -284,9 +283,8 @@ if ($NvidiaPhase4) {
     }
 }
 elseif ($NvidiaPhase5) {
-    # Phase 5 reuses the completed Phase 4 vendor object graph and only
-    # rebuilds the changed GSP/firmware boundary.  The build script also
-    # stages the matching 595.84 firmware into this ESP.
+    # Phase 5 复用已完成的 Phase 4 供应商对象图，仅重建发生变化的 GSP/固件边界。
+    # 构建脚本还会将匹配的 595.84 固件暂存到此 ESP。
     $espPath = Join-Path $projectRoot 'build\nvidia\phase5\esp'
     if ($ReuseNvidiaPhase5Build) {
         foreach ($required in @(
@@ -307,9 +305,8 @@ elseif ($NvidiaPhase5) {
     }
 }
 elseif ($NvidiaPhase6) {
-    # Phase 6 reuses the verified Phase 5 ESP and replaces only the bridge
-    # closure plus the RM/CE probe.  -FullGate is explicit so a normal Phase 6
-    # image cannot silently claim the 20-cycle hardware Gate.
+    # Phase 6 复用已验证的 Phase 5 ESP，仅替换桥接依赖闭包和 RM/CE 探针。
+    # 必须显式指定 -FullGate，避免普通 Phase 6 映像静默宣称通过 20 轮硬件门禁。
     $espPath = Join-Path $projectRoot 'build\nvidia\phase6\esp'
     if ($ReuseNvidiaPhase6Build) {
         foreach ($required in @(
@@ -330,9 +327,8 @@ elseif ($NvidiaPhase6) {
     }
 }
 elseif ($NvidiaPhase8) {
-    # Phase 8 is the first image that contains the Linux personality NVIDIA
-    # frontend.  Build it from the verified Phase 6 ESP and stage the real
-    # glibc probe; no QEMU image can provide the required NVIDIA nodes.
+    # Phase 8 是首个包含 Linux 兼容模式 NVIDIA 前端的映像。基于已验证的 Phase 6 ESP 构建，
+    # 并暂存真实 glibc 探针；QEMU 映像无法提供所需 NVIDIA 节点。
     $espPath = Join-Path $projectRoot 'build\nvidia\phase8\esp'
     if ($ReuseNvidiaPhase8Build) {
         foreach ($required in @(
@@ -564,16 +560,14 @@ if (($NvidiaPhase5 -or $NvidiaPhase6 -or $NvidiaPhase8 -or $NvidiaPhase9 -or $Nv
 foreach ($relative in @(
     'EFI\BOOT\BOOTX64.EFI',
     'EFI\OS',
-    'etc',
+    'log',
     'lib',
-    'sbin',
-    'init',
-    'init-runtime'
+    'sbin'
 )) {
     Backup-Target $relative $volumeRoot
 }
 
-Remove-Item -LiteralPath (Join-Path $volumeRoot 'EFI\OS\realtest.log'),
+Remove-Item -LiteralPath (Join-Path $volumeRoot 'log\realtest.log'),
     (Join-Path $volumeRoot 'realtest.log') -Force -ErrorAction SilentlyContinue
 $script:deploymentCopiedFiles = 0
 $script:deploymentSkippedFiles = 0

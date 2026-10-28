@@ -1,4 +1,5 @@
 #include <kernel/bootinfo.h>
+#include <kernel/boot_profile.h>
 #include "arch/x86_64/cpu.h"
 #include <arch/x86_64/interrupt.h>
 #include <arch/x86_64/paging.h>
@@ -23,7 +24,6 @@
 #include <kernel/dma.h>
 #include <kernel/gpu.h>
 #include <kernel/display.h>
-#include <kernel/qemu_stdvga.h>
 #include <kernel/iommu.h>
 #include <kernel/device.h>
 #include <kernel/io.h>
@@ -74,7 +74,7 @@
 #include <kernel/init_self_tests.h>
 #include <kernel/init_runtime.h>
 
-/* REFACTOR_P3_BOOT_SELF_TEST_OWNER: boot self-test fixtures and ownership checks. */
+/* REFACTOR_P3_BOOT_SELF_TEST_OWNER：启动自测夹具和所有权检查。 */
 
 #define halt_forever() kernel_halt_forever_at(__FILE__, __LINE__)
 
@@ -441,9 +441,8 @@ bool kernel_init_pci_self_test(void) {
 }
 
 bool kernel_init_nvme_self_test(void) {
-    /* The canonical NVMe Owner already validates command submission and
-     * controller state during init_storage. Keep this boundary as a cheap
-     * repeatable ownership check instead of reviving the legacy ring model. */
+    /* 规范 NVMe 所有者已在 init_storage 阶段验证命令提交和控制器状态。
+     * 此处保留低成本、可重复的所有权检查，不恢复旧版环模型。 */
     return nvme_driver_self_test();
 }
 
@@ -538,7 +537,7 @@ BOOLEAN kernel_init_post_scheduler(const OS_BOOT_INFO *info,
     kernel_perf_emit_scope("io.nvme_core", benchmark_start);
     kernel_serial_write("OS_NVME_OK\r\n");
     realtest_mark("POST_NVME_CORE_OK");
-    /* NVMe completion IRQ/CQ/deferred ownership is now independently locatable. */
+    /* NVMe 完成 IRQ/CQ/延迟处理的所有权现在可独立定位。 */
     kernel_debug_stage(OS_DEBUG_PHASE_REFACTOR_8,
                        OS_DEBUG_STEP_PROGRESS, 19U);
     kernel_debug_stage(OS_DEBUG_PHASE_REFACTOR_8,
@@ -632,6 +631,7 @@ BOOLEAN kernel_init_post_scheduler(const OS_BOOT_INFO *info,
     kernel_serial_write("OS_TELEMETRY_OK\r\n");
     realtest_mark("POST_TELEMETRY_OK");
 
+#if OS_REALTEST || OS_DEBUG_SERIAL
     realtest_mark("POST_PERF_BEGIN");
     kernel_perf_report_t perf_report;
     if (!kernel_perf_benchmark(&perf_report)) {
@@ -641,6 +641,7 @@ BOOLEAN kernel_init_post_scheduler(const OS_BOOT_INFO *info,
     }
     kernel_perf_emit_report(&perf_report);
     realtest_mark("POST_PERF_OK");
+#endif
     kernel_debug_stage(OS_DEBUG_PHASE_REFACTOR_0,
                        OS_DEBUG_STEP_PROGRESS, 1U);
     kernel_debug_stage_ready(OS_DEBUG_PHASE_SPEC_18);
@@ -661,17 +662,20 @@ BOOLEAN kernel_init_post_scheduler(const OS_BOOT_INFO *info,
         .halt = kernel_halt_forever,
     };
     realtest_mark("POST_FILESYSTEM_BEGIN");
+    kernel_boot_begin(BOOT_PROFILE_FILESYSTEM);
     if (!kernel_init_filesystem(info, active_controller, &filesystem_hooks)) {
         realtest_mark("POST_FILESYSTEM_FAIL");
         halt_forever();
     }
     realtest_mark("POST_FILESYSTEM_OK");
+    kernel_boot_end(BOOT_PROFILE_FILESYSTEM);
     kernel_init_network_hooks_t network_hooks = {
         .write = kernel_serial_write,
         .write_u32 = kernel_serial_write_u32,
         .halt = kernel_halt_forever,
     };
     realtest_mark("POST_NETWORK_BEGIN");
+    kernel_boot_begin(BOOT_PROFILE_NETWORK);
     if (!kernel_init_network(&network_hooks)) {
         realtest_mark("POST_NETWORK_FAIL");
         kernel_serial_write("OS_NETWORK_UNAVAILABLE\r\n");
@@ -679,12 +683,14 @@ BOOLEAN kernel_init_post_scheduler(const OS_BOOT_INFO *info,
     } else {
         realtest_mark("POST_NETWORK_OK");
     }
+    kernel_boot_end(BOOT_PROFILE_NETWORK);
     kernel_init_graphics_hooks_t graphics_hooks = {
         .write = kernel_serial_write,
         .write_u32 = kernel_serial_write_u32,
         .halt = kernel_halt_forever,
     };
     realtest_mark("POST_GRAPHICS_BEGIN");
+    kernel_boot_begin(BOOT_PROFILE_GRAPHICS);
     if (!kernel_init_graphics(info, &graphics_hooks)) {
         realtest_mark("POST_GRAPHICS_FAIL");
         kernel_serial_write("OS_GRAPHICS_UNAVAILABLE\r\n");
@@ -698,10 +704,13 @@ BOOLEAN kernel_init_post_scheduler(const OS_BOOT_INFO *info,
         .halt = kernel_halt_forever,
     };
     realtest_mark("POST_USERSPACE_BEGIN");
+    kernel_boot_end(BOOT_PROFILE_GRAPHICS);
+    kernel_boot_begin(BOOT_PROFILE_USERSPACE);
     if (!kernel_init_userspace(&userspace_hooks)) {
         realtest_mark("POST_USERSPACE_FAIL");
         halt_forever();
     }
     realtest_mark("POST_USERSPACE_OK");
+    kernel_boot_end(BOOT_PROFILE_USERSPACE);
     return 1;
 }

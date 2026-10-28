@@ -1,7 +1,6 @@
 /*
- * Small Linux/glibc runtime probe for the Chromium compatibility
- * layer.  It deliberately uses the real libc syscall wrappers so the probe
- * exercises the same Linux-personality entry path as a staged browser.
+ * 面向 Chromium 兼容层的小型 Linux/glibc 运行时探测程序。它有意使用真实的 libc 系统调用
+ * 封装，使探测过程与分阶段启动的浏览器走相同的 Linux personality 入口路径。
  */
 #define _GNU_SOURCE
 
@@ -190,9 +189,8 @@ _Static_assert(sizeof(struct linux_statx_abi) == 256U,
 
 static int g_failure_code = 1;
 
-/* These descriptors are created with raw Linux syscalls, so use the same
- * syscall path for I/O instead of libc wrappers that require libc's private
- * descriptor table to know how each fd was opened. */
+/* 这些描述符由原始 Linux 系统调用创建，因此 I/O 也使用相同的系统调用路径，而不是依赖
+ * libc 私有描述符表来判断各 fd 的打开方式。 */
 static ssize_t linux_raw_read(int descriptor, void *buffer, size_t length) {
     return (ssize_t)syscall(SYS_read, descriptor, buffer, length);
 }
@@ -206,8 +204,8 @@ static int linux_raw_close(int descriptor) {
     return (int)syscall(SYS_close, descriptor);
 }
 
-/* Keep libc-created descriptors on the libc close path below the raw Linux
- * syscall aliases used by the ABI probes. */
+/* ABI 探测中使用的原始 Linux 系统调用别名位于此处；libc 创建的描述符仍走下方 libc
+ * close 路径。 */
 static int libc_close_descriptor(int descriptor) {
     return close(descriptor);
 }
@@ -631,8 +629,7 @@ static int test_epoll_watch_holes_and_tail_reuse(void) {
             syscall(SYS_epoll_ctl, epoll_descriptor, EPOLL_CTL_ADD,
                     descriptors[index], &watches[index]) != 0) goto cleanup;
     }
-    /* Delete an interior watch, then reuse its slot while a later watch
-     * remains live. */
+    /* 删除中间的监视项，并在后续监视项仍有效时重用其槽位。 */
     if (syscall(SYS_epoll_ctl, epoll_descriptor, EPOLL_CTL_DEL,
                 descriptors[1], 0U) != 0 ||
         write(descriptors[2], &counter, sizeof(counter)) !=
@@ -649,8 +646,7 @@ static int test_epoll_watch_holes_and_tail_reuse(void) {
         result.data != watches[1].data ||
         read(descriptors[1], &received, sizeof(received)) !=
             (ssize_t)sizeof(received) || received != counter) goto cleanup;
-    /* Removing the tail and then all remaining watches must permit a new
-     * first slot without exposing stale events. */
+    /* 移除尾部及其余所有监视项后，必须允许新监视项使用首个槽位，且不能暴露过期事件。 */
     for (int index = 2; index >= 0; --index) {
         if (syscall(SYS_epoll_ctl, epoll_descriptor, EPOLL_CTL_DEL,
                     descriptors[index], 0U) != 0) goto cleanup;
@@ -878,8 +874,8 @@ static int fail(const char *text) {
     return g_failure_code;
 }
 
-/* Optional QEMU/host-proxy integration probe.  Keep the normal regression
- * hermetic: this path requires a proxy listening on the host at port 7890. */
+/* 可选的 QEMU/主机代理集成探测。保持常规回归测试独立可复现：此路径要求主机上的 7890
+ * 端口有代理正在监听。 */
 static int test_tcp_proxy_connect(bool late_registration) {
     static const char request[] =
         "CONNECT example.com:443 HTTP/1.1\r\n"
@@ -920,8 +916,8 @@ static int test_tcp_proxy_connect(bool late_registration) {
         goto cleanup;
     }
     emit("OS_CHROMIUM_TCP_PROXY_PENDING_PASS\n");
-    /* Chromium registers its one-shot write watch after connect() returned
-     * EINPROGRESS and probes SO_ERROR before entering the message pump. */
+    /* connect() 返回 EINPROGRESS 后，Chromium 会注册一次性写监视，并在进入消息泵前检查
+     * SO_ERROR。 */
     if (late_registration &&
         (syscall(SYS_epoll_ctl, epoll_fd, EPOLL_CTL_ADD, fd, &watch) != 0 ||
          getsockopt(fd, SOL_SOCKET, SO_ERROR, &socket_error,
@@ -986,9 +982,8 @@ cleanup:
     return success;
 }
 
-/* A busy event source must not starve later registrations when maxevents is
- * smaller than the number of ready fds.  Chromium's IO pump uses small event
- * batches while many eventfd/pipe/socket watches may remain ready. */
+/* 当 maxevents 小于就绪 fd 数量时，繁忙事件源不得饿死后续注册项。Chromium 的 I/O 泵会
+ * 分批处理事件，此时许多 eventfd/pipe/socket 监视项可能持续就绪。 */
 static int test_epoll_ready_fairness(void) {
     enum { WATCH_COUNT = 24, BATCH_SIZE = 4 };
     int fds[WATCH_COUNT];
@@ -1282,9 +1277,8 @@ cleanup:
     return success;
 }
 
-/* Exercise Chromium's libc path, not only the raw syscall ABI: Mojo receives
- * shared-memory descriptors through recvmsg(), then validates them with
- * fcntl(F_GETFL/F_GETFD). */
+/* 不仅测试原始系统调用 ABI，也要覆盖 Chromium 的 libc 路径：Mojo 通过 recvmsg() 接收
+ * 共享内存描述符，再用 fcntl(F_GETFL/F_GETFD) 验证。 */
 static int test_libc_scm_rights_fcntl(void) {
     char path[] = "/tmp/system-libc-fdpass-XXXXXX";
     char sent_payload = 'L';
@@ -1535,8 +1529,8 @@ static void *linux_fd_race_worker_main(void *argument) {
     return 0;
 }
 
-/* Concurrent Linux-file and native-socket installation share the libc fd
- * resource pool. Chromium exercises both paths on different threads. */
+/* Linux 文件和原生 socket 的并发安装共享 libc fd 资源池。Chromium 会在不同线程上测试
+ * 这两条路径。 */
 static int test_concurrent_fd_resource_install(void) {
     enum { WORKER_COUNT = 4 };
     char path[] = "/tmp/system-fd-race-XXXXXX";
@@ -1604,8 +1598,7 @@ static int test_concurrent_fd_resource_install(void) {
     return failure == 0U;
 }
 
-/* dup2 onto an occupied Linux descriptor must not close the replacement after
- * the kernel's dup3 operation has atomically installed it. */
+/* 对已占用的 Linux 描述符执行 dup2 时，在内核 dup3 操作原子安装替换项后，不得再将其关闭。 */
 static int test_linux_libc_dup2_replacement(void) {
     int source = open("/dev/null", O_RDWR | O_CLOEXEC);
     int target = open("/dev/null", O_RDONLY);
@@ -1665,9 +1658,8 @@ static int test_tmp_directory_open(void) {
     return errno == EISDIR;
 }
 
-/* Exercise the file-backed shared-memory sequence Chromium uses when
- * PlatformSharedMemoryRegion falls back to a temporary file.  Return distinct
- * stage markers so a QEMU failure identifies the exact unsupported operation. */
+/* 测试 Chromium 在 PlatformSharedMemoryRegion 回退到临时文件时使用的文件后备共享内存流程。
+ * 返回不同阶段标记，以便 QEMU 失败时准确定位不支持的操作。 */
 static int test_tmp_shared_memory_file(void) {
     static const size_t region_size = 256U * 1024U;
     char path[] = "/tmp/system-shmem-XXXXXX";
@@ -1760,7 +1752,7 @@ static int test_tmp_shared_memory_file(void) {
         goto cleanup;
     }
     if (child == 0) {
-        /* A fresh mapping in another process must resolve the same pages. */
+        /* 另一个进程中的新映射必须解析到相同页面。 */
         (void)munmap(writable_mapping, region_size);
         (void)munmap((void *)readonly_mapping, region_size);
         uint8_t *child_mapping = mmap(0, region_size,
@@ -1934,9 +1926,8 @@ static void format_inherited_descriptor(int descriptor, char output[12]) {
     output[digits] = '\0';
 }
 
-/* Chromium's volatile profile must outgrow the VFS's original 256-node table
- * without reporting a spurious ENOMEM.  Keep this separate from the normal
- * event test because it deliberately creates hundreds of temporary files. */
+/* Chromium 的易失配置文件必须能超过 VFS 原有的 256 节点表容量，且不得误报 ENOMEM。
+ * 此项与常规事件测试分开，因为它会有意创建数百个临时文件。 */
 static int test_tmp_vfs_scale(bool raw) {
     char path[] = "/tmp/system-vfs-scale-0000";
     char *digits = path + sizeof(path) - 5U;
@@ -2164,7 +2155,7 @@ int main(int argc, char **argv, char **envp) {
 
     emit("OS_CHROMIUM_LINUX_EVENTS_BEGIN\n");
 
-    /* Chromium's existing startup stub uses the legacy envp-only hook. */
+    /* Chromium 现有启动桩使用旧版 envp-only 钩子。 */
     __libc_init_environment(envp);
 
     g_failure_code = 74;

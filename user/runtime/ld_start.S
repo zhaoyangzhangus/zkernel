@@ -2,12 +2,11 @@
 .globl ld_entry
 .extern runtime_linker_main
 
-/* Keep the loader's filesystem/VM work on the native System syscall ABI.
- * The kernel switches this process to Linux syscall numbering only after the
- * loader has finished relocating all images and is about to enter main. */
+/* 加载器的文件系统/VM 操作继续使用 System 原生系统调用 ABI。
+ * 加载器完成所有映像重定位并即将进入 main 后，内核才会将此进程切换为 Linux 调用号。 */
 .equ OS_SYS_LINUX_ACTIVATE, 0x000c
 
-/* The kernel leaves the SysV initial stack untouched for PT_INTERP. */
+/* 内核为 PT_INTERP 保留未经修改的 SysV 初始栈。 */
 ld_entry:
     movq %rsp, %r12
     movq %rsp, %rdi

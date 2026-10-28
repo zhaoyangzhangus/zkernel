@@ -7,9 +7,9 @@ root = Path(__file__).resolve().parents[2]
 source = (root/'kernel/net/socket.c').read_text()
 helpers = source[source.index('bool socket_tcp_slots_available_locked('):
                  source.index('int32_t socket_find_tcp6_locked(')]
-assert helpers.count('index < SOCKET_BINDING_COUNT') == 2
-helpers = helpers.replace('index < SOCKET_BINDING_COUNT',
-                          'index < SOCKET_BINDING_COUNT && (++visits, 1)')
+assert helpers.count('index < g_registry_capacity') == 2
+helpers = helpers.replace('index < g_registry_capacity',
+                          'index < g_registry_capacity && (++visits, 1)')
 code = r'''
 #include <assert.h>
 #include <stdint.h>
@@ -19,6 +19,7 @@ code = r'''
 static socket_tcp_connection_t g_tcp_connections[SOCKET_BINDING_COUNT];
 static socket_tcp6_connection_t g_tcp6_connections[SOCKET_BINDING_COUNT];
 static unsigned visits;
+static uint32_t g_registry_capacity = SOCKET_BINDING_COUNT;
 ''' + helpers + r'''
 static unsigned cases;
 static void check(uint32_t required) {

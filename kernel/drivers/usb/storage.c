@@ -296,59 +296,73 @@ static kstatus_t usb_msc_read_capacity(usb_msc_device_t *device) {
     return K_OK;
 }
 
-static kstatus_t usb_msc_rw_block(usb_msc_device_t *device,
+static kstatus_t usb_msc_rw_blocks(usb_msc_device_t *device,
                                   uint64_t lba,
+                                  uint32_t count,
                                   void *buffer,
                                   bool write) {
     uint8_t command[10] = {0};
     uint32_t actual = 0U;
 
     if (device == 0 || buffer == 0 || device->block_size == 0U ||
-        lba >= device->block_count || lba > UINT32_MAX) return K_EINVAL;
+        device->block_size > PAGE_SIZE || count == 0U ||
+        count > XHCI_MSC_MAX_TRANSFER / device->block_size || count > UINT16_MAX ||
+        lba >= device->block_count || count > device->block_count - lba ||
+        lba > UINT32_MAX || (uint64_t)count - 1U > UINT32_MAX - lba)
+        return K_EINVAL;
+    uint32_t length = count * device->block_size;
 
     command[0] = write ? SCSI_WRITE_10 : SCSI_READ_10;
     msc_store_be32(command + 2U, (uint32_t)lba);
-    msc_store_be16(command + 7U, 1U);
+    msc_store_be16(command + 7U, (uint16_t)count);
 
     kstatus_t status = usb_msc_bot_locked(
         device, command, sizeof(command),
-        buffer, device->block_size, !write, &actual);
+        buffer, length, !write, &actual);
     if (status != K_OK) return status;
-    if (!write && actual != device->block_size) return K_EIO;
+    if (actual != length) return K_EIO;
     return K_OK;
+}
+
+static BOOLEAN usb_msc_block_io(VOID *context, UINT64 lba,
+                                UINT32 count, VOID *buffer, bool write) {
+    usb_msc_device_t *device = (usb_msc_device_t *)context;
+    if (device == 0 || buffer == 0 || count == 0U ||
+        device->block_size == 0U || device->block_size > PAGE_SIZE ||
+        lba >= device->block_count || count > device->block_count - lba ||
+        lba > UINT32_MAX || (uint64_t)count - 1U > UINT32_MAX - lba ||
+        !usb_msc_enter(device)) return 0;
+
+    bool ok = true;
+    uint64_t requested = (uint64_t)count * device->block_size;
+    if (requested > XHCI_MSC_MAX_TRANSFER) requested = XHCI_MSC_MAX_TRANSFER;
+    uint32_t capacity = xhci_usb_msc_prepare_buffer(device->slot, (uint32_t)requested);
+    uint32_t maximum = capacity / device->block_size;
+    if (maximum > UINT16_MAX) maximum = UINT16_MAX;
+    if (maximum == 0U) { usb_msc_leave(device); return 0; }
+    /* One SCSI request for the largest contiguous run the transport can
+     * accept. xHCI chains DMA segments without copying eligible buffers.
+     * Each command releases the event-ring lock for HID progress. */
+    for (uint32_t i = 0U; ok && i < count;) {
+        uint32_t chunk = count - i;
+        if (chunk > maximum) chunk = maximum;
+        ok = usb_msc_rw_blocks(device, lba + i, chunk,
+                 (uint8_t *)buffer + (uint64_t)i * device->block_size,
+                 write) == K_OK;
+        i += chunk;
+    }
+    usb_msc_leave(device);
+    return ok ? 1 : 0;
 }
 
 static BOOLEAN usb_msc_block_read(VOID *context, UINT64 lba,
                                   UINT32 count, VOID *buffer) {
-    usb_msc_device_t *device = (usb_msc_device_t *)context;
-    if (device == 0 || buffer == 0 || count == 0U ||
-        !usb_msc_enter(device)) return 0;
-
-    bool ok = lba <= device->block_count && count <= device->block_count - lba;
-    for (uint32_t i = 0U; ok && i < count; ++i) {
-        ok = usb_msc_rw_block(device, lba + i,
-                 (uint8_t *)buffer + (uint64_t)i * device->block_size,
-                 false) == K_OK;
-    }
-    usb_msc_leave(device);
-    return ok ? 1 : 0;
+    return usb_msc_block_io(context, lba, count, buffer, false);
 }
 
 static BOOLEAN usb_msc_block_write(VOID *context, UINT64 lba,
                                    UINT32 count, const VOID *buffer) {
-    usb_msc_device_t *device = (usb_msc_device_t *)context;
-    if (device == 0 || buffer == 0 || count == 0U ||
-        !usb_msc_enter(device)) return 0;
-
-    bool ok = lba <= device->block_count && count <= device->block_count - lba;
-    for (uint32_t i = 0U; ok && i < count; ++i) {
-        ok = usb_msc_rw_block(device, lba + i,
-                 (void *)((const uint8_t *)buffer +
-                          (uint64_t)i * device->block_size),
-                 true) == K_OK;
-    }
-    usb_msc_leave(device);
-    return ok ? 1 : 0;
+    return usb_msc_block_io(context, lba, count, (void *)buffer, true);
 }
 
 static BOOLEAN usb_msc_block_flush(VOID *context) {

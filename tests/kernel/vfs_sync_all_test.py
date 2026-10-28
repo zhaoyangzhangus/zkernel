@@ -29,10 +29,8 @@ static void vfs_lock(void) {assert(!locked);locked=true;}
 static void vfs_unlock(void) {assert(locked);locked=false;}
 static void object_get(vnode_t *v) {assert(locked);++v->refs;}
 static void object_put(vnode_t *v) {assert(!locked && !v->locked);--v->refs;}
-static void vfs_vnode_lock(vnode_t *v) {assert(!locked);v->locked=true;}
-static void vfs_vnode_unlock(vnode_t *v) {assert(v->locked);v->locked=false;}
-static int vfs_page_cache_flush(vnode_t *v) {
-    assert(!locked && v->locked && v->refs==2);++writes;return v->error;
+static int vfs_page_cache_writeback(vnode_t *v) {
+    assert(!locked && !v->locked && v->refs==2);++writes;return v->error;
 }
 static bool fat32_sync(OS_FAT32 *fs) {
     assert(!locked && writes%2==0);++fs->syncs;return !fs->fail;

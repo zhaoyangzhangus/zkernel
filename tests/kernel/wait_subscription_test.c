@@ -13,11 +13,18 @@ typedef struct host_wait_job host_wait_job_t;
 bool host_wait_locks_held(void);
 host_wait_job_t *host_completion_job_start(completion_t *completion,
                                            uint64_t timeout_ns);
+host_wait_job_t *host_uninterruptible_job_start(completion_t *completion,
+                                                uint64_t timeout_ns,
+                                                unsigned signal_on_block);
+bool host_wait_job_termination_pending(const host_wait_job_t *job,
+                                       unsigned reason);
 
 host_wait_job_t *host_wait_job_start(void *const *objects, size_t count,
                                      bool wait_all, uint64_t timeout_ns);
 host_wait_job_t *host_wait_job_start_with_sigkill_on_block(
     void *const *objects, size_t count, uint64_t timeout_ns);
+host_wait_job_t *host_wait_job_start_with_terminate_on_block(
+    void *const *objects, size_t count, bool wait_all, uint64_t timeout_ns);
 bool host_wait_until_sleeping(host_wait_job_t *job, uint64_t timeout_ms);
 bool host_wait_until_done(host_wait_job_t *job, uint64_t timeout_ms);
 kstatus_t host_wait_job_status(const host_wait_job_t *job);
@@ -392,6 +399,43 @@ static void test_sigkill_during_block_publication_is_not_lost(void) {
     host_wait_job_join(job);
 }
 
+static void test_thread_terminate_during_block_publication_is_not_lost(void) {
+    const unsigned counts[] = {1U, 2U, 32U};
+    for (unsigned all = 0U; all < 2U; ++all) {
+        for (unsigned c = 0U; c < 3U; ++c) {
+            fake_wait_object_t values[32];
+            void *objects[32];
+            for (unsigned i = 0U; i < counts[c]; ++i) {
+                fake_wait_object_init(&values[i]);
+                objects[i] = &values[i];
+            }
+            host_wait_job_t *job = host_wait_job_start_with_terminate_on_block(
+                objects, counts[c], all != 0U, UINT64_MAX);
+            TEST_CHECK(job != 0, "thread-terminate-race waiter creation failed");
+            if (job == 0) continue;
+            bool done = host_wait_until_done(job, 200U);
+            TEST_CHECK(done, "thread termination racing BLOCKED publication stranded the waiter");
+            /* Unstrand the negative-control fixture before joining it. */
+            if (!done) {
+                TEST_CHECK(host_cancel_waiter(job), "could not rescue stranded test waiter");
+                TEST_CHECK(host_wait_until_done(job, 2000U), "rescued waiter did not finish");
+            }
+            TEST_CHECK(host_wait_job_status(job) == K_ECANCELED,
+                       "thread-terminate-raced wait returned wrong status");
+            TEST_CHECK(host_wait_job_is_unblocked(job),
+                       "thread-terminate-raced wait retained stack association");
+            for (unsigned i = 0U; i < counts[c]; ++i) {
+                TEST_CHECK(list_empty(&values[i].header.signal_waiters.waiters),
+                           "thread-terminate-raced wait retained subscription");
+                TEST_CHECK(atomic_load_explicit(&values[i].header.refs.value,
+                                                memory_order_acquire) == 1U,
+                           "thread-terminate-raced wait leaked object reference");
+            }
+            host_wait_job_join(job);
+        }
+    }
+}
+
 static void test_small_wait_sets_and_large_allocation_stages(void) {
     fake_wait_object_t values[5];
     void *objects[5];
@@ -687,7 +731,50 @@ static void test_local_notification_inside_readiness_callback(void) {
     host_wait_job_join(job);
 }
 
+static void test_internal_wait_defers_termination(void) {
+    for (unsigned reason = 1U; reason <= 2U; ++reason) {
+        for (unsigned timeout = 0U; timeout <= 1U; ++timeout) {
+            completion_t completion;
+            completion_init(&completion, 0U);
+            host_wait_job_t *job = host_uninterruptible_job_start(
+                &completion, timeout ? 200000000ULL : UINT64_MAX, reason);
+            TEST_CHECK(job != 0, "internal wait job creation failed");
+            if (job == 0) continue;
+            TEST_CHECK(host_wait_until_sleeping(job, 2000U),
+                       "pending termination prevented internal wait sleeping");
+            TEST_CHECK(!host_cancel_waiter(job), "internal wait was cancelled");
+            TEST_CHECK(!host_wait_until_done(job, 5U),
+                       "internal wait returned without readiness or timeout");
+            if (!timeout) {
+                host_wake_without_wait_notification(job);
+                TEST_CHECK(host_wait_until_schedule_entries(job, 2U, 2000U),
+                           "internal wait did not retry after unrelated wake");
+                TEST_CHECK(host_wait_until_sleeping(job, 2000U),
+                           "internal wait did not reblock");
+                TEST_CHECK(!host_cancel_waiter(job),
+                           "retried internal wait lost cancellation policy");
+                complete(&completion);
+            }
+            bool done = host_wait_until_done(job, 2000U);
+            TEST_CHECK(done, "internal wait failed to wake");
+            if (!done) abort();
+            TEST_CHECK(host_wait_job_status(job) == (timeout ? K_ETIMEDOUT : K_OK),
+                       "internal wait lost readiness/timeout result");
+            TEST_CHECK(host_wait_job_termination_pending(job, reason),
+                       "internal wait discarded pending termination");
+            TEST_CHECK(host_wait_job_is_unblocked(job) &&
+                       list_empty(&completion.waitq.waiters),
+                       "internal wait retained stack association/subscription");
+            TEST_CHECK(atomic_load(&completion.count) == 0U,
+                       "internal wait did not consume completion exactly once");
+            host_wait_job_join(job);
+        }
+    }
+    if (g_failures == 0U) puts("WAIT_INTERNAL_DEFERRED_TERMINATION_PASS");
+}
+
 int main(void) {
+    test_internal_wait_defers_termination();
     test_local_notification_inside_readiness_callback();
     test_large_ready_and_poll_wait_skip_subscription_allocation();
     test_notification_during_subscription_publication();
@@ -707,6 +794,7 @@ int main(void) {
     test_unrelated_scheduler_wake_retries_wait();
     test_ready_waiter_must_finish_stack_cleanup_before_reap();
     test_sigkill_during_block_publication_is_not_lost();
+    test_thread_terminate_during_block_publication_is_not_lost();
     TEST_CHECK(atomic_load(&g_locked_predicate_calls) == 0U,
                "readiness callback ran under wait locks (IRQ lock inversion)");
     if (g_failures != 0U) {

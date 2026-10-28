@@ -31,7 +31,7 @@ def _chrome_build_id(binary):
 def validate_chrome_build(expected):
     if not re.fullmatch(r'Build ID: [0-9a-f]+', expected):
         raise RuntimeError('Invalid expected Chrome build identity')
-    for binary in (ROOT/'build/esp/sbin/chrome', chrome_binary_path()):
+    for binary in (ROOT/'build/esp/usr/apps/chrome/chrome', chrome_binary_path()):
         if _chrome_build_id(binary) != expected:
             raise RuntimeError(f'Refusing stale Chrome breakpoint addresses: {binary}')
 
@@ -39,6 +39,6 @@ def validate_chrome_build(expected):
 def validate_chrome_symbols():
     """For symbol-derived addresses, require exactly matching staged/output ELFs."""
     binary = chrome_binary_path()
-    if _chrome_build_id(ROOT/'build/esp/sbin/chrome') != _chrome_build_id(binary):
+    if _chrome_build_id(ROOT/'build/esp/usr/apps/chrome/chrome') != _chrome_build_id(binary):
         raise RuntimeError('Symbol executable does not match staged Chrome Build ID')
     return binary

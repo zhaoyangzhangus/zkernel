@@ -54,7 +54,7 @@ static void *allocate_from_cache(uint16_t cls,size_t size,uint32_t flags,bool ze
     ++cache_calls;return mode==3?0:&fallback;
 }
 static void *allocate_large(size_t size,uint32_t flags,bool zero) {
-    (void)zero;assert(size==7&&flags==19&&depth==initial_depth+1);
+    (void)zero;assert(size==7&&flags==19&&depth==initial_depth);
     ++large_calls;return mode==3?0:&fallback;
 }
 ''' + helpers + r'''

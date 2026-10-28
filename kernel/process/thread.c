@@ -4,6 +4,7 @@
 #include <arch/x86_64/syscall_internal.h>
 #include <arch/x86_64/uaccess.h>
 #include <kernel/debug_stage.h>
+#include <kernel/console.h>
 #include <kernel/process.h>
 #include <kernel/sched.h>
 #include <kernel/wait.h>
@@ -36,62 +37,17 @@ static const object_ops_t g_thread_ops = {
 
 static volatile uint32_t g_process_thread_create_stage;
 #if OS_DEBUG_SERIAL
-static atomic_flag g_thread_cancel_diag_lock = ATOMIC_FLAG_INIT;
-
-static void thread_cancel_diag_char(char value) {
-    for (uint32_t attempt = 0U; attempt < 100000U; ++attempt) {
-        uint8_t ready;
-        __asm__ volatile ("inb %w1, %0" : "=a"(ready) : "d"(0x3FDU));
-        if ((ready & 0x20U) != 0U) break;
-        __asm__ volatile ("pause");
-    }
-    __asm__ volatile ("outb %0, %w1" : : "a"((uint8_t)value), "d"(0x3F8U));
-}
-
-static void thread_cancel_diag_hex(uint64_t value) {
-    static const char digits[] = "0123456789abcdef";
-    for (int shift = 60; shift >= 0; shift -= 4) {
-        thread_cancel_diag_char(digits[(value >> (uint32_t)shift) & 0xFU]);
-    }
-}
-
 static void thread_cancel_diag(thread_t *target, int64_t status) {
     thread_t *caller = sched_current_thread();
-    while (atomic_flag_test_and_set_explicit(&g_thread_cancel_diag_lock,
-                                              memory_order_acquire)) {
-        __asm__ volatile ("pause");
-    }
-    const char prefix[] = "OS_THREAD_WAIT_CANCEL target_pid=";
-    for (size_t index = 0U; prefix[index] != '\0'; ++index) {
-        thread_cancel_diag_char(prefix[index]);
-    }
-    thread_cancel_diag_hex(target != 0 && target->process != 0 ?
-                           target->process->pid : 0U);
-    const char target_tid[] = " target_tid=";
-    for (size_t index = 0U; target_tid[index] != '\0'; ++index) {
-        thread_cancel_diag_char(target_tid[index]);
-    }
-    thread_cancel_diag_hex(target != 0 ? target->tid : 0U);
-    const char caller_pid[] = " caller_pid=";
-    for (size_t index = 0U; caller_pid[index] != '\0'; ++index) {
-        thread_cancel_diag_char(caller_pid[index]);
-    }
-    thread_cancel_diag_hex(caller != 0 && caller->process != 0 ?
-                           caller->process->pid : 0U);
-    const char caller_tid[] = " caller_tid=";
-    for (size_t index = 0U; caller_tid[index] != '\0'; ++index) {
-        thread_cancel_diag_char(caller_tid[index]);
-    }
-    thread_cancel_diag_hex(caller != 0 ? caller->tid : 0U);
-    const char status_text[] = " status=";
-    for (size_t index = 0U; status_text[index] != '\0'; ++index) {
-        thread_cancel_diag_char(status_text[index]);
-    }
-    thread_cancel_diag_hex((uint64_t)status);
-    thread_cancel_diag_char('\r');
-    thread_cancel_diag_char('\n');
-    atomic_flag_clear_explicit(&g_thread_cancel_diag_lock,
-                               memory_order_release);
+    /* 与其他常规记录共用串口事务，避免不同私有锁保护的输出相互穿插。 */
+    kernel_serial_printf_serial_only(
+        "OS_THREAD_WAIT_CANCEL target_pid=%llx target_tid=%llx "
+        "caller_pid=%llx caller_tid=%llx status=%llx\r\n",
+        (unsigned long long)(target != 0 && target->process != 0 ? target->process->pid : 0U),
+        (unsigned long long)(target != 0 ? target->tid : 0U),
+        (unsigned long long)(caller != 0 && caller->process != 0 ? caller->process->pid : 0U),
+        (unsigned long long)(caller != 0 ? caller->tid : 0U),
+        (unsigned long long)(uint64_t)status);
 }
 #endif
 
@@ -163,11 +119,12 @@ static kstatus_t thread_create_user_frame_internal(
         kfree(thread);
         return K_EBUSY;
     }
-    /* Once visible in the list, a remote terminator may reap this NEW thread.
-     * Publish its execution ownership first, in the same locked transaction. */
+    /* 线程加入列表后，远端终止者就可能回收这个 NEW 线程。必须在同一加锁事务中先发布其执行所有权。 */
     object_get(thread);
     __atomic_fetch_or(&thread->flags, THREAD_FLAG_EXECUTION_REF,
                       __ATOMIC_RELEASE);
+    /* 列表变化后，枚举缓存必须在释放线程锁前失效。 */
+    process->enumeration_thread_cursor = 0;
     list_add_tail(&process->threads, &thread->process_node);
     if (process->thread_count == 0U) {
         process->linux_thread_group_leader_tid = thread->tid;
@@ -177,7 +134,14 @@ static kstatus_t thread_create_user_frame_internal(
     process_thread_unlock(process);
 
     if (start) {
-        (void)sched_start_thread(thread);
+        kstatus_t status = sched_start_thread(thread);
+        if (status != K_OK) {
+            /* 远端启动请求达到上限时，不得在进程中留下不可访问的 NEW 线程却仍报告 clone 成功。创建者
+             * 引用必须保持有效，直到线程终止并摘除。 */
+            (void)thread_terminate(thread, status);
+            object_put(thread);
+            return status;
+        }
     }
     *out = thread;
     debug_trace_stage(OS_DEBUG_PHASE_USER_RUNTIME,
@@ -246,8 +210,7 @@ kstatus_t thread_register_user_stack(thread_t *thread, vaddr_t base,
     if (mapped) {
         process_thread_lock(process);
         uint32_t flags = __atomic_load_n(&thread->flags, __ATOMIC_ACQUIRE);
-        /* Validation may race with termination or an image replacement.
-         * Only an unreaped suspended thread can accept stack ownership. */
+        /* 校验可能与线程终止或映像替换并发。只有尚未回收的挂起线程才能接管栈所有权。 */
         if (atomic_load_explicit(&process->state, memory_order_acquire) != PROCESS_RUNNING ||
             atomic_load_explicit(&thread->state, memory_order_acquire) != THREAD_NEW ||
             (flags & THREAD_FLAG_EXECUTION_REF) == 0U ||
@@ -283,9 +246,8 @@ kstatus_t thread_terminate(thread_t *thread, int64_t status) {
         if (state == THREAD_DEAD) return K_OK;
         if (state == THREAD_READY && sched_wait_cleanup_pending(thread)) {
             /*
-             * A wake made the waiter runnable, but its stack-local
-             * subscriptions are still linked until it resumes the wait path.
-             * Let it finish that cleanup before reclaiming its kernel stack.
+             * 唤醒已使等待者变为可运行状态，但其栈上订阅仍会保持链接，直到它恢复等待路径。回收内核栈
+             * 前必须让它完成清理。
              */
             return K_EBUSY;
         }
@@ -301,13 +263,13 @@ kstatus_t thread_terminate(thread_t *thread, int64_t status) {
         unsigned observed = atomic_load_explicit(&thread->state,
                                                   memory_order_acquire);
         if (observed == THREAD_DEAD) return K_OK;
-        /* A READY -> BLOCKED race can happen after the initial state check. */
+        /* 首次状态检查后仍可能发生 READY -> BLOCKED 竞争。 */
         if (observed == THREAD_BLOCKED) continue;
         return K_EBUSY;
     }
     sched_remove(thread);
     process_detach_thread(thread);
-    /* Keep WAIT_ONE behind the process-list detach used by exec/teardown. */
+    /* WAIT_ONE 必须排在 exec/拆除使用的进程列表摘除之后。 */
     object_notify_signaled(thread);
     thread_release_execution_ref(thread);
     return K_OK;

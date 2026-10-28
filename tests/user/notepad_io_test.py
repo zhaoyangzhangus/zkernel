@@ -4,7 +4,7 @@ import subprocess
 import tempfile
 ROOT=Path(__file__).resolve().parents[2]
 source=(ROOT/'user/desktop/notepad/main.c').read_text()
-functions=source[source.index('static bool load_document('):source.index('static void request_action(')]
+functions=source[source.index('static bool load_document('):source.index('static void show_file_picker(')]
 program=r'''
 #include <assert.h>
 #include <stdbool.h>

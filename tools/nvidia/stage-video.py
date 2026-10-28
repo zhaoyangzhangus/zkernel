@@ -45,7 +45,7 @@ stage.stage.builder.write_changed(out/'video-compiler.txt',compiler)
 inputs.append(out/'video-compiler.txt')
 cache.cached_command(command,inputs,[out/'vulkan-video'],out/'video-link-cache.json')
 stage.abi.check(runtime,[out/'vulkan-video'])
-libdir=root/'build/esp/compat/linux/lib/x86_64-linux-gnu'
+libdir=root/'build/esp/usr/apps/chrome/lib'
 catalog={p.name:p for p in libdir.glob('*.so*') if p.is_file()}
 needed=stage.closure(catalog,stage.check.Elf64(out/'vulkan-video').needed())
 stage.abi.check(runtime,needed.values())
@@ -58,10 +58,25 @@ fixture=root/'tools/nvidia/make-video-fixture.py'
 cache.cached_command(['python3',str(fixture),str(out/'video-test.h264')],
                      [fixture],[out/'video-test.h264'],out/'video-fixture-cache.json')
 esp=root/'build/esp'
-stage.stage.copy_changed(out/'vulkan-video',esp/'sbin/vulkan-video')
-stage.stage.copy_changed(out/'video-test.h264',esp/'video-test.h264')
-stage.stage.copy_changed(ff/'COPYING.LGPLv2.1',esp/'usr/share/licenses/vulkan/ffmpeg/COPYING.LGPLv2.1')
+for name, path in needed.items():
+    stage.stage.copy_changed(path,esp/'usr/apps/vulkan-video/lib'/name)
+stage.stage.copy_changed(runtime/'ld-linux-x86-64.so.2',esp/'usr/apps/vulkan-video/lib/ld-linux-x86-64.so.2')
+icd=json.loads((esp/'usr/apps/chrome/vulkan/nvidia_icd.json').read_text())
+icd['ICD']['library_path']='/usr/apps/vulkan-video/lib/libGLX_nvidia.so.0'
+for name,path in stage.vulkan_closure(catalog,libdir).items():
+    stage.stage.copy_changed(path,esp/'usr/apps/vulkan-video/lib'/name)
+stage.stage.builder.write_changed(esp/'usr/apps/vulkan-video/vulkan/nvidia_icd.json',json.dumps(icd,indent=2)+'\n')
+stage.stage.builder.write_changed(esp/'usr/apps/vulkan-video/egl/10_nvidia.json',json.dumps({
+    'file_format_version':'1.0.0','ICD':{
+        'library_path':'/usr/apps/vulkan-video/lib/libEGL_nvidia.so.0'}},indent=2)+'\n')
+stage.stage.copy_changed(out/'vulkan-video',esp/'usr/apps/vulkan-video/vulkan-video')
+stage.stage.copy_changed(out/'video-test.h264',esp/'usr/apps/vulkan-video/video-test.h264')
+stage.stage.copy_changed(ff/'COPYING.LGPLv2.1',esp/'usr/apps/vulkan-video/licenses/ffmpeg/COPYING.LGPLv2.1')
+for path in (esp/'usr/apps/chrome/licenses').rglob('*'):
+    if path.is_file():
+        stage.stage.copy_changed(path,esp/'usr/apps/vulkan-video/licenses'/path.relative_to(esp/'usr/apps/chrome/licenses'))
+app=esp/'usr/apps/vulkan-video'
 stage.stage.builder.write_changed(out/'video-deployed.json',json.dumps({
-    'sbin/vulkan-video':stage.stage.builder.sha(esp/'sbin/vulkan-video'),
-    'video-test.h264':stage.stage.builder.sha(esp/'video-test.h264')},indent=2)+'\n')
+    str(path.relative_to(esp)):stage.stage.builder.sha(path)
+    for path in app.rglob('*') if path.is_file()},indent=2,sort_keys=True)+'\n')
 print('VULKAN_VIDEO_PAYLOAD_READY',flush=True)

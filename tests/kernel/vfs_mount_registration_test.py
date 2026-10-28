@@ -8,8 +8,11 @@ root = Path(__file__).resolve().parents[2]
 source = (root / 'kernel/fs/vfs/core.c').read_text()
 limit = re.search(r'#define VFS_FAT32_MOUNT_LIMIT (\d+)U',
                  (root / 'kernel/fs/vfs/internal.h').read_text()).group(1)
-mount = source[source.index('kstatus_t vfs_mount_fat32('):source.index('kstatus_t vfs_unmount_fat32(')]
-equals = source[source.index('static bool vfs_path_range_equals('):source.index('/* Memory-backed /tmp')]
+def function(signature):
+    start = source.index(signature)
+    return source[start:source.index('\n}', start) + 2]
+mount = function('kstatus_t vfs_mount_fat32(')
+equals = function('static bool vfs_path_range_equals(')
 new = '''            g_fat32_mounts[index].prefix[length] == 0 &&
             vfs_path_range_equals(g_fat32_mounts[index].prefix,
                                   length, prefix, length)'''

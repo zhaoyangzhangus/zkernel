@@ -1,19 +1,36 @@
 #define main chrome_start_program_main
 #define setenv chrome_test_setenv
+#define mkdir chrome_test_mkdir
 #include "../../user/runtime/chrome_start.c"
 #undef setenv
+#undef mkdir
 #undef main
 
 extern int setenv(const char *, const char *, int);
 static int g_gpu_env_error;
 int chrome_test_setenv(const char *name, const char *value, int overwrite) {
-    if (strcmp(name, "VK_DRIVER_FILES") != 0 ||
-        strcmp(value, "/usr/share/vulkan/icd.d/nvidia_icd.json") != 0 ||
+    int valid_mode = strcmp(name, "OS_CHROME_GPU_MODE") == 0 &&
+        (strcmp(value, "software") == 0 || strcmp(value, "vulkan") == 0);
+    int valid_icd = strcmp(name, "VK_DRIVER_FILES") == 0 &&
+        strcmp(value, "/usr/apps/chrome/vulkan/nvidia_icd.json") == 0;
+    int valid_temporary = strcmp(name, "TMPDIR") == 0 &&
+        strcmp(value, "/usr/apps/chrome/run") == 0;
+    int valid_egl = strcmp(name, "__EGL_VENDOR_LIBRARY_FILENAMES") == 0 &&
+        strcmp(value, "/usr/apps/chrome/egl/10_nvidia.json") == 0;
+    if ((!valid_mode && !valid_icd && !valid_temporary && !valid_egl) ||
         overwrite != 1 || g_gpu_env_error) {
         errno = ENOMEM;
         return -1;
     }
     return setenv(name, value, overwrite);
+}
+
+int chrome_test_mkdir(const char *path, mode_t mode) {
+    if (strcmp(path, "/usr/apps/chrome/run") || mode != 0700) {
+        errno = EINVAL;
+        return -1;
+    }
+    return 0;
 }
 
 static const char *g_exec_path;
@@ -47,7 +64,7 @@ int64_t __libc_native_syscall6(uint64_t number, uint64_t pointer,
 }
 
 int open(const char *path, int flags, ...) {
-    if (strcmp(path, "/etc/chrome-gpu-mode") != 0 || flags != O_RDONLY) {
+    if (strcmp(path, "/usr/apps/chrome/gpu-mode") != 0 || flags != O_RDONLY) {
         errno = EINVAL;
         return -1;
     }
@@ -167,15 +184,15 @@ int main(void) {
     if (!test_has_argument("--disable-features=PrefetchUseContentRefactor,"
                            "PrefetchPrerenderIntegration,Prewarm,"
                            "WebUIOmniboxPopup,WebUIOmniboxFullPopup,"
-                           "WebUIOmniboxAimPopup")) {
+                           "WebUIOmniboxAimPopup,OptimizationGuideModelExecution")) {
         return test_fail("omnibox must use native suggestions without WebUI renderer startup");
     }
     if (status != 127) return test_fail("execv failure path was not reached");
-    if (!test_string_equal(g_exec_path, "/sbin/chrome")) {
-        return test_fail("chrome-start did not exec /sbin/chrome");
+    if (!test_string_equal(g_exec_path, "/usr/apps/chrome/chrome")) {
+        return test_fail("chrome-start did not exec /usr/apps/chrome/chrome");
     }
     if (g_exec_argument_count == 0U ||
-        !test_string_equal(g_exec_arguments[0], "/sbin/chrome")) {
+        !test_string_equal(g_exec_arguments[0], "/usr/apps/chrome/chrome")) {
         return test_fail("Chrome argv[0] is incorrect");
     }
     if (test_has_argument("--single-process")) {
@@ -202,7 +219,7 @@ int main(void) {
         return test_fail("desktop launch did not select the QEMU host proxy");
     status = chrome_start_program_main(0, 0);
     if (status != 127 ||
-        !test_string_equal(g_exec_path, "/sbin/chrome") ||
+        !test_string_equal(g_exec_path, "/usr/apps/chrome/chrome") ||
         !test_has_argument("https://www.google.com/") ||
         !test_has_argument("--test-type") ||
         !test_has_argument("--disk-cache-size=67108864") ||
@@ -306,6 +323,7 @@ int main(void) {
         !test_has_argument("--use-vulkan=native") ||
         !test_has_argument("--disable-vulkan-surface") ||
         !test_has_argument("--use-gl=disabled") ||
+        !test_has_argument("--enable-gpu-rasterization") ||
         !test_has_argument("--in-process-gpu") ||
         test_has_argument("--disable-gpu") || test_has_argument("--disable-gpu-compositing") ||
         test_has_argument("--disable-gpu-program-cache") ||
@@ -316,13 +334,26 @@ int main(void) {
         !test_has_argument("https://override.invalid/"))
         return test_fail("Vulkan profile lost explicit arguments");
     if (!test_string_equal(getenv("VK_DRIVER_FILES"),
-                           "/usr/share/vulkan/icd.d/nvidia_icd.json"))
+                           "/usr/apps/chrome/vulkan/nvidia_icd.json"))
         return test_fail("Vulkan profile did not select the deployed NVIDIA ICD");
+    if (!test_string_equal(getenv("__EGL_VENDOR_LIBRARY_FILENAMES"),
+                           "/usr/apps/chrome/egl/10_nvidia.json"))
+        return test_fail("Vulkan profile lost the private EGL vendor configuration");
+    if (!test_string_equal(getenv("OS_CHROME_GPU_MODE"), "vulkan"))
+        return test_fail("Vulkan mode was not propagated to child processes");
+    char *disable_video[] = {"chrome-start", "--disable-accelerated-video-decode", 0};
+    if (chrome_start_program_main(2, disable_video) != 127 ||
+        !test_string_equal(getenv("OS_CHROME_GPU_MODE"), "software"))
+        return test_fail("explicit video disable was not propagated");
+    char *near_disable[] = {"chrome-start", "--disable-gpu-compositing", 0};
+    if (chrome_start_program_main(2, near_disable) != 127 ||
+        !test_string_equal(getenv("OS_CHROME_GPU_MODE"), "vulkan"))
+        return test_fail("compositing-only switch incorrectly disabled video");
     if (setenv("VK_DRIVER_FILES", "/invalid/inherited.json", 1) != 0)
         return test_fail("could not prepare inherited ICD regression");
     if (chrome_start_program_main(0, 0) != 127 ||
         !test_string_equal(getenv("VK_DRIVER_FILES"),
-                           "/usr/share/vulkan/icd.d/nvidia_icd.json"))
+                           "/usr/apps/chrome/vulkan/nvidia_icd.json"))
         return test_fail("inherited ICD overrode the hardware profile");
     calls = g_exec_calls;
     g_gpu_env_error = 1;
@@ -341,8 +372,11 @@ int main(void) {
     g_profile = "software\n"; g_profile_size = 9U;
     if (chrome_start_program_main(0, 0) != 127 ||
         !test_has_argument("--disable-gpu") || !test_has_argument("--disable-gpu-compositing") ||
-        test_has_argument("--use-vulkan=native"))
+        test_has_argument("--use-vulkan=native") ||
+        test_has_argument("--enable-gpu-rasterization"))
         return test_fail("software profile retained Vulkan switches");
+    if (!test_string_equal(getenv("OS_CHROME_GPU_MODE"), "software"))
+        return test_fail("software mode was not propagated to child processes");
     static const char *const invalid_profiles[] = {
         "", "vulkan", "VULKAN\n", "vulkan\nextra", "software\nextra", "staging\n",
         "vulkan-profile-that-is-too-long",

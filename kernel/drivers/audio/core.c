@@ -27,6 +27,7 @@ typedef struct audio_period {
     dma_mapping_t dma;
     uint32_t state;
     uint32_t frames;
+    uint64_t submission;
 } audio_period_t;
 
 struct audio_stream {
@@ -44,15 +45,47 @@ struct audio_stream {
     uint32_t queued_count;
     uint64_t queued_frames;
     uint64_t queued_total;
+    uint64_t submission_sequence;
     uint64_t completed_total;
     uint64_t completed_frames;
     uint64_t underruns;
     uint64_t overruns;
     uint64_t controller_resets;
     uint64_t device_generation;
+    struct audio_stream *retired_next;
 };
 
 static atomic_uint g_audio_init_state;
+static spinlock_t g_audio_retired_lock;
+static audio_stream_t *g_audio_retired;
+
+static bool audio_stream_try_destroy(audio_stream_t *stream);
+
+/* 失败对象由回收链表持有；只在打开新流时重试，避免后台忙轮询。 */
+static void audio_stream_retire(audio_stream_t *stream) {
+    sched_preempt_disable();
+    spinlock_lock(&g_audio_retired_lock);
+    stream->retired_next = g_audio_retired;
+    g_audio_retired = stream;
+    spinlock_unlock(&g_audio_retired_lock);
+    sched_preempt_enable();
+}
+
+static void audio_stream_reap_retired(void) {
+    sched_preempt_disable();
+    spinlock_lock(&g_audio_retired_lock);
+    audio_stream_t *streams = g_audio_retired;
+    g_audio_retired = 0;
+    spinlock_unlock(&g_audio_retired_lock);
+    sched_preempt_enable();
+    /* 先摘下快照，在锁外停止设备和释放映射；本轮失败的对象留到下次打开。 */
+    while (streams != 0) {
+        audio_stream_t *next = streams->retired_next;
+        streams->retired_next = 0;
+        if (!audio_stream_try_destroy(streams)) audio_stream_retire(streams);
+        streams = next;
+    }
+}
 
 static void audio_stream_object_destroy(void *object);
 
@@ -237,6 +270,7 @@ kstatus_t audio_stream_create(struct device *device, audio_direction_t direction
     audio_stream_t *stream;
     if (device == 0 || out == 0 || direction > AUDIO_CAPTURE ||
         !audio_core_init()) return K_EINVAL;
+    audio_stream_reap_retired();
     stream = (audio_stream_t *)kzalloc(sizeof(*stream), 0);
     if (stream == 0) return K_ENOMEM;
     audio_object_init(&stream->object);
@@ -255,17 +289,24 @@ audio_direction_t audio_stream_direction(const audio_stream_t *stream) {
     return stream == 0 ? AUDIO_CAPTURE : stream->direction;
 }
 
-static void audio_stream_object_destroy(void *object) {
-    audio_stream_t *stream = (audio_stream_t *)object;
+static bool audio_stream_try_destroy(audio_stream_t *stream) {
     struct device *device;
-    if (stream == 0) return;
     device = stream->device;
     /* 先停止设备后端并释放控制器描述符，再释放 period 的 DMA 映射。 */
-    (void)xhci_audio_stream_disconnect(stream);
-    (void)hda_audio_stream_disconnect(stream);
-    if (audio_stream_disconnect(stream) != K_OK) return;
+    kstatus_t usb_status = xhci_audio_stream_disconnect(stream);
+    kstatus_t hda_status = hda_audio_stream_disconnect(stream);
+    /* 后端未确认停止时，保留流、设备引用和周期映射，避免 DMA 访问已释放内存。 */
+    if ((usb_status != K_OK && usb_status != K_ENOENT) ||
+        (hda_status != K_OK && hda_status != K_ENOENT)) return false;
+    if (audio_stream_disconnect(stream) != K_OK) return false;
     if (device != 0) object_put(device);
     kfree(stream);
+    return true;
+}
+
+static void audio_stream_object_destroy(void *object) {
+    audio_stream_t *stream = object;
+    if (stream != 0 && !audio_stream_try_destroy(stream)) audio_stream_retire(stream);
 }
 
 void audio_stream_destroy(audio_stream_t *stream) {
@@ -359,26 +400,24 @@ kstatus_t audio_stream_stop(audio_stream_t *stream) {
     return K_OK;
 }
 
-kstatus_t audio_stream_queue(audio_stream_t *stream, uint32_t period,
+static kstatus_t audio_stream_queue_locked(audio_stream_t *stream, uint32_t period,
                              uint32_t frames) {
     audio_period_t *entry;
     if (stream == 0 || frames == 0U) return K_EINVAL;
-    audio_lock(stream);
     if (stream->state == AUDIO_STREAM_DISCONNECTED) {
-        audio_unlock(stream);
         return K_EDEVREMOVED;
     }
     if (stream->state == AUDIO_STREAM_NEW || period >= stream->format.period_count ||
         frames > stream->format.period_frames) {
-        audio_unlock(stream);
         return K_EINVAL;
     }
     entry = &stream->periods[period];
     if (entry->state != AUDIO_PERIOD_FREE) {
         ++stream->overruns;
-        audio_unlock(stream);
         return K_EBUSY;
     }
+    if (stream->submission_sequence == UINT64_MAX) return K_EOVERFLOW;
+    entry->submission = ++stream->submission_sequence;
     entry->frames = frames;
     dma_sync_for_device(&entry->dma);
     entry->state = AUDIO_PERIOD_QUEUED;
@@ -386,8 +425,16 @@ kstatus_t audio_stream_queue(audio_stream_t *stream, uint32_t period,
     stream->queued_frames += frames;
     ++stream->queued_total;
     if (stream->state != AUDIO_STREAM_XRUN) audio_activate_next_locked(stream);
-    audio_unlock(stream);
     return K_OK;
+}
+
+kstatus_t audio_stream_queue(audio_stream_t *stream, uint32_t period,
+                             uint32_t frames) {
+    if (stream == 0) return K_EINVAL;
+    audio_lock(stream);
+    kstatus_t status = audio_stream_queue_locked(stream, period, frames);
+    audio_unlock(stream);
+    return status;
 }
 
 kstatus_t audio_stream_complete(audio_stream_t *stream, uint32_t period,
@@ -607,21 +654,22 @@ uint64_t audio_stream_period_dma_length(const audio_stream_t *stream,
     return length;
 }
 
-static kstatus_t audio_stream_period_copy(audio_stream_t *stream,
+static kstatus_t audio_stream_period_copy_locked(audio_stream_t *stream,
                                           uint32_t period, void *buffer,
                                           uint64_t bytes, bool to_stream) {
     audio_period_t *entry;
     uint64_t offset = 0U;
     if (stream == 0 || buffer == 0 || bytes == 0U) return K_EINVAL;
-    audio_lock(stream);
     if (stream->state == AUDIO_STREAM_NEW ||
         stream->state == AUDIO_STREAM_DISCONNECTED ||
         period >= stream->format.period_count ||
         bytes > stream->period_bytes || stream->periods[period].pages == 0) {
-        audio_unlock(stream);
         return stream->state == AUDIO_STREAM_DISCONNECTED ? K_EDEVREMOVED : K_EINVAL;
     }
     entry = &stream->periods[period];
+    /* 播放期由 DMA 持有；采集后端仍可写入自己的活动周期。 */
+    if (to_stream && stream->direction == AUDIO_PLAYBACK &&
+        entry->state != AUDIO_PERIOD_FREE) return K_EBUSY;
     while (offset < bytes) {
         uint32_t page_index = (uint32_t)(offset / PAGE_SIZE);
         uint32_t page_offset = (uint32_t)(offset & (PAGE_SIZE - 1U));
@@ -631,7 +679,6 @@ static kstatus_t audio_stream_period_copy(audio_stream_t *stream,
                                 remaining : remaining_in_page);
         void *page_address;
         if (page_index >= entry->page_count || entry->pages[page_index] == 0) {
-            audio_unlock(stream);
             return K_EIO;
         }
         page_address = (uint8_t *)phys_to_direct(
@@ -643,8 +690,18 @@ static kstatus_t audio_stream_period_copy(audio_stream_t *stream,
         }
         offset += chunk;
     }
-    audio_unlock(stream);
     return K_OK;
+}
+
+static kstatus_t audio_stream_period_copy(audio_stream_t *stream,
+                                          uint32_t period, void *buffer,
+                                          uint64_t bytes, bool to_stream) {
+    if (stream == 0 || buffer == 0 || bytes == 0U) return K_EINVAL;
+    audio_lock(stream);
+    kstatus_t status = audio_stream_period_copy_locked(stream, period, buffer,
+                                                       bytes, to_stream);
+    audio_unlock(stream);
+    return status;
 }
 
 kstatus_t audio_stream_period_write(audio_stream_t *stream, uint32_t period,
@@ -655,6 +712,65 @@ kstatus_t audio_stream_period_write(audio_stream_t *stream, uint32_t period,
 kstatus_t audio_stream_period_read(audio_stream_t *stream, uint32_t period,
                                    void *buffer, uint64_t bytes) {
     return audio_stream_period_copy(stream, period, buffer, bytes, false);
+}
+
+/* 在同一临界区检查、复制并发布，避免两个提交者互相覆盖尚未入队的数据。 */
+kstatus_t audio_stream_submit(audio_stream_t *stream, uint32_t period,
+                               const void *buffer, uint64_t bytes,
+                               uint32_t frames, uint64_t *submission) {
+    if (stream == 0 || buffer == 0 || frames == 0U) return K_EINVAL;
+    audio_lock(stream);
+    kstatus_t status;
+    if (stream->state == AUDIO_STREAM_DISCONNECTED) {
+        status = K_EDEVREMOVED;
+    } else if (stream->direction != AUDIO_PLAYBACK ||
+               stream->state == AUDIO_STREAM_NEW ||
+               frames > stream->format.period_frames ||
+               bytes != (uint64_t)frames * stream->frame_bytes) {
+        status = K_EINVAL;
+    } else if (stream->submission_sequence == UINT64_MAX) {
+        status = K_EOVERFLOW;
+    } else {
+        status = audio_stream_period_copy_locked(stream, period,
+                                                   (void *)buffer, bytes, true);
+        if (status == K_OK)
+            status = audio_stream_queue_locked(stream, period, frames);
+        if (status == K_OK && submission != 0)
+            *submission = stream->periods[period].submission;
+    }
+    audio_unlock(stream);
+    return status;
+}
+
+/* 后端拒绝后仅撤销对应提交，旧请求不能取消重置后的新周期。 */
+kstatus_t audio_stream_cancel_submit(audio_stream_t *stream, uint32_t period,
+                                     uint64_t submission) {
+    if (stream == 0 || submission == 0U) return K_EINVAL;
+    audio_lock(stream);
+    kstatus_t status = K_OK;
+    if (stream->state == AUDIO_STREAM_DISCONNECTED) status = K_EDEVREMOVED;
+    else if (period >= stream->format.period_count) status = K_EINVAL;
+    else {
+        audio_period_t *entry = &stream->periods[period];
+        if (entry->state == AUDIO_PERIOD_FREE || entry->submission != submission) {
+            status = K_EAGAIN;
+        } else {
+            stream->queued_frames -= entry->frames;
+            --stream->queued_count;
+            --stream->queued_total;
+            entry->frames = 0U;
+            entry->state = AUDIO_PERIOD_FREE;
+            if (stream->active_period == period) {
+                stream->active_period = AUDIO_PERIOD_INVALID;
+                if (stream->state != AUDIO_STREAM_XRUN) audio_activate_next_locked(stream);
+                if (stream->state == AUDIO_STREAM_RUNNING &&
+                    stream->active_period == AUDIO_PERIOD_INVALID)
+                    stream->state = AUDIO_STREAM_XRUN;
+            }
+        }
+    }
+    audio_unlock(stream);
+    return status;
 }
 
 void audio_stream_get_stats(audio_stream_t *stream, audio_stream_stats_t *stats) {

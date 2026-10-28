@@ -7,6 +7,10 @@
 #include <blend2d/blend2d.h>
 
 #include "text.h"
+#include "text_metrics.h"
+#include <uapi/control_tree.h>
+#include <uapi/font.h>
+#include <uapi/utf8.h>
 
 typedef struct ui_text_state {
     BLFontDataCore font_data;
@@ -14,7 +18,6 @@ typedef struct ui_text_state {
     BLFontCore font;
     BLImageCore image;
     BLContextCore context;
-    BLGlyphBufferCore measure_buffer;
     BLFontMetrics metrics;
     uint32_t size;
     uint32_t advance;
@@ -29,10 +32,10 @@ typedef struct ui_text_state {
     bool font_face_ready;
     bool font_ready;
     bool context_ready;
-    bool measure_buffer_ready;
 } ui_text_state_t;
 
 static ui_text_state_t g_text;
+static const char g_font_path[] = OS_FONT_DEFAULT_PATH;
 
 static uint32_t ceil_pixel(float value) {
     uint32_t integer;
@@ -62,10 +65,6 @@ static void close_context(void) {
 
 void ui_text_shutdown(void) {
     close_context();
-    if (g_text.measure_buffer_ready) {
-        (void)bl_glyph_buffer_destroy(&g_text.measure_buffer);
-        g_text.measure_buffer_ready = false;
-    }
     if (g_text.font_ready) {
         (void)bl_font_destroy(&g_text.font);
         g_text.font_ready = false;
@@ -89,44 +88,17 @@ void ui_text_shutdown(void) {
 }
 
 static bool update_metrics(ui_text_state_t *text) {
-    BLGlyphBufferCore sample = {0};
-    BLTextMetrics text_metrics = {0};
-    const char sample_text[] = "M";
-    bool sample_ready = false;
-    float line_height;
-
-    if (bl_font_get_metrics(&text->font, &text->metrics) != BL_SUCCESS) {
-        return false;
-    }
-    line_height = text->metrics.ascent + text->metrics.descent +
-                  text->metrics.line_gap;
-    text->line_height = ceil_pixel(line_height);
-    if (text->line_height < text->size + 2U) {
-        text->line_height = text->size + 2U;
-    }
-    text->baseline = ceil_pixel(text->metrics.ascent);
-    if (text->baseline >= text->line_height) {
-        text->baseline = text->line_height - 1U;
-    }
-
-    if (bl_glyph_buffer_init(&sample) == BL_SUCCESS) {
-        sample_ready = true;
-        if (bl_glyph_buffer_set_text(&sample, sample_text, 1U,
-                                     BL_TEXT_ENCODING_UTF8) == BL_SUCCESS &&
-            bl_font_get_text_metrics(&text->font, &sample, &text_metrics) ==
-                BL_SUCCESS) {
-            text->advance = ceil_pixel((float)text_metrics.advance.x);
-        }
-    }
-    if (sample_ready) (void)bl_glyph_buffer_destroy(&sample);
-    if (text->advance == 0U) text->advance = (text->size * 3U) / 5U;
-    if (text->advance == 0U) text->advance = 1U;
+    if (bl_font_get_metrics(&text->font,&text->metrics)!=BL_SUCCESS) return false;
+    /* 版式尺寸与系统控件一致；基线仅供遗留 Surface 文本绘制使用。 */
+    text->advance=ui_text_cell_advance(text->size);
+    text->line_height=ui_text_layout_line_height(text->size);
+    text->baseline=ceil_pixel(text->metrics.ascent);
     return true;
 }
 
 bool ui_text_init(uint32_t size) {
     ui_text_state_t next = {0};
-    if (size < OS_TEXT_MIN_SIZE || size > OS_TEXT_MAX_SIZE) {
+    if (!ui_text_valid_size(size)) {
         return false;
     }
     if (!g_text.runtime_ready) {
@@ -137,7 +109,7 @@ bool ui_text_init(uint32_t size) {
         if (bl_font_data_init(&g_text.font_data) != BL_SUCCESS) goto fail;
         g_text.font_data_ready = true;
         if (bl_font_data_create_from_file(&g_text.font_data,
-                                          "/etc/fonts/default.ttf",
+                                          g_font_path,
                                           BL_FILE_READ_NO_FLAGS) != BL_SUCCESS) {
             goto fail;
         }
@@ -157,9 +129,8 @@ bool ui_text_init(uint32_t size) {
         (void)bl_font_destroy(&next.font);
         goto fail;
     }
-    /* Commit only after creation and metrics succeed. Failed zoom keeps the
-     * old font and its active context usable; successful zoom invalidates
-     * the old rasterization context before releasing its font. */
+    /* 仅在创建和度量值计算都成功后提交。缩放失败时保留旧字体及其可用上下文；
+     * 缩放成功时先使旧光栅化上下文失效，再释放其字体。 */
     close_context();
     if (g_text.font_ready) (void)bl_font_destroy(&g_text.font);
     (void)bl_font_init_move(&g_text.font, &next.font);
@@ -181,13 +152,7 @@ bool ui_text_adjust(int32_t direction) {
     uint32_t current = g_text.size;
     uint32_t next;
     if (!g_text.font_ready || direction == 0) return false;
-    if (direction > 0) {
-        next = current >= OS_TEXT_MAX_SIZE - OS_TEXT_SIZE_STEP ?
-               OS_TEXT_MAX_SIZE : current + OS_TEXT_SIZE_STEP;
-    } else {
-        next = current <= OS_TEXT_MIN_SIZE + OS_TEXT_SIZE_STEP ?
-               OS_TEXT_MIN_SIZE : current - OS_TEXT_SIZE_STEP;
-    }
+    next = ui_text_step_size(current, direction);
     if (next == current || !ui_text_init(next)) return false;
 #if OS_REALTEST
     (void)fprintf(stderr, "OS_TEXT_ZOOM_SIZE=%u\n", next);
@@ -285,32 +250,8 @@ void ui_text_draw_rect(uint32_t *pixels, uint32_t stride,
 }
 
 uint32_t ui_text_measure_range(const char *text, size_t length) {
-    /* Bound retained capacity; long strings must not grow the UI scratch
-     * buffer for the remainder of the application's lifetime. */
-    const size_t retained_limit = 4096U;
-    BLGlyphBufferCore temporary = {0};
-    BLGlyphBufferCore *glyph_buffer;
-    BLTextMetrics metrics = {0};
-    uint32_t width = 0U;
-    if (!g_text.font_ready || text == 0 || length == 0U) return 0U;
-    if (length <= retained_limit) {
-        if (!g_text.measure_buffer_ready) {
-            if (bl_glyph_buffer_init(&g_text.measure_buffer) != BL_SUCCESS)
-                return 0U;
-            g_text.measure_buffer_ready = true;
-        }
-        glyph_buffer = &g_text.measure_buffer;
-    } else {
-        if (bl_glyph_buffer_init(&temporary) != BL_SUCCESS) return 0U;
-        glyph_buffer = &temporary;
-    }
-    if (bl_glyph_buffer_set_text(glyph_buffer, text, length,
-                                 BL_TEXT_ENCODING_UTF8) == BL_SUCCESS &&
-        bl_font_get_text_metrics(&g_text.font, glyph_buffer, &metrics) ==
-            BL_SUCCESS) width = ceil_pixel((float)metrics.advance.x);
-    if (glyph_buffer == &temporary) (void)bl_glyph_buffer_destroy(glyph_buffer);
-    else (void)bl_glyph_buffer_clear(glyph_buffer);
-    return width;
+    /* 控件布局与合成器共用 UTF-8 单元度量，不再由另一套字体引擎推算命中宽度。 */
+    return g_text.font_ready ? ui_text_measure_cells(text, length, g_text.size) : 0U;
 }
 
 uint32_t ui_text_measure(const char *text) {

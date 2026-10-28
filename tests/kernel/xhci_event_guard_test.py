@@ -16,6 +16,7 @@ typedef struct {
     spinlock_t event_lock;
     uint64_t event_lock_saved_flags;
     uint32_t event_lock_owner;
+    atomic_bool event_work_waiting;
 } xhci_state_t;
 void sched_preempt_disable(void);
 void sched_preempt_enable(void);
@@ -26,6 +27,7 @@ void xhci_event_restore_flags(uint64_t flags);
 void xhci_event_lock(xhci_state_t *state);
 bool xhci_event_try_lock(xhci_state_t *state);
 void xhci_event_unlock(xhci_state_t *state);
+void xhci_runtime_resume_events(void);
 '''
 instrumented = common.replace('#include <kernel/spinlock.h>', r'''
 bool test_cas(atomic_uint *,unsigned *,unsigned,memory_order,memory_order);
@@ -45,6 +47,10 @@ static _Thread_local bool interrupt_enabled;
 static xhci_state_t state;
 static atomic_uint attempts,polls,waiting;
 static uint64_t value,checksum;
+static unsigned resumes;
+void xhci_runtime_resume_events(void) {
+    assert(!atomic_load(&state.event_lock.state));++resumes;
+}
 void sched_preempt_disable(void) {++depth;}
 void sched_preempt_enable(void) {assert(depth);--depth;}
 uint32_t x86_current_cpu_index(void) {assert(depth);return cpu;}
@@ -121,6 +127,10 @@ int main(void) {
     for(unsigned i=0;i<4;++i)assert(!pthread_join(threads[i],0));
     assert(value==80000 && checksum==1360000 && !depth && !interrupt_enabled);
     assert(!atomic_load(&state.event_lock.state) && state.event_lock_owner==UINT32_MAX);
+    xhci_event_lock(&state);
+    atomic_store(&state.event_work_waiting,true);
+    xhci_event_unlock(&state);
+    assert(resumes==1 && !atomic_load(&state.event_work_waiting));
     puts("xHCI event lock: 32 nested depths x IF on/off, null and busy/successful try paths, unchanged owner/saved flags on failure, 80000 contended updates and read-only waiting passed");
 }
 '''

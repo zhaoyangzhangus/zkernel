@@ -18,7 +18,7 @@ if (-not $SourceDirectory -and -not $Download) {
     throw 'Pass -SourceDirectory <linux-firmware directory> or -Download.'
 }
 
-$targetDirectory = Join-Path (Join-Path $projectRoot $Build) 'esp\rtl_nic'
+$targetDirectory = Join-Path (Join-Path $projectRoot $Build) 'esp\EFI\OS\firmware\rtl8126'
 $firmware = @(
     @('rtl8126a-2.fw',
       'https://kernel.googlesource.com/pub/scm/linux/kernel/git/firmware/linux-firmware/+/refs/heads/main/rtl_nic/rtl8126a-2.fw?format=TEXT'),

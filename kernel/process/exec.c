@@ -32,9 +32,9 @@
 #define ELF_EXEC_METADATA_SIZE (16ULL * 1024ULL * 1024ULL)
 #define ELF_EXEC_LOAD_CHUNK_SIZE (1ULL * 1024ULL * 1024ULL)
 
-/* Debugger-enabled, bounded maxima. Never schedule or allocate in this path.
- * Stages: 1=metadata, 2=prepare image, 3=segment read, 4=segment copy,
- * 5=close-on-exec descriptors, 6=old-space release, 7=load-buffer cleanup. */
+/* 供调试器使用的有界最大值。此路径绝不调度或分配内存。
+ * 阶段：1=元数据，2=准备映像，3=读取段，4=复制段，5=关闭 close-on-exec 描述符，
+ * 6=释放旧地址空间，7=清理加载缓冲区。 */
 typedef struct exec_load_delay {
     uint64_t pid, tid, stage, bytes, duration_ns;
     int64_t status;
@@ -75,7 +75,7 @@ static void exec_load_finish(uint64_t started, uint64_t stage, uint64_t bytes,
     exec_load_record(thread->process->pid, thread->tid, stage, bytes, status, ticks);
 }
 
-/* Failure-only PROCESS_EXEC progress snapshot. */
+/* 仅在失败时记录 PROCESS_EXEC 进度快照。 */
 static atomic_uint g_exec_debug_stage;
 static atomic_uint g_exec_debug_status;
 static atomic_uint g_exec_debug_thread;
@@ -144,8 +144,7 @@ typedef struct elf_exec_arguments {
 } elf_exec_arguments_t;
 
 /*
- * Exec diagnostics are deliberately failure-only so the successful runtime
- * timing remains unchanged.
+ * exec 诊断有意仅用于失败路径，以免改变成功运行时的计时结果。
  */
 static void exec_diag_status(const char *tag, kstatus_t status) {
     kernel_serial_write("OS_DIAG_EXEC_");
@@ -191,12 +190,11 @@ static bool exec_path_is_self_exe(const char *path) {
 
 static kstatus_t exec_resolve_path(process_t *process,
                                    const char __user *user_path,
-                                   char output[EXEC_PATH_CAPACITY],
-                                   bool *resolved_self_exe) {
+                                   char output[EXEC_PATH_CAPACITY]) {
     kstatus_t status = exec_copy_user_path(user_path, output);
     if (status != K_OK) return status;
-    *resolved_self_exe = exec_path_is_self_exe(output);
-    if (!*resolved_self_exe) return K_OK;
+    if (!exec_path_is_self_exe(output))
+        return vfs_resolve_user_path(user_path, true, false, output);
 
     process_thread_lock(process);
     __builtin_memcpy(output, process->linux_exe, EXEC_PATH_CAPACITY);
@@ -222,11 +220,9 @@ static void exec_update_process_name(process_t *process, const char *path) {
 }
 
 /*
- * Releasing an old address space can unmap every VMA and issue a TLB
- * shootdown for each page.  It must not keep the exec syscall on the old
- * process's execution stack after CR3 has already moved to the new space.
- * The deferred worker runs with a kernel root and an ordinary preemptible
- * context, so the teardown cannot strand the newly loaded user thread.
+ * 释放旧地址空间可能取消映射所有 VMA，并为每个页面执行 TLB shootdown。CR3 已切换到新空间后，
+ * exec 系统调用不能继续占用旧进程的执行栈。后台工作线程使用内核根页表和普通可抢占上下文，
+ * 因此拆除过程不会使新加载的用户线程陷入停滞。
  */
 static void exec_release_old_space_work(void *argument) {
     vm_space_put((vm_space_t *)argument);
@@ -234,9 +230,9 @@ static void exec_release_old_space_work(void *argument) {
 
 static void exec_release_old_space(vm_space_t *space) {
     if (space == 0) return;
-    /* A full deferred queue is exceptional; preserve ownership with a safe
-     * synchronous fallback rather than leaking the address space. */
-    if (!deferred_schedule(exec_release_old_space_work, space)) {
+    /* 绝不在 xHCI/输入下半部中销毁 VM。后台队列已满属于异常情况；应使用安全的同步回退路径
+     * 保留资源所有权，而不是泄漏地址空间。 */
+    if (!deferred_background_schedule(exec_release_old_space_work, space)) {
         vm_space_put(space);
     }
 }
@@ -319,8 +315,8 @@ static kstatus_t write_address_space(vm_space_t *space, uint64_t address,
         if (status != K_OK) return status;
         uint8_t *destination = (uint8_t *)phys_to_direct(physical);
         if (destination == 0) return K_EIO;
-        /* The translated page bounds this copy; use the kernel's integer
-         * bulk primitive without touching FPU state or scheduling here. */
+        /* 已转换的页面范围限定了此次复制；使用内核整数批量操作，不触碰 FPU 状态，也不在此处
+         * 调度。 */
         __builtin_memcpy(destination + page_offset, input, chunk);
         address += chunk;
         input += chunk;
@@ -451,7 +447,7 @@ static kstatus_t map_exec_range(vm_space_t *space, vnode_t *vnode,
     uint64_t end = (uint64_t)address + (uint64_t)size;
     if (end <= (uint64_t)address) return K_EINVAL;
 
-    /* The common case is a completely new range. */
+    /* 常见情况是映射一个全新的范围。 */
     bool range_mapped = vm_range_is_mapped(space, address, size);
 #if OS_DEBUG_SERIAL
     if (exec_debug_serial_allow()) {
@@ -504,8 +500,7 @@ static kstatus_t map_exec_range(vm_space_t *space, vnode_t *vnode,
         if (status != K_EBUSY) return status;
     }
 
-    /* PT_LOADs may share their final page.  Split around mapped runs and
-     * update an existing VMA instead of inserting an overlapping one. */
+    /* 多个 PT_LOAD 可能共用最后一页。应在已映射区域处分割，并更新现有 VMA，而不是插入重叠项。 */
     uint64_t cursor = (uint64_t)address;
     while (cursor < end) {
         bool mapped = vm_range_is_mapped(space, (vaddr_t)cursor, PAGE_SIZE);
@@ -567,12 +562,9 @@ static kstatus_t map_load_segment_from_vfs(
 
     kstatus_t status = K_OK;
 
-    /* The writable part of a Linux executable is private after exec.  Keep
-     * it anonymous and stream the bytes in large requests: mapping it as a
-     * FAT-backed file causes every dynamic-relocator store to perform a
-     * separate page-cache/COW operation.  The shared page at a PT_LOAD
-     * boundary is still handled by map_exec_range and its existing bytes are
-     * preserved before the segment payload is copied over them. */
+    /* Linux 可执行文件的可写部分在 exec 后为私有映射。将其保留为匿名区域并以大块请求流式
+     * 写入：若映射为 FAT 后备文件，动态重定位器的每次写入都会触发单独的页缓存/COW 操作。
+     * PT_LOAD 边界的共享页仍由 map_exec_range 处理，并在复制段数据前保留其中已有字节。 */
     if ((program->flags & ELF_PF_WRITE) != 0U) {
         status = map_exec_range(space, 0, 0U, (vaddr_t)mapping_start,
                                 (size_t)(memory_end - mapping_start),
@@ -580,8 +572,16 @@ static kstatus_t map_load_segment_from_vfs(
         if (status != K_OK) return status;
         if (program->file_size != 0U) {
             if (program->offset > (uint64_t)INT64_MAX) return K_EINVAL;
-            uint8_t *chunk = (uint8_t *)kmalloc(ELF_EXEC_LOAD_CHUNK_SIZE, 0U);
-            if (chunk == 0) return K_ENOMEM;
+            /* 小段按实际长度分配；大块中转分配失败时缩小批次，不改变最终段内容。
+             * 最小重试批次为一页，但本来不足一页的段无需扩大。 */
+            size_t capacity = program->file_size > ELF_EXEC_LOAD_CHUNK_SIZE ?
+                              (size_t)ELF_EXEC_LOAD_CHUNK_SIZE : (size_t)program->file_size;
+            uint8_t *chunk;
+            while ((chunk = (uint8_t *)kmalloc(capacity, 0U)) == 0) {
+                if (capacity <= PAGE_SIZE) return K_ENOMEM;
+                capacity /= 2U;
+                if (capacity < PAGE_SIZE) capacity = PAGE_SIZE;
+            }
             uint64_t position = 0U;
             status = vfs_seek(source_file, (int64_t)program->offset,
                               OS_FILE_SEEK_SET, &position);
@@ -589,8 +589,8 @@ static kstatus_t map_load_segment_from_vfs(
                 uint64_t copied = 0U;
                 while (copied < program->file_size) {
                     uint64_t remaining = program->file_size - copied;
-                    size_t request = remaining > ELF_EXEC_LOAD_CHUNK_SIZE ?
-                                     (size_t)ELF_EXEC_LOAD_CHUNK_SIZE :
+                    size_t request = remaining > capacity ?
+                                     capacity :
                                      (size_t)remaining;
                     uint64_t bytes = 0U;
 #if OS_DEBUG_SERIAL
@@ -642,9 +642,8 @@ static kstatus_t map_load_segment_from_vfs(
             if (status != K_OK) return status;
         }
 
-        /* If p_filesz stops in the middle of a page, clear the remainder of
-         * that shared boundary page.  Later BSS pages are zeroed by anon_page.
-         */
+        /* 如果 p_filesz 在页面中间结束，则清零该共享边界页的剩余部分。后续 BSS 页面由
+         * anon_page 清零。 */
         if ((data_end & (PAGE_SIZE - 1ULL)) != 0U && data_end < memory_end) {
             uint64_t zero_end = (data_end + PAGE_SIZE - 1ULL) &
                                 ~(PAGE_SIZE - 1ULL);
@@ -671,9 +670,8 @@ static kstatus_t map_load_segment_from_vfs(
     if (status != K_OK) return status;
 
     if (data_end > file_mapping_end) {
-        /* The final partial file page is anonymous so bytes after p_filesz
-         * stay zero.  It is at most one page because full pages are
-         * file-backed. */
+        /* 最后一个不完整文件页使用匿名映射，以确保 p_filesz 之后的字节为零。它最多只有一页，
+         * 因为完整页面均由文件后备。 */
         uint64_t copy_start = virtual_start > file_mapping_end ?
                               virtual_start : file_mapping_end;
         uint64_t copy_size = data_end - copy_start;
@@ -743,48 +741,8 @@ static kstatus_t map_load_segment(vm_space_t *space, const uint8_t *image,
     }
     exec_debug_progress(0x123U);
     if (program->file_size == 0U) return K_OK;
-    if (source_file == 0) {
     return write_address_space(space, virtual_start, image + program->offset,
                                (size_t)program->file_size);
-}
-
-    if (program->offset > (uint64_t)INT64_MAX) return K_EINVAL;
-    uint8_t *chunk = (uint8_t *)kmalloc(ELF_EXEC_LOAD_CHUNK_SIZE, 0U);
-    if (chunk == 0) return K_ENOMEM;
-    uint64_t position = 0U;
-    status = vfs_seek(source_file, (int64_t)program->offset,
-                      OS_FILE_SEEK_SET, &position);
-    if (status != K_OK) {
-        kfree(chunk);
-        return status;
-    }
-    uint64_t copied = 0U;
-    while (copied < program->file_size) {
-        uint64_t remaining = program->file_size - copied;
-        size_t request = remaining > ELF_EXEC_LOAD_CHUNK_SIZE ?
-                         (size_t)ELF_EXEC_LOAD_CHUNK_SIZE :
-                         (size_t)remaining;
-        uint64_t bytes = 0U;
-        status = vfs_read_kernel(source_file, chunk, request, &bytes);
-        if (status != K_OK || bytes == 0U || bytes > request) {
-            if (status == K_OK) status = K_EIO;
-            kfree(chunk);
-            return status;
-        }
-        status = write_address_space(space, virtual_start + copied,
-                                     chunk, (size_t)bytes);
-        if (status != K_OK) {
-            kfree(chunk);
-            return status;
-        }
-        copied += bytes;
-        if (bytes < request && copied < program->file_size) {
-            kfree(chunk);
-            return K_EIO;
-        }
-    }
-    kfree(chunk);
-    return K_OK;
 }
 
 static kstatus_t map_elf_segments(vm_space_t *space, const uint8_t *image,
@@ -976,8 +934,7 @@ static kstatus_t build_initial_stack(vm_space_t *space,
         if (status != K_OK) return status;
     }
 
-    /* Linux emits 17 auxv pairs here, including AUX_NULL.  Keep two spare
-     * slots so the terminating pair cannot overwrite argv_values. */
+    /* Linux 在此处写入 17 对 auxv，包括 AUX_NULL。预留两个额外槽位，避免终止项覆盖 argv_values。 */
     uint64_t auxiliary[ELF_EXEC_AUX_MAX];
     size_t auxiliary_count = 0U;
 #define LINUX_AUX_PUSH(tag, value) do { \
@@ -1002,9 +959,8 @@ static kstatus_t build_initial_stack(vm_space_t *space,
         LINUX_AUX_PUSH(AUX_SECURE, 0U);
         LINUX_AUX_PUSH(AUX_EXECFN, execfn_address);
     }
-    /* Linux child processes also need the System descriptor map: Chromium's
-     * direct child launcher remaps shared files before exec, and libc imports
-     * those native handles from this private auxv entry at startup. */
+    /* Linux 子进程也需要 System 描述符映射：Chromium 的直接子进程启动器会在 exec 前重新映射
+     * 共享文件，libc 则在启动时从此私有 auxv 项导入这些原生句柄。 */
     if (descriptor_map_address != 0U) {
         LINUX_AUX_PUSH(OS_AUX_FD_MAP, descriptor_map_address);
     }
@@ -1016,8 +972,8 @@ static kstatus_t build_initial_stack(vm_space_t *space,
     vaddr_t stack_top = string_pointer & ~15ULL;
     size_t padding = (size_t)((stack_top - stack_data_size) & 15ULL);
     vaddr_t sp = stack_top - padding;
-    /* argc銆乤rgv銆乪nvp 鍜?auxv 缁勬垚鐨勬€婚暱搴﹂殢鍙傛暟涓暟鍙樺寲锛涘伓鏁颁釜鍙傛暟
-     * 鏃惰ˉ 8 瀛楄妭锛屼娇鏂扮▼搴忓叆鍙ｄ粛婊¤冻 x86-64 鍒濆鏍?16 瀛楄妭瀵归綈銆?*/
+    /* argc、argv、envp 和 auxv 的总长度随参数数量变化；参数数量为偶数时补齐 8 字节，
+     * 使新程序入口仍满足 x86-64 初始栈的 16 字节对齐要求。 */
     sp -= auxiliary_count * sizeof(uint64_t);
     status = write_address_space(space, sp, auxiliary,
                                  auxiliary_count * sizeof(uint64_t));
@@ -1041,7 +997,7 @@ static kstatus_t build_initial_stack(vm_space_t *space,
         return K_EIO;
     }
     uint64_t argc = arguments->count;
-    sp -= sizeof(uint64_t); /* argc */
+    sp -= sizeof(uint64_t); /* 参数个数 */
     if (write_address_space(space, sp, &argc, sizeof(argc)) != K_OK) return K_EIO;
     if ((sp & 15U) != 0) return K_EIO;
     *stack_pointer = sp;
@@ -1065,9 +1021,8 @@ static kstatus_t read_vfs_range(file_t *file, uint64_t offset,
     return bytes == size ? K_OK : K_EIO;
 }
 
-/* Read only the ELF header/program-header prefix.  Large VFS executables are
- * loaded a PT_LOAD at a time below; retaining the complete file here would
- * require a single contiguous kernel allocation as large as Chrome itself. */
+/* 仅读取 ELF 头和程序头前缀。大型 VFS 可执行文件会在下方逐个 PT_LOAD 加载；若在此处保留
+ * 完整文件，就需要一次性分配与 Chrome 本身一样大的连续内核内存。 */
 static kstatus_t read_vfs_metadata(file_t *file, uint8_t **image_out,
                                    size_t *size_out) {
     elf64_header_t header_copy;
@@ -1103,13 +1058,18 @@ static kstatus_t read_vfs_metadata(file_t *file, uint8_t **image_out,
     }
     image = (uint8_t *)kmalloc((size_t)metadata_size, 0U);
     if (image == 0) return K_ENOMEM;
-    status = read_vfs_range(file, 0U, image, (size_t)metadata_size);
+    /* 保留已验证的头快照，只读取尚未获取的前缀，避免重复 I/O 及重读头导致的尺寸失配。 */
+    __builtin_memcpy(image, &header_copy, sizeof(header_copy));
+    status = metadata_size > sizeof(header_copy) ?
+        read_vfs_range(file, sizeof(header_copy), image + sizeof(header_copy),
+                       (size_t)metadata_size - sizeof(header_copy)) : K_OK;
     if (status != K_OK) {
         kfree(image);
         return status;
     }
 
     const elf64_header_t *header = (const elf64_header_t *)image;
+    uint64_t required_size = metadata_size;
     for (uint16_t index = 0U; index < header->program_header_count; ++index) {
         const elf64_program_header_t *program =
             program_header(image, header, index);
@@ -1122,20 +1082,24 @@ static kstatus_t read_vfs_metadata(file_t *file, uint8_t **image_out,
             return K_EINVAL;
         }
         uint64_t interpreter_end = program->offset + program->file_size;
-        if (interpreter_end <= metadata_size) continue;
         if (interpreter_end > ELF_EXEC_METADATA_SIZE ||
             interpreter_end > (uint64_t)SIZE_MAX) {
             kfree(image);
             return K_EINVAL;
         }
+        if (interpreter_end > required_size) required_size = interpreter_end;
+    }
+    /* 所有解释器描述完成校验后最多扩容一次；已读取前缀直接复制，设备只读取新增后缀。 */
+    if (required_size > metadata_size) {
         uint8_t *extended_image = (uint8_t *)kmalloc(
-            (size_t)interpreter_end, 0U);
+            (size_t)required_size, 0U);
         if (extended_image == 0) {
             kfree(image);
             return K_ENOMEM;
         }
-        status = read_vfs_range(file, 0U, extended_image,
-                                (size_t)interpreter_end);
+        __builtin_memcpy(extended_image, image, (size_t)metadata_size);
+        status = read_vfs_range(file, metadata_size, extended_image + metadata_size,
+                                (size_t)(required_size - metadata_size));
         if (status != K_OK) {
             kfree(extended_image);
             kfree(image);
@@ -1143,16 +1107,14 @@ static kstatus_t read_vfs_metadata(file_t *file, uint8_t **image_out,
         }
         kfree(image);
         image = extended_image;
-        metadata_size = interpreter_end;
-        header = (const elf64_header_t *)image;
+        metadata_size = required_size;
     }
     *image_out = image;
     *size_out = (size_t)metadata_size;
     return K_OK;
 }
 
-/* VFS exec reads the interpreter image eagerly because it is small and is
- * needed while preparing the initial address space. */
+/* VFS exec 会立即读取解释器映像，因为它体积较小，且准备初始地址空间时就需要使用。 */
 static kstatus_t read_vfs_image(const char *path, uint8_t **image_out,
                                 size_t *size_out) {
     if (path == 0 || image_out == 0 || size_out == 0) return K_EINVAL;
@@ -1202,7 +1164,7 @@ static kstatus_t prepare_elf_space(const void *raw_image, size_t image_size,
     if (info == 0) return K_EINVAL;
     *info = (user_elf_image_info_t){0};
     exec_debug_progress(0x101U);
-    if (diag_stage != 0) *diag_stage = 1U; /* validate main ELF */
+    if (diag_stage != 0) *diag_stage = 1U; /* 验证主 ELF */
     kstatus_t status = validate_elf(image, image_size, main_file_size,
                                     ELF_PIE_BIAS,
                                     &main_validation);
@@ -1216,12 +1178,12 @@ static kstatus_t prepare_elf_space(const void *raw_image, size_t image_size,
             interpreter_path[i] = (char)image[main_validation.interp_offset + i];
         }
         linux_abi = linux_elf_interpreter_path(interpreter_path);
-        if (diag_stage != 0) *diag_stage = 2U; /* read PT_INTERP */
+        if (diag_stage != 0) *diag_stage = 2U; /* 读取 PT_INTERP */
         exec_debug_progress(0x102U);
         status = read_vfs_image(interpreter_path, &interpreter_image,
                                 &interpreter_size);
         if (status != K_OK) return status;
-        if (diag_stage != 0) *diag_stage = 3U; /* validate PT_INTERP */
+        if (diag_stage != 0) *diag_stage = 3U; /* 验证 PT_INTERP */
         exec_debug_progress(0x103U);
         status = validate_elf(interpreter_image, interpreter_size,
                               interpreter_size, ELF_INTERP_BIAS,
@@ -1233,18 +1195,18 @@ static kstatus_t prepare_elf_space(const void *raw_image, size_t image_size,
     }
 
     vm_space_t *space = 0;
-    if (diag_stage != 0) *diag_stage = 4U; /* create new vm_space */
+    if (diag_stage != 0) *diag_stage = 4U; /* 创建新的 vm_space */
     exec_debug_progress(0x104U);
     status = vm_space_create(&space);
     if (status != K_OK) {
         kfree(interpreter_image);
         return status;
     }
-    if (diag_stage != 0) *diag_stage = 5U; /* map main PT_LOADs */
+    if (diag_stage != 0) *diag_stage = 5U; /* 映射主映像 PT_LOAD 段 */
     exec_debug_progress(0x105U);
     status = map_elf_segments(space, image, &main_validation, main_file);
     if (status == K_OK && interpreter_image != 0) {
-        if (diag_stage != 0) *diag_stage = 6U; /* map interpreter PT_LOADs */
+        if (diag_stage != 0) *diag_stage = 6U; /* 映射解释器 PT_LOAD 段 */
         exec_debug_progress(0x106U);
         status = map_elf_segments(space, interpreter_image, &interpreter_validation,
                                   0);
@@ -1270,7 +1232,7 @@ static kstatus_t prepare_elf_space(const void *raw_image, size_t image_size,
     }
     info->brk_base = (vaddr_t)brk_base;
     info->linux_abi = linux_abi;
-    if (diag_stage != 0) *diag_stage = 7U; /* build initial user stack */
+    if (diag_stage != 0) *diag_stage = 7U; /* 构建初始用户栈 */
     exec_debug_progress(0x107U);
     status = build_initial_stack(space, info, arguments, descriptor_map,
                                  stack_pointer);
@@ -1300,8 +1262,7 @@ kstatus_t process_load_elf_image(process_t *process, const void *image, size_t i
     kfree(arguments);
     if (status != K_OK) return status;
     process_thread_lock(process);
-    /* Preparation runs without the owner lock. An exit may finish during
-     * it; never reinstall a VM after once-only resource teardown claimed it. */
+    /* 准备阶段不持有所有者锁。此期间进程可能退出；一次性资源拆除开始后，绝不能重新安装 VM。 */
     if (process->thread_count != 0 ||
         atomic_load_explicit(&process->state, memory_order_acquire) != PROCESS_RUNNING ||
         (__atomic_load_n(&process->flags, __ATOMIC_ACQUIRE) &
@@ -1343,9 +1304,7 @@ kstatus_t process_exec_from_vfs(
         return K_EPERM;
     }
     char executable_path[EXEC_PATH_CAPACITY] = {0};
-    bool resolved_self_exe = false;
-    kstatus_t status = exec_resolve_path(process, path, executable_path,
-                                         &resolved_self_exe);
+    kstatus_t status = exec_resolve_path(process, path, executable_path);
     if (status != K_OK) {
         exec_debug_result(status);
         exec_diag_status("PATH_FAIL", status);
@@ -1374,9 +1333,8 @@ kstatus_t process_exec_from_vfs(
     }
     file_t *file = 0;
     exec_debug_progress(3U);
-    status = resolved_self_exe ?
-        vfs_open_kernel(executable_path, VFS_OPEN_READ, 0U, &file) :
-        vfs_open(path, VFS_OPEN_READ, 0U, &file);
+    /* 实际打开的路径与记录的执行文件路径必须是同一次解析结果。 */
+    status = vfs_open_kernel(executable_path, VFS_OPEN_READ, 0U, &file);
     if (status != K_OK) {
         kfree(arguments);
         exec_debug_result(status);
@@ -1460,8 +1418,8 @@ kstatus_t process_exec_from_vfs(
                     1ULL << (cpu & 63U);
             }
         }
-        /* The current CPU is online and remains allowed, so this widens the
-         * bootstrap thread's mask without migrating it during exec commit. */
+        /* 当前 CPU 已上线且仍在允许集合中，因此此操作会扩大引导线程的亲和性掩码，而不会在
+         * exec 提交期间迁移该线程。 */
         status = sched_set_affinity(thread, &online_affinity);
         if (status != K_OK) {
             process_thread_unlock(process);
@@ -1473,9 +1431,8 @@ kstatus_t process_exec_from_vfs(
 
     vm_space_t *old_space = process->vm;
     process->vm = new_space;
-    /* The boot-only affinity applies to neither this new image nor threads it
-     * creates: sched_set_affinity widened the exec thread above, and clearing
-     * the flag lets future pthread/clone threads use all online CPUs. */
+    /* 仅用于启动阶段的 CPU 亲和性不适用于此新映像及其创建的线程：上方的 sched_set_affinity
+     * 已扩大 exec 线程的亲和性，清除此标志后，后续 pthread/clone 线程即可使用所有在线 CPU。 */
     __atomic_fetch_and(&process->flags, ~PROCESS_FLAG_INIT_CPU_PINNED,
                        __ATOMIC_ACQ_REL);
     process->linux_loader_pending = info.linux_abi &&
@@ -1500,21 +1457,18 @@ kstatus_t process_exec_from_vfs(
     }
     spinlock_unlock(&process->signal_lock);
     process_thread_unlock(process);
-    /* POSIX closes only descriptors marked close-on-exec, and only after the
-     * new image has been prepared successfully.  Handle callbacks run outside
-     * the table locks so socket/pipe teardown cannot deadlock exec. */
+    /* POSIX 只关闭标记为 close-on-exec 的描述符，且仅在新映像准备成功后关闭。句柄回调在表锁
+     * 之外运行，以免 socket/pipe 拆除过程与 exec 发生死锁。 */
     uint64_t close_started = exec_load_start();
     status = handle_table_close_on_exec(&process->handles);
     if (status != K_OK) {
-        /* The image commit is already valid; preserve exec success while
-         * leaving a failure-only diagnostic for the exceptional path. */
+        /* 映像提交已经有效；应保留 exec 成功状态，仅为异常路径记录失败诊断。 */
         exec_diag_status("CLOEXEC_FAIL", status);
     }
     linux_fd_table_close_on_exec(process);
     exec_load_finish(close_started, 5U, 0U, status);
     /* 先切到新 CR3，再把旧页表交给可抢占的 deferred worker 回收。 */
-    /* Copy the old-image path before switching CR3; the user pointer is not
-     * valid in the newly committed address space. */
+    /* 切换 CR3 前先复制旧映像路径；在新提交的地址空间中，旧用户指针已无效。 */
     exec_update_process_name(process, executable_path);
     exec_debug_progress(8U);
     x86_activate_root_table_pcid(new_space->root_table, new_space->pcid);
@@ -1667,11 +1621,8 @@ bool user_elf_loader_self_test(void) {
         failure_status = status;
         goto cleanup;
     }
-    /* The interpreter's link-time entry belongs to the Linux-compatible
-     * ld-linux-system.so.1 alias and is
-     * intentionally not fixed by this kernel self-test.  Validate the bias
-     * and the mapped entry range instead of coupling the test to one linker
-     * script's entry address. */
+    /* 解释器的链接时入口属于 Linux 兼容别名 ld-linux-system.so.1，本内核自测有意不固定该地址。
+     * 应验证加载偏移和已映射入口范围，而不是将测试绑定到某个链接脚本的入口地址。 */
     if (dynamic_info.main_entry != 0x400000ULL ||
         dynamic_info.interpreter_base != ELF_INTERP_BIAS ||
         dynamic_info.entry < ELF_INTERP_BIAS ||

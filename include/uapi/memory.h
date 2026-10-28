@@ -2,8 +2,8 @@
 
 #include "abi.h"
 
-/* Physical memory statistics in base pages.  free_pages includes pages held
- * in the allocator's per-CPU caches, since those remain immediately usable. */
+/* 物理内存统计以基础页为单位。free_pages 包含分配器每 CPU 缓存中的页面，
+ * 因为这些页面仍可立即使用。 */
 typedef struct os_memory_info {
     os_versioned_header_t hdr;
     uint64_t page_size;

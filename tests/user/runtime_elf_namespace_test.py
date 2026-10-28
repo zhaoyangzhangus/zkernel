@@ -153,10 +153,13 @@ int main(void) {
     selection += r'''
 int main(void) {
     const char *linux[] = {"/lib/ld-linux-system.so.1",
-        "/lib64/ld-linux-x86-64.so.2", "/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2"};
+        "/usr/apps/chrome/lib/ld-linux-x86-64.so.2", "/usr/apps/cube/lib/ld-linux-x86-64.so.2",
+        "/usr/apps/vulkan-probe/lib/ld-linux-x86-64.so.2"};
     for (unsigned i = 0; i < sizeof(linux)/sizeof(linux[0]); ++i)
         assert(linux_elf_interpreter_path(linux[i]));
-    const char *native[] = {NULL, "", "/lib/ld-system.so.1", "/lib/ld-liteos.so.1", "/lib/ld-linux-liteos.so.1",
+    const char *native[] = {"/lib64/ld-linux-x86-64.so.2", "/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2",
+        "/usr/apps//lib/ld-linux-x86-64.so.2", "/usr/apps/../lib/ld-linux-x86-64.so.2",
+        "/usr/apps/chrome/../lib/ld-linux-x86-64.so.2", "/usr/apps/chrome/lib/ld-linux-x86-64.so.2-extra", NULL, "", "/lib/ld-system.so.1", "/lib/ld-liteos.so.1", "/lib/ld-linux-liteos.so.1",
         "/lib/ld-linux-system.so.1-extra", "/lib/ld-linux-system.so.",
         "/lib/ld-linux-system.so.1/", "/LIB/ld-linux-system.so.1"};
     for (unsigned i = 0; i < sizeof(native)/sizeof(native[0]); ++i)

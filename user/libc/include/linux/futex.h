@@ -1,6 +1,6 @@
 #pragma once
 
-/* Linux futex command values used by Chromium's user-space locks. */
+/* Chromium 用户态锁使用的 Linux futex 命令值。 */
 #define FUTEX_WAIT 0
 #define FUTEX_WAKE 1
 #define FUTEX_FD 2

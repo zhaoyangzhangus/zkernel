@@ -14,9 +14,8 @@ typedef struct timer_object {
     object_header_t object;
     atomic_bool canceled;
     atomic_bool fired;
-    uint32_t registry_slot; /* assigned/retired under the timer registry lock */
-    /* The timer registry lock protects deadline updates and object lifetime;
-     * period_tsc is immutable after registration. */
+    uint32_t registry_slot; /* 在定时器注册表锁保护下分配和回收 */
+    /* 定时器注册表锁保护截止时间更新和对象生命周期；注册后 period_tsc 不可变。 */
     uint64_t deadline_tsc;
     uint64_t period_tsc;
 } timer_object_t;

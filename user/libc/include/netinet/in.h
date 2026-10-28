@@ -20,9 +20,8 @@ struct sockaddr_in {
     unsigned char sin_zero[8];
 };
 
-/* Match the POSIX/glibc aggregate shape used by Chromium.  In particular,
- * Chromium uses the extra brace level in static initializers that comes from
- * the address union, and a few consumers also access the 16/32-bit views. */
+/* 匹配 Chromium 使用的 POSIX/glibc 聚合类型布局。特别是，Chromium 的静态初始化器
+ * 会使用地址联合体所需的额外花括号层级，部分调用方也会访问 16/32 位视图。 */
 struct in6_addr {
     union {
     uint8_t s6_addr[16];
@@ -31,9 +30,8 @@ struct in6_addr {
 };
 };
 
-/* Keep the standard glibc-style address predicates available to portable
- * networking code.  These byte-wise forms do not depend on host endianness or
- * on the alignment of the caller's in6_addr object. */
+/* 为可移植网络代码提供标准 glibc 风格地址判断宏。这些逐字节实现不依赖宿主字节序，
+ * 也不依赖调用方 in6_addr 对象的对齐方式。 */
 #ifndef IN6_IS_ADDR_UNSPECIFIED
 #define IN6_IS_ADDR_UNSPECIFIED(a) \
     ((a)->s6_addr[0] == 0 && (a)->s6_addr[1] == 0 && \
@@ -88,7 +86,7 @@ struct sockaddr_in6 {
 #define MCAST_JOIN_SOURCE_GROUP 46
 #define MCAST_LEAVE_SOURCE_GROUP 47
 
-/* IPv4 socket option names used by the POSIX networking interfaces. */
+/* POSIX 网络接口使用的 IPv4 socket 选项名称。 */
 #define IP_TOS 1
 #define IP_TTL 2
 #define IP_MULTICAST_IF 32
@@ -103,10 +101,9 @@ struct sockaddr_in6 {
 #define IP_PMTUDISC_DONT 0
 #define IP_PMTUDISC_DO 2
 
-/* IPv6 socket option names.  The System socket ABI currently accepts only
- * SOL_SOCKET options, but exposing the standard values keeps portable
- * Chromium networking code source-compatible; unsupported options return
- * ENOPROTOOPT at runtime. */
+/* IPv6 socket 选项名称。System socket ABI 当前仅接受 SOL_SOCKET 选项，但公开这些
+ * 标准取值可保持 Chromium 网络代码的源代码兼容性；不支持的选项在运行时返回
+ * ENOPROTOOPT。 */
 #define IPV6_UNICAST_HOPS 16
 #define IPV6_MULTICAST_IF 17
 #define IPV6_MULTICAST_HOPS 18

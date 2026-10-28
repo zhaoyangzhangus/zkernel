@@ -22,6 +22,9 @@ static vm_space_t space;
 static vm_area_t areas[512];static vm_object_t objects[512];
 static bool present[512];
 static unsigned locked,batches,discarded,fail_batch;
+typedef struct anon_page_node { struct anon_page_node *next; } anon_page_node_t;
+static anon_page_node_t detached[512];
+static unsigned released,fail_discard;
 static void map_lock(vm_space_t *s) { assert(s==&space&&!locked);locked=1; }
 static void map_unlock(vm_space_t *s) { assert(s==&space&&locked);locked=0; }
 static bool range_valid(uint64_t address,size_t size,uint64_t *end) {
@@ -54,8 +57,16 @@ kstatus_t x86_unmap_user_page_batch(paddr_t table,const vaddr_t *addresses,size_
     }
     return K_OK;
 }
-static kstatus_t anon_page_discard_range(vm_object_t *object,uint64_t first,uint64_t end) {
-    assert(locked&&object&&first==0&&end==1);++discarded;return K_OK;
+static kstatus_t anon_page_retire_range(vm_object_t *object,uint64_t first,uint64_t end,
+                                        anon_page_node_t **out) {
+    assert(locked&&object&&first==0&&end==1);
+    if(discarded+1==fail_discard)return K_EIO;
+    assert(discarded<512);detached[discarded].next=*out;
+    *out=&detached[discarded++];return K_OK;
+}
+static void anon_page_release_retired(anon_page_node_t *pages) {
+    assert(!locked);
+    while(pages){++released;pages=pages->next;}
 }
 '''
 program=r'''
@@ -68,6 +79,7 @@ static void prepare(unsigned count) {
         list_add_tail(&space.area_list,&areas[i].ordered_node);present[i]=true;
     }
     atomic_store(&space.rss_pages,count);locked=batches=discarded=fail_batch=0;
+    released=fail_discard=0;
 }
 static kstatus_t advise(unsigned pages) { return vm_advise(&space,BASE,pages*PAGE_SIZE,OS_VM_ADVICE_DONTNEED); }
 int main(void) {
@@ -76,6 +88,7 @@ int main(void) {
     assert(vm_advise(&space,BASE,PAGE_SIZE,18)==K_EINVAL);
     assert(!locked&&!batches&&!discarded); /* BoringSSL must see unsupported probes fail. */
     prepare(64);assert(advise(64)==K_OK&&batches==1&&discarded==64&&!locked);
+    assert(released==64);
     assert(!atomic_load(&space.rss_pages)&&atomic_load(&space.advice_generation)==1);
     printf("64 adjacent VMAs / 64 resident pages: %u TLB batch, not 64\n",batches);
     prepare(65);assert(advise(65)==K_OK&&batches==2&&discarded==65);
@@ -95,6 +108,12 @@ int main(void) {
     assert(present[64]);
     prepare(64);memset(present,0,sizeof(present));atomic_store(&space.rss_pages,0);
     assert(advise(64)==K_OK&&!batches&&discarded==64&&!locked);
+    assert(released==64);
+    for(unsigned failure=1;failure<=64;++failure) {
+        prepare(64);fail_discard=failure;
+        assert(advise(64)==K_EIO && !locked);
+        assert(discarded==failure-1 && released==discarded);
+    }
     return 0;
 }
 '''
@@ -105,7 +124,7 @@ with tempfile.TemporaryDirectory(prefix='vm-advice-tlb-') as directory:
     subprocess.run(command,check=True)
     subprocess.run([str(binary)],check=True,timeout=10)
     start=advice.index('    kstatus_t unmap_status = vm_tlb_unmap_range(')
-    end=advice.index('\n    /* Faults that sampled',start)
+    end=advice.index('\n    atomic_fetch_add_explicit(&space->advice_generation',start)
     legacy=r'''
     for(list_head_t *n=&first_area->ordered_node;n!=range_end;n=n->next) {
         vm_area_t *a=area_from_list(n);
@@ -119,4 +138,13 @@ with tempfile.TemporaryDirectory(prefix='vm-advice-tlb-') as directory:
     def no_core():resource.setrlimit(resource.RLIMIT_CORE,(0,0))
     negative=subprocess.run([str(binary)],capture_output=True,timeout=10,preexec_fn=no_core)
     assert negative.returncode!=0 and b'batches==1' in negative.stderr
+    # Both success and partial-retirement failures must release after unlock.
+    reordered=advice.replace(
+        'map_unlock(space);\n    anon_page_release_retired(retired);',
+        'anon_page_release_retired(retired);\n    map_unlock(space);')
+    assert reordered!=advice
+    c.write_text(fixture+checks+tlb+reordered+program)
+    subprocess.run(command,check=True)
+    negative=subprocess.run([str(binary)],capture_output=True,timeout=10,preexec_fn=no_core)
+    assert negative.returncode!=0 and b'!locked' in negative.stderr
 print('VM advice batching: boundaries, sparse pages, shared backing, guard/hole preflight, failed shootdown/RSS and negative control passed')

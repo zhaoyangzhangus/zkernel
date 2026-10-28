@@ -13,9 +13,8 @@ static BOOLEAN usb_self_test(void) {
     BOOLEAN event_queue_ok = xhci_event_queue_self_test();
 
     kernel_perf_emit_scope("io.xhci_events", benchmark_start);
-    /* Hardware probing is owned by init_devices/xhci_hardware_self_test.
-     * This boundary only keeps the protocol-independent xHCI primitives
-     * deterministic and therefore does not need a second PCI/ring model. */
+    /* 硬件探测由 init_devices/xhci_hardware_self_test 所有。
+     * 此边界仅确保与协议无关的 xHCI 原语行为确定，因此无需再建一套 PCI/环模型。 */
     if (!event_queue_ok ||
         !xhci_transfer_encode_self_test() ||
         !xhci_device_context_self_test() ||
@@ -43,8 +42,7 @@ static BOOLEAN graphics_fail_at(const kernel_init_graphics_hooks_t *hooks,
     kernel_debug_stage_fail_at(OS_DEBUG_PHASE_DISPLAY,
                                OS_DEBUG_STEP_FAIL, K_EIO, file, line);
     hooks->write(message);
-    /* GOP and GPU backends are optional.  Preserve the failure and continue
-     * booting so a headless machine can still reach the shell and services. */
+    /* GOP 和 GPU 后端均为可选项。记录失败后继续启动，使无头机器仍可进入 shell 和服务。 */
     return 0;
 }
 
@@ -100,7 +98,7 @@ BOOLEAN kernel_init_graphics(const OS_BOOT_INFO *info,
                        OS_DEBUG_STEP_PROGRESS, 17U);
     kernel_debug_stage(OS_DEBUG_PHASE_REFACTOR_7B,
                        OS_DEBUG_STEP_PROGRESS, 1U);
-    /* Canonical compositor owns immutable snapshot capture and planning. */
+    /* 规范合成器负责不可变快照捕获和规划。 */
     kernel_debug_stage(OS_DEBUG_PHASE_REFACTOR_7B,
                        OS_DEBUG_STEP_PROGRESS, 2U);
     kernel_debug_stage(OS_DEBUG_PHASE_REFACTOR_7B,

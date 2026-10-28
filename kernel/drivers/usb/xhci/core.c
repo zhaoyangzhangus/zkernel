@@ -116,8 +116,11 @@ void xhci_event_unlock(xhci_state_t *state) {
     uint64_t saved_flags = state->event_lock_saved_flags;
     __atomic_store_n(&state->event_lock_owner, UINT32_MAX, __ATOMIC_RELEASE);
     spinlock_unlock(&state->event_lock);
+    bool resume = atomic_exchange_explicit(&state->event_work_waiting, false,
+                                           memory_order_acq_rel);
     xhci_event_restore_flags(saved_flags);
     sched_preempt_enable();
+    if (resume) xhci_runtime_resume_events();
 }
 
 bool xhci_core_initialize(xhci_state_t *state, const pci_device_t *pci) {
@@ -127,6 +130,7 @@ bool xhci_core_initialize(xhci_state_t *state, const pci_device_t *pci) {
         ((uint8_t *)state)[i] = 0U;
     }
     spinlock_init(&state->event_lock);
+    atomic_init(&state->event_work_waiting, false);
     state->event_lock_owner = UINT32_MAX;
     state->pci = pci;
 

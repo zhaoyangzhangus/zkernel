@@ -5,16 +5,14 @@
 #include <kernel/vm.h>
 #include "internal.h"
 
-/* CPU-side retained-surface composition leaves. */
+/* CPU 端保留表面合成的底层实现。 */
 
 /*
- * Fast WB -> WB pixel copy.
+ * 快速 WB -> WB 像素复制。
  *
- * Source is the shared window backing page through the physical direct map.
- * Destination is the normal-RAM composite framebuffer.
+ * 源数据来自通过物理直接映射访问的共享窗口后备页。目标为普通 RAM 中的合成帧缓冲区。
  *
- * REP MOVSQ uses only integer registers and is well suited to contiguous
- * scanline spans.  No kernel SIMD/FPU state is touched.
+ * REP MOVSQ 仅使用整数寄存器，适合复制连续扫描线跨度，且不会触及内核 SIMD/FPU 状态。
  */
 void compositor_copy_wb_pixels(
     uint32_t *destination,
@@ -72,8 +70,9 @@ bool compositor_copy_self_test(void) {
 
     pixel_count = (uint32_t)pixel_count64;
     bytes = (size_t)pixel_count * sizeof(uint32_t);
-    source = (uint32_t *)kzalloc(bytes, 0);
-    destination = (uint32_t *)kzalloc(bytes, 0);
+    /* 源缓冲逐像素初始化，目标由整屏复制完整覆盖，无需提前清零两次。 */
+    source = (uint32_t *)kmalloc(bytes, 0);
+    destination = (uint32_t *)kmalloc(bytes, 0);
     if (source == 0 || destination == 0) {
         if (source != 0) kfree(source);
         if (destination != 0) kfree(destination);
@@ -83,6 +82,11 @@ bool compositor_copy_self_test(void) {
     for (uint32_t index = 0U; index < pixel_count; ++index) {
         source[index] = 0x00100000U | (index & 0x0000FFFFU);
     }
+
+    /* 只反置验证点，防止复用的堆内容恰好匹配源数据而掩盖复制失败。 */
+    destination[0] = ~source[0];
+    destination[pixel_count / 2U] = ~source[pixel_count / 2U];
+    destination[pixel_count - 1U] = ~source[pixel_count - 1U];
 
     uint64_t benchmark_start = telemetry_timestamp();
     compositor_copy_wb_pixels(destination, source, pixel_count);
@@ -101,9 +105,8 @@ bool compositor_copy_self_test(void) {
 
 
 /*
- * Private retained-scene fill.  The global composite pointer remains volatile
- * for the GOP alias fallback; callers enter this helper only after proving the
- * target is ordinary cacheable WB RAM.
+ * 填充私有保留场景。GOP 别名回退路径要求全局合成指针仍为 volatile；调用方仅在确认目标
+ * 是普通可缓存 WB RAM 后才会进入此辅助函数。
  */
 void compositor_fill_wb_pixels(
     uint32_t *destination,
@@ -143,10 +146,9 @@ void compositor_fill_wb_pixels(
 
 
 /*
- * Fast background fill for a clipped surface span.
+ * 快速填充裁剪后的表面背景跨度。
  *
- * This is mainly used during live resize or if a shared backing page cannot
- * be resolved.  Pack two XRGB pixels into one 64-bit store.
+ * 主要用于实时调整大小或无法解析共享后备页时。将两个 XRGB 像素打包到一次 64 位存储中。
  */
 void compositor_fill_surface_pixels(
     volatile uint32_t *destination,
@@ -160,7 +162,7 @@ void compositor_fill_surface_pixels(
     }
 
     /*
-     * Align destination before using uint64_t stores.
+    * 使用 uint64_t 存储前先对齐目标地址。
      */
     if ((((uintptr_t)destination) & 7U) != 0U) {
         *destination++ = color;
@@ -199,26 +201,23 @@ void compositor_fill_surface_pixels(
 
 
 /*
- * Copy one horizontal window-surface span.
+ * 复制一段水平窗口表面跨度。
  *
- * The span is split only when it crosses a 4K VM_OBJECT_SHARED backing page.
- * Therefore page lookup happens roughly once per 1024 XRGB8888 pixels rather
- * than once per pixel.
+ * 仅当跨度跨越 4K VM_OBJECT_SHARED 后备页时才会拆分。因此每约 1024 个 XRGB8888 像素
+ * 查找一次页面，而非每个像素都查找。
  *
- * cached_page/cached_base persist across scanlines, so a page shared by the
- * tail of one row and the beginning of the next does not need to be resolved
- * twice.
+ * cached_page/cached_base 会跨扫描线保留，因此同一页面同时包含上一行尾部和下一行开头时，
+ * 无需重复解析。
  */
 
 /*
- * Persistent direct-page table for a window surface.
+ * 窗口表面的常驻直接映射页表。
  *
- * VM_OBJECT_SHARED pages do not move while their object remains alive.
- * The compositor snapshot holds a reference to the live window, therefore
- * positive direct mappings may safely be reused across compositor frames.
+ * VM_OBJECT_SHARED 页面在所属对象存续期间不会移动。合成器快照会持有活动窗口的引用，
+ * 因此可在多帧合成期间安全复用有效的直接映射。
  *
- * Missing pages are NEVER cached.  If Ring3 faults a new page later, the next
- * compositor lookup will see an empty slot and resolve it normally.
+ * 绝不缓存缺失页面。如果 Ring3 之后为新页面触发缺页，下一次合成器查找会看到空槽并正常
+ * 解析该页面。
  */
 struct compositor_surface_page_cache {
     shared_section_t *section;
@@ -226,127 +225,67 @@ struct compositor_surface_page_cache {
     uint32_t reserved;
 
     /*
-     * Flexible array:
+    * 柔性数组：
      *
-     *     pages[page_index] -> kernel direct-map address
+     *     pages[page_index] -> 内核直接映射地址
      *
-     * NULL means "not resolved yet", not "page permanently absent".
+    * NULL 表示“尚未解析”，而非“页面永久不存在”。
      */
     uint8_t *pages[];
 };
 
 
 /*
- * Return/create the per-window direct-page table.
+ * 返回或创建每个窗口对应的直接映射页表。
  *
- * Allocation failure is harmless: the compositor simply falls back to the
- * normal VM lookup path.
+ * 分配失败不会造成错误：合成器会直接回退到常规 VM 查找路径。
  */
 compositor_surface_page_cache_t *
-compositor_surface_cache_get(
-    const compositor_window_view_t *view) {
+compositor_surface_cache_get(const compositor_window_view_t *view) {
+    if (view == 0 || view->reference == 0 || view->section == 0 ||
+        view->buffer_size == 0U) return 0;
 
-    window_server_window_t *reference;
-    compositor_surface_page_cache_t *cache;
-    uint64_t page_count64;
-    size_t bytes;
+    window_server_window_t *reference = view->reference;
+    compositor_surface_page_cache_t *cache = reference->compositor_cache;
+    /* 同一稳定分区直接复用页表；窗口快照持有引用，页面不会迁移。 */
+    if (cache != 0 && cache->section == view->section) return cache;
 
-    if (view == 0 ||
-        view->reference == 0 ||
-        view->section == 0 ||
-        view->buffer_size == 0U) {
-        return 0;
-    }
-
-    reference = view->reference;
-
-    /*
-     * Existing window section means the direct-page table remains valid.
-     * Avoid recomputing page_count on the normal path.
-     */
-    cache =
-        (compositor_surface_page_cache_t *)
-            reference->compositor_cache;
-
-    if (cache != 0 &&
-        cache->section == view->section) {
-        return cache;
-    }
-
-    page_count64 =
-        (reference->buffer_size + PAGE_SIZE - 1U) >>
-        PAGE_SHIFT;
-
-    if (page_count64 == 0U ||
-        page_count64 > UINT32_MAX) {
-        return 0;
-    }
-
-    /*
-     * The current implementation keeps a stable section for a window.
-     * Still validate it here so a future section replacement cannot expose
-     * stale direct pointers.
-     */
-    if (cache != 0 &&
-        cache->section == view->section &&
-        cache->page_count == (uint32_t)page_count64) {
-        return cache;
-    }
+    uint64_t bytes = reference->buffer_size;
+    if (bytes == 0U) return 0;
+    /* 减一后取整，避免向字节数加上页内偏移时溢出。 */
+    uint64_t pages = ((bytes - 1U) >> PAGE_SHIFT) + 1U;
+    if (pages > UINT32_MAX) return 0;
 
     if (cache != 0) {
         reference->compositor_cache = 0;
         kfree(cache);
-        cache = 0;
     }
 
-    /*
-     * page_count is bounded to uint32_t and the kernel is 64-bit, so this
-     * multiplication is safely representable as size_t.
-     */
-    bytes =
-        sizeof(compositor_surface_page_cache_t) +
-        (size_t)page_count64 * sizeof(uint8_t *);
-
-    cache =
-        (compositor_surface_page_cache_t *)
-            kzalloc(bytes, 0);
-
-    if (cache == 0) {
-        return 0;
-    }
-
-    cache->section =
-        view->section;
-
-    cache->page_count =
-        (uint32_t)page_count64;
-
-    cache->reserved = 0U;
-
-    reference->compositor_cache =
-        cache;
-
+    /* 页数限制为 uint32_t，64 位 size_t 足以表示整个指针数组。 */
+    cache = kzalloc(sizeof(*cache) + (size_t)pages * sizeof(cache->pages[0]), 0);
+    if (cache == 0) return 0;
+    cache->section = view->section;
+    cache->page_count = (uint32_t)pages;
+    reference->compositor_cache = cache;
     return cache;
 }
 
 
 /*
- * Cached wrapper around vm_object_shared_page_direct().
+ * vm_object_shared_page_direct() 的缓存封装。
  *
- * Fast hit:
+ * 快速命中路径：
  *
- *     page_index -> pointer array -> direct address
+ *     page_index -> 指针数组 -> 直接映射地址
  *
- * No VM lock, no backing-page list traversal.
+ * 不获取 VM 锁，也不遍历后备页链表。
  */
 
 /*
- * Sequential surface rendering normally crosses shared pages in ascending
- * order.  Once the next page already has a positive direct-page cache entry,
- * pull its first cache line toward L1 before the current page is exhausted.
+ * 表面通常按升序跨越共享页进行渲染。一旦确认下一页已有有效的直接映射缓存项，就在当前页
+ * 耗尽前将下一页的首条缓存行预取到 L1。
  *
- * This is only a performance hint. Missing pages are never resolved or
- * allocated here.
+ * 这只是性能提示。此处绝不解析或分配缺失页面。
  */
 static inline void compositor_prefetch_surface_page(
     const compositor_surface_page_cache_t *cache,
@@ -374,16 +313,16 @@ static inline void compositor_prefetch_surface_page(
 
 
 /*
- * Resolve row-invariant surface state once per window/damage pass.
- * This matters most for narrow retained-drag strips: successive rows can touch
- * different 4K pages even though only one or a few pixels are copied.
+ * 每次窗口/损坏区域处理时，仅解析一次行间不变的表面状态。
+ * 对较窄的保留内容拖动条带尤其重要：即使每行只复制一两个像素，相邻行也可能访问不同的
+ * 4K 页面。
  */
 
 
 /*
- * Positive cache hit:
+ * 有效的缓存命中：
  *     cache->pages[page_index]
- * No per-page reference->compositor_cache reload or section comparison.
+ * 不必针对每页重新读取 reference->compositor_cache 或比较分区。
  */
 uint8_t *compositor_surface_page_resolve(
     const compositor_surface_source_context_t *context,
@@ -456,7 +395,7 @@ void compositor_surface_copy_destination(
 
 
 /*
- * source_row_offset is maintained incrementally by the caller.  The normal
- * hot path now does only page-index arithmetic + direct page-array lookup.
+ * source_row_offset 由调用方增量维护。常规热路径现在只需计算页索引并查询直接映射页数组。
+ * 常规热路径现在只需计算页索引并查询直接映射页数组。
  */
 

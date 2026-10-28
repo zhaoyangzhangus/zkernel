@@ -13,6 +13,10 @@ harness = r'''
 #include <stddef.h>
 #include <stdbool.h>
 #include <assert.h>
+/* 单句柄测试只桩化偏移锁；共享句柄并发由专门的回归测试覆盖。 */
+#define vfs_file_position_init(file) ((file)->position_initialized=1)
+#define vfs_file_position_lock(file) ((void)(file), K_OK)
+#define vfs_file_position_unlock(file) ((void)(file))
 #define __user
 #define K_OK 0
 #define K_EINVAL -22
@@ -23,7 +27,7 @@ harness = r'''
 typedef int kstatus_t;
 typedef struct { int unused; } process_t;
 typedef struct { struct { int type; } object; void *vnode,*ops;
- uint64_t position; unsigned flags,rights; void *private_data; } file_t;
+ uint64_t position; unsigned flags,rights; void *private_data; int position_initialized; } file_t;
 typedef struct { int kind; file_t *file; } linux_fd_entry_t;
 static file_t shared = {.position=777};
 static int puts,interleave,kind=LINUX_FD_FILE;
@@ -35,7 +39,7 @@ static void linux_fd_entry_put(linux_fd_entry_t*e){(void)e;++puts;}
 static int linux_copy_status(int s){return s;}
 static int io(file_t*f,uint64_t*bytes) {
  uint64_t own=f->position;
- assert(f!=&shared && shared.position==777);
+ assert(f!=&shared && shared.position==777 && f->position_initialized);
  if(!interleave){interleave=1;assert(linux_positioned_io(0,3,0,8,99,true)==8);}
  assert(f->position==own && shared.position==777);
  f->position+=8;*bytes=8;return 0;

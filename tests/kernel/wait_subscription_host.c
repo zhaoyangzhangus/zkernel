@@ -20,10 +20,11 @@ struct host_wait_job {
     thread_t thread;
     void *const *objects;
     completion_t *completion;
+    bool uninterruptible;
     size_t count;
     bool wait_all;
     uint64_t timeout_ns;
-    bool signal_on_block;
+    unsigned signal_on_block;
     bool sleeping;
     bool wake_pending;
     bool hold_next_wake;
@@ -60,10 +61,25 @@ static void deadline_after_ms(struct timespec *deadline, uint64_t timeout_ms) {
     }
 }
 
+static bool host_completion_consume(void *opaque) {
+    completion_t *completion = opaque;
+    unsigned count = atomic_load_explicit(&completion->count, memory_order_acquire);
+    while (count != 0U) {
+        if (atomic_compare_exchange_weak_explicit(&completion->count, &count,
+                                                  count - 1U,
+                                                  memory_order_acq_rel,
+                                                  memory_order_acquire)) return true;
+    }
+    return false;
+}
+
 static void *host_wait_thread_main(void *opaque) {
     struct host_wait_job *job = (struct host_wait_job *)opaque;
     g_current_job = job;
-    job->status = job->completion != 0 ?
+    job->status = job->uninterruptible ?
+        wait_on_queue_uninterruptible(&job->completion->waitq,
+                                       host_completion_consume, job->completion,
+                                       job->timeout_ns) : job->completion != 0 ?
         completion_wait(job->completion, job->timeout_ns) :
         object_wait_many(job->objects, job->count, job->wait_all,
                                    job->timeout_ns, &job->signaled_index,
@@ -96,12 +112,13 @@ static void host_start_timeout_thread(void) {
 
 static host_wait_job_t *host_wait_job_start_internal(
     void *const *objects, size_t count, bool wait_all, uint64_t timeout_ns,
-    bool signal_on_block, completion_t *completion) {
+    unsigned signal_on_block, completion_t *completion, bool uninterruptible) {
     (void)pthread_once(&g_timer_once, host_start_timeout_thread);
     struct host_wait_job *job = (struct host_wait_job *)calloc(1U, sizeof(*job));
     if (job == 0) return 0;
     job->objects = objects;
     job->completion = completion;
+    job->uninterruptible = uninterruptible;
     job->count = count;
     job->wait_all = wait_all;
     job->timeout_ns = timeout_ns;
@@ -123,19 +140,41 @@ static host_wait_job_t *host_wait_job_start_internal(
 host_wait_job_t *host_wait_job_start(void *const *objects, size_t count,
                                      bool wait_all, uint64_t timeout_ns) {
     return host_wait_job_start_internal(objects, count, wait_all, timeout_ns,
-                                        false, 0);
+                                        false, 0, false);
 }
 
 host_wait_job_t *host_wait_job_start_with_sigkill_on_block(
     void *const *objects, size_t count, uint64_t timeout_ns) {
     return host_wait_job_start_internal(objects, count, false, timeout_ns,
-                                        true, 0);
+                                        true, 0, false);
+}
+
+host_wait_job_t *host_wait_job_start_with_terminate_on_block(
+    void *const *objects, size_t count, bool wait_all, uint64_t timeout_ns) {
+    return host_wait_job_start_internal(objects, count, wait_all, timeout_ns,
+                                        2U, 0, false);
 }
 
 host_wait_job_t *host_completion_job_start(completion_t *completion,
                                            uint64_t timeout_ns) {
     return host_wait_job_start_internal(0, 0U, false, timeout_ns, false,
-                                        completion);
+                                        completion, false);
+}
+
+host_wait_job_t *host_uninterruptible_job_start(completion_t *completion,
+                                                uint64_t timeout_ns,
+                                                unsigned signal_on_block) {
+    return host_wait_job_start_internal(0, 0U, false, timeout_ns,
+                                        signal_on_block, completion, true);
+}
+
+bool host_wait_job_termination_pending(const host_wait_job_t *job,
+                                       unsigned reason) {
+    if (reason == 1U)
+        return (__atomic_load_n(&job->thread.signal_pending, __ATOMIC_ACQUIRE) &
+                (1ULL << (OS_SIGKILL - 1U))) != 0U;
+    return (__atomic_load_n(&job->thread.flags, __ATOMIC_ACQUIRE) &
+            THREAD_FLAG_TERMINATE_REQUEST) != 0U;
 }
 
 bool host_wait_job_is_unblocked(const host_wait_job_t *opaque) {
@@ -307,9 +346,16 @@ bool sched_publish_blocked(thread_t *thread) {
     struct host_wait_job *job = g_current_job;
     if (job != 0 && job->signal_on_block) {
         const uint64_t kill_bit = 1ULL << (OS_SIGKILL - 1U);
+        unsigned reason = job->signal_on_block;
         job->signal_on_block = false;
-        (void)__atomic_fetch_or(&thread->signal_pending, kill_bit,
-                                __ATOMIC_RELEASE);
+        if (reason == 2U) {
+            (void)__atomic_fetch_or(&thread->flags,
+                                    THREAD_FLAG_TERMINATE_REQUEST,
+                                    __ATOMIC_RELEASE);
+        } else {
+            (void)__atomic_fetch_or(&thread->signal_pending, kill_bit,
+                                    __ATOMIC_RELEASE);
+        }
     }
     atomic_store_explicit(&thread->state, THREAD_BLOCKED, memory_order_release);
     return true;

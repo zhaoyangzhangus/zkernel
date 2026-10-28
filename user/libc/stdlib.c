@@ -525,6 +525,17 @@ int random_r(struct random_data *buffer, int32_t *result) {
 }
 
 static void swap_bytes(unsigned char *left, unsigned char *right, size_t size) {
+    /* 大目录条目按字宽交换；内建复制允许未对齐地址且不违反别名规则。 */
+    while (size >= sizeof(uint64_t)) {
+        uint64_t a, b;
+        __builtin_memcpy(&a, left, sizeof(a));
+        __builtin_memcpy(&b, right, sizeof(b));
+        __builtin_memcpy(left, &b, sizeof(b));
+        __builtin_memcpy(right, &a, sizeof(a));
+        left += sizeof(a);
+        right += sizeof(b);
+        size -= sizeof(a);
+    }
     while (size-- != 0U) {
         unsigned char value = *left;
         *left++ = *right;

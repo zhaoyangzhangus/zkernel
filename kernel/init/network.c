@@ -13,8 +13,7 @@ static BOOLEAN network_fail_at(const kernel_init_network_hooks_t *hooks,
     kernel_debug_stage_fail_at(OS_DEBUG_PHASE_NETWORK,
                                OS_DEBUG_STEP_FAIL, K_EIO, file, line);
     hooks->write(message);
-    /* Network hardware is optional during boot.  Keep the failure in the
-     * canonical log and let the runtime start without a NIC. */
+    /* 启动期间网络硬件为可选项。将失败记录到规范日志中，并允许系统在没有网卡时进入运行阶段。 */
     return 0;
 }
 
@@ -78,8 +77,7 @@ BOOLEAN kernel_init_network(const kernel_init_network_hooks_t *hooks) {
             hooks->write_u32(e1000_last_error());
             return network_fail(hooks, "\r\n");
         }
-        /* The interrupt lifecycle is now independently locatable in
-         * recovery.c. */
+        /* 中断生命周期现在可在 recovery.c 中单独定位。 */
         kernel_debug_stage(OS_DEBUG_PHASE_REFACTOR_8,
                            OS_DEBUG_STEP_PROGRESS, 18U);
         if (e1000_intel_hardware_present()) {
@@ -113,3 +111,4 @@ BOOLEAN kernel_init_network(const kernel_init_network_hooks_t *hooks) {
                        OS_DEBUG_STEP_PROGRESS, 8U);
     return 1;
 }
+

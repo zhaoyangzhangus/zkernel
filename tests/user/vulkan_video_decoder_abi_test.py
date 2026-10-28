@@ -8,12 +8,19 @@ binary = root / 'build/nvidia/vulkan/libos-vulkan-video.so.1'
 exports = subprocess.check_output(['nm', '-D', '--defined-only', str(binary)], text=True)
 names = {line.split()[-1].split('@')[0] for line in exports.splitlines()}
 expected = {'OS_VIDEO_1', 'os_video_decoder_abi', 'os_video_decoder_create_h264',
+            'os_video_decoder_create',
+            'os_video_decoder_query',
             'os_video_decoder_send', 'os_video_decoder_receive',
             'os_video_decoder_reset', 'os_video_decoder_destroy'}
 assert names == expected, names
 library = ctypes.CDLL(str(binary), mode=ctypes.RTLD_LOCAL)
 library.os_video_decoder_abi.restype = ctypes.c_uint32
 assert library.os_video_decoder_abi() == 1
+query = library.os_video_decoder_query
+query.argtypes = [ctypes.c_uint32, ctypes.c_void_p]
+assert query(2, None) == -22
+caps = (ctypes.c_uint32 * 4)(1, 2, 3, 4)
+assert query(99, ctypes.byref(caps)) == -22 and list(caps) == [0, 0, 0, 0]
 create = library.os_video_decoder_create_h264
 create.argtypes = [ctypes.c_void_p, ctypes.c_uint32, ctypes.POINTER(ctypes.c_void_p)]
 create.restype = ctypes.c_int

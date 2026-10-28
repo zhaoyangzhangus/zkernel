@@ -1,4 +1,4 @@
-/* REFACTOR_SYSCALL_NETWORK_OWNER: network and socket syscall handlers. */
+/* REFACTOR_SYSCALL_NETWORK_OWNER：网络和 socket 系统调用处理程序。 */
 
 #include <arch/x86_64/uaccess.h>
 #include <arch/x86_64/cpu.h>
@@ -6,6 +6,7 @@
 #include <kernel/console.h>
 #include <kernel/debug_stage.h>
 #include <kernel/e1000.h>
+#include <kernel/pci.h>
 #include <kernel/message_port.h>
 #include <kernel/net_manager.h>
 #include <kernel/socket.h>
@@ -774,4 +775,33 @@ int64_t syscall_socket_recv6(uint64_t handle, uint64_t buffer, uint64_t length,
     }
 #endif
     return status == K_OK ? (int64_t)bytes : status;
+}
+
+int64_t syscall_net_enum_adapter(uint64_t pointer,uint64_t a,uint64_t b,
+    uint64_t c,uint64_t d,uint64_t e) {
+    (void)a;(void)b;(void)c;(void)d;(void)e;
+    os_net_adapter_t input;
+    kstatus_t result=copy_from_user(&input,(const void __user *)(uintptr_t)pointer,sizeof(input));
+    if (result!=K_OK) return result;
+    if (!versioned_header_valid(&input.hdr,sizeof(input))) return K_EINVAL;
+    os_net_adapter_t output={.hdr=input.hdr,.index=input.index};
+    const pci_host_t *host=pci_current_host();
+    const pci_device_t *selected=0,*active=0;
+    result=e1000_active_adapter(&active);
+    if (result!=K_OK) return result;
+    if (host && host->initialized) {
+        for (uint32_t i=0;i<host->device_count && i<PCI_MAX_DEVICES;++i) {
+            const pci_device_t *device=&host->devices[i];
+            if (device->class_code!=2U) continue;
+            if (output.count++==input.index) selected=device;
+        }
+    }
+    if (selected) {
+        output.vendor=selected->vendor_id;output.device=selected->device_id;
+        output.segment=selected->segment;output.bus=selected->bus;
+        output.slot=selected->slot;output.function=selected->function;
+        output.subclass=selected->subclass;
+        if (selected==active) output.flags=OS_NET_ADAPTER_ACTIVE;
+    }
+    return copy_to_user((void __user *)(uintptr_t)pointer,&output,sizeof(output));
 }

@@ -22,6 +22,11 @@
 #include <stdint.h>
 #include <string.h>
 
+/* Opt-in only: successful frame submission must not wait on COM1 or FAT. */
+#ifndef OS_NVKMS_FRAME_TRACE
+#define OS_NVKMS_FRAME_TRACE 0
+#endif
+
 typedef struct nvkms_scanout_surface {
     struct NvKmsKapiMemory *memory;
     struct NvKmsKapiSurface *surface;
@@ -43,6 +48,14 @@ typedef struct nvkms_display_state {
     bool connected;
     bool owns_device;
     bool pending;
+    bool pending_timed_out;
+    uint64_t pending_started_ns;
+    uint64_t submitted_flips;
+    uint64_t completed_flips;
+    uint64_t recovered_flips;
+    uint64_t timed_out_flips;
+    uint64_t pending_query_failures;
+    nv_port_work_t progress_work;
 
     const struct NvKmsKapiFunctionsTable *functions;
     struct NvKmsKapiDevice *device;
@@ -81,6 +94,15 @@ static void nvkms_trace(const char *text)
     if (text == NULL)
         return;
     kernel_serial_write_serial_only(text);
+}
+
+static inline void nvkms_frame_trace(const char *text)
+{
+#if OS_NVKMS_FRAME_TRACE
+    nvkms_trace(text);
+#else
+    (void)text;
+#endif
 }
 
 static void nvkms_gpu_pick_callback(const struct NvKmsKapiGpuInfo *info)
@@ -214,7 +236,7 @@ static kstatus_t nvkms_copy_request_to_surface(
         request->stride < (uint64_t)request->width * sizeof(uint32_t))
         return K_EINVAL;
 
-    nvkms_trace("OS_NVKMS_NATIVE_COPY_BEGIN\r\n");
+    nvkms_frame_trace("OS_NVKMS_NATIVE_COPY_BEGIN\r\n");
 
     row_bytes = (uint64_t)request->width * sizeof(uint32_t);
     if ((uint64_t)(request->height - 1U) > UINT64_MAX / request->stride)
@@ -231,7 +253,7 @@ static kstatus_t nvkms_copy_request_to_surface(
         return status == K_OK ? K_EIO : status;
     }
 
-    nvkms_trace("OS_NVKMS_NATIVE_COPY_MAP_OK\r\n");
+    nvkms_frame_trace("OS_NVKMS_NATIVE_COPY_MAP_OK\r\n");
 
     for (uint32_t y = 0U; y < request->height; ++y) {
         const volatile uint32_t *source =
@@ -245,7 +267,7 @@ static kstatus_t nvkms_copy_request_to_surface(
     }
     __asm__ volatile ("sfence" : : : "memory");
     gpu_allocation_cpu_unmap(request->buffer, source_mapping, map_length);
-    nvkms_trace("OS_NVKMS_NATIVE_COPY_DONE\r\n");
+    nvkms_frame_trace("OS_NVKMS_NATIVE_COPY_DONE\r\n");
     return K_OK;
 }
 
@@ -334,10 +356,13 @@ static kstatus_t nvkms_apply_config(
     status = (f != NULL && f->applyModeSetConfig != NULL) ?
              f->applyModeSetConfig(state->device, config, &reply, NV_TRUE) :
              NV_FALSE;
-    kernel_serial_printf_serial_only(
-        "OS_NVKMS_MODESET_RESULT ok=%u flip=%d\r\n",
-        status ? 1U : 0U, (int)reply.flipResult);
-    (void)realtest_flush();
+    if (OS_NVKMS_FRAME_TRACE ||
+        (reply.flipResult != NV_KMS_FLIP_RESULT_IN_PROGRESS &&
+         (!status || reply.flipResult != NV_KMS_FLIP_RESULT_SUCCESS))) {
+        kernel_serial_printf_serial_only(
+            "OS_NVKMS_MODESET_RESULT ok=%u flip=%d\r\n",
+            status ? 1U : 0U, (int)reply.flipResult);
+    }
     if (!status) {
         return reply.flipResult == NV_KMS_FLIP_RESULT_IN_PROGRESS ?
                K_EBUSY : K_EIO;
@@ -373,9 +398,9 @@ static kstatus_t nvkms_atomic_commit(
         nvkms_trace("OS_NVKMS_NATIVE_ATOMIC_LOCK_FAIL\r\n");
         return K_EBUSY;
     }
-    nvkms_trace("OS_NVKMS_NATIVE_ATOMIC_LOCK_OK\r\n");
+    nvkms_frame_trace("OS_NVKMS_NATIVE_ATOMIC_LOCK_OK\r\n");
     if (!state->initialized || !state->connected || state->pending) {
-        nvkms_trace("OS_NVKMS_NATIVE_ATOMIC_REJECT\r\n");
+        nvkms_frame_trace("OS_NVKMS_NATIVE_ATOMIC_REJECT\r\n");
         (void)nv_port_mutex_unlock(&state->lock);
         return K_EBUSY;
     }
@@ -396,14 +421,16 @@ static kstatus_t nvkms_atomic_commit(
     status = nvkms_copy_request_to_surface(state, request, &selected);
     if (status == K_OK) {
         nvkms_fill_config(state, &config, selected.surface, false);
-        nvkms_trace("OS_NVKMS_NATIVE_APPLY_BEGIN\r\n");
+        nvkms_frame_trace("OS_NVKMS_NATIVE_APPLY_BEGIN\r\n");
         status = nvkms_apply_config(state, &config);
-        nvkms_trace(status == K_OK ?
-                    "OS_NVKMS_NATIVE_APPLY_OK\r\n" :
-                    "OS_NVKMS_NATIVE_APPLY_FAIL\r\n");
+        if (status == K_OK)
+            nvkms_frame_trace("OS_NVKMS_NATIVE_APPLY_OK\r\n");
+        else if (status != K_EBUSY)
+            nvkms_trace("OS_NVKMS_NATIVE_APPLY_FAIL\r\n");
     }
     if (status != K_OK) {
-        nvkms_trace("OS_NVKMS_NATIVE_ATOMIC_FAIL\r\n");
+        if (status != K_EBUSY)
+            nvkms_trace("OS_NVKMS_NATIVE_ATOMIC_FAIL\r\n");
         if (selected_from_spare)
             state->spare = selected;
         else
@@ -416,16 +443,87 @@ static kstatus_t nvkms_atomic_commit(
     state->pending_complete = complete;
     state->pending_context = completion_context;
     state->pending = true;
-    nvkms_trace("OS_NVKMS_NATIVE_ATOMIC_ACCEPTED\r\n");
+    state->pending_timed_out = false;
+    state->pending_started_ns = nv_port_time_now_ns();
+    ++state->submitted_flips;
+    nvkms_frame_trace("OS_NVKMS_NATIVE_ATOMIC_ACCEPTED\r\n");
     (void)nv_port_mutex_unlock(&state->lock);
     return K_OK;
+}
+
+/* A missing event is not proof of a missing flip. Query the hardware before
+ * retiring surfaces. If the engine really remains busy, fail the client once
+ * but quarantine both surfaces until a later query proves retirement safe. */
+static void nvkms_pending_progress(nvkms_display_state_t *state, bool event_seen)
+{
+    display_scanout_complete_fn complete = NULL;
+    void *completion_context = NULL;
+    kstatus_t completion_status = K_OK;
+    bool report_timeout = false;
+    uint64_t timeout_age_ns = 0U;
+    NvBool hardware_pending = NV_TRUE;
+    bool query_ok = false;
+
+    if (state == NULL || !state->lock_initialized ||
+        nv_port_mutex_lock(&state->lock, 0U) != K_OK) return;
+    if (state->pending) {
+        uint64_t age = nv_port_time_now_ns() - state->pending_started_ns;
+        if (state->functions != NULL &&
+            state->functions->getFlipPendingStatus != NULL) {
+            query_ok = state->functions->getFlipPendingStatus(
+                state->device, state->head, NVKMS_KAPI_LAYER_PRIMARY_IDX,
+                &hardware_pending) != NV_FALSE;
+            if (!query_ok) ++state->pending_query_failures;
+        }
+        if (query_ok && !hardware_pending) {
+            nvkms_scanout_surface_t old = state->current;
+            state->current = state->pending_surface;
+            state->pending_surface = (nvkms_scanout_surface_t){0};
+            state->spare = old;
+            state->pending = false;
+            ++state->completed_flips;
+            if (!event_seen) ++state->recovered_flips;
+            complete = state->pending_complete;
+            completion_context = state->pending_context;
+            state->pending_complete = NULL;
+            state->pending_context = NULL;
+            state->pending_timed_out = false;
+        } else if (age >= 250000000ULL && !state->pending_timed_out) {
+            state->pending_timed_out = true;
+            ++state->timed_out_flips;
+            complete = state->pending_complete;
+            completion_context = state->pending_context;
+            state->pending_complete = NULL;
+            state->pending_context = NULL;
+            completion_status = K_ETIMEDOUT;
+            report_timeout = true;
+            timeout_age_ns = age;
+        }
+    }
+    (void)nv_port_mutex_unlock(&state->lock);
+    if (report_timeout) {
+        nvkms_trace("OS_NVKMS_FLIP_TIMEOUT_SURFACES_QUARANTINED\r\n");
+        kernel_serial_printf_serial_only(
+            "OS_NVKMS_FLIP_TIMEOUT age_ms=%llu query_ok=%u hw_pending=%u\r\n",
+            (unsigned long long)(timeout_age_ns / 1000000ULL),
+            query_ok ? 1U : 0U, hardware_pending ? 1U : 0U);
+    }
+    if (complete != NULL) complete(completion_context, completion_status);
+}
+
+static void nvkms_poll(void *context)
+{
+    nvkms_pending_progress((nvkms_display_state_t *)context, false);
+}
+
+static void nvkms_event_progress(void *context)
+{
+    nvkms_pending_progress((nvkms_display_state_t *)context, true);
 }
 
 static void nvkms_event_callback(const struct NvKmsKapiEvent *event)
 {
     nvkms_display_state_t *state;
-    display_scanout_complete_fn complete = NULL;
-    void *completion_context = NULL;
 
     if (event == NULL)
         return;
@@ -451,25 +549,9 @@ static void nvkms_event_callback(const struct NvKmsKapiEvent *event)
         event->u.flipOccurred.layer != NVKMS_KAPI_LAYER_PRIMARY_IDX)
         return;
 
-    if (nv_port_mutex_lock(&state->lock, UINT64_MAX) != K_OK)
-        return;
-    if (state->pending) {
-        nvkms_trace("OS_NVKMS_NATIVE_EVENT_FLIP\r\n");
-        nvkms_scanout_surface_t old = state->current;
-        state->current = state->pending_surface;
-        state->pending_surface = (nvkms_scanout_surface_t){0};
-        state->spare = old;
-        state->pending = false;
-        complete = state->pending_complete;
-        completion_context = state->pending_context;
-        state->pending_complete = NULL;
-        state->pending_context = NULL;
-    }
-    (void)nv_port_mutex_unlock(&state->lock);
-
-    /* display_core releases its source buffer only after this callback. */
-    if (complete != NULL)
-        complete(completion_context, K_OK);
+    /* Vendor event dispatch may still own its global lock. Query hardware
+     * only after returning from that dispatch, never recursively here. */
+    (void)nv_port_work_queue_irq(&state->progress_work);
 }
 
 static bool nvkms_select_display(
@@ -597,6 +679,8 @@ kstatus_t nv_nvkms_display_init(void)
         return K_EIO;
     if (!g_nvkms_display.lock_initialized) {
         nv_port_mutex_init(&g_nvkms_display.lock);
+        nv_port_work_init(&g_nvkms_display.progress_work,
+                         nvkms_event_progress, &g_nvkms_display);
         g_nvkms_display.lock_initialized = true;
     }
     if (g_nvkms_display.initialized)
@@ -610,7 +694,8 @@ kstatus_t nv_nvkms_display_init(void)
     f = (const struct NvKmsKapiFunctionsTable *)nv_nvkms_functions();
     if (f == NULL || f->enumerateGpus == NULL || f->allocateDevice == NULL ||
         f->freeDevice == NULL || f->grabOwnership == NULL ||
-        f->releaseOwnership == NULL || f->getDeviceResourcesInfo == NULL)
+        f->releaseOwnership == NULL || f->getDeviceResourcesInfo == NULL ||
+        f->getFlipPendingStatus == NULL)
         return K_ENOSYS;
     g_nvkms_display.functions = f;
     g_nvkms_display.width = gop_width;
@@ -741,6 +826,7 @@ kstatus_t nv_nvkms_display_init(void)
         f->framebufferConsoleDisabled(g_nvkms_display.device);
 
     g_nvkms_display.backend.context = &g_nvkms_display;
+    g_nvkms_display.backend.poll = nvkms_poll;
     g_nvkms_display.backend.atomic_commit = nvkms_atomic_commit;
     nvkms_trace("OS_NVKMS_BACKEND_REGISTER_BEGIN\r\n");
     status = display_core_register_scanout_backend(0U,

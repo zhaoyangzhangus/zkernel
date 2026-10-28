@@ -38,7 +38,8 @@ int main(void) {
     for (UINT64 lba = 1; lba <= OS_BLOCK_CACHE_ENTRY_COUNT; ++lba) {
         if (!block_cache_read(&cache, lba, buffer)) return 3;
     }
-    if (memcmp(disk, "cached", 6U) != 0 ||
+    /* 热缓存项未必在读取过程中被淘汰；先显式写回，再检查介质内容。 */
+    if (!block_cache_writeback(&cache) || memcmp(disk, "cached", 6U) != 0 ||
         !block_cache_invalidate(&cache, 1U) ||
         !block_cache_destroy(&cache) ||
         !block_unregister(&blocks, device) ||

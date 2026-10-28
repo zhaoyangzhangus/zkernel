@@ -4,9 +4,10 @@
 #include <usb/device.h>
 #include <usb/hub.h>
 #include "internal.h"
+#include "audio_descriptor.h"
 
-/* REFACTOR_P8_XHCI_ENUMERATION_OWNER: USB descriptor parsing, endpoint
- * context setup, and device enumeration are isolated cold-path policy. */
+/* REFACTOR_P8_XHCI_ENUMERATION_OWNER：USB 描述符解析、端点上下文设置和设备枚举
+ * 属于独立的冷路径策略。 */
 
 #define XHCI_RING_TRB_COUNT 256U
 #define XHCI_ADDRESS_DEVICE_TYPE 11U
@@ -85,7 +86,7 @@ static bool xhci_resolve_tt(
         false;
 
     /*
-     * Only Low/Full-Speed devices use an external USB2 TT.
+    * 只有低速/全速设备会使用外部 USB2 TT。
      */
     if(child_speed > 2U ||
        parent_slot == 0U)
@@ -110,8 +111,8 @@ static bool xhci_resolve_tt(
     }
 
     /*
-     * Directly below a High-Speed Hub:
-     * that Hub owns the split transaction.
+    * 设备直接连接到高速 Hub 下方时：
+    * 该 Hub 负责拆分事务。
      */
     if(parent->context.device_speed == 3U)
     {
@@ -129,9 +130,8 @@ static bool xhci_resolve_tt(
     }
 
     /*
-     * A Full/Low-Speed Hub may itself be behind a High-Speed TT.
-     * All of its Full/Low-Speed descendants remain in that same
-     * upstream TT domain.
+    * 全速/低速 Hub 自身可能位于高速 TT 后方。
+    * 其所有全速/低速后代都属于同一个上游 TT 域。
      */
     if(parent->tt_slot != 0U)
     {
@@ -193,10 +193,9 @@ static bool xhci_prepare_device_resources(xhci_state_t *state, uint8_t slot,
         16;
 
     /*
-     * DW2 is NOT software parent identity.
+    * DW2 不是软件层的父设备标识。
      *
-     * It is the external High-Speed Transaction Translator that
-     * services this Low/Full-Speed device.
+    * 它表示为此低速/全速设备提供服务的外部高速 Transaction Translator。
      */
     slot_context[2] =
         (uint32_t)tt_slot |
@@ -209,9 +208,8 @@ static bool xhci_prepare_device_resources(xhci_state_t *state, uint8_t slot,
     ep0_context[1] = (3U << 1) | (4U << 3) | (max_packet << 16);
     ep0_context[2] = (uint32_t)xhci_dma_address(&state->ep0_ring.mapping) | 1U;
     ep0_context[3] = (uint32_t)(xhci_dma_address(&state->ep0_ring.mapping) >> 32);
-    /* Endpoint Context DW4: Average TRB Length.  A control TD always
-     * contains an eight-byte Setup TRB; zero is tolerated by QEMU but causes
-     * some physical xHCI implementations to leave EP0 unscheduled. */
+    /* Endpoint Context DW4：平均 TRB 长度。控制 TD 始终包含一个 8 字节 Setup TRB；
+     * QEMU 容忍零值，但某些实体 xHCI 实现会因此不调度 EP0。 */
     ep0_context[4] = 8U;
 
     xhci_trb_t *ring = (xhci_trb_t *)state->ep0_ring.cpu;
@@ -245,10 +243,9 @@ static uint32_t xhci_ep0_descriptor_max_packet(
     raw = descriptor[7];
     if (raw == 8U || raw == 16U || raw == 32U || raw == 64U) return raw;
 
-    /* USB 2 devices must report one of the values above.  A few firmware
-     * paths expose the SuperSpeed encoding (9) through a USB2 companion
-     * port; retain the speed-specific EP0 default instead of programming an
-     * impossible packet size into the xHCI context. */
+    /* USB 2 设备必须报告上述取值之一。部分固件路径会通过 USB2 companion 端口暴露
+     * SuperSpeed 编码值（9）；此时保留对应速度的 EP0 默认值，不要向 xHCI 上下文
+     * 写入不可能的包大小。 */
     return device->device_speed >= 3U ? 64U : 8U;
 }
 
@@ -292,7 +289,7 @@ static bool xhci_prepare_ep0_update(xhci_state_t *state,
         }
     }
 
-    /* Endpoint State is output-only in an input Endpoint Context. */
+    /* 输入 Endpoint Context 中的 Endpoint State 只用于输出。 */
     ep0[0] &= ~0x7U;
     ep0[1] = (ep0[1] & 0x0000FFFFU) | (max_packet << 16);
     dequeue = xhci_dma_address(&device->ep0_ring.mapping) +
@@ -381,27 +378,25 @@ static bool xhci_complete_device_address(
 }
 
 /*
- * V3.10.1A EXPLICIT EP0 DEVICE
+ * V3.10.1A 显式 EP0 设备上下文
  *
- * Controller-owned state:
- *   MMIO / doorbell / Event Ring
+ * 控制器所有的状态：
+ *   MMIO / 门铃 / 事件环
  *
- * Device-owned state:
- *   Slot ID / EP0 Ring / EP0 enqueue / descriptor buffer
+ * 设备所有的状态：
+ *   Slot ID / EP0 环 / EP0 入队位置 / 描述符缓冲区
  */
 /*
- * V3.10.1F CONTROL WRAPPER REMOVED
+ * V3.10.1F 已移除控制传输包装函数
  *
- * Every control-transfer caller now names its device context.
- * This stage changes API shape only; legacy callers explicitly
- * pass &state->device and retain identical ownership semantics.
+ * 每个控制传输调用方现在都显式指定设备上下文。
+ * 此阶段仅改变 API 形式；旧调用方显式传入 &state->device，所有权语义保持不变。
  */
 /*
- * Legacy working-context wrapper.
+ * 旧版工作上下文包装函数。
  *
- * V3.10.1A deliberately leaves every existing caller unchanged.
- * Later patches migrate individual subsystems to the explicit
- * device-context helper one at a time.
+ * V3.10.1A 刻意不修改任何现有调用方。
+ * 后续变更会逐个子系统迁移到显式设备上下文辅助函数。
  */
 
 
@@ -446,9 +441,9 @@ static bool xhci_read_hub_descriptor(xhci_state_t *state) {
             0x03U);
     uint32_t power_good_ms = (uint32_t)descriptor[5] * 2U;
 
-    /* Linux powers every external Hub port before looking for children, even
-     * when the Hub reports no switching support.  Some devices emulate the
-     * request and expose no connection status until it has been sent. */
+    /* Linux 会在查找子设备前为每个外部 Hub 端口上电，即使 Hub 报告不支持电源切换也如此。
+     * 某些设备会模拟该请求，并且只有发送请求后才会报告连接状态。
+     */
     uint32_t powered_ports = 0U;
     for (uint32_t port = 1U; port <= state->hub_port_count; ++port) {
         if (xhci_hub_set_port_feature_device(
@@ -513,7 +508,7 @@ static bool xhci_parse_configuration(xhci_state_t *state) {
     bool hid_interface = false;
     uint8_t hid_candidate = 0U;
     uint8_t hid_count = 0U;
-    bool audio_interface = false;
+
     bool hub_interface = false;
     bool bt_interface = false;
     bool msc_interface = false;
@@ -606,8 +601,7 @@ static bool xhci_parse_configuration(xhci_state_t *state) {
             uint8_t interface_subclass = descriptor[offset + 6U];
             uint8_t alternate = descriptor[offset + 3U];
             uint8_t interface_protocol = descriptor[offset + 7U];
-            /* Boot protocol gives the driver a fixed report format, avoiding
-             * a report-descriptor parser in the interrupt fast path. */
+            /* Boot protocol 为驱动提供固定报告格式，避免在中断快速路径中解析报告描述符。 */
             hid_interface = interface_class == USB_CLASS_HID &&
                             interface_subclass == USB_HID_SUBCLASS_BOOT &&
                             (interface_protocol == USB_HID_PROTOCOL_KEYBOARD ||
@@ -625,9 +619,6 @@ static bool xhci_parse_configuration(xhci_state_t *state) {
                     state->hid_secondary.protocol = interface_protocol;
                 }
             }
-            audio_interface = interface_class == USB_CLASS_AUDIO &&
-                              interface_subclass == USB_AUDIO_SUBCLASS_STREAM &&
-                              alternate != 0U;
             hub_interface =
                 interface_class == USB_CLASS_HUB &&
                 alternate == 0U;
@@ -654,10 +645,6 @@ static bool xhci_parse_configuration(xhci_state_t *state) {
                 state->msc_uas_present = true;
                 state->msc_uas_interface = descriptor[offset + 2U];
                 state->msc_uas_alternate = alternate;
-            }
-            if (audio_interface) {
-                state->audio_interface = descriptor[offset + 2U];
-                state->audio_alt_setting = alternate;
             }
             if (hub_interface) {
                 state->hub_interface = descriptor[offset + 2U];
@@ -704,16 +691,6 @@ static bool xhci_parse_configuration(xhci_state_t *state) {
                 break;
             }
             uas_last_endpoint = 0U;
-        } else if (type == XHCI_DESCRIPTOR_CS_INTERFACE && length >= 8U &&
-                   audio_interface && descriptor[offset + 2U] == 0x02U) {
-            /* Audio Format Type I锛氳褰?PCM 璁惧鐨勫熀鏈害鏉燂紝渚涗笂灞傞€夊懆鏈熴€?*/
-            state->audio_channels = descriptor[offset + 4U];
-            state->audio_bit_resolution = descriptor[offset + 6U];
-            if (descriptor[offset + 7U] == 1U && length >= 11U) {
-                state->audio_sample_rate = (uint32_t)descriptor[offset + 8U] |
-                    ((uint32_t)descriptor[offset + 9U] << 8) |
-                    ((uint32_t)descriptor[offset + 10U] << 16);
-            }
         } else if (type == XHCI_DESCRIPTOR_ENDPOINT && length >= 7U && hid_interface &&
                    (descriptor[offset + 2U] & 0x80U) != 0U &&
                    (descriptor[offset + 3U] & 0x03U) == 0x03U) {
@@ -746,14 +723,6 @@ static bool xhci_parse_configuration(xhci_state_t *state) {
                                         ((uint16_t)descriptor[offset + 5U] << 8);
                 state->hub_interval = descriptor[offset + 6U];
             }
-        } else if (type == XHCI_DESCRIPTOR_ENDPOINT && length >= 7U && audio_interface &&
-                   (descriptor[offset + 3U] & 0x03U) == USB_TRANSFER_ISOCHRONOUS &&
-                   state->audio_endpoint == 0U) {
-            state->audio_endpoint = descriptor[offset + 2U] & 0x0FU;
-            state->audio_endpoint_in = (descriptor[offset + 2U] & 0x80U) != 0U;
-            state->audio_max_packet = ((uint16_t)descriptor[offset + 4U] |
-                                       ((uint16_t)descriptor[offset + 5U] << 8)) & 0x07FFU;
-            state->audio_interval = descriptor[offset + 6U];
         } else if (type == XHCI_DESCRIPTOR_ENDPOINT && length >= 7U &&
                    uas_interface &&
                    (descriptor[offset + 3U] & 0x03U) == USB_TRANSFER_BULK) {
@@ -797,9 +766,8 @@ static bool xhci_parse_configuration(xhci_state_t *state) {
             uint8_t transfer_type = descriptor[offset + 3U] & 0x03U;
             uint16_t max_packet = (uint16_t)descriptor[offset + 4U] |
                                   ((uint16_t)descriptor[offset + 5U] << 8);
-            /* Alternate setting zero may expose zero-bandwidth isochronous
-             * endpoints. Ignore them, but always advance to the next
-             * descriptor; continuing here used to loop forever. */
+            /* Alternate setting 0 可能公开零带宽等时端点。忽略这些端点，但始终继续处理下一个描述符；
+             * 过去在此处继续循环会导致无限循环。 */
             if (endpoint != 0U && max_packet != 0U) {
                 if (direction_in != 0U &&
                     transfer_type == USB_TRANSFER_INTERRUPT &&
@@ -821,6 +789,24 @@ static bool xhci_parse_configuration(xhci_state_t *state) {
             }
         }
         offset += length;
+    }
+    xhci_audio_descriptor_t audio;
+    if (xhci_select_audio_descriptor(descriptor, total_length, &audio)) {
+        state->audio_interface = audio.interface_number;
+        state->audio_alt_setting = audio.alternate;
+        state->audio_protocol = audio.protocol;
+        state->audio_control_interface = audio.control_interface;
+        state->audio_clock = audio.clock;
+        state->audio_mute_unit=audio.mute_unit;
+        state->audio_volume_unit=audio.volume_unit;
+        state->audio_volume_channels=audio.volume_channels;
+        state->audio_endpoint = audio.endpoint;
+        state->audio_endpoint_in = false;
+        state->audio_interval = audio.interval;
+        state->audio_max_packet = audio.max_packet;
+        state->audio_channels = audio.channels;
+        state->audio_bit_resolution = audio.bits;
+        state->audio_sample_rate = audio.rate;
     }
     if (state->msc_uas_present) {
         kernel_serial_printf_serial_only(
@@ -910,50 +896,44 @@ static bool xhci_parse_configuration(xhci_state_t *state) {
 }
 
 /*
- * V3.10.1B EXPLICIT HUB GET STATUS
+ * V3.10.1B 显式读取 Hub 状态
  *
- * Hub EP0 state belongs to the supplied device context.
+ * Hub EP0 状态属于传入的设备上下文。
  */
 /*
- * V3.10.1E HUB CONTROL WRAPPERS REMOVED
+ * V3.10.1E 已移除 Hub 控制包装函数
  *
- * All Hub control callers now name the device context explicitly.
- * Runtime callers still pass &state->device in this stage.
+ * 所有 Hub 控制调用方现在都显式指定设备上下文。
+ * 此阶段的运行时调用方仍传入 &state->device。
  */
 /*
- * V3.9.6 INITIAL HUB SLOT WALK
+ * V3.9.6 初始 Hub Slot 遍历
  *
- * Initial downstream enumeration is now entirely Slot Table based.
+ * 初始下游枚举现在完全基于 Slot Table。
  *
- * Newly discovered Hub Slots are processed in a following pass,
- * allowing arbitrary xHCI-supported Hub nesting without inventory.
+ * 新发现的 Hub Slot 会在后续轮次处理，因此无需 inventory 即可支持 xHCI 支持的任意 Hub 嵌套。
  */
 /*
- * V3.10.1D DIRECT STARTUP HUB CONTEXT
+ * V3.10.1D 启动阶段直接使用 Hub 上下文
  *
- * Startup Hub control transfers operate directly on the canonical
- * Slot.context.
+ * 启动阶段的 Hub 控制传输直接操作规范 Slot.context。
  *
- * state->device is reserved for a child while that child is being
- * enumerated.
+ * 子设备枚举期间，state->device 保留给该子设备使用。
  */
 /*
- * V3.10.6B10B4 HUB RUNTIME ARM BARRIER
+ * V3.10.6B10B4 Hub 运行时挂起屏障
  *
- * A Hub interrupt-IN TD is allowed to exist only after the explicit startup
- * topology walk has reached a stable baseline.  This prevents port resets
- * used for enumeration from becoming runtime hotplug events.
+ * 只有在显式启动拓扑遍历达到稳定基线后，才允许存在 Hub interrupt-IN TD。
+ * 这样可避免枚举期间的端口复位被当作运行时热插拔事件。
  */
 /*
- * V3.10.6B10B8 STARTUP EVENT DRAIN
+ * V3.10.6B10B8 启动事件排空
  *
- * Hub endpoints are armed during Configure Endpoint so QEMU can establish its
- * normal NAK/retry ownership.  Initial downstream probing then produces
- * expected C_CONNECTION/C_ENABLE/C_RESET notifications.
+ * Configure Endpoint 阶段会挂起 Hub 端点，使 QEMU 建立常规 NAK/重试所有权。
+ * 初始下游探测随后会产生预期的 C_CONNECTION/C_ENABLE/C_RESET 通知。
  *
- * Consume those startup completions before MSI-X runtime is exposed.  The
- * ordinary event handlers perform the same reconciliation/ACK/re-arm logic as
- * runtime, so there is only one Hub state machine.
+ * 向运行时开放 MSI-X 前先消费这些启动完成事件。常规事件处理程序执行与运行时相同的协调/ACK/重新挂起逻辑，
+ * 因此 Hub 只有一套状态机。
  */
 
 
@@ -967,12 +947,12 @@ static uint8_t xhci_interrupt_interval(
     }
 
     /*
-     * xHCI speed IDs used by this driver:
+    * 本驱动使用的 xHCI 速度 ID：
      *
-     *   1 = Full
-     *   2 = Low
-     *   3 = High
-     *   4 = Super
+    *   1 = 全速
+    *   2 = 低速
+    *   3 = 高速
+    *   4 = 超高速
      */
     if(speed >= 3U)
     {
@@ -991,14 +971,13 @@ static uint8_t xhci_interrupt_interval(
     }
 
     /*
-     * Full/Low-Speed bInterval is in 1ms frames.
+    * 全速/低速设备的 bInterval 以 1 ms 帧为单位。
      *
-     * Convert:
+    * 转换：
      *
-     *     milliseconds -> microframes
+    *     毫秒 -> 微帧
      *
-     * then round DOWN to the nearest power of two, matching the
-     * xHCI scheduling rule used by mature host-controller drivers.
+    * 然后向下取整到最接近的 2 次幂，遵循成熟主机控制器驱动采用的 xHCI 调度规则。
      */
     uint32_t microframes =
         (uint32_t)b_interval *
@@ -1017,10 +996,10 @@ static uint8_t xhci_interrupt_interval(
     }
 
     /*
-     * FS/LS periodic endpoint valid useful range:
+    * FS/LS 周期端点的有效实用范围：
      *
-     *   2^3 microframes =   1 ms
-     *   2^10 microframes = 128 ms
+    *   2^3 微帧 = 1 ms
+    *   2^10 微帧 = 128 ms
      */
     if(exponent < 3U)
     {
@@ -1047,10 +1026,10 @@ void xhci_init_endpoint_context(xhci_state_t *state, uint32_t *endpoint,
         interval;
 
     /*
-     * Endpoint types:
+    * 端点类型：
      *
-     *   3 = Interrupt OUT
-     *   7 = Interrupt IN
+    *   3 = 中断输出
+    *   7 = 中断输入
      */
     if(type == 3U ||
        type == 7U)
@@ -1063,9 +1042,8 @@ void xhci_init_endpoint_context(xhci_state_t *state, uint32_t *endpoint,
 
     xhci_endpoint_context_encode(endpoint, encoded_interval, type,
                                   max_packet, address);
-    /* Linux leaves Average TRB Length at zero for bulk endpoints: their
-     * transfer buffer size is not known when the endpoint is initialized.
-     * Periodic endpoints use their packet size as a conservative payload. */
+    /* Linux 将 bulk 端点的 Average TRB Length 保持为零：初始化端点时尚不知道传输缓冲区大小。
+     * 周期端点则使用包大小作为保守负载值。 */
     if (type == 3U || type == 7U)
         xhci_endpoint_context_set_max_esit_payload(endpoint, max_packet);
     if (type == 3U || type == 7U)
@@ -1075,10 +1053,9 @@ void xhci_init_endpoint_context(xhci_state_t *state, uint32_t *endpoint,
 }
 
 /*
- * V3.10.5A EXPLICIT BT QUEUES
+ * V3.10.5A 显式 BT 队列
  *
- * Bluetooth endpoint/ring producer state belongs to the explicit
- * device context.  Controller MMIO state remains in xhci_state_t.
+ * Bluetooth 端点/环生产者状态属于显式设备上下文。控制器 MMIO 状态仍保存在 xhci_state_t 中。
  */
 static bool xhci_configure_hid_endpoint(xhci_state_t *state) {
     uint32_t endpoint_id;
@@ -1114,10 +1091,8 @@ static bool xhci_configure_hid_endpoint(xhci_state_t *state) {
         if (secondary_endpoint_id > 31U ||
             secondary_endpoint_id == endpoint_id) return false;
     }
-    /* Context Entries is the highest enabled DCI, not the first HID DCI.
-     * A composite receiver commonly places mouse on DCI 3 and keyboard on
-     * DCI 7.  Advertising only DCI 3 makes the controller ignore the valid
-     * keyboard endpoint context even though its Add Context flag is set. */
+    /* Context Entries 表示最高启用 DCI，而不是首个 HID DCI。复合接收器通常将鼠标放在 DCI 3、
+     * 键盘放在 DCI 7。若只声明 DCI 3，即使设置了 Add Context 标志，控制器也会忽略有效的键盘端点上下文。 */
     last_endpoint_id = endpoint_id > secondary_endpoint_id ?
         endpoint_id : secondary_endpoint_id;
     if (state == xhci_hid_controller_state()) {
@@ -1153,7 +1128,7 @@ static bool xhci_configure_hid_endpoint(xhci_state_t *state) {
     input_slot[0] &= ~(0x1FU << 27);
     input_slot[0] |= last_endpoint_id << 27;
     control[0] = 0U;
-    /* Add Context Flags 蹇呴』鍚屾椂鍖呭惈 Slot Context 鍜岀洰鏍囩鐐广€?*/
+    /* Add Context Flags 必须同时包含 Slot Context 和目标端点。 */
     control[1] = 1U;
     if (has_primary) control[1] |= 1U << endpoint_id;
     if (has_secondary) control[1] |= 1U << secondary_endpoint_id;
@@ -1233,8 +1208,7 @@ static void xhci_mark_aux_enumeration_stage(bool auxiliary_hid,
     }
 }
 
-/* Keep the existing failure paths identical for the normal enumerator while
- * making the auxiliary HID path independent of the primary Slot Table. */
+/* 保持常规枚举器现有的失败路径不变，同时使辅助 HID 路径独立于主 Slot Table。 */
 #define xhci_unpublish_slot_device(slot, parent_slot, parent_port) \
     xhci_enumeration_rollback(publish_topology, slot, parent_slot, parent_port)
 
@@ -1251,29 +1225,25 @@ static bool xhci_enumerate_device_mode(xhci_state_t *state, uint8_t slot,
     if (auxiliary_hid) xhci_clear_error();
 
     /*
-     * V3.7.2 ENUMERATION FAILURE ROLLBACK
+    * V3.7.2 枚举失败回滚
      *
-     * Slot Table and USB Core objects can be created before
-     * hardware enumeration has fully succeeded.
+    * 硬件枚举完全成功前，Slot Table 和 USB Core 对象可能已经创建。
      *
-     * Every failure exit must remove those tentative software
-     * objects.  Hardware Disable Slot and DMA teardown remain
-     * owned by the existing caller.
+    * 所有失败出口都必须移除这些临时软件对象。硬件 Disable Slot 和 DMA 拆除仍由现有调用方负责。
      */
 
 
     /*
-     * V3.5.2 USB CORE BIND
+    * V3.5.2 绑定 USB CORE
      *
-     * Bind xHCI Slot ID to USB Core device.
+    * 将 xHCI Slot ID 绑定到 USB Core 设备。
      */
 
 
     /*
-     * V3.5.3 USB descriptor sync
+    * V3.5.3 同步 USB 描述符
      *
-     * Bind xHCI enumeration result
-     * into USB Core object.
+    * 将 xHCI 枚举结果写入 USB Core 对象。
      */
 
     usb_device_t *usb_dev = publish_topology ? usb_alloc_device(slot) : 0;
@@ -1292,10 +1262,9 @@ static bool xhci_enumerate_device_mode(xhci_state_t *state, uint8_t slot,
 
 
         /*
-         * Device identity.
+         * 设备标识。
          *
-         * Descriptor parser will
-         * fill these fields later.
+         * 这些字段稍后由描述符解析器填写。
          */
         usb_dev->device_class =
             0;
@@ -1308,9 +1277,9 @@ static bool xhci_enumerate_device_mode(xhci_state_t *state, uint8_t slot,
     }
 
     /*
-     * V3.6.4 USB HUB CLASS BIND
+    * V3.6.4 绑定 USB HUB 类
      *
-     * Hub devices get their own class object.
+    * Hub 设备拥有独立的类对象。
      */
 
     if(publish_topology && usb_dev != 0 &&
@@ -1327,16 +1296,15 @@ static bool xhci_enumerate_device_mode(xhci_state_t *state, uint8_t slot,
 
 
     /*
-     * V3.2 Slot Table mirror
+    * V3.2 Slot Table 镜像
      *
-     * Keep old inventory path unchanged.
-     * This only creates a native Slot ID view.
+    * 保持旧的 inventory 路径不变。
+    * 此处仅创建原生 Slot ID 视图。
      */
     /*
-     * parent_slot/parent_port remain software topology.
+    * parent_slot/parent_port 仍表示软件拓扑。
      *
-     * tt_slot/tt_port describe the hardware split-transaction
-     * domain required by xHCI Slot Context DW2.
+    * tt_slot/tt_port 描述 xHCI Slot Context DW2 所需的硬件分割事务域。
      */
     uint8_t tt_slot = 0U;
     uint8_t tt_port = 0U;
@@ -1376,13 +1344,12 @@ static bool xhci_enumerate_device_mode(xhci_state_t *state, uint8_t slot,
         0x80U, XHCI_SETUP_GET_DESCRIPTOR, 0x00U, XHCI_DESCRIPTOR_DEVICE,
         0x00U, 0x00U, XHCI_DESCRIPTOR_DEVICE_LENGTH, 0x00U
 
-    /* V3.2 Slot Table mirror completed */
+    /* V3.2 Slot Table 镜像完成 */
 };
     uint8_t set_configuration[8] = {0};
     uint8_t set_interface[8] = {0};
-    /* High-speed EP0 is already 64 bytes wide.  The AMD auxiliary controller
-     * is more reliable when it receives the full descriptor in one request;
-     * low/full-speed devices still need the eight-byte MPS probe. */
+    /* 高速 EP0 已是 64 字节。AMD 辅助控制器一次收到完整描述符时更可靠；
+     * 低速/全速设备仍需先探测 8 字节 MPS。 */
     bool probe_ep0_size = publish_topology || speed < 3U;
     if (!xhci_prepare_device_resources(state, slot, port, speed, root_port,
                                         parent_slot, parent_port,
@@ -1425,11 +1392,9 @@ static bool xhci_enumerate_device_mode(xhci_state_t *state, uint8_t slot,
             realtest_mark_number("XHCI_AUX_EP0_MPS_EFFECTIVE",
                 xhci_ep0_descriptor_max_packet(&state->device, header));
         }
-        /* The first Address Device command used BSR so EP0 could read the
-         * descriptor header while the slot remained in Default state.  A
-         * non-BSR command is required even when bMaxPacketSize0 already
-         * matches the initial value; it assigns the USB address and moves the
-         * slot to Addressed state. */
+        /* 首个 Address Device 命令使用 BSR，使 EP0 能在 Slot 仍处于 Default 状态时读取描述符头。
+         * 即使 bMaxPacketSize0 已与初始值匹配，也必须再次使用非 BSR 命令；该命令会分配 USB 地址，
+         * 并将 Slot 转换到 Addressed 状态。 */
         if (!xhci_complete_device_address(state, &state->device, header)) {
             xhci_mark_aux_enumeration_stage(auxiliary_hid, 5U);
             do {
@@ -1493,9 +1458,8 @@ static bool xhci_enumerate_device_mode(xhci_state_t *state, uint8_t slot,
     xhci_mark_aux_enumeration_stage(auxiliary_hid, 9U);
     if (!xhci_read_configuration_descriptor(state) ||
         !xhci_parse_configuration(state)) {
-        /* Keep the EP0 completion/timeout code.  Replacing it with the
-         * generic parser code made real hardware failures look identical and
-         * hid whether the controller ever completed the request. */
+        /* 保留 EP0 完成/超时错误码。替换为通用解析错误码会使真实硬件故障无法区分，也会掩盖控制器是否
+         * 实际完成了请求。 */
         if (xhci_last_error() == 0U) xhci_set_error(57U);
         do {
         xhci_unpublish_slot_device(
@@ -1539,10 +1503,8 @@ static bool xhci_enumerate_device_mode(xhci_state_t *state, uint8_t slot,
         kernel_serial_write_serial_only("OS_DIAG_HUB_DESCRIPTOR_OK\r\n");
 
         /*
-         * Establish a clean Hub change baseline before interrupt-IN is
-         * armed. Existing downstream devices are discovered explicitly by
-         * xhci_hub_runtime_probe_downstream(), so clearing their old C_CONNECTION
-         * state here cannot hide a device.
+         * 启用 interrupt-IN 前先建立干净的 Hub 变化基线。现有下游设备会由
+         * xhci_hub_runtime_probe_downstream() 显式发现，因此此处清除旧的 C_CONNECTION 状态不会漏掉设备。
          */
         if(!xhci_hub_ack_all_port_changes_device(
                state,
@@ -1589,7 +1551,41 @@ static bool xhci_enumerate_device_mode(xhci_state_t *state, uint8_t slot,
     } while (0);
         }
     } else if (state->audio_endpoint != 0U) {
-        /* USB Audio 鐨勭瓑鏃剁鐐归€氬父浣嶄簬 alternate setting 1锛?         * 鍙湁鍒囨崲鎺ュ彛鍚庤澶囨墠浼氱湡姝ｆ墦寮€鏁版嵁甯﹀銆?*/
+        /* UAC2 在时钟实体上设置频率；UAC1 使用端点采样频率控制。 */
+        uint8_t frequency[8] = {0x22U, 1U, 0U, 1U,
+            state->audio_endpoint, 0U, 3U, 0U};
+        if (state->audio_protocol == 0x20U) {
+            frequency[0] = 0x21U;
+            frequency[4] = state->audio_control_interface;
+            frequency[5] = state->audio_clock;
+            frequency[6] = 4U;
+        }
+        uint8_t *rate = state->device.descriptor_buffer.cpu;
+        rate[0] = 0x80U; rate[1] = 0xBBU; rate[2] = 0U; rate[3] = 0U;
+        if (!xhci_submit_control_transfer_device(state, &state->device,
+                frequency, frequency[6], false)) {
+            xhci_set_error(59U);
+            xhci_unpublish_slot_device(slot, parent_slot, parent_port);
+            return false;
+        }
+        /* 耳机复位后可能保持硬件静音；只初始化播放链上明确可写的控制。 */
+        uint8_t feature[8]={0x21U,1U,0U,1U,state->audio_control_interface,0U,1U,0U};
+        if (state->audio_mute_unit) {
+            feature[5]=state->audio_mute_unit;rate[0]=0U;
+            if (!xhci_submit_control_transfer_device(state,&state->device,feature,1U,false)) {
+                xhci_set_error(59U);xhci_unpublish_slot_device(slot,parent_slot,parent_port);return false;
+            }
+        }
+        if (state->audio_volume_unit) {
+            feature[3]=2U;feature[5]=state->audio_volume_unit;feature[6]=2U;
+            for (uint8_t channel=0U;channel<8U;++channel) {
+                if (!(state->audio_volume_channels&(1U<<channel))) continue;
+                feature[2]=channel;rate[0]=rate[1]=0U;
+                if (!xhci_submit_control_transfer_device(state,&state->device,feature,2U,false)) {
+                    xhci_set_error(59U);xhci_unpublish_slot_device(slot,parent_slot,parent_port);return false;
+                }
+            }
+        }
         set_interface[0] = 0x01U;
         set_interface[1] = XHCI_SETUP_SET_INTERFACE;
         set_interface[2] = state->audio_alt_setting;
@@ -1607,8 +1603,7 @@ static bool xhci_enumerate_device_mode(xhci_state_t *state, uint8_t slot,
     }
     if (state->hid_endpoint != 0U ||
         state->hid_secondary.endpoint != 0U) {
-        /* A Boot-subclass interface may currently be in report protocol.
-         * Select Boot protocol before arming its fixed-format interrupt TRB. */
+        /* Boot 子类接口当前可能处于报告协议。为其固定格式的中断 TRB 启用前，先选择 Boot 协议。 */
         if (state->hid_endpoint != 0U) {
             uint8_t set_protocol[8] = {
                 0x21U, USB_HID_SET_PROTOCOL, USB_HID_PROTOCOL_BOOT, 0x00U,

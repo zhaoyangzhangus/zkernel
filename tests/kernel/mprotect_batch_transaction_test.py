@@ -17,17 +17,14 @@ program = r'''
 #include <stdatomic.h>
 #include <stddef.h>
 #include <string.h>
-typedef int kstatus_t;
-typedef uint64_t vaddr_t;
+#include <kernel/list.h>
 #define K_OK 0
 #define K_ENOENT -2
 #define K_EIO -5
 #define K_EINVAL -22
-#define PAGE_SIZE 4096ULL
 #define X86_PAGE_USER 2U
 #define X86_PAGE_GLOBAL 4U
 #define X86_CACHE_WB 0
-typedef struct list_head { struct list_head *next; } list_head_t;
 typedef struct { list_head_t ordered_node; uint64_t start,end; uint32_t prot; bool cow; } vm_area_t;
 typedef struct { list_head_t area_list; uint64_t root_table; } vm_space_t;
 static vm_area_t areas[2];
@@ -68,6 +65,14 @@ static bool x86_tlb_shootdown_root(uint64_t root) {
 }
 static void vm_tlb_bump_generation(vm_space_t *s) { (void)s; assert(locked); ++bumps; }
 static void map_unlock(vm_space_t *s) { (void)s; assert(locked); locked=false; }
+/* 此夹具隔离页表事务，真实合并和引用释放由索引及合并回归覆盖。 */
+static void vm_area_merge_range(vm_space_t *s,vm_area_t *first,
+                                list_head_t *end,list_head_t *retired) {
+    assert(locked && s==&space && first==&areas[0]);
+    assert(end==&space.area_list || end==&areas[1].ordered_node);
+    assert(list_empty(retired));
+}
+static void area_release(vm_area_t *a) { (void)a; assert(!"unexpected retired VMA"); }
 static bool x86_page_range_has_present_pages(uint64_t root,vaddr_t start,uint64_t end) {
     (void)root;assert(locked);
     for(uint64_t va=start;va<end;va+=PAGE_SIZE)if(present[va/PAGE_SIZE])return true;
@@ -138,6 +143,7 @@ with tempfile.TemporaryDirectory(prefix='liteos-mprotect-batch-') as directory:
     path = Path(directory)
     (path / 'test.c').write_text(program)
     subprocess.run(['cc', '-std=c11', '-Wall', '-Wextra', '-Werror',
+                    '-I'+str(root/'include'),
                     '-fsanitize=address,undefined', '-fno-pie', '-no-pie',
                     str(path / 'test.c'), '-o', str(path / 'test')], check=True)
     subprocess.run([str(path / 'test')], check=True)

@@ -97,10 +97,8 @@ static int translate_protection(int protection, uint32_t *result) {
 
 void *mmap(void *address, size_t length, int protection, int flags,
            int descriptor, off_t offset) {
-    /* Linux-personality opens of compatibility paths (notably /tmp shared
-     * memory files) install Linux fd-table entries.  Route those mappings
-     * through the same ABI, while preserving native VFS descriptors used by
-     * the remaining POSIX file paths. */
+    /* Linux 兼容模式下打开兼容路径（尤其是 /tmp 共享内存文件）会安装 Linux fd 表项。
+     * 这些映射也应通过相同 ABI 处理，同时保留其余 POSIX 文件路径使用的原生 VFS 描述符。 */
     if (libc_linux_personality() &&
         (((flags & MAP_ANONYMOUS) != 0) ||
          __libc_descriptor_is_linux_fd(descriptor))) {

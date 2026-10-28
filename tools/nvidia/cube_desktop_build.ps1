@@ -9,6 +9,7 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'app-layout.ps1')
 . (Join-Path $PSScriptRoot 'object-paths.ps1')
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $phase12Root = Join-Path $repoRoot 'build\nvidia\phase12'
@@ -127,9 +128,11 @@ function Write-TextIfChanged([string]$Path, [string]$Text) {
 
 function Copy-DirectoryContents([string]$SourceRoot, [string]$TargetRoot,
                                 [System.Collections.Generic.HashSet[string]]$Skip) {
+    Assert-AppGuestLayout $TargetRoot
     Require-Directory $SourceRoot 'Phase 12 source ESP'
     foreach ($source in @(Get-ChildItem -LiteralPath $SourceRoot -Recurse -File)) {
         $relative = $source.FullName.Substring($SourceRoot.Length).TrimStart('\', '/')
+        if (Test-LegacyGuestPath $relative) { continue }
         $normalized = $relative.Replace('\', '/').ToLowerInvariant()
         if ($Skip.Contains($normalized)) { continue }
         Copy-FileIfChanged $source.FullName (Join-Path $TargetRoot $relative)
@@ -169,7 +172,6 @@ $desktopObjectNames = @(
     'gpu-core.o',
     'display-core.o',
     'nvidia-port-mmio.o',
-    'qemu-stdvga.o',
     'linux-abi.o',
     'graphics-window.o',
     'graphics-server.o',
@@ -327,8 +329,8 @@ Invoke-CompileIfChanged $cubeSource $cubeObject $hostFlags $headerDependencies
 $hostLinkArguments = @(
     '-nostdlib', '-nodefaultlibs', '-nostartfiles',
     '-Wl,--build-id=none',
-    '-Wl,-dynamic-linker,/lib64/ld-linux-x86-64.so.2',
-    '-Wl,-rpath,/compat/linux/lib/x86_64-linux-gnu:/compat/linux/lib',
+    '-Wl,-dynamic-linker,/usr/apps/cube/lib/ld-linux-x86-64.so.2',
+    '-Wl,-rpath,/usr/apps/cube/lib',
     '-Wl,--disable-new-dtags',
     '-Wl,--allow-shlib-undefined',
     ('-Wl,-rpath-link,{0}' -f $hostRunLib.Replace('\', '/')),
@@ -366,6 +368,7 @@ if (-not ((Test-Path -LiteralPath $cubeBinary -PathType Leaf) -and
 }
 else { Write-Output 'DESKTOP_CUBE_HOST_LINK=INCREMENTAL_SKIP' }
 Require-File $cubeBinary 'interactive OpenGL cube binary'
+Assert-AppInterpreter $cubeBinary 'cube'
 
 $script:stageCopied = 0
 $script:stageSkipped = 0
@@ -375,14 +378,15 @@ foreach ($relative in @(
         'efi/system/kernel.build-id',
         'efi/system/kernel.build-id.cmd',
         'efi/system/loader.conf',
-        'sbin/cube')) {
+        'usr/apps/cube/cube')) {
     [void]$skip.Add($relative)
 }
 Copy-DirectoryContents $phase12Esp $desktopEsp $skip
+Install-NvidiaApp (Join-Path $repoRoot 'build\nvidia\userspace') $desktopEsp 'cube'
 Copy-FileIfChanged $desktopKernel $desktopKernelTarget
 Copy-FileIfChanged $desktopKernelBuildId (Join-Path $desktopEsp 'EFI\OS\kernel.build-id')
 Write-TextIfChanged $desktopLoaderConfig "kernel=\EFI\OS\kernel.elf`ncmdline=console=framebuffer loglevel=info`n"
-Copy-FileIfChanged $cubeBinary (Join-Path $desktopEsp 'sbin\cube')
+Copy-FileIfChanged $cubeBinary (Join-Path $desktopEsp 'usr\apps\cube\cube')
 
 foreach ($required in @(
         (Join-Path $desktopEsp 'EFI\BOOT\BOOTX64.EFI'),
@@ -390,12 +394,12 @@ foreach ($required in @(
         (Join-Path $desktopEsp 'EFI\OS\kernel.build-id'),
         $desktopLoaderConfig,
         (Join-Path $desktopEsp 'EFI\OS\firmware\gsp_ga10x.bin'),
-        (Join-Path $desktopEsp 'sbin\gshell'),
-        (Join-Path $desktopEsp 'sbin\cube'),
-        (Join-Path $desktopEsp 'lib64\ld-linux-x86-64.so.2'),
-        (Join-Path $desktopEsp 'lib\x86_64-linux-gnu\libc.so.6'),
-        (Join-Path $desktopEsp 'compat\linux\lib\x86_64-linux-gnu\libEGL.so.1'),
-        (Join-Path $desktopEsp 'compat\linux\lib\x86_64-linux-gnu\libEGL_nvidia.so.0'))) {
+        (Join-Path $desktopEsp 'usr\apps\gshell\gshell'),
+        (Join-Path $desktopEsp 'usr\apps\cube\cube'),
+        (Join-Path $desktopEsp 'usr\apps\cube\lib\ld-linux-x86-64.so.2'),
+        (Join-Path $desktopEsp 'usr\apps\cube\lib\libc.so.6'),
+        (Join-Path $desktopEsp 'usr\apps\cube\lib\libEGL.so.1'),
+        (Join-Path $desktopEsp 'usr\apps\cube\lib\libEGL_nvidia.so.0'))) {
     Require-File $required 'normal desktop ESP asset'
 }
 

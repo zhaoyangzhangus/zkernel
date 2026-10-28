@@ -2,26 +2,18 @@
 from pathlib import Path
 import subprocess
 import tempfile
+import resource
 
 ROOT = Path(__file__).resolve().parents[2]
 for name in ('exec.c', 'exit.c', 'thread.c'):
     assert 'LITEOS_' not in (ROOT / 'kernel/process' / name).read_text(), name
 
 
-def function_end(source, start):
-    opening = source.index('{', start)
-    depth, end = 1, opening + 1
-    while depth:
-        depth += (source[end] == '{') - (source[end] == '}')
-        end += 1
-    return end
-
-
-def raw_diagnostics(name, start, end, sink):
+def diagnostics(name, start, end):
     source = (ROOT / 'kernel/process' / name).read_text()
     source = source[source.index(start):source.index(end)]
-    begin = source.index('static void ' + sink + '(')
-    return source[:begin] + f'static void {sink}(char c) {{ capture(c); }}\n' + source[function_end(source, begin):]
+    assert 'inb ' not in source and 'outb ' not in source and 'atomic_flag' not in source
+    return source
 
 
 raw = r'''
@@ -30,34 +22,45 @@ raw = r'''
 #include <string.h>
 #include <kernel/process.h>
 #include <kernel/sched.h>
+#define printf test_console_printf
+''' + f'#include "{ROOT / "kernel/console_printf.c"}"\n' + r'''
+#undef printf
 static char output[1024];
 static size_t used;
+static unsigned records;
 static thread_t *current;
 thread_t *sched_current_thread(void) { return current; }
-static void capture(char c) { assert(used+1 < sizeof(output)); output[used++]=c; }
-static void reset(void) { memset(output,0,sizeof(output)); used=0; }
+void kernel_serial_write(const char *text) { (void)text; assert(0); }
+void kernel_serial_write_serial_only(const char *text) {
+    used = strlen(text); assert(used < sizeof(output)); strcpy(output,text); ++records;
+}
+static void reset(void) { memset(output,0,sizeof(output)); used=records=0; }
 '''
-raw += raw_diagnostics('exit.c', 'static atomic_flag g_process_exit_diag_lock',
-                       'bool process_publish_thread_exit', 'process_exit_diag_char')
-raw += raw_diagnostics('thread.c', 'static atomic_flag g_thread_cancel_diag_lock',
-                       '\n#endif', 'thread_cancel_diag_char')
+raw += diagnostics('exit.c', 'static void process_exit_diag(', 'bool process_publish_thread_exit')
+raw += '\n#if OS_DEBUG_SERIAL\n' + diagnostics('thread.c', 'static void thread_cancel_diag(', '\n#endif') + '\n#endif\n'
 raw += r'''
 int main(void) {
     process_t process={.pid=UINT64_MAX};
     thread_t target={.tid=0x123456789abcdef0,.process=&process}; current=&target;
     process_exit_diag(&process,&target,INT64_MIN,UINT32_MAX);
-    assert(!strcmp(output,"OS_PROCESS_EXIT pid=0xffffffffffffffff tid=0x123456789abcdef0 status=0x8000000000000000 signal=0x00000000ffffffff\r\n"));
+#if OS_DEBUG_SERIAL
+    assert(records==1 && !strcmp(output,"OS_PROCESS_EXIT pid=0xffffffffffffffff tid=0x123456789abcdef0 status=0x8000000000000000 signal=0xffffffff\r\n"));
     reset(); process_exit_diag(NULL,NULL,-1,0);
-    assert(!strcmp(output,"OS_PROCESS_EXIT pid=0x0000000000000000 tid=0x0000000000000000 status=0xffffffffffffffff signal=0x0000000000000000\r\n"));
+    assert(records==1 && !strcmp(output,"OS_PROCESS_EXIT pid=0x0 tid=0x0 status=0xffffffffffffffff signal=0x0\r\n"));
     reset(); thread_cancel_diag(&target,K_EIO);
     assert(!strcmp(output,"OS_THREAD_WAIT_CANCEL target_pid=ffffffffffffffff target_tid=123456789abcdef0 caller_pid=ffffffffffffffff caller_tid=123456789abcdef0 status=fffffffffffffffb\r\n"));
     current=NULL; reset(); thread_cancel_diag(NULL,0);
-    assert(!strcmp(output,"OS_THREAD_WAIT_CANCEL target_pid=0000000000000000 target_tid=0000000000000000 caller_pid=0000000000000000 caller_tid=0000000000000000 status=0000000000000000\r\n"));
+    assert(records==1 && !strcmp(output,"OS_THREAD_WAIT_CANCEL target_pid=0 target_tid=0 caller_pid=0 caller_tid=0 status=0\r\n"));
     target.process=NULL; current=&target; reset(); thread_cancel_diag(&target,INT64_MIN);
-    assert(strstr(output,"target_pid=0000000000000000") && strstr(output,"caller_pid=0000000000000000") && strstr(output,"status=8000000000000000\r\n"));
+    assert(records==1 && strstr(output,"target_pid=0") && strstr(output,"caller_pid=0") && strstr(output,"status=8000000000000000\r\n"));
+#else
+    assert(!records && !used);
+    reset(); process_exit_diag(NULL,NULL,-1,0);
+    assert(!records && !used);
+#endif
     assert(!process_is_chrome_image(NULL) && !process_is_chrome_image(&process));
-    strcpy(process.linux_exe,"/sbin/chrome"); assert(process_is_chrome_image(&process));
-    strcpy(process.linux_exe,"/sbin/chrome-extra"); assert(!process_is_chrome_image(&process));
+    strcpy(process.linux_exe,"/usr/apps/chrome/chrome"); assert(process_is_chrome_image(&process));
+    strcpy(process.linux_exe,"/usr/apps/chrome/chrome-extra"); assert(!process_is_chrome_image(&process));
     puts("PROCESS_EXIT_CANCEL_DIAGNOSTIC_TEST_OK");
 }
 '''
@@ -125,10 +128,21 @@ int main(void) {
 '''
 with tempfile.TemporaryDirectory(prefix='process-diagnostics-') as temporary:
     fixture = Path(temporary) / 'test.c'; binary = Path(temporary) / 'test'
-    for code,flags in ((raw,[]),(progress,['-DOS_DEBUG_SERIAL=0']),
-                       (progress,['-DOS_DEBUG_SERIAL=1'])):
+    bypass = raw.replace('#if OS_DEBUG_SERIAL\n    /* 常规退出',
+                         '#if 1\n    /* 常规退出', 1)
+    assert bypass != raw
+    for code,flags in ((raw,['-DOS_DEBUG_SERIAL=0']),(raw,['-DOS_DEBUG_SERIAL=1']),
+                       (progress,['-DOS_DEBUG_SERIAL=0']),
+                       (progress,['-DOS_DEBUG_SERIAL=1']),
+                       (bypass,['-DOS_DEBUG_SERIAL=0'])):
         fixture.write_text(code)
         subprocess.run(['cc','-std=gnu11','-Wall','-Wextra','-Werror','-pthread','-fno-builtin',
                         '-fsanitize=address,undefined','-fno-pie','-no-pie',
                         '-I',str(ROOT/'include'),*flags,str(fixture),'-o',str(binary)],check=True)
-        subprocess.run([str(binary)],check=True)
+        if code == bypass:
+            result = subprocess.run([str(binary)], capture_output=True, text=True,
+                                    preexec_fn=lambda: resource.setrlimit(resource.RLIMIT_CORE, (0, 0)))
+            assert result.returncode and '!records && !used' in result.stderr, result.stderr
+            print('Negative control rejected: exit diagnostics bypass the disabled serial switch')
+        else:
+            subprocess.run([str(binary)],check=True)

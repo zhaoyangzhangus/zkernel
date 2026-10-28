@@ -52,7 +52,13 @@ static void scheduler_irq_restore(uint64_t flags) { irq=(flags&(1ULL<<9))!=0; }
 static bool scheduler_current_cpu(uint32_t *cpu) { *cpu=current_cpu;return true; }
 static bool sched_preempt_disabled(void) { return false; }
 static bool x86_tlb_shootdown_active(void) { return false; }
-static void object_put(thread_t *thread) {
+static bool deferred_background_worker_started(void) { return false; }
+static bool deferred_background_schedule(void (*work)(void *),void *arg) {
+    (void)work;(void)arg;assert(false);return false;
+}
+static uint32_t x86_current_cpu_index(void) { return current_cpu; }
+static void object_put(void *object) {
+    thread_t *thread=object;
     assert(irq&&!held_locks);
     assert(atomic_fetch_sub_explicit(&thread->refs,1,memory_order_relaxed)>1);
     atomic_fetch_add_explicit(&thread->puts,1,memory_order_relaxed);

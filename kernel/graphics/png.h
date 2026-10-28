@@ -5,7 +5,7 @@
 
 #include <uapi/abi.h>
 
-/* Kernel-owned PNG output storage. The byte order is R, G, B, A. */
+/* 由内核管理的 PNG 输出存储。字节顺序为 R、G、B、A。 */
 typedef struct desktop_png_image {
     uint8_t *storage;
     const uint8_t *pixels;

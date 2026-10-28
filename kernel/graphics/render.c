@@ -1,4 +1,4 @@
-/* REFACTOR_P7B_SURFACE_RENDER_OWNER */
+/* REFACTOR_P7B_SURFACE_RENDER_OWNER：surface 渲染。 */
 
 #include "internal.h"
 #include <uapi/window_theme.h>
@@ -17,27 +17,41 @@ static bool compositor_corner_pixel(const compositor_window_view_t *window,
     return true;
 }
 
-/* Capture underlying pixels before either client content or server chrome
- * touches a corner. Mask the complete result once, including the bottom frame.
- * The 256 fixed samples keep the rectangular interior's bulk-copy fast path. */
+/* 客户端内容或服务器装饰接触圆角前先捕获底层像素。包括底边框在内，最终结果只做一次遮罩。
+ * 固定的 256 个采样点使矩形内部仍可走批量复制快速路径。 */
 static void compositor_window_corners(const compositor_window_view_t *window,
     uint32_t width, uint32_t height, uint32_t background[256], bool restore) {
-    for (uint32_t corner = 0U; corner < 4U; ++corner)
+    for (uint32_t corner = 0U; corner < 4U; ++corner) {
+        int64_t left = (int64_t)window->x + ((corner & 1U) ? width - 8U : 0U);
+        int64_t top = (int64_t)window->y + ((corner & 2U) ? height - 8U : 0U);
+        if (left + 8 <= g_compositor_snapshot.damage_bounds.x0 ||
+            left >= g_compositor_snapshot.damage_bounds.x1 ||
+            top + 8 <= g_compositor_snapshot.damage_bounds.y0 ||
+            top >= g_compositor_snapshot.damage_bounds.y1 ||
+            left + 8 <= 0 || top + 8 <= 0 ||
+            left >= g_window_server.display_width ||
+            top >= g_window_server.display_height) continue;
         for (uint32_t y = 0U; y < 8U; ++y)
             for (uint32_t x = 0U; x < 8U; ++x) {
                 uint32_t alpha = chrome_corner_coverage[y][x];
+                bool framed=!window_client_decorations(window->flags);
+                uint32_t inner=framed?chrome_corner_inner_coverage[y][x]:alpha;
                 uint64_t offset;
-                if (alpha == 255U || !compositor_corner_pixel(window, width, height,
+                if ((alpha == 255U && inner == 255U) || !compositor_corner_pixel(window, width, height,
                     corner, x, y, &offset)) continue;
                 uint32_t i = corner * 64U + y * 8U + x;
                 if (!restore) { background[i] = g_window_server.composite_framebuffer[offset]; continue; }
                 uint32_t source = g_window_server.composite_framebuffer[offset], under = background[i];
                 uint32_t inverse = 255U - alpha;
-                uint32_t r = (((source >> 16U) & 255U) * alpha + ((under >> 16U) & 255U) * inverse + 127U) / 255U;
-                uint32_t g = (((source >> 8U) & 255U) * alpha + ((under >> 8U) & 255U) * inverse + 127U) / 255U;
-                uint32_t b = ((source & 255U) * alpha + (under & 255U) * inverse + 127U) / 255U;
+                uint32_t border=alpha-inner;
+                uint32_t frame=os_theme_resolve(OS_THEME_BORDER,g_compositor_snapshot.theme);
+                /* 内部、边环和底层一次混合，避免外圈被提前裁剪或重复混合。 */
+                uint32_t r = (((source >> 16U) & 255U) * inner + ((frame >> 16U) & 255U) * border + ((under >> 16U) & 255U) * inverse + 127U) / 255U;
+                uint32_t g = (((source >> 8U) & 255U) * inner + ((frame >> 8U) & 255U) * border + ((under >> 8U) & 255U) * inverse + 127U) / 255U;
+                uint32_t b = ((source & 255U) * inner + (frame & 255U) * border + (under & 255U) * inverse + 127U) / 255U;
                 g_window_server.composite_framebuffer[offset] = (under & 0xFF000000U) | (r << 16U) | (g << 8U) | b;
             }
+    }
 }
 
 void compositor_draw_window_locked(
@@ -64,9 +78,9 @@ void compositor_draw_window_locked(
             frame_color);
     }
 
-    compositor_surface_locked(
-        window);
-    if (window_standard_caption(window->flags))
+    if (window->controls) compositor_control_tree(window);
+    else compositor_surface_locked(window);
+    if (window_standard_caption(window->flags) && !window_control_has_caption(window->controls))
         compositor_standard_caption_locked(window);
     if (rounded) compositor_window_corners(window, width, height, corner_background, true);
 }
@@ -112,11 +126,10 @@ void compositor_surface_locked(
         window_client_offset_y(window->flags);
 
     /*
-     * Compute the display/damage intersection once.
+    * 仅计算一次显示范围与损坏区域的交集。
      *
-     * The old path iterated row=0..window->height for every damage rectangle
-     * and rejected unrelated rows inside the loop.  A 20-pixel-high update on
-     * a 1000-pixel-tall window therefore still executed ~1000 row tests.
+    * 旧路径会针对每个损坏矩形遍历 row=0..window->height，再在循环内排除无关行。因此，
+    * 高度 1000 像素的窗口即使只更新 20 像素，也仍会执行约 1000 次行检查。
      */
     first_row = 0;
     last_row = window->height;
@@ -254,8 +267,7 @@ void compositor_surface_locked(
             inset = chrome_frame_row_inset((uint32_t)frame_row, window->width, window->height);
 
         /*
-         * Preserve the one-pixel decoration border around rounded windows.
-         * This is the only row-dependent clipping left in the hot loop.
+         * 保留圆角窗口周围一个像素的装饰边框。这是热循环中唯一与行相关的裁剪操作。
          */
         if (first_column <
             (int64_t)inset) {
@@ -318,9 +330,12 @@ void compositor_surface_source_prepare(
     if (window == 0) return;
 
     context->row_bytes =
-        (uint64_t)window->width * sizeof(uint32_t);
+        (uint64_t)(window->surface_lease ? window->surface_width : window->width) * sizeof(uint32_t);
 
-    if (window->resize_pending ||
+    /* 交换模式固定的是上一张完整帧及其行跨度，缩放期间不能把它替换成空白。
+     * 单缓冲仍不能读取：生产者可能正在按新尺寸覆盖同一块内存。 */
+    if ((window->resize_pending && !window->surface_lease) ||
+        (window->surface_lease && (!window->surface_width || !window->surface_height)) ||
         window->section == 0 ||
         window->section->vm_object == 0 ||
         window->owner_address == 0U) {
@@ -335,16 +350,50 @@ void compositor_surface_source_prepare(
     context->readable = true;
 }
 
-/* Source-over onto the already composed lower windows. Skia N32Premul
- * stores premultiplied components: multiplying source by alpha again would
- * darken antialiased edges. Alpha zero must not touch the destination. */
+/* 以 source-over 方式绘制到已合成的下层窗口上。Skia N32Premul 存储的是预乘分量，再次将
+ * 源颜色乘以 alpha 会使抗锯齿边缘变暗。Alpha 为零时不得修改目标。 */
 static void compositor_surface_blend_span(
     uint32_t *wb_destination, volatile uint32_t *device_destination,
     const uint32_t *source, uint32_t color, uint32_t pixels) {
+    /* 常量背景只判定一次 alpha，透明时不读写目标，不透明时批量填充。 */
+    if (source == 0) {
+        if ((color >> 24U) == 0U) return;
+        if ((color >> 24U) == 255U) {
+            compositor_surface_fill_destination(wb_destination, device_destination, pixels, color);
+            return;
+        }
+    }
     for (uint32_t index = 0U; index < pixels; ++index) {
         uint32_t foreground = source != 0 ? source[index] : color;
         uint32_t alpha = foreground >> 24U;
         if (alpha == 0U) continue;
+        /* 即使大面积不透明区域，Chrome 也使用预乘表面。边缘保留 alpha；不透明区域则使用批量
+         * 复制器处理，而不是逐像素存储。 */
+        if (alpha == 255U && source != 0 && pixels - index >= 16U) {
+            uint32_t end = index + 1U;
+            /* 每次检查两个像素，只在剩余长度足够时读取；透明边缘仍交给标量混合。 */
+            while (pixels - end >= 2U) {
+                uint64_t pair;
+                __builtin_memcpy(&pair, source + end, sizeof(pair));
+                if ((pair & 0xff000000ff000000ULL) != 0xff000000ff000000ULL) break;
+                end += 2U;
+            }
+            while (end < pixels && (source[end] >> 24U) == 255U) ++end;
+            if (end - index >= 16U) {
+                compositor_surface_copy_destination(
+                    wb_destination != 0 ? wb_destination + index : 0,
+                    device_destination != 0 ? device_destination + index : 0,
+                    source + index, end - index);
+            } else {
+                /* 短段也只探测一次，避免后续像素反复扫描同一段。 */
+                for (uint32_t i = index; i < end; ++i) {
+                    if (wb_destination != 0) wb_destination[i] = source[i];
+                    else device_destination[i] = source[i];
+                }
+            }
+            index = end - 1U;
+            continue;
+        }
         uint32_t result = foreground;
         if (alpha != 255U) {
             uint32_t background = wb_destination != 0 ?
@@ -404,6 +453,22 @@ void compositor_copy_surface_span(
             wb_destination, device_destination,
             remaining);
         return;
+    }
+
+    /* 新窗口可比旧帧更大。只复制旧帧有效的行列，新增区域填背景，不能跨行或越槽读取。 */
+    if (window->surface_lease) {
+        if (!surface->row_bytes || source_row_offset / surface->row_bytes >= window->surface_height ||
+            first_column >= window->surface_width) {
+            compositor_window_fill_span(window, wb_destination, device_destination, remaining);
+            return;
+        }
+        uint32_t available = window->surface_width - first_column;
+        if (available < remaining) {
+            compositor_window_fill_span(window,
+                wb_destination ? wb_destination + available : 0,
+                device_destination ? device_destination + available : 0, remaining-available);
+            remaining = available;
+        }
     }
 
     column_offset =

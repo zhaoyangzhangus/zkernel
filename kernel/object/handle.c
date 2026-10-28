@@ -12,11 +12,12 @@ static void handle_table_release(handle_table_t *table, bool close_objects);
 
 static void handle_lock(spinlock_t *lock) {
     /*
-     * The table lock is also held while a new chunk or backing array is
-     * allocated.  Keep its owner on this CPU until the publication is done;
-     * otherwise a local timer can switch away while another CPU spins here.
+    * 分配新分块或后备数组时也会持有表锁。在发布完成前让锁持有者留在当前 CPU；
+    * 否则本地定时器可能将其切走，而另一颗 CPU 会在此处持续自旋。
     */
     sched_preempt_disable();
+    /* 无竞争时不触碰全局诊断缓存行；只有实际等待者才发布等待目标。 */
+    if (spinlock_try_lock(lock)) return;
     atomic_store_explicit(&g_handle_waiting_lock, (uintptr_t)lock,
                           memory_order_release);
     spinlock_lock(lock);
@@ -53,7 +54,7 @@ static uint32_t next_generation(uint32_t generation) {
     return generation == 0U ? 1U : generation;
 }
 
-/* Handle storage does not know concrete object Owners. */
+/* 句柄存储不依赖具体对象所有者的类型。 */
 static void handle_close_object(void *object) {
     if (object == 0) return;
     object_header_t *header = (object_header_t *)object;
@@ -83,8 +84,8 @@ static kstatus_t grow_table_locked(handle_table_t *table) {
     handle_chunk_t **chunks = (handle_chunk_t **)kmalloc(
         (size_t)new_capacity * sizeof(handle_chunk_t *), 0);
     if (chunks == 0) return K_ENOMEM;
-    /* Initialize every pointer exactly once before publishing: copy the
-     * used prefix, including holes, and clear only the unused suffix. */
+    /* 发布前恰好初始化每个指针一次：复制已使用的前缀（包括空洞），
+     * 仅清空尚未使用的后缀。 */
     for (uint32_t i = 0; i < table->chunk_count; ++i) chunks[i] = table->chunks[i];
     for (uint32_t i = table->chunk_count; i < new_capacity; ++i) chunks[i] = 0;
     handle_chunk_t **old = table->chunks;
@@ -121,8 +122,7 @@ static kstatus_t handle_table_clone_internal(handle_table_t *source,
     destination->reserved = 0;
     spinlock_init(&destination->grow_lock);
 
-    /* Keep indexes and generations identical: user-space descriptor tables
-     * contain the original kernel handle values after a COW fork. */
+    /* 保持索引和代数一致：COW fork 后，用户态描述符表仍包含原有内核句柄值。 */
     handle_lock(&source->grow_lock);
     uint32_t capacity = source->chunk_capacity;
     uint32_t chunk_count = source->chunk_count;
@@ -147,9 +147,8 @@ static kstatus_t handle_table_clone_internal(handle_table_t *source,
     for (uint32_t chunk_index = 0U; chunk_index < chunk_count; ++chunk_index) {
         handle_chunk_t *source_chunk = source->chunks[chunk_index];
         if (source_chunk == 0) continue;
-        /* Every entry is copied below, including free-slot generations.
-         * Only the lock needs initialization; clearing entries first would
-         * write the entire block twice while holding the source table lock. */
+        /* 下方会复制每个条目，包括空闲槽位的代数。只需初始化锁；若先清零条目，就会在持有源表锁时将
+         * 整个内存块写两遍。 */
         handle_chunk_t *destination_chunk = (handle_chunk_t *)kmalloc(sizeof(*destination_chunk), 0);
         if (destination_chunk == 0) {
             status = K_ENOMEM;
@@ -183,7 +182,7 @@ static kstatus_t handle_table_clone_internal(handle_table_t *source,
     handle_unlock(&source->grow_lock);
 
     if (status != K_OK) {
-        /* Unpublished clone entries own references, not logical handles. */
+        /* 尚未发布的克隆条目持有引用，而非逻辑句柄。 */
         handle_table_release(destination, false);
         return status;
     }
@@ -200,16 +199,14 @@ kstatus_t handle_table_clone_without_type(handle_table_t *source,
     return handle_table_clone_internal(source, destination, true, excluded_type);
 }
 
-/* A transferred reference is consumed only when the entry is published.
- * On failure it remains owned by the caller, which releases it unlocked. */
+/* 仅在条目发布后才消费转移来的引用。失败时引用仍归调用方所有，并由调用方在解锁后释放。 */
 static kstatus_t handle_create_internal(handle_table_t *table, void *object,
                                    uint32_t rights, uint32_t flags,
                                    handle_t *out, bool transfer_reference) {
     if (table == 0 || object == 0 || out == 0 || table->chunks == 0 ||
         (flags & ~HANDLE_FLAG_MASK) != 0U) return K_EINVAL;
     handle_lock(&table->grow_lock);
-    /* Destruction may have detached the array after argument validation
-     * while this creator waited for grow_lock. Never resurrect that table. */
+    /* 创建者等待 grow_lock 时，参数校验之后数组可能已被销毁流程摘除。绝不能重新启用该表。 */
     if (table->chunks == 0) {
         handle_unlock(&table->grow_lock);
         return K_EINVAL;
@@ -232,8 +229,7 @@ static kstatus_t handle_create_internal(handle_table_t *table, void *object,
                 if (chunk_index + 1U > table->chunk_count) table->chunk_count = chunk_index + 1U;
             }
             chunk_lock(chunk);
-            /* The grow lock pins the chunk; scan its occupied suffix under
-             * one acquisition instead of locking once per occupied entry. */
+            /* grow_lock 会固定该块；一次加锁扫描其已占用后缀，而不是为每个已占用条目分别加锁。 */
             for (; entry_index < HANDLE_CHUNK_ENTRIES; ++entry_index, ++index) {
                 handle_entry_t *entry = &chunk->entries[entry_index];
                 if (entry->object != 0) continue;
@@ -274,14 +270,12 @@ static void handle_entry_unlock(handle_table_t *table, handle_chunk_t *chunk) {
     handle_unlock(&table->grow_lock);
 }
 
-/* Callers validate arguments. Success keeps both locks held; failure keeps
- * neither lock held. The grow lock pins the returned chunk and entry. */
+/* 调用方负责校验参数。成功时保留两把锁；失败时不持有任何锁。grow_lock 会固定返回的块和条目。 */
 static handle_entry_t *handle_entry_lock(handle_table_t *table, handle_t handle,
                                           handle_chunk_t **out_chunk) {
     uint32_t index = handle_index(handle);
     uint32_t chunk_index = index >> HANDLE_CHUNK_SHIFT;
-    /* Neither condition can become valid through concurrent table growth:
-     * generations skip zero and chunk storage has a fixed implementation cap. */
+    /* 并发扩展句柄表也无法使任一条件变为有效：代数会跳过零，分块存储有固定实现上限。 */
     if (handle_generation(handle) == 0U || chunk_index >= HANDLE_MAX_CHUNKS)
         return 0;
     handle_lock(&table->grow_lock);
@@ -301,7 +295,7 @@ static handle_entry_t *handle_entry_lock(handle_table_t *table, handle_t handle,
     return entry;
 }
 
-/* Take a temporary object reference while reading a source entry. */
+/* 读取源条目期间，暂时增加对象引用。 */
 static kstatus_t handle_reference(handle_table_t *table, handle_t handle,
                                   uint32_t required_rights,
                                   uint32_t *granted_rights, void **object) {
@@ -365,8 +359,7 @@ kstatus_t handle_set_flags(handle_table_t *table, handle_t handle,
     return K_OK;
 }
 
-/* Caller holds both table and chunk locks; the returned reference is owned
- * by the closer, whose callbacks must run after releasing those locks. */
+/* 调用方持有表锁和分块锁；返回的引用归关闭方所有，其回调必须在释放这些锁后执行。 */
 static void *handle_detach_locked(handle_table_t *table, handle_entry_t *entry,
                                    uint32_t index) {
     void *object = entry->object;
@@ -394,10 +387,8 @@ kstatus_t handle_close(handle_table_t *table, handle_t handle) {
 kstatus_t handle_table_close_on_exec(handle_table_t *table) {
     if (table == 0) return K_EINVAL;
 
-    /* Continue from the detached slot instead of restarting for each handle.
-     * A completed removal pass is followed by a fresh pass: callbacks may
-     * create/mark CLOEXEC entries behind the cursor. No entry/chunk pointer
-     * survives unlocking, and flags are checked at the point of removal. */
+    /* 从已摘除槽位继续，而非每个句柄都重新开始扫描。每轮移除完成后再开启新一轮：回调可能在游标后方
+     * 创建/标记 CLOEXEC 条目。解锁后不保留条目/分块指针，且会在移除时检查标志。 */
     uint32_t cursor = 0U;
     bool removed = false;
     for (;;) {
@@ -441,10 +432,8 @@ kstatus_t handle_table_close_on_exec(handle_table_t *table) {
 static void handle_table_release(handle_table_t *table, bool close_objects) {
     if (table == 0) return;
     handle_lock(&table->grow_lock);
-    /* Detach storage in one bounded critical section. All entry users hold
-     * grow_lock, so no chunk pointer can survive this publication. Object
-     * callbacks/destructors may take other locks or reenter this table and
-     * must run with neither the table nor any chunk lock held. */
+    /* 在一个有界临界区中摘除存储。所有条目使用方都持有 grow_lock，因此此状态发布后不会有分块指针继续
+     * 存活。对象回调/析构函数可能获取其他锁或重入此表，执行时不得持有表锁或任何分块锁。 */
     handle_chunk_t **chunks = table->chunks;
     uint32_t chunk_count = table->chunk_count;
     table->chunks = 0;
@@ -452,7 +441,7 @@ static void handle_table_release(handle_table_t *table, bool close_objects) {
     table->chunk_capacity = 0;
     table->free_hint = 0;
     handle_unlock(&table->grow_lock);
-    /* Slots at and above the published high-water mark were never allocated. */
+    /* 已发布高水位及其以上的槽位从未分配。 */
     for (uint32_t chunk_index = 0; chunk_index < chunk_count; ++chunk_index) {
         handle_chunk_t *chunk = chunks[chunk_index];
         if (chunk == 0) continue;

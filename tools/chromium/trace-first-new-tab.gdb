@@ -5,14 +5,14 @@ import gdb, subprocess, struct, json, time, os, sys
 from pathlib import Path
 sys.path.insert(0, str(Path("tools/chromium").resolve()))
 from trace_build import validate_chrome_build
-expected = 'Build ID: ccd5fc305e3b0600'
+expected = 'Build ID: 2ea4a62ae34e05c9'
 try:
     validate_chrome_build(expected)
 except RuntimeError as error:
     raise gdb.GdbError("Refusing stale Chrome diagnostic: " + str(error))
 end
 target remote /tmp/system-keys.sock
-# ONLY Chrome build ID ccd5fc305e3b0600; addresses from its llvm-nm.
+# ONLY Chrome build ID 2ea4a62ae34e05c9; addresses from its llvm-nm.
 # Kernel ELF_PIE_BIAS=0x40000000. Hardware stops perturb elapsed time:
 # this is a stage-localization diagnostic, never a latency benchmark.
 python
@@ -22,13 +22,13 @@ import gdb, time, os
 # nested stage per run to stay within the four hardware breakpoint slots.
 stage = os.environ.get('OS_NEW_TAB_STAGE', 'renderer')
 stages = {
-    'renderer': (0x47f4e5d0, 'RENDERER_INIT'),
-    'navigate': (0x4b292820, 'NAVIGATE'),
-    'tabstrip': (0x4a8d1f60, 'TABSTRIP_ADD'),
-    'loadurl': (0x47e5d250, 'LOAD_URL'),
-    'contents': (0x4b292a60, 'CREATE_TARGET_CONTENTS'),
-    'webcontents': (0x48118dc0, 'WEB_CONTENTS_CREATE'),
-    'helpers': (0x51e65b80, 'ATTACH_TAB_HELPERS'),
+    'renderer': (0x480310d0, 'RENDERER_INIT'),
+    'navigate': (0x4b35d3f0, 'NAVIGATE'),
+    'tabstrip': (0x4a99ccd0, 'TABSTRIP_ADD'),
+    'loadurl': (0x47f3fc30, 'LOAD_URL'),
+    'contents': (0x4b35d630, 'CREATE_TARGET_CONTENTS'),
+    'webcontents': (0x481fbce0, 'WEB_CONTENTS_CREATE'),
+    'helpers': (0x520ccba0, 'ATTACH_TAB_HELPERS'),
 }
 if stage not in stages:
     raise gdb.GdbError('Unknown OS_NEW_TAB_STAGE')
@@ -111,7 +111,7 @@ class RendererInitEntry(gdb.Breakpoint):
                 '*(unsigned long long*)$rsp')), entered)
         return False
 
-NewTabEntry('*0x51e890e0', gdb.BP_HARDWARE_BREAKPOINT,
+NewTabEntry('*0x520f0100', gdb.BP_HARDWARE_BREAKPOINT,
             temporary=True, internal=True)
 RendererInitEntry('*%#x' % stage_address, gdb.BP_HARDWARE_BREAKPOINT, internal=True)
 end

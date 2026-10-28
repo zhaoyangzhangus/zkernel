@@ -134,7 +134,7 @@ int blend2d_api_test(void) {
     if (!blend2d_result_ok(result)) goto cleanup;
     font_data_ready = true;
     if (!blend2d_result_ok(bl_font_data_create_from_file(
-            &font_data, "/etc/fonts/default.ttf", BL_FILE_READ_NO_FLAGS))) {
+            &font_data, "/EFI/OS/fonts/default.ttf", BL_FILE_READ_NO_FLAGS))) {
         goto cleanup;
     }
     result = bl_font_face_init(&font_face);

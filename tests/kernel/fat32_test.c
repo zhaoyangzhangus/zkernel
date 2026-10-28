@@ -8,6 +8,7 @@
 #define HELLO_DATA_LBA 4U
 static UINT8 disk[TEST_SECTORS * 512U];
 static UINT32 fail_write_number;
+static BOOLEAN partial_write_failure;
 static UINT32 write_count;
 static UINT32 read_counts[TEST_SECTORS];
 
@@ -73,7 +74,10 @@ static BOOLEAN write_disk(VOID *context, UINT64 lba, UINT32 count, const VOID *b
     UINT8 *data = (UINT8 *)context;
     if (data == 0 || buffer == 0 || lba >= TEST_SECTORS || count > TEST_SECTORS - lba) return 0;
     ++write_count;
-    if (fail_write_number != 0U && write_count == fail_write_number) return 0;
+    if (fail_write_number != 0U && write_count == fail_write_number) {
+        if (partial_write_failure) memcpy(data + lba * 512ULL, buffer, count * 256U);
+        return 0;
+    }
     memcpy(data + lba * 512ULL, buffer, count * 512U);
     return 1;
 }
@@ -82,6 +86,7 @@ static void make_disk(void) {
     UINT8 *fat1;
     memset(disk, 0, sizeof(disk));
     fail_write_number = 0U;
+    partial_write_failure = 0;
     write_count = 0U;
     memset(read_counts, 0, sizeof(read_counts));
     disk[510] = 0x55U;
@@ -133,12 +138,39 @@ static void make_disk(void) {
     memcpy(disk + 8U * 512U, "nested", 6U);
 }
 
+/* 通过短别名删除时，只有校验和匹配的 LFN 槽位才属于该文件。 */
+static void short_alias_lfn_ownership_test(void) {
+    for (UINT32 corrupt = 0U; corrupt < 2U; ++corrupt) {
+        make_disk();
+        UINT8 *lfn = disk + 3U * 512U + 32U;
+        if (corrupt) { lfn[13] ^= 1U; lfn[32U + 13U] ^= 1U; }
+        UINT8 original[64];memcpy(original, lfn, sizeof(original));
+        OS_BLOCK_MANAGER blocks = {0};OS_BLOCK_DEVICE *device = 0;OS_FAT32 fat = {0};
+        assert(block_manager_init(&blocks));
+        assert(block_register(&blocks, "alias0", 512U, TEST_SECTORS,
+                              read_disk, write_disk, 0, disk, &device));
+        assert(fat32_init(&fat, device));
+        assert(fat32_remove_path(&fat, "LONGFI~1.TXT"));
+        assert(fat32_destroy(&fat));
+        if (corrupt) assert(!memcmp(lfn, original, sizeof(original)));
+        else assert(lfn[0] == 0xE5U && lfn[32U] == 0xE5U);
+        assert(disk[3U * 512U + 96U] == 0xE5U);
+        assert(!memcmp(disk + 3U * 512U, "HELLO   TXT", 11U));
+        assert(block_unregister(&blocks, device));
+        assert(block_manager_destroy(&blocks));
+    }
+    puts("FAT short alias removal: matching LFN deleted, checksum-mismatched LFN preserved on media");
+}
+
 static void rename_writeback_failure_test(void) {
-    const char *sources[] = {"hello.txt", "hello.txt", "Long File Name.txt", "hello.txt"};
+    const char *sources[] = {"hello.txt", "hello.txt", "Long File Name.txt", "hello.txt",
+                             "hello.txt", "hello.txt"};
     const char *destinations[] = {"DIR/renamed-long-file-name.txt", "new.txt", "short.txt",
-                                "DIR/extended-long-file-name.txt"};
+                                "DIR/extended-long-file-name.txt", "下载 验证.bin",
+                                  "DIR/abcdefghijkl😀跨项.txt"};
     UINT32 failure_points = 0U;
-    for (UINT32 scenario = 0U; scenario < 4U; ++scenario) {
+    /* 中文及跨目录项代理对也必须在每个回写失败点完整恢复。 */
+    for (UINT32 scenario = 0U; scenario < sizeof(sources) / sizeof(sources[0]); ++scenario) {
     const char *source = sources[scenario];
     const char *destination = destinations[scenario];
     const char *expected = scenario == 2U ? "long " : "hello";
@@ -331,6 +363,144 @@ static void replacement_writeback_test(void) {
     printf("FAT replacement: %u write failure points, short/long source names, same/cross directory, source handle and fresh-cache recovery passed\n", failures);
 }
 
+/* 截断回写在每个单次写失败点后都能重试，重挂载后的目录和两个 FAT 副本一致。 */
+static void truncate_writeback_failure_test(void) {
+    UINT32 failures = 0U;
+    for (UINT32 partial = 0U; partial < 2U; ++partial)
+    for (UINT32 scenario = 0U; scenario < 3U; ++scenario) {
+        UINT32 writes = 0U;
+        for (UINT32 failure = 0U; failure == 0U || failure <= writes; ++failure) {
+            make_disk();
+            const UINT32 chain[] = {3U, 4U, 8U, 9U};
+            UINT8 expected[1900], actual[1900];
+            for (UINT32 i = 0U; i < sizeof(expected); ++i) expected[i] = (UINT8)(i * 23U + 7U);
+            for (UINT32 copy = 0U; copy < 2U; ++copy) {
+                UINT8 *fat = disk + (1U + copy) * 512U;
+                for (UINT32 i = 0U; i < 4U; ++i)
+                    put32(fat + chain[i] * 4U, i == 3U ? 0x0FFFFFFFU : chain[i + 1U]);
+            }
+            put32(disk + 3U * 512U + 28U, sizeof(expected));
+            for (UINT32 i = 0U; i < sizeof(expected); ++i)
+                disk[(chain[i / 512U] + 1U) * 512U + i % 512U] = expected[i];
+            OS_BLOCK_MANAGER blocks = {0}; OS_BLOCK_DEVICE *device = 0;
+            OS_FAT32 fs = {0}; OS_FAT32_FILE *file = 0;
+            assert(block_manager_init(&blocks));
+            assert(block_register(&blocks, "truncate0", 512U, TEST_SECTORS,
+                                  read_disk, write_disk, 0, disk, &device));
+            assert(fat32_init(&fs, device));
+            assert(fat32_open(&fs, "hello.txt", &file));
+            UINT64 target = scenario == 1U ? 0U : scenario == 2U ? 1800U : 600U;
+            write_count = 0U; fail_write_number = failure;
+            partial_write_failure = partial;
+            BOOLEAN ok = fat32_truncate_file(file, target);
+            fail_write_number = 0U;
+            if (failure == 0U) { assert(ok); writes = write_count; assert(writes); }
+            else {
+                assert(!ok && file->Size == sizeof(expected) && file->FirstCluster == chain[0]);
+                ++failures;
+            }
+            UINT32 bytes = 0U;
+            assert(fat32_read_file(file, 0U, actual, sizeof(actual), &bytes));
+            assert(bytes == (ok ? target : sizeof(expected)));
+            assert(memcmp(actual, expected, bytes) == 0);
+            assert(fat32_close(file)); assert(fat32_destroy(&fs));
+            for (UINT32 copy = 0U; copy < 2U; ++copy) {
+                const UINT8 *fat = disk + (1U + copy) * 512U;
+                for (UINT32 i = 0U; i < 4U; ++i) {
+                    const UINT8 *p = fat + chain[i] * 4U;
+                    UINT32 value = (UINT32)p[0] | (UINT32)p[1] << 8U |
+                                   (UINT32)p[2] << 16U | (UINT32)p[3] << 24U;
+                    value &= 0x0FFFFFFFU;
+                    UINT32 before = i == 3U ? 0x0FFFFFFFU : chain[i + 1U];
+                    if (!ok || scenario == 2U) assert(value == before);
+                    else if (scenario == 1U || i >= 2U) assert(value == 0U);
+                    else if (i == 1U) assert(value >= 0x0FFFFFF8U);
+                    else assert(value == chain[i + 1U]);
+                }
+            }
+            memset(&fs, 0, sizeof(fs)); file = 0;
+            assert(fat32_init(&fs, device)); assert(fat32_open(&fs, "hello.txt", &file));
+            assert(file->Size == (ok ? target : sizeof(expected)));
+            assert(fat32_read_file(file, 0U, actual, sizeof(actual), &bytes));
+            assert(bytes == (ok ? target : sizeof(expected)) && !memcmp(actual, expected, bytes));
+            if (!ok) {
+                assert(fat32_truncate_file(file, target));
+                assert(file->Size == target);
+            }
+            assert(fat32_close(file)); assert(fat32_destroy(&fs));
+            assert(block_unregister(&blocks, device)); assert(block_manager_destroy(&blocks));
+        }
+    }
+    printf("FAT truncate: %u failed/partial writes preserve data, handle and remount state; retry succeeds\n", failures);
+}
+
+/* 跳过预先计数后，循环、无效链尾和不足以覆盖新长度的短链仍须在任何写盘前拒绝。 */
+static void truncate_corruption_test(void) {
+    for (UINT32 scenario = 0U; scenario < 3U; ++scenario) {
+        make_disk();
+        const UINT32 chain[] = {3U, 4U, 8U, 9U};
+        for (UINT32 copy = 0U; copy < 2U; ++copy) {
+            UINT8 *fat = disk + (1U + copy) * 512U;
+            for (UINT32 i = 0U; i < 4U; ++i)
+                put32(fat + chain[i] * 4U, i == 3U ? 0x0FFFFFFFU : chain[i + 1U]);
+            if (scenario == 0U) put32(fat + 9U * 4U, 3U);
+            if (scenario == 1U) put32(fat + 9U * 4U, 0x0FFFFFF7U);
+            if (scenario == 2U) put32(fat + 4U * 4U, 0x0FFFFFFFU);
+        }
+        put32(disk + 3U * 512U + 28U, 1900U);
+        OS_BLOCK_MANAGER blocks = {0}; OS_BLOCK_DEVICE *device = 0;
+        OS_FAT32 fs = {0}; OS_FAT32_FILE *file = 0;
+        assert(block_manager_init(&blocks));
+        assert(block_register(&blocks, "truncate-bad", 512U, TEST_SECTORS,
+                              read_disk, write_disk, 0, disk, &device));
+        assert(fat32_init(&fs, device)); assert(fat32_open(&fs, "hello.txt", &file));
+        OS_FAT32_FILE before = *file;
+        write_count = 0U;
+        assert(!fat32_truncate_file(file, scenario == 2U ? 1500U : 600U));
+        assert(!write_count && !memcmp(file, &before, sizeof(before)));
+        assert(fat32_close(file)); assert(fat32_destroy(&fs));
+        assert(!write_count);
+        assert(block_unregister(&blocks, device)); assert(block_manager_destroy(&blocks));
+    }
+    puts("FAT truncate: cyclic, invalid-tail and premature-EOC chains rejected without writes or handle changes");
+}
+
+/* 扩展或越过文件末尾写入时，不得暴露旧扇区或已释放簇内的内容。 */
+static void file_growth_zero_test(void) {
+    for (UINT32 scenario=0U;scenario<4U;++scenario) {
+        make_disk();
+        memset(disk + 4U*512U + 5U, 0xa5, 512U-5U);
+        memset(disk + 5U*512U, 0xb6, 512U);
+        OS_BLOCK_MANAGER blocks={0};OS_BLOCK_DEVICE *device=0;
+        OS_FAT32 fs={0};OS_FAT32_FILE *file=0;
+        assert(block_manager_init(&blocks));
+        assert(block_register(&blocks,"growth0",512U,TEST_SECTORS,read_disk,write_disk,0,disk,&device));
+        assert(fat32_init(&fs,device));assert(fat32_open(&fs,"hello.txt",&file));
+        UINT32 bytes=999U;
+        assert(fat32_write_file(file,2000U,0,0U,&bytes) && bytes==0U && file->Size==5U);
+        if(scenario==3U) assert(fat32_truncate_file(file,2U));
+        UINT32 prefix=scenario==3U?2U:5U;
+        UINT64 size=(scenario==0U||scenario==3U)?100U:700U;
+        if(scenario==2U) {
+            UINT8 marker=0x42;
+            assert(fat32_write_file(file,699U,&marker,1U,&bytes)&&bytes==1U);
+        } else assert(fat32_truncate_file(file,size));
+        UINT8 out[700];memset(out,0xcc,sizeof(out));
+        assert(fat32_read_file(file,0U,out,sizeof(out),&bytes) && bytes==size);
+        assert(!memcmp(out,"hello",prefix));
+        for(UINT32 i=prefix;i<size;++i) assert(out[i]==(scenario==2U&&i==699U?0x42U:0U));
+        assert(fat32_close(file));assert(fat32_destroy(&fs));
+        memset(&fs,0,sizeof(fs));file=0;
+        assert(fat32_init(&fs,device));assert(fat32_open(&fs,"hello.txt",&file));
+        assert(fat32_read_file(file,0U,out,sizeof(out),&bytes) && bytes==size);
+        assert(!memcmp(out,"hello",prefix));
+        for(UINT32 i=prefix;i<size;++i) assert(out[i]==(scenario==2U&&i==699U?0x42U:0U));
+        assert(fat32_close(file));assert(fat32_destroy(&fs));
+        assert(block_unregister(&blocks,device));assert(block_manager_destroy(&blocks));
+    }
+    puts("FAT growth: same/new clusters, seek writes, regrowth and empty writes survive remount");
+}
+
 int main(void) {
     OS_BLOCK_MANAGER blocks = {0};
     OS_BLOCK_DEVICE *device = 0;
@@ -343,6 +513,10 @@ int main(void) {
     UINT32 hello_data_reads;
     UINT32 size = 0;
     for (UINT32 i = 0; i < sizeof(extension); ++i) extension[i] = (UINT8)(i ^ 0x5AU);
+    file_growth_zero_test();
+    truncate_writeback_failure_test();
+    truncate_corruption_test();
+    short_alias_lfn_ownership_test();
     rename_writeback_failure_test();
     replacement_writeback_test();
     replacement_corrupt_chain_test();

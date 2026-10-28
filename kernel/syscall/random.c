@@ -1,4 +1,4 @@
-/* System kernel random stream: UEFI entropy in, ChaCha20 blocks out. */
+/* System 内核随机流：输入为 UEFI 熵，输出为 ChaCha20 数据块。 */
 
 #include <arch/x86_64/cpu.h>
 #include <arch/x86_64/uaccess.h>
@@ -126,8 +126,8 @@ static void random_clear_words(uint32_t words[16]) {
 static void random_block(uint8_t output[64]) {
     uint32_t state[16];
     uint32_t working[16];
-    /* Reserve one unique stream block while pinned on this CPU. Neither
-     * the rounds nor a faultable user copy need the global stream lock. */
+    /* 在线程固定于此 CPU 时预留唯一的流数据块。ChaCha 轮计算和可能缺页的用户态复制都无需
+     * 持有全局流锁。 */
     random_lock();
     for (uint32_t index = 0U; index < 16U; ++index) {
         state[index] = g_random_state[index];

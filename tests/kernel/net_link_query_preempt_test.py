@@ -11,7 +11,7 @@ def function(signature):
         depth+=(source[end]=='{')-(source[end]=='}');end+=1
     return source[start:end]
 helpers=source[source.index('static bool e1000_lifecycle_try_lock(void)'):
-               source.index('static void e1000_zero(')]
+               source.index('void e1000_configure_link_local(')]
 program=r'''
 #include <assert.h>
 #include <stdbool.h>
@@ -19,17 +19,22 @@ program=r'''
 #include <stdint.h>
 enum { NET_BACKEND_E1000=1,NET_BACKEND_RTL8126=2,
        E1000_REG_STATUS=8,E1000_STATUS_LU=2,E1000_RX_STATUS_DD=1 };
-typedef struct {unsigned status;} descriptor_t;
+typedef struct {unsigned status,options1;} descriptor_t;
 typedef struct {
  bool initialized,link_up;
  unsigned backend,rx_clean;
  descriptor_t *rx_ring;
  unsigned rx_ring_dma;
+ descriptor_t *rtl_rx_ring;
+ unsigned rtl_rx_next,rtl_rx_ring_dma;
  struct {bool link_up;} device;
 } e1000_state_t;
 static e1000_state_t g_e1000;
 static atomic_uint g_e1000_lifecycle_lock;
 static atomic_bool g_e1000_poll_queued,g_e1000_poll_retry;
+static struct { atomic_uint_fast64_t queued_tsc; } g_e1000_poll_timing;
+static uint64_t telemetry_timestamp(void) { return 1000U; }
+static void e1000_record_poll_wait(void) {}
 static bool g_e1000_runtime_ready=true,inject_contention,desired_link=true;
 static unsigned preempt_depth,expected_outer,reads,queue_attempts;
 static void sched_preempt_disable(void){++preempt_depth;}
@@ -39,6 +44,9 @@ static bool deferred_try_schedule(void (*fn)(void*),void *arg){
  (void)fn;(void)arg;++queue_attempts;return true;
 }
 static void dma_sync_for_cpu(unsigned *dma){(void)dma;}
+static void rtl8126_rearm_interrupts(e1000_state_t *s){
+ assert(s==&g_e1000 && !atomic_load(&g_e1000_poll_queued));
+}
 ''' + helpers + r'''
 static bool e1000_poll(void){
  if(!e1000_lifecycle_try_lock())return false;
@@ -93,6 +101,15 @@ int main(void){
  descriptor_t ring={.status=E1000_RX_STATUS_DD};g_e1000.rx_ring=&ring;
  g_e1000.backend=NET_BACKEND_E1000;e1000_deferred_poll(0);
  assert(queue_attempts==2&&atomic_load(&g_e1000_poll_queued));
+ /* RTL ownership is inverted, and only the next descriptor counts. */
+ descriptor_t rtl[2]={{.options1=0},{.options1=1U<<31}};
+ g_e1000.backend=NET_BACKEND_RTL8126;g_e1000.rtl_rx_ring=rtl;
+ g_e1000.rtl_rx_next=1;e1000_deferred_poll(0);
+ assert(queue_attempts==2&&!atomic_load(&g_e1000_poll_queued));
+ rtl[1].options1=0;e1000_deferred_poll(0);
+ assert(queue_attempts==3&&atomic_load(&g_e1000_poll_queued));
+ g_e1000.rtl_rx_next=0;e1000_deferred_poll(0);
+ assert(queue_attempts==4&&atomic_load(&g_e1000_poll_queued));
 }
 '''
 with tempfile.TemporaryDirectory(prefix='liteos-link-preempt-') as directory:

@@ -6,6 +6,7 @@
 #include <kernel/mm.h>
 #include <kernel/sched.h>
 #include <kernel/spinlock.h>
+#include <kernel/string.h>
 
 /* REFACTOR_P2_PHYS_INTERNAL: private contract for the physical MM Owners. */
 
@@ -14,13 +15,27 @@
 #define PAGE_DB_MAX_PHYSICAL \
     (X86_64_DIRECT_MAP_END - X86_64_DIRECT_MAP_BASE + 1ULL)
 
-/* 64 equal-size slots are parked as one Buddy block. */
+/* 64 个等长槽位作为一个 Buddy 块驻留。 */
 #define PAGE_POOL_GROUP_SHIFT       6U
 #define PAGE_POOL_GROUP_SLOTS       64U
-#define PAGE_POOL_SMALL_MAX_ORDER   5U
+/* 仅缓存单页。多页请求直接交给 Buddy，避免空闲的高阶槽位使 RAM 滞留在部分占用的 CPU 池中。 */
+#define PAGE_POOL_SMALL_MAX_ORDER   0U
 #define PAGE_POOL_ORDER_COUNT       (PAGE_POOL_SMALL_MAX_ORDER + 1U)
 #define PAGE_POOL_GROUP_NONE        UINT32_MAX
 #define PAGE_POOL_GROUP_PARTIAL     1U
+
+/* 缓存的 0 阶页面此前可能用作页表、文件页或 slab。所有权和 private_data 属于该页面原有生命周期，
+ * 而不属于内存池。特别是 DMA 将 private_data 用作固定计数，初始值为零。 */
+static inline void pool_prepare_allocated_page(page_t *page, uint8_t order) {
+    page->flags = PAGE_COMPOUND_HEAD;
+    page->owner = PAGE_OWNER_NONE;
+    page->order = order;
+    page->private_data = 0U;
+    page->u.compound.head = page;
+    page->u.compound.index = 0U;
+    atomic_store_explicit(&page->mapcount, -1, memory_order_relaxed);
+    atomic_store_explicit(&page->refs, 1U, memory_order_relaxed);
+}
 
 #if defined(__GNUC__) || defined(__clang__)
 #define PAGE_HOT_NOINLINE __attribute__((noinline, hot, aligned(64)))
@@ -41,10 +56,10 @@ typedef struct {
 
 typedef struct {
     uint64_t base_pfn;
-    uint64_t free_mask;                 /* owner CPU only while parked */
-    atomic_uint_fast64_t remote_mask;   /* cross-CPU frees */
-    uint32_t partial_next;              /* page_pool_group_t index */
-    uint32_t remote_next;               /* page_pool_group_t index */
+    uint64_t free_mask;                 /* 页面驻留池中时仅由所属 CPU 访问 */
+    atomic_uint_fast64_t remote_mask;   /* 跨 CPU 释放 */
+    uint32_t partial_next;              /* page_pool_group_t 索引 */
+    uint32_t remote_next;               /* page_pool_group_t 索引 */
     uint16_t owner_cpu;
     uint8_t pool_order;
     uint8_t zone;
@@ -65,7 +80,7 @@ typedef struct {
     page_t *base;
     uint64_t free_mask;
     uint32_t partial_head;
-    uint32_t contiguous_pages; /* metadata span cached when base is installed */
+    uint32_t contiguous_pages; /* 安装基址时缓存的连续元数据范围 */
 } page_local_pool_t;
 
 typedef struct __attribute__((aligned(CACHELINE_SIZE))) {
@@ -77,18 +92,13 @@ _Static_assert(sizeof(page_o0_cache_t) == CACHELINE_SIZE,
                "order0 Step5 cache must fit one cache line");
 
 typedef struct __attribute__((aligned(CACHELINE_SIZE))) {
-    /* orders 1..5 only; order0 has the dedicated hot line above. */
-    page_local_pool_t pool[PAGE_ZONE_COUNT][PAGE_POOL_SMALL_MAX_ORDER];
-} page_small_cache_t;
-
-typedef struct __attribute__((aligned(CACHELINE_SIZE))) {
     atomic_uint head[PAGE_ZONE_COUNT][PAGE_POOL_SMALL_MAX_ORDER + 1U];
 } page_remote_heads_t;
 
 _Static_assert(sizeof(page_remote_heads_t) == CACHELINE_SIZE,
                "remote Step5 inbox must be cache-line isolated");
 
-/* Physical-page state is defined once by page_db.c. */
+/* 物理页状态仅在 page_db.c 中定义一次。 */
 extern page_section_t g_sections[PAGE_DB_MAX_SECTIONS];
 extern page_pool_section_t g_pool_sections[PAGE_DB_MAX_SECTIONS];
 extern uint32_t g_section_count;
@@ -99,21 +109,19 @@ extern reserved_range_t g_reserved[PAGE_DB_MAX_RESERVED];
 extern uint32_t g_reserved_count;
 extern bool g_initialized;
 
-/* Per-CPU pool state is defined once by percpu_page.c. */
+/* 每 CPU 内存池状态仅在 percpu_page.c 中定义一次。 */
 extern page_pool_group_t *g_pool_groups;
 extern uint32_t g_pool_base_group_count;
 extern uint32_t g_pool_group_count;
 extern page_o0_cache_t g_o0_cache[MAX_CPUS]
     __attribute__((aligned(CACHELINE_SIZE)));
-extern page_small_cache_t g_small_cache[MAX_CPUS]
-    __attribute__((aligned(CACHELINE_SIZE)));
 extern page_remote_heads_t g_remote_heads[MAX_CPUS]
     __attribute__((aligned(CACHELINE_SIZE)));
 
-/* Small primitives remain inline so splitting files does not add hot calls. */
+/* 小型原语保持内联，避免拆分文件后增加热路径调用。 */
 static inline void page_memory_zero(void *address, size_t size) {
-    uint8_t *bytes = (uint8_t *)address;
-    while (size-- != 0) *bytes++ = 0;
+    /* 复用不触碰 SIMD 状态的批量清零；逐字节循环会拖慢大量匿名页缺页。 */
+    memset(address, 0, size);
 }
 
 static inline uint64_t page_pool_irq_save(void) {
@@ -140,7 +148,7 @@ static inline uint64_t align_up_group(uint64_t pfn) {
 }
 
 static inline void lock_pages(void) {
-    /* Keep Buddy ownership on one CPU while another CPU may be waiting. */
+    /* 其他 CPU 可能正在等待，此时要让 Buddy 所有权固定在当前 CPU。 */
     sched_preempt_disable();
     spinlock_lock(&g_page_lock);
 }
@@ -150,9 +158,9 @@ static inline void unlock_pages(void) {
     sched_preempt_enable();
 }
 
-/* page_db.c: metadata and Buddy ownership. */
+/* page_db.c：元数据和 Buddy 所有权。 */
 page_t *page_for_pfn(pfn_t pfn);
-/* Clamp *count to contiguous metadata in one section; holes return NULL. */
+/* 将 *count 限制为单一区段中的连续元数据范围；遇到空洞时返回 NULL。 */
 page_t *page_span_for_pfn(pfn_t pfn, uint64_t *count);
 page_t *page_for_address(uint64_t physical);
 void mark_compound(page_t *head, uint8_t order, bool free_page);
@@ -162,13 +170,19 @@ void free_block_locked(page_t *head, uint8_t order);
 void page_stats_note_alloc(uint8_t order);
 void page_stats_note_free(uint8_t order);
 
-/* percpu_page.c: pooled allocation and the order-zero public fast path. */
+/* percpu_page.c：池化分配和公开的 0 阶快速路径。 */
 page_t *pool_alloc_small(uint8_t zone, uint8_t order, uint32_t cpu);
+/* 调用方必须先屏蔽 IRQ 并固定当前 CPU，再获取内存池保护。持有 Buddy 保护时绝不能获取池保护，
+ * 也不得同时持有两个池保护。 */
+void pool_cpu_lock(uint32_t cpu);
+void pool_cpu_unlock(uint32_t cpu);
 void pool_drain_cpu(uint32_t cpu);
+void pool_reclaim_all(void);
+page_t *pool_alloc_remote(uint8_t order, page_alloc_flags_t flags, uint32_t requester);
 bool pool_free_small(page_t *page, uint8_t order, uint32_t cpu);
 void pool_init_cpu_state(void);
 
-/* page_alloc.c: cold/slow order and legacy Buddy fallback paths. */
+/* page_alloc.c：冷/慢速阶数分配和旧式 Buddy 回退路径。 */
 page_t *page_alloc_slow(uint8_t order, page_alloc_flags_t flags);
 void free_legacy_slow(page_t *head, uint8_t order);
 void page_free_non_o0(page_t *head, uint8_t order);

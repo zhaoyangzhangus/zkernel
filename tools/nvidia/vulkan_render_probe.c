@@ -1,4 +1,4 @@
-/* Real graphics-pipeline validation; no host GPU or software fallback. */
+/* 真实图形管线验证；不使用宿主 GPU 或软件后备路径。 */
 #include <vulkan/vulkan_core.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -22,8 +22,8 @@ static uint32_t memory_type(VkPhysicalDevice gpu, uint32_t bits,
     return UINT32_MAX;
 }
 
-/* Pixel centers and edges are integer-exact, with no centers on an edge.
- * Verify the complete image, not just a success marker or one center pixel. */
+/* 像素中心和边缘均可用整数精确表示，且像素中心不会落在边缘上。
+ * 验证整幅图像，而不只检查成功标记或单个中心像素。 */
 static int validate_surface(const volatile uint8_t *pixels, uint32_t side,
                             int bgra) {
     uint32_t colored = 0;
@@ -222,8 +222,8 @@ int vulkan_render_probe(VkPhysicalDevice gpu,VkDevice device,VkQueue queue,
                             VK_NULL_HANDLE,NULL);
 }
 
-/* The caller owns the imported window buffer throughout draw/fence/readback.
- * B8G8R8A8 is chosen at image creation: no CPU channel conversion or copy. */
+/* 绘制/fence/回读期间，导入的窗口缓冲区始终由调用方持有。
+ * 创建图像时选择 B8G8R8A8，因此无需 CPU 通道转换或复制。 */
 int vulkan_render_surface(VkPhysicalDevice gpu,VkDevice device,VkQueue queue,
     uint32_t family,VkBuffer target,const volatile uint8_t *pixels,uint32_t side) {
     return render_triangle(gpu,device,queue,family,NULL,side,target,pixels);

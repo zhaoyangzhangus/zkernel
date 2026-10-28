@@ -1,4 +1,4 @@
-/* REFACTOR_SYSCALL_DEVICE_OWNER: device enumeration and control handlers. */
+/* REFACTOR_SYSCALL_DEVICE_OWNER：设备枚举和控制处理程序。 */
 
 #include <arch/x86_64/uaccess.h>
 #include <kernel/device.h>

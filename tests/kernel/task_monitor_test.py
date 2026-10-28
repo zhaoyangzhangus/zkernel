@@ -6,7 +6,12 @@ import resource
 
 root = Path(__file__).resolve().parents[2]
 source = (root/'kernel/process/process.c').read_text()
-functions = source[source.index('static bool process_monitor_protected('):source.index('static uint64_t read_tsc(')]
+# Linux TID translation has separate fixtures and depends on the full process
+# registry. Extract only the actual monitor/termination implementation here.
+functions = (source[source.index('static bool process_monitor_protected('):
+                    source.index('uint64_t linux_thread_visible_tid(')] +
+             source[source.index('kstatus_t process_task_query('):
+                    source.index('static uint64_t read_tsc(')])
 runtime_read = 'uint64_t runtime = __atomic_load_n(&thread->sched.runtime_ns, __ATOMIC_RELAXED);'
 assert functions.count(runtime_read) == 1
 functions = functions.replace(runtime_read, 'assert(held); ++runtime_reads; '+runtime_read)
@@ -28,6 +33,7 @@ code = r'''
 #define PROCESS_FLAG_INIT_CPU_PINNED 4U
 #define THREAD_FLAG_TERMINATE_REQUEST 4U
 typedef int kstatus_t;
+static kstatus_t sched_monitor_query(uint64_t tid,os_task_info_t *info) {(void)tid;(void)info;return K_ENOENT;}
 typedef struct list_head {struct list_head *next,*prev;} list_head_t;
 #define list_entry(node,type,member) ((type *)((char *)(node)-offsetof(type,member)))
 typedef struct {atomic_uint_fast64_t rss_pages,commit_pages;} vm_space_t;

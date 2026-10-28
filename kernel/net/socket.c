@@ -1,4 +1,5 @@
 #include <kernel/kmem.h>
+#include <kernel/mm.h>
 #include <kernel/net_manager.h>
 #include <kernel/console.h>
 #include <arch/x86_64/cpu.h>
@@ -10,18 +11,32 @@
 
 #include "socket_internal.h"
 #include "socket_model.h"
+#include "tcp_retry.h"
+#include "tcp_output.h"
 
-/* Private state types are declared once in socket_model.h. */
+/* 私有状态类型统一在 socket_model.h 中声明。 */
 
-/* 瀹告彃缂撶粩?TCP 鏉╃偞甯撮惃鍕磽閸忓啰绮嶇槐銏犵穿閿涙稓娲冮崥顒傤伂閸欙絽鎷?accepted socket 閸欘垯浜掗崗鍗炵摠閵?*/
-/* Connection and wait types are declared once in socket_model.h. */
+/* TCP 连接与已接受的 socket 状态在 socket_model.h 中统一定义。 */
+/* 连接和等待类型仅在 socket_model.h 中声明一次。 */
 
-/* 瀵倹顒為崣鎴︹偓浣锋崲閸斺€愁槻閸掓儼绀嬫潪钘夎嫙閹镐焦婀佹稉銈囶伂鐎电钖勫鏇犳暏閿涘苯鍙ч梻?socket 娑撳秳绱伴柌濠冩杹娴犺濮熸笟婵婄閵?*/
-/* Async request state is declared once in socket_model.h. */
+/* socket 异步请求状态在 socket_model.h 中统一定义。 */
+/* 异步请求状态仅在 socket_model.h 中声明一次。 */
 
-static socket_binding_t g_bindings[SOCKET_BINDING_COUNT];
-static socket_tcp_connection_t g_tcp_connections[SOCKET_BINDING_COUNT];
-static socket_tcp6_connection_t g_tcp6_connections[SOCKET_BINDING_COUNT];
+static socket_binding_t g_initial_bindings[SOCKET_BINDING_COUNT];
+static socket_tcp_connection_t g_initial_tcp_connections[SOCKET_BINDING_COUNT];
+static socket_tcp6_connection_t g_initial_tcp6_connections[SOCKET_BINDING_COUNT];
+static socket_binding_t *g_bindings = g_initial_bindings;
+static socket_tcp_connection_t *g_tcp_connections = g_initial_tcp_connections;
+static socket_tcp6_connection_t *g_tcp6_connections = g_initial_tcp6_connections;
+static uint32_t g_registry_capacity = SOCKET_BINDING_COUNT;
+/* 由绑定锁保护的索引，不保存借用的 socket 指针。发生变更时使两个提示失效，
+ * 保留查找首个匹配槽位的语义。 */
+static uint32_t g_tcp_lookup_hint = UINT32_MAX;
+static uint32_t g_tcp6_lookup_hint = UINT32_MAX;
+/* 仅缓存完全匹配的 UDP 项：通配项仍需完整扫描，以排除后续存在精确匹配项。
+ * 绑定变更会使两个索引失效。 */
+static uint32_t g_udp_lookup_hint = UINT32_MAX;
+static uint32_t g_udp6_lookup_hint = UINT32_MAX;
 static spinlock_t g_binding_lock;
 static atomic_uint g_socket_init_state;
 static atomic_uint g_next_ephemeral_port;
@@ -52,29 +67,33 @@ void socket_copy(void *destination, const void *source, size_t length) {
 uint32_t socket_stream_write_locked(socket_private_t *private,
                                     const void *buffer, size_t length) {
     if (length == 0U) return private->stream_write;
-    size_t first = SOCKET_STREAM_BUFFER_SIZE - private->stream_write;
+    uint32_t capacity = socket_stream_capacity(private);
+    uint8_t *data = socket_stream_data(private);
+    size_t first = capacity - private->stream_write;
     if (first > length) first = length;
-    socket_copy(private->stream_buffer + private->stream_write, buffer, first);
+    socket_copy(data + private->stream_write, buffer, first);
     if (length > first) {
-        socket_copy(private->stream_buffer, (const uint8_t *)buffer + first,
+        socket_copy(data, (const uint8_t *)buffer + first,
                     length - first);
     }
     uint32_t next = private->stream_write + (uint32_t)first;
-    return next == SOCKET_STREAM_BUFFER_SIZE ? (uint32_t)(length - first) : next;
+    return next == capacity ? (uint32_t)(length - first) : next;
 }
 
 uint32_t socket_stream_read_locked(const socket_private_t *private,
                                    void *buffer, size_t length) {
     if (length == 0U) return private->stream_read;
-    size_t first = SOCKET_STREAM_BUFFER_SIZE - private->stream_read;
+    uint32_t capacity = socket_stream_capacity(private);
+    const uint8_t *data = socket_stream_data_const(private);
+    size_t first = capacity - private->stream_read;
     if (first > length) first = length;
-    socket_copy(buffer, private->stream_buffer + private->stream_read, first);
+    socket_copy(buffer, data + private->stream_read, first);
     if (length > first) {
-        socket_copy((uint8_t *)buffer + first, private->stream_buffer,
+        socket_copy((uint8_t *)buffer + first, data,
                     length - first);
     }
     uint32_t next = private->stream_read + (uint32_t)first;
-    return next == SOCKET_STREAM_BUFFER_SIZE ? (uint32_t)(length - first) : next;
+    return next == capacity ? (uint32_t)(length - first) : next;
 }
 
 static uint32_t socket_active_ipv4_address(void) {
@@ -87,8 +106,8 @@ static uint32_t socket_active_ipv4_address(void) {
 }
 
 bool socket_address6_equal(const uint8_t left[16], const uint8_t right[16]) {
-    /* Fixed-size copies allow unaligned packet addresses without aliasing
-     * violations or reading beyond the 16-byte address. */
+    /* 固定大小复制可处理未对齐的数据包地址，避免违反别名规则或
+     * 越过 16 字节地址边界读取。 */
     uint64_t left_low, left_high, right_low, right_high;
     __builtin_memcpy(&left_low, left, sizeof(left_low));
     __builtin_memcpy(&left_high, left + 8U, sizeof(left_high));
@@ -106,10 +125,9 @@ bool socket_address6_zero(const uint8_t address[16]) {
 
 void socket_lock(spinlock_t *lock) {
     /*
-     * System is preemptive.  A thread that owns a spin lock must not be
-     * scheduled out on this CPU while another local thread spins for it.
-     * The preempt-disable state is a nesting counter, so nested socket
-     * locks remain valid.
+    * System 支持抢占。当某线程持有自旋锁时，若本地另一线程正在等待该锁，
+    * 就不能将锁持有者从当前 CPU 上调度出去。
+    * 禁止抢占状态使用嵌套计数，因此嵌套获取 socket 锁仍然安全。
     */
     sched_preempt_disable();
     spinlock_lock(lock);
@@ -126,9 +144,11 @@ void socket_initialize_globals(void) {
     if (atomic_compare_exchange_strong_explicit(&g_socket_init_state, &expected, 1U,
                                                  memory_order_acq_rel,
                                                  memory_order_acquire)) {
-        socket_zero(g_bindings, sizeof(g_bindings));
-        socket_zero(g_tcp_connections, sizeof(g_tcp_connections));
-        socket_zero(g_tcp6_connections, sizeof(g_tcp6_connections));
+        socket_zero(g_bindings, sizeof(g_initial_bindings));
+        socket_zero(g_tcp_connections, sizeof(g_initial_tcp_connections));
+        socket_zero(g_tcp6_connections, sizeof(g_initial_tcp6_connections));
+        g_tcp_lookup_hint = g_tcp6_lookup_hint = UINT32_MAX;
+        g_udp_lookup_hint = g_udp6_lookup_hint = UINT32_MAX;
         spinlock_init(&g_binding_lock);
         atomic_init(&g_next_ephemeral_port, SOCKET_EPHEMERAL_FIRST);
         atomic_init(&g_next_async_request_id, 0U);
@@ -146,15 +166,19 @@ spinlock_t *socket_binding_lock(void) {
 }
 
 const socket_binding_t *socket_binding_at(uint32_t index) {
-    return index < SOCKET_BINDING_COUNT ? &g_bindings[index] : 0;
+    return index < g_registry_capacity ? &g_bindings[index] : 0;
 }
 
 const socket_tcp_connection_t *socket_tcp_connection_at(uint32_t index) {
-    return index < SOCKET_BINDING_COUNT ? &g_tcp_connections[index] : 0;
+    return index < g_registry_capacity ? &g_tcp_connections[index] : 0;
 }
 
 const socket_tcp6_connection_t *socket_tcp6_connection_at(uint32_t index) {
-    return index < SOCKET_BINDING_COUNT ? &g_tcp6_connections[index] : 0;
+    return index < g_registry_capacity ? &g_tcp6_connections[index] : 0;
+}
+
+uint32_t socket_registry_capacity_locked(void) {
+    return g_registry_capacity;
 }
 
 uint64_t socket_next_async_request_id(void) {
@@ -285,8 +309,7 @@ bool socket_tcp_keepalive_poll_locked(socket_private_t *private,
         atomic_load_explicit(&private->peer_closed, memory_order_acquire)) {
         return false;
     }
-    // Outstanding data/FIN uses the existing retransmission timer, never
-    // consume the keepalive budget or alter its sequence state.
+    // 尚未确认的数据/FIN 使用现有重传定时器，不消耗保活额度，也不改变序列状态。
     if (private->tcp_send_pending) {
         socket_tcp_keepalive_activity_locked(private, now_tsc);
         return false;
@@ -297,11 +320,7 @@ bool socket_tcp_keepalive_poll_locked(socket_private_t *private,
     }
     if ((int64_t)(now_tsc - private->tcp_keep_deadline_tsc) < 0) return false;
     if (private->tcp_keep_probes >= private->tcp_keepcnt) {
-        private->tcp_send_failed = true;
-        private->tcp_state = SOCKET_TCP_CLOSED;
-        private->tcp_keep_deadline_tsc = 0U;
-        atomic_store_explicit(&private->tcp_keep_failed, true,
-                              memory_order_release);
+        socket_tcp_fail_locked(private, K_ETIMEDOUT);
         *failed = true;
         return false;
     }
@@ -325,7 +344,8 @@ kstatus_t socket_connect_status(socket_t *socket) {
                private->tcp_state == SOCKET_TCP_ESTABLISHED) {
         status = K_OK;
     } else if (private->tcp_send_failed) {
-        status = K_EIO;
+        status = atomic_load_explicit(&private->tcp_error, memory_order_acquire);
+        if (status == K_OK) status = K_EIO;
     } else if (private->tcp_state == SOCKET_TCP_SYN_SENT ||
                private->tcp_state == SOCKET_TCP_SYN_RECEIVED) {
         status = K_EAGAIN;
@@ -364,13 +384,12 @@ uint32_t socket_poll_state(socket_t *socket) {
             if (peer != 0 &&
                 atomic_load_explicit(&peer->stream_count,
                                      memory_order_acquire) <
-                    SOCKET_STREAM_BUFFER_SIZE) {
+                    socket_stream_capacity(peer)) {
                 state |= SOCKET_POLL_WRITE;
             }
         } else if (!private->listening &&
                    private->tcp_state == SOCKET_TCP_ESTABLISHED &&
-                   !private->tcp_send_pending &&
-                   private->tcp_peer_window != 0U) {
+                   socket_tcp_send_room_locked(socket->family, private) != 0U) {
             state |= SOCKET_POLL_WRITE;
         }
     }
@@ -393,9 +412,8 @@ kstatus_t socket_get_option(socket_t *socket, uint32_t option, int32_t *value) {
                                       memory_order_acquire);
         break;
     case OS_SOCKET_OPTION_ERROR:
-        *value = atomic_load_explicit(&private->tcp_keep_failed,
-                                      memory_order_acquire) ? 110 :
-                 private->tcp_send_failed ? 5 : 0;
+        *value = -atomic_load_explicit(&private->tcp_error, memory_order_acquire);
+        if (*value == 0 && private->tcp_send_failed) *value = 5;
         break;
     case OS_SOCKET_OPTION_KEEPALIVE: *value = private->tcp_keepalive; break;
     case OS_SOCKET_OPTION_KEEPIDLE: *value = (int32_t)private->tcp_keepidle; break;
@@ -406,7 +424,7 @@ kstatus_t socket_get_option(socket_t *socket, uint32_t option, int32_t *value) {
     case OS_SOCKET_OPTION_PROTOCOL: *value = socket->protocol; break;
     case OS_SOCKET_OPTION_ACCEPT_CONNECTION: *value = private->listening; break;
     case OS_SOCKET_OPTION_RECEIVE_BUFFER:
-        *value = socket->type == OS_SOCK_STREAM ? SOCKET_STREAM_BUFFER_SIZE :
+        *value = socket->type == OS_SOCK_STREAM ? socket_stream_capacity(private) :
                  SOCKET_RX_QUEUE_DEPTH * SOCKET_MAX_PAYLOAD;
         break;
     case OS_SOCKET_OPTION_SEND_BUFFER: *value = SOCKET_STREAM_BUFFER_SIZE; break;
@@ -468,7 +486,7 @@ static bool socket_is_signaled(const void *object) {
            atomic_load_explicit(&private->receive_shutdown, memory_order_acquire) ||
            atomic_load_explicit(&private->closed, memory_order_acquire) ||
            atomic_load_explicit(&private->peer_closed, memory_order_acquire) ||
-           atomic_load_explicit(&private->tcp_keep_failed, memory_order_acquire);
+           atomic_load_explicit(&private->tcp_error, memory_order_acquire) != 0;
 }
 
 static int64_t socket_wait_value(const void *object) {
@@ -484,7 +502,8 @@ static int64_t socket_wait_value(const void *object) {
 }
 
 static void socket_unbind_locked(socket_t *socket) {
-    for (uint32_t index = 0; index < SOCKET_BINDING_COUNT; ++index) {
+    g_udp_lookup_hint = g_udp6_lookup_hint = UINT32_MAX;
+    for (uint32_t index = 0; index < g_registry_capacity; ++index) {
         if (g_bindings[index].socket == socket) {
             socket_zero(&g_bindings[index], sizeof(g_bindings[index]));
         }
@@ -492,17 +511,18 @@ static void socket_unbind_locked(socket_t *socket) {
 }
 
 bool socket_register_tcp_locked(socket_t *socket, socket_private_t *private) {
-    uint32_t slot = SOCKET_BINDING_COUNT;
+    uint32_t slot = g_registry_capacity;
     if (socket == 0 || private == 0 || socket->type != OS_SOCK_STREAM ||
         !private->bound || !private->connected || private->peer_port == 0U) return false;
+    g_tcp_lookup_hint = g_tcp6_lookup_hint = UINT32_MAX;
     if (socket->family == OS_AF_INET6) {
-        for (uint32_t index = 0; index < SOCKET_BINDING_COUNT; ++index) {
+        for (uint32_t index = 0; index < g_registry_capacity; ++index) {
             if (g_tcp6_connections[index].socket == socket) return true;
-            if (g_tcp6_connections[index].socket == 0 && slot == SOCKET_BINDING_COUNT) {
+            if (g_tcp6_connections[index].socket == 0 && slot == g_registry_capacity) {
                 slot = index;
             }
         }
-        if (slot == SOCKET_BINDING_COUNT) return false;
+        if (slot == g_registry_capacity) return false;
         g_tcp6_connections[slot].socket = socket;
         socket_copy(g_tcp6_connections[slot].local_address, private->local_address6, 16U);
         g_tcp6_connections[slot].local_port = private->local_port;
@@ -511,13 +531,13 @@ bool socket_register_tcp_locked(socket_t *socket, socket_private_t *private) {
         return true;
     }
     if (socket->family != OS_AF_INET4) return false;
-    for (uint32_t index = 0; index < SOCKET_BINDING_COUNT; ++index) {
+    for (uint32_t index = 0; index < g_registry_capacity; ++index) {
         if (g_tcp_connections[index].socket == socket) return true;
-        if (g_tcp_connections[index].socket == 0 && slot == SOCKET_BINDING_COUNT) {
+        if (g_tcp_connections[index].socket == 0 && slot == g_registry_capacity) {
             slot = index;
         }
     }
-    if (slot == SOCKET_BINDING_COUNT) return false;
+    if (slot == g_registry_capacity) return false;
     g_tcp_connections[slot].socket = socket;
     g_tcp_connections[slot].local_address = private->local_address;
     g_tcp_connections[slot].local_port = private->local_port;
@@ -528,12 +548,13 @@ bool socket_register_tcp_locked(socket_t *socket, socket_private_t *private) {
 
 static uint32_t socket_unregister_tcp_locked(socket_t *socket) {
     uint32_t released = 0U;
-    for (uint32_t index = 0; index < SOCKET_BINDING_COUNT; ++index) {
+    g_tcp_lookup_hint = g_tcp6_lookup_hint = UINT32_MAX;
+    for (uint32_t index = 0; index < g_registry_capacity; ++index) {
         if (g_tcp_connections[index].socket != socket) continue;
         socket_zero(&g_tcp_connections[index], sizeof(g_tcp_connections[index]));
         ++released;
     }
-    for (uint32_t index = 0; index < SOCKET_BINDING_COUNT; ++index) {
+    for (uint32_t index = 0; index < g_registry_capacity; ++index) {
         if (g_tcp6_connections[index].socket != socket) continue;
         socket_zero(&g_tcp6_connections[index], sizeof(g_tcp6_connections[index]));
         ++released;
@@ -541,11 +562,30 @@ static uint32_t socket_unregister_tcp_locked(socket_t *socket) {
     return released;
 }
 
+static bool socket_tcp_matches(const socket_tcp_connection_t *connection,
+                                uint32_t source, uint16_t source_port,
+                                uint32_t destination, uint16_t destination_port) {
+    return connection->socket != 0 && connection->local_port == destination_port &&
+           connection->peer_port == source_port &&
+           (connection->local_address == 0U || connection->local_address == destination) &&
+           connection->peer_address == source;
+}
+
+static bool socket_tcp6_matches(const socket_tcp6_connection_t *connection,
+                                 const uint8_t source[16], uint16_t source_port,
+                                 const uint8_t destination[16], uint16_t destination_port) {
+    return connection->socket != 0 && connection->local_port == destination_port &&
+           connection->peer_port == source_port &&
+           (socket_address6_zero(connection->local_address) ||
+            socket_address6_equal(connection->local_address, destination)) &&
+           socket_address6_equal(connection->peer_address, source);
+}
+
 bool socket_tcp_slots_available_locked(uint32_t required) {
     if (required == 0U) return true;
-    if (required > SOCKET_BINDING_COUNT) return false;
+    if (required > g_registry_capacity) return false;
     uint32_t free_slots = 0U;
-    for (uint32_t index = 0; index < SOCKET_BINDING_COUNT; ++index) {
+    for (uint32_t index = 0; index < g_registry_capacity; ++index) {
         if (g_tcp_connections[index].socket == 0 && ++free_slots == required) return true;
     }
     return false;
@@ -553,9 +593,9 @@ bool socket_tcp_slots_available_locked(uint32_t required) {
 
 bool socket_tcp6_slots_available_locked(uint32_t required) {
     if (required == 0U) return true;
-    if (required > SOCKET_BINDING_COUNT) return false;
+    if (required > g_registry_capacity) return false;
     uint32_t free_slots = 0U;
-    for (uint32_t index = 0; index < SOCKET_BINDING_COUNT; ++index) {
+    for (uint32_t index = 0; index < g_registry_capacity; ++index) {
         if (g_tcp6_connections[index].socket == 0 && ++free_slots == required) return true;
     }
     return false;
@@ -565,13 +605,16 @@ int32_t socket_find_tcp6_locked(const uint8_t source_address[16],
                                        uint16_t source_port,
                                        const uint8_t destination_address[16],
                                        uint16_t destination_port) {
-    for (uint32_t index = 0; index < SOCKET_BINDING_COUNT; ++index) {
+    if (g_tcp6_lookup_hint < g_registry_capacity &&
+        socket_tcp6_matches(&g_tcp6_connections[g_tcp6_lookup_hint],
+                            source_address, source_port,
+                            destination_address, destination_port))
+        return (int32_t)g_tcp6_lookup_hint;
+    for (uint32_t index = 0; index < g_registry_capacity; ++index) {
         const socket_tcp6_connection_t *connection = &g_tcp6_connections[index];
-        if (connection->socket == 0 || connection->local_port != destination_port ||
-            connection->peer_port != source_port ||
-            (!socket_address6_zero(connection->local_address) &&
-             !socket_address6_equal(connection->local_address, destination_address)) ||
-            !socket_address6_equal(connection->peer_address, source_address)) continue;
+        if (!socket_tcp6_matches(connection, source_address, source_port,
+                                destination_address, destination_port)) continue;
+        g_tcp6_lookup_hint = index;
         return (int32_t)index;
     }
     return -1;
@@ -580,13 +623,16 @@ int32_t socket_find_tcp6_locked(const uint8_t source_address[16],
 int32_t socket_find_tcp_locked(uint32_t source_address, uint16_t source_port,
                                       uint32_t destination_address,
                                       uint16_t destination_port) {
-    for (uint32_t index = 0; index < SOCKET_BINDING_COUNT; ++index) {
+    if (g_tcp_lookup_hint < g_registry_capacity &&
+        socket_tcp_matches(&g_tcp_connections[g_tcp_lookup_hint],
+                           source_address, source_port,
+                           destination_address, destination_port))
+        return (int32_t)g_tcp_lookup_hint;
+    for (uint32_t index = 0; index < g_registry_capacity; ++index) {
         const socket_tcp_connection_t *connection = &g_tcp_connections[index];
-        if (connection->socket == 0 || connection->local_port != destination_port ||
-            connection->peer_port != source_port ||
-            (connection->local_address != 0U &&
-             connection->local_address != destination_address) ||
-            connection->peer_address != source_address) continue;
+        if (!socket_tcp_matches(connection, source_address, source_port,
+                               destination_address, destination_port)) continue;
+        g_tcp_lookup_hint = index;
         return (int32_t)index;
     }
     return -1;
@@ -642,11 +688,87 @@ static void socket_detach_peer(socket_t *socket, socket_private_t *private) {
     object_put(peer);
 }
 
+/* 发布每个 socket 前，先在每个注册表中预留一个槽位。一个 socket 最多占用一个绑定项
+ * 和一个 TCP 地址族项，因此可按活动对象预留空间，后续 bind/connect 时无需在自旋锁下
+ * 分配内存。读取方仅在持有 g_binding_lock 时访问这些视图。 */
+static uint32_t g_registry_reservations;
+static void *g_registry_storage;
+
+static kstatus_t socket_registry_reserve(void) {
+    void *replacement = 0;
+    uint32_t capacity = 0U;
+    socket_initialize_globals();
+    for (;;) {
+        socket_lock(&g_binding_lock);
+        if (g_registry_reservations < g_registry_capacity) {
+            ++g_registry_reservations;
+            socket_unlock(&g_binding_lock);
+            kfree(replacement);
+            return K_OK;
+        }
+        if (replacement != 0 && capacity > g_registry_capacity) {
+            socket_binding_t *bindings = replacement;
+            socket_tcp_connection_t *tcp = (void *)(bindings + capacity);
+            socket_tcp6_connection_t *tcp6 = (void *)(tcp + capacity);
+            socket_copy(bindings, g_bindings, g_registry_capacity * sizeof(*bindings));
+            socket_copy(tcp, g_tcp_connections, g_registry_capacity * sizeof(*tcp));
+            socket_copy(tcp6, g_tcp6_connections, g_registry_capacity * sizeof(*tcp6));
+            void *old = g_registry_storage;
+            g_registry_storage = replacement;
+            g_bindings = bindings;
+            g_tcp_connections = tcp;
+            g_tcp6_connections = tcp6;
+            g_registry_capacity = capacity;
+            ++g_registry_reservations;
+            socket_unlock(&g_binding_lock);
+            kfree(old);
+            return K_OK;
+        }
+        /* 查找 API 使用有符号注册表索引。扩容前同时检查该上限和分配大小计算。 */
+        size_t stride = sizeof(socket_binding_t) +
+                        sizeof(socket_tcp_connection_t) + sizeof(socket_tcp6_connection_t);
+        if (g_registry_capacity > INT32_MAX / 2U ||
+            (size_t)g_registry_capacity > SIZE_MAX / stride / 2U) {
+            socket_unlock(&g_binding_lock);
+            kfree(replacement);
+            return K_ENOMEM;
+        }
+        capacity = g_registry_capacity * 2U;
+        socket_unlock(&g_binding_lock);
+        kfree(replacement);
+        replacement = kzalloc((size_t)capacity * stride, 0U);
+        if (replacement == 0) return K_ENOMEM;
+    }
+}
+
+static void socket_registry_release(void) {
+    void *old = 0;
+    socket_lock(&g_binding_lock);
+    --g_registry_reservations;
+    if (g_registry_reservations == 0U && g_registry_storage != 0) {
+        old = g_registry_storage;
+        g_registry_storage = 0;
+        g_bindings = g_initial_bindings;
+        g_tcp_connections = g_initial_tcp_connections;
+        g_tcp6_connections = g_initial_tcp6_connections;
+        g_registry_capacity = SOCKET_BINDING_COUNT;
+        g_udp_lookup_hint = g_udp6_lookup_hint = UINT32_MAX;
+        socket_zero(g_bindings, sizeof(g_initial_bindings));
+        socket_zero(g_tcp_connections, sizeof(g_initial_tcp_connections));
+        socket_zero(g_tcp6_connections, sizeof(g_initial_tcp6_connections));
+    }
+    socket_unlock(&g_binding_lock);
+    kfree(old);
+}
+
 static void socket_destroy(void *object) {
     socket_t *socket = (socket_t *)object;
     if (socket == 0) return;
     socket_private_t *private = socket_private(socket);
     (void)socket_close(socket);
+    socket_registry_release();
+    if (private != 0 && private->stream_dynamic != 0)
+        vfree(private->stream_dynamic);
     kfree(private);
     kfree(socket);
 }
@@ -666,14 +788,24 @@ static const object_ops_t g_socket_object_ops = {
 int32_t socket_find_binding_locked(uint32_t address, uint16_t port,
                                           uint16_t type, bool listening_only) {
     int32_t wildcard = -1;
-    for (uint32_t index = 0; index < SOCKET_BINDING_COUNT; ++index) {
+    bool cacheable = type == OS_SOCK_DGRAM && !listening_only;
+    if (cacheable && g_udp_lookup_hint < g_registry_capacity) {
+        const socket_binding_t *binding = &g_bindings[g_udp_lookup_hint];
+        if (binding->socket != 0 && binding->family == OS_AF_INET4 &&
+            binding->type == type && binding->port == port &&
+            binding->address == address) return (int32_t)g_udp_lookup_hint;
+    }
+    for (uint32_t index = 0; index < g_registry_capacity; ++index) {
         const socket_binding_t *binding = &g_bindings[index];
         const socket_private_t *private;
         if (binding->socket == 0 || binding->family != OS_AF_INET4 ||
             binding->port != port || binding->type != type) continue;
         private = socket_private_const(binding->socket);
         if (listening_only && (private == 0 || !private->listening)) continue;
-        if (binding->address == address) return (int32_t)index;
+        if (binding->address == address) {
+            if (cacheable) g_udp_lookup_hint = index;
+            return (int32_t)index;
+        }
         if (binding->address == 0U) wildcard = (int32_t)index;
     }
     return wildcard;
@@ -682,14 +814,24 @@ int32_t socket_find_binding_locked(uint32_t address, uint16_t port,
 int32_t socket_find_binding6_locked(const uint8_t address[16], uint16_t port,
                                            uint16_t type, bool listening_only) {
     int32_t wildcard = -1;
-    for (uint32_t index = 0; index < SOCKET_BINDING_COUNT; ++index) {
+    bool cacheable = type == OS_SOCK_DGRAM && !listening_only;
+    if (cacheable && g_udp6_lookup_hint < g_registry_capacity) {
+        const socket_binding_t *binding = &g_bindings[g_udp6_lookup_hint];
+        if (binding->socket != 0 && binding->family == OS_AF_INET6 &&
+            binding->type == type && binding->port == port &&
+            socket_address6_equal(binding->address6, address)) return (int32_t)g_udp6_lookup_hint;
+    }
+    for (uint32_t index = 0; index < g_registry_capacity; ++index) {
         const socket_binding_t *binding = &g_bindings[index];
         const socket_private_t *private;
         if (binding->socket == 0 || binding->family != OS_AF_INET6 ||
             binding->port != port || binding->type != type) continue;
         private = socket_private_const(binding->socket);
         if (listening_only && (private == 0 || !private->listening)) continue;
-        if (socket_address6_equal(binding->address6, address)) return (int32_t)index;
+        if (socket_address6_equal(binding->address6, address)) {
+            if (cacheable) g_udp6_lookup_hint = index;
+            return (int32_t)index;
+        }
         if (socket_address6_zero(binding->address6)) wildcard = (int32_t)index;
     }
     return wildcard;
@@ -697,7 +839,7 @@ int32_t socket_find_binding6_locked(const uint8_t address[16], uint16_t port,
 
 static bool socket_port_available_locked(uint32_t address, uint16_t port,
                                          uint16_t type, const socket_t *self) {
-    for (uint32_t index = 0; index < SOCKET_BINDING_COUNT; ++index) {
+    for (uint32_t index = 0; index < g_registry_capacity; ++index) {
         const socket_binding_t *binding = &g_bindings[index];
         if (binding->socket == 0 || binding->socket == self ||
             binding->family != OS_AF_INET4 || binding->port != port ||
@@ -712,7 +854,7 @@ static bool socket_port_available_locked(uint32_t address, uint16_t port,
 static bool socket_port6_available_locked(const uint8_t address[16], uint16_t port,
                                           uint16_t type, const socket_t *self) {
     bool wildcard = socket_address6_zero(address);
-    for (uint32_t index = 0; index < SOCKET_BINDING_COUNT; ++index) {
+    for (uint32_t index = 0; index < g_registry_capacity; ++index) {
         const socket_binding_t *binding = &g_bindings[index];
         if (binding->socket == 0 || binding->socket == self ||
             binding->family != OS_AF_INET6 || binding->port != port ||
@@ -725,17 +867,18 @@ static bool socket_port6_available_locked(const uint8_t address[16], uint16_t po
 
 static kstatus_t socket_bind_locked(socket_t *socket, socket_private_t *private,
                                     uint32_t address, uint16_t port) {
-    uint32_t slot = SOCKET_BINDING_COUNT;
+    uint32_t slot = g_registry_capacity;
     if (private->bound || !socket_port_available_locked(address, port, socket->type, socket)) {
         return K_EBUSY;
     }
-    for (uint32_t index = 0; index < SOCKET_BINDING_COUNT; ++index) {
+    for (uint32_t index = 0; index < g_registry_capacity; ++index) {
         if (g_bindings[index].socket == 0) {
             slot = index;
             break;
         }
     }
-    if (slot == SOCKET_BINDING_COUNT) return K_ENOMEM;
+    if (slot == g_registry_capacity) return K_ENOMEM;
+    g_udp_lookup_hint = g_udp6_lookup_hint = UINT32_MAX;
     g_bindings[slot].socket = socket;
     g_bindings[slot].family = OS_AF_INET4;
     g_bindings[slot].address = address;
@@ -749,17 +892,18 @@ static kstatus_t socket_bind_locked(socket_t *socket, socket_private_t *private,
 
 static kstatus_t socket_bind6_locked(socket_t *socket, socket_private_t *private,
                                      const uint8_t address[16], uint16_t port) {
-    uint32_t slot = SOCKET_BINDING_COUNT;
+    uint32_t slot = g_registry_capacity;
     if (private->bound || !socket_port6_available_locked(address, port, socket->type, socket)) {
         return K_EBUSY;
     }
-    for (uint32_t index = 0; index < SOCKET_BINDING_COUNT; ++index) {
+    for (uint32_t index = 0; index < g_registry_capacity; ++index) {
         if (g_bindings[index].socket == 0) {
             slot = index;
             break;
         }
     }
-    if (slot == SOCKET_BINDING_COUNT) return K_ENOMEM;
+    if (slot == g_registry_capacity) return K_ENOMEM;
+    g_udp_lookup_hint = g_udp6_lookup_hint = UINT32_MAX;
     g_bindings[slot].socket = socket;
     g_bindings[slot].family = OS_AF_INET6;
     socket_copy(g_bindings[slot].address6, address, 16U);
@@ -771,13 +915,20 @@ static kstatus_t socket_bind6_locked(socket_t *socket, socket_private_t *private
     return K_OK;
 }
 
-static kstatus_t socket_bind_ephemeral(socket_t *socket, socket_private_t *private) {
-    uint32_t local_address = socket_active_ipv4_address();
-    socket_initialize_globals();
-    /* A wildcard-created Internet socket must use the active interface as its
-     * source address.  Loopback remains the fallback for boot-time and
-     * socket-loopback tests before DHCP has published an address. */
-    socket_lock(&g_binding_lock);
+/* 调用方持有 g_binding_lock。保留显式通配符/回环绑定；只有 connect 隐式绑定时才选择活动网卡的源地址。 */
+static kstatus_t socket_bind_port_locked(socket_t *socket,
+                                         socket_private_t *private,
+                                         uint32_t address4,
+                                         const uint8_t address6[16],
+                                         uint16_t requested_port) {
+    if (atomic_load_explicit(&private->closed, memory_order_acquire))
+        return K_EDEVREMOVED;
+    if (private->bound) return K_EBUSY;
+    if (requested_port != 0U) {
+        return socket->family == OS_AF_INET4 ?
+            socket_bind_locked(socket, private, address4, requested_port) :
+            socket_bind6_locked(socket, private, address6, requested_port);
+    }
     uint32_t first = atomic_fetch_add_explicit(&g_next_ephemeral_port, 1U,
                                                memory_order_relaxed);
     uint32_t span = SOCKET_EPHEMERAL_LAST - SOCKET_EPHEMERAL_FIRST + 1U;
@@ -785,40 +936,128 @@ static kstatus_t socket_bind_ephemeral(socket_t *socket, socket_private_t *priva
     for (uint32_t attempt = 0; attempt < span; ++attempt) {
         uint16_t port = (uint16_t)(SOCKET_EPHEMERAL_FIRST +
             ((first - SOCKET_EPHEMERAL_FIRST + attempt) % span));
-        status = socket_bind_locked(socket, private, local_address, port);
-        if (status == K_OK || status != K_EBUSY) break;
+        status = socket->family == OS_AF_INET4 ?
+            socket_bind_locked(socket, private, address4, port) :
+            socket_bind6_locked(socket, private, address6, port);
+        if (status != K_EBUSY) break;
     }
+    return status;
+}
+
+static kstatus_t socket_bind_ephemeral(socket_t *socket, socket_private_t *private) {
+    uint32_t local_address = socket_active_ipv4_address();
+    socket_initialize_globals();
+    socket_lock(&g_binding_lock);
+    kstatus_t status = socket_bind_port_locked(socket, private, local_address, 0, 0U);
     socket_unlock(&g_binding_lock);
     return status;
 }
 
-static kstatus_t socket_bind6_ephemeral(socket_t *socket, socket_private_t *private) {
-    static const uint8_t loopback6[16] = {0, 0, 0, 0, 0, 0, 0, 0,
-                                          0, 0, 0, 0, 0, 0, 0, 1};
+/* 当前 IPv6 路由仅支持回环、接口自身和链路本地邻居。尚未实现 RA/默认路由，因此不能仅因 UDP connect
+ * 不发送数据包，就宣称存在互联网路由或选择 ::1 作为源地址。这样也能保证可达性探测结果真实。 */
+static kstatus_t socket_ipv6_connect_source(const uint8_t destination[16],
+                                            uint8_t source[16]) {
+    static const uint8_t loopback[16] = {[15] = 1U};
+    if (socket_address6_equal(destination, loopback)) {
+        socket_copy(source, loopback, 16U);
+        return K_OK;
+    }
+    net_manager_status_t network = {0};
+    if (!net_manager_get_status(&network) || !network.link_up ||
+        !network.ipv6_configured || socket_address6_zero(network.ipv6_address))
+        return K_ENETUNREACH;
+    bool local = socket_address6_equal(destination, network.ipv6_address);
+    bool neighbour = destination[0] == 0xfeU && (destination[1] & 0xc0U) == 0x80U &&
+                     network.ipv6_address[0] == 0xfeU &&
+                     (network.ipv6_address[1] & 0xc0U) == 0x80U;
+    if (!local && !neighbour) return K_ENETUNREACH;
+    socket_copy(source, network.ipv6_address, 16U);
+    return K_OK;
+}
+
+static kstatus_t socket_bind6_ephemeral(socket_t *socket, socket_private_t *private,
+                                        const uint8_t source[16]) {
     socket_initialize_globals();
     socket_lock(&g_binding_lock);
-    uint32_t first = atomic_fetch_add_explicit(&g_next_ephemeral_port, 1U,
-                                               memory_order_relaxed);
-    uint32_t span = SOCKET_EPHEMERAL_LAST - SOCKET_EPHEMERAL_FIRST + 1U;
-    kstatus_t status = K_EAGAIN;
-    for (uint32_t attempt = 0; attempt < span; ++attempt) {
-        uint16_t port = (uint16_t)(SOCKET_EPHEMERAL_FIRST +
-            ((first - SOCKET_EPHEMERAL_FIRST + attempt) % span));
-        status = socket_bind6_locked(socket, private, loopback6, port);
-        if (status == K_OK || status != K_EBUSY) break;
-    }
+    kstatus_t status = socket_bind_port_locked(socket, private, 0U, source, 0U);
     socket_unlock(&g_binding_lock);
+    return status;
+}
+
+static kstatus_t socket_stream_resize_status(const socket_private_t *private) {
+    if (atomic_load_explicit(&private->closed, memory_order_acquire))
+        return K_EDEVREMOVED;
+    if (private->connected || private->listening || private->peer != 0 ||
+        private->tcp_state != SOCKET_TCP_CLOSED ||
+        atomic_load_explicit(&private->stream_count, memory_order_relaxed) != 0U ||
+        private->tcp_rx_future_count != 0U || private->tcp_rx_fin_pending)
+        return K_EBUSY;
+    return K_OK;
+}
+
+kstatus_t socket_stream_reserve(socket_t *socket, uint32_t capacity) {
+    socket_private_t *private = socket_private(socket);
+    if (socket == 0 || socket->object.type != KOBJECT_TYPE_SOCKET || private == 0 ||
+        socket->type != OS_SOCK_STREAM ||
+        (socket->family != OS_AF_INET4 && socket->family != OS_AF_INET6) ||
+        capacity < SOCKET_STREAM_BUFFER_SIZE || capacity > SOCKET_STREAM_MAX_CAPACITY ||
+        (capacity & (capacity - 1U)) != 0U) return K_EINVAL;
+    socket_lock(&socket->lock);
+    kstatus_t status = socket_stream_resize_status(private);
+    bool sufficient = capacity <= socket_stream_capacity(private);
+    socket_unlock(&socket->lock);
+    if (status != K_OK || sufficient) return status;
+
+    /* 使用非连续物理页可避免高阶 Buddy 分配压力。只需清除所有权位；未读取的负载绝不会被发布。 */
+    uint8_t *storage = vmalloc((size_t)capacity + (capacity + 7U) / 8U);
+    if (storage == 0) return K_ENOMEM;
+    memset(storage + capacity, 0, (capacity + 7U) / 8U);
+
+    uint8_t *retired = storage;
+    socket_lock(&socket->lock);
+    status = socket_stream_resize_status(private);
+    if (status == K_OK && capacity > socket_stream_capacity(private)) {
+        retired = private->stream_dynamic;
+        private->stream_dynamic = storage;
+        private->stream_capacity = capacity;
+        private->tcp_rx_present = storage + capacity;
+        private->stream_read = private->stream_write = 0U;
+    }
+    socket_unlock(&socket->lock);
+    if (retired != 0) vfree(retired);
     return status;
 }
 
 kstatus_t socket_allocate(uint16_t family, uint16_t type, uint16_t protocol,
                                   socket_t **out) {
     socket_t *socket = (socket_t *)kzalloc(sizeof(*socket), 0);
-    socket_private_t *private = (socket_private_t *)kzalloc(sizeof(*private), 0);
-    if (socket == 0 || private == 0) {
-        kfree(private);
+    /* 小对象分配已经失败后，不要再尝试大型分配。尤其是在无法发布 socket 时，OOM 路径不得进入私有
+     * 接收缓冲区的分配/回收流程。 */
+    if (socket == 0) return K_ENOMEM;
+    size_t private_size = sizeof(socket_private_t);
+    if (type == OS_SOCK_DGRAM)
+        private_size += sizeof(socket_datagram_t) * SOCKET_RX_QUEUE_DEPTH;
+    bool reassembly = type == OS_SOCK_STREAM &&
+        (family == OS_AF_INET4 || family == OS_AF_INET6);
+    if (reassembly)
+        private_size += (SOCKET_STREAM_BUFFER_SIZE + 7U) / 8U;
+    socket_private_t *private = (socket_private_t *)kmalloc(private_size, 0);
+    if (private == 0) {
         kfree(socket);
         return K_ENOMEM;
+    }
+    socket_zero(private, offsetof(socket_private_t, stream_buffer));
+    kstatus_t reservation = socket_registry_reserve();
+    if (reservation != K_OK) {
+        kfree(private);
+        kfree(socket);
+        return reservation;
+    }
+    /* 重用分配区域的尾部，而非另行分配整页。位图与 TCP 缓冲区合计仍可放入同一 Buddy 阶。 */
+    if (reassembly) {
+        private->tcp_rx_present = (uint8_t *)(private + 1);
+        memset(private->tcp_rx_present, 0,
+               (SOCKET_STREAM_BUFFER_SIZE + 7U) / 8U);
     }
     object_header_init(&socket->object, KOBJECT_TYPE_SOCKET,
                        &g_socket_object_ops);
@@ -835,7 +1074,7 @@ kstatus_t socket_allocate(uint16_t family, uint16_t type, uint16_t protocol,
     atomic_init(&private->receive_shutdown, false);
     atomic_init(&private->send_shutdown, false);
     atomic_init(&private->reuse_address, false);
-    atomic_init(&private->tcp_keep_failed, false);
+    atomic_init(&private->tcp_error, 0);
     private->tcp_keepidle = 7200U;
     private->tcp_keepintvl = 75U;
     private->tcp_keepcnt = 9U;
@@ -865,6 +1104,10 @@ kstatus_t socket_shutdown(socket_t *socket, uint32_t how) {
     }
 
     if (how == OS_SOCKET_SHUT_READ || how == OS_SOCKET_SHUT_BOTH) {
+        if (private->tcp_rx_present != 0)
+            memset(private->tcp_rx_present, 0, (socket_stream_capacity(private) + 7U) / 8U);
+        private->tcp_rx_fin_pending = false;
+        private->tcp_rx_future_count = 0U;
         atomic_store_explicit(&private->receive_shutdown, true,
                               memory_order_release);
         private->datagram_read = private->datagram_write = 0U;
@@ -888,8 +1131,7 @@ kstatus_t socket_shutdown(socket_t *socket, uint32_t how) {
         }
     }
 
-    /* Keep the descriptor alive while publishing the half-close to a local
-     * peer.  The peer's own lock is acquired only after releasing ours. */
+    /* 向本地对端发布半关闭状态时保持描述符有效。只有释放当前锁后，才获取对端自身的锁。 */
     if (socket->type == OS_SOCK_STREAM && private->peer != 0 &&
         object_try_get(private->peer)) {
         peer = private->peer;
@@ -941,7 +1183,7 @@ kstatus_t socket_create(uint16_t family, uint16_t type, uint16_t protocol,
 kstatus_t socket_bind(socket_t *socket, uint32_t address, uint16_t port) {
     socket_private_t *private;
     if (socket == 0 || socket->object.type != KOBJECT_TYPE_SOCKET ||
-        socket->family != OS_AF_INET4 || port == 0U) {
+        socket->family != OS_AF_INET4) {
         return K_EINVAL;
     }
     private = socket_private(socket);
@@ -950,7 +1192,7 @@ kstatus_t socket_bind(socket_t *socket, uint32_t address, uint16_t port) {
     }
     socket_initialize_globals();
     socket_lock(&g_binding_lock);
-    kstatus_t status = socket_bind_locked(socket, private, address, port);
+    kstatus_t status = socket_bind_port_locked(socket, private, address, 0, port);
     socket_unlock(&g_binding_lock);
     return status;
 }
@@ -958,14 +1200,14 @@ kstatus_t socket_bind(socket_t *socket, uint32_t address, uint16_t port) {
 kstatus_t socket_bind_ipv6(socket_t *socket, const uint8_t address[16], uint16_t port) {
     socket_private_t *private;
     if (socket == 0 || socket->object.type != KOBJECT_TYPE_SOCKET ||
-        socket->family != OS_AF_INET6 || address == 0 || port == 0U) return K_EINVAL;
+        socket->family != OS_AF_INET6 || address == 0) return K_EINVAL;
     private = socket_private(socket);
     if (private == 0 || atomic_load_explicit(&private->closed, memory_order_acquire)) {
         return K_EDEVREMOVED;
     }
     socket_initialize_globals();
     socket_lock(&g_binding_lock);
-    kstatus_t status = socket_bind6_locked(socket, private, address, port);
+    kstatus_t status = socket_bind_port_locked(socket, private, 0U, address, port);
     socket_unlock(&g_binding_lock);
     return status;
 }
@@ -1053,18 +1295,14 @@ kstatus_t socket_connect(socket_t *socket, uint32_t address, uint16_t port) {
     if (atomic_load_explicit(&private->closed, memory_order_acquire)) return K_EDEVREMOVED;
 
     if (socket->type == OS_SOCK_DGRAM) {
-        /* POSIX connect() implicitly selects a local endpoint for an
-         * unbound datagram socket.  Without this bind, the subsequent
-         * send()/sendto(NULL, 0) path has no source port and returns EINVAL;
-         * Chromium uses exactly that connected-UDP pattern for DNS probes. */
+        /* POSIX connect() 会为尚未绑定的数据报 socket 隐式选择本地端点。若不执行此绑定，后续
+         * send()/sendto(NULL, 0) 将没有源端口并返回 EINVAL；Chromium 的 DNS 探测正使用这种已连接 UDP 模式。 */
         if (!private->bound) {
             kstatus_t bind_status = socket_bind_ephemeral(socket, private);
             if (bind_status != K_OK) return bind_status;
         } else if (private->local_address == 0U) {
-            /* Chromium's RANDOM_BIND path may reserve a port with
-             * INADDR_ANY before connect().  Keep the wildcard binding for
-             * receive matching, but select the active interface as the
-             * connected source address. */
+            /* Chromium 的 RANDOM_BIND 路径可能在 connect() 前使用 INADDR_ANY 预留端口。保留通配符绑定
+             * 以匹配接收数据，但将活动接口选作已连接 socket 的源地址。 */
             uint32_t local_address = socket_active_ipv4_address();
             socket_lock(&socket->lock);
             if (private->local_address == 0U) {
@@ -1091,12 +1329,26 @@ kstatus_t socket_connect(socket_t *socket, uint32_t address, uint16_t port) {
     if (listener != 0 && !object_try_get(listener)) listener = 0;
     socket_unlock(&g_binding_lock);
     if (listener == 0) {
+        /* 已关闭的回环端口应在本地拒绝。绝不通过物理网卡发送 127/8，也不应为浏览器的本地应用探测消耗
+         * 外部 SYN 重试预算。已有监听端使用下方的内核内连接路径。 */
+        if ((address >> 24U) == 127U) {
+            socket_lock(&socket->lock);
+            bool busy = private->connected ||
+                atomic_load_explicit(&private->closed, memory_order_acquire);
+            socket_unlock(&socket->lock);
+            return busy ? K_EBUSY : K_ECONNREFUSED;
+        }
         socket_tcp_ipv4_output_fn output = 0;
         void *output_context = 0;
         uint32_t initial_sequence;
+        uint16_t syn_window;
         kstatus_t output_status;
         socket_tcp_output_get(&output, &output_context);
         if (output == 0) return K_ENOENT;
+
+        /* 尽力执行；在发布前完成，并且不持有任何传输层保护。OOM 时保留内嵌环形缓冲区和常规旧式握手。 */
+        kstatus_t reserve = socket_stream_reserve(socket, SOCKET_STREAM_TCP_CAPACITY);
+        if (reserve != K_OK && reserve != K_ENOMEM) return reserve;
 
         socket_lock(&socket->lock);
         if (private->connected ||
@@ -1115,12 +1367,15 @@ kstatus_t socket_connect(socket_t *socket, uint32_t address, uint16_t port) {
         private->tcp_send_flags = NET_TCP_FLAG_SYN;
         private->tcp_send_retransmits = 0U;
         private->tcp_send_pending = true;
+        private->tcp_local_retry_tsc = 0U;
         private->tcp_send_failed = false;
-        atomic_store_explicit(&private->tcp_keep_failed, false, memory_order_release);
+        atomic_store_explicit(&private->tcp_error, 0, memory_order_release);
         private->tcp_send_deadline_tsc = socket_tcp_retransmit_deadline(x86_read_tsc());
         private->tcp_peer_window = 0U;
         private->tcp_sequence_valid = false;
+        socket_tcp_prepare_scale(private, true);
         private->tcp_state = SOCKET_TCP_SYN_SENT;
+        syn_window = socket_tcp_receive_window(private, true);
         socket_unlock(&socket->lock);
 
         socket_lock(&g_binding_lock);
@@ -1138,7 +1393,7 @@ kstatus_t socket_connect(socket_t *socket, uint32_t address, uint16_t port) {
         output_status = output(output_context, private->local_address,
                                private->local_port, address, port,
                                initial_sequence, 0U, NET_TCP_FLAG_SYN,
-                               SOCKET_STREAM_BUFFER_SIZE, 0, 0U);
+                               syn_window, 0, 0U);
 #if OS_DEBUG_SERIAL
         if (g_debug_tcp_connect_logs < 16U) {
             kernel_serial_printf_serial_only(
@@ -1148,7 +1403,14 @@ kstatus_t socket_connect(socket_t *socket, uint32_t address, uint16_t port) {
             ++g_debug_tcp_connect_logs;
         }
 #endif
-        /* ARP 閺堫亜鎳℃稉顓熸 SYN 閻ｆ瑥婀柌宥勭炊闂冪喎鍨敍灞芥倵缂侇叀鐤嗙拠顫窗閸愬秵顐肩亸婵婄槸閸欐垿鈧降鈧?*/
+        socket_lock(&socket->lock);
+        bool failed = socket_tcp_local_output_locked(private, initial_sequence, initial_sequence + 1U,
+                                                      output_status, x86_read_tsc());
+        socket_unlock(&socket->lock);
+        if (failed) {
+            (void)wake_all(&socket->waitq);
+            object_notify_changed(socket);
+        }
         return output_status == K_EAGAIN ? K_OK : output_status;
     }
 
@@ -1233,14 +1495,26 @@ kstatus_t socket_connect_ipv6(socket_t *socket, const uint8_t address[16], uint1
     socket_tcp_ipv6_output_fn output = 0;
     void *output_context = 0;
     uint32_t initial_sequence;
+    uint16_t syn_window;
     kstatus_t output_status;
     if (socket == 0 || socket->object.type != KOBJECT_TYPE_SOCKET ||
         socket->family != OS_AF_INET6 || private == 0 || address == 0 || port == 0U ||
         socket_address6_zero(address)) return K_EINVAL;
     if (atomic_load_explicit(&private->closed, memory_order_acquire)) return K_EDEVREMOVED;
+    uint8_t selected_source[16];
+    kstatus_t route_status = socket_ipv6_connect_source(address, selected_source);
+    if (route_status != K_OK) return route_status;
+    socket_lock(&socket->lock);
+    bool incompatible_source = private->bound &&
+        !socket_address6_zero(private->local_address6) &&
+        !socket_address6_equal(private->local_address6, selected_source);
+    if (private->bound && !incompatible_source)
+        socket_copy(private->local_address6, selected_source, 16U);
+    socket_unlock(&socket->lock);
+    if (incompatible_source) return K_ENETUNREACH;
     if (socket->type == OS_SOCK_DGRAM) {
         if (!private->bound) {
-            kstatus_t bind_status = socket_bind6_ephemeral(socket, private);
+            kstatus_t bind_status = socket_bind6_ephemeral(socket, private, selected_source);
             if (bind_status != K_OK) return bind_status;
         }
         socket_lock(&socket->lock);
@@ -1251,11 +1525,29 @@ kstatus_t socket_connect_ipv6(socket_t *socket, const uint8_t address[16], uint1
         return K_OK;
     }
     if (!private->bound) {
-        kstatus_t bind_status = socket_bind6_ephemeral(socket, private);
+        kstatus_t bind_status = socket_bind6_ephemeral(socket, private, selected_source);
         if (bind_status != K_OK) return bind_status;
+    }
+    /* 在分配接收环、发布 SYN 状态或查找物理输出前，先处理 IPv4 关闭回环端口的拒绝。浏览器的本地应用
+     * 探测不得等待外部重传超时。现有监听端处理和非回环路由保持不变。 */
+    static const uint8_t loopback[16] = {[15] = 1U};
+    if (socket_address6_equal(address, loopback)) {
+        socket_initialize_globals();
+        socket_lock(&g_binding_lock);
+        int32_t listener = socket_find_binding6_locked(address, port, OS_SOCK_STREAM, true);
+        socket_unlock(&g_binding_lock);
+        if (listener < 0) {
+            socket_lock(&socket->lock);
+            bool busy = private->connected ||
+                atomic_load_explicit(&private->closed, memory_order_acquire);
+            socket_unlock(&socket->lock);
+            return busy ? K_EBUSY : K_ECONNREFUSED;
+        }
     }
     socket_tcp6_output_get(&output, &output_context);
     if (output == 0) return K_ENOENT;
+    kstatus_t reserve = socket_stream_reserve(socket, SOCKET_STREAM_TCP_CAPACITY);
+    if (reserve != K_OK && reserve != K_ENOMEM) return reserve;
     socket_lock(&socket->lock);
     if (private->connected || atomic_load_explicit(&private->closed, memory_order_acquire)) {
         socket_unlock(&socket->lock);
@@ -1272,12 +1564,15 @@ kstatus_t socket_connect_ipv6(socket_t *socket, const uint8_t address[16], uint1
     private->tcp_send_flags = NET_TCP_FLAG_SYN;
     private->tcp_send_retransmits = 0U;
     private->tcp_send_pending = true;
+    private->tcp_local_retry_tsc = 0U;
     private->tcp_send_failed = false;
-    atomic_store_explicit(&private->tcp_keep_failed, false, memory_order_release);
+    atomic_store_explicit(&private->tcp_error, 0, memory_order_release);
     private->tcp_send_deadline_tsc = socket_tcp_retransmit_deadline(x86_read_tsc());
     private->tcp_peer_window = 0U;
     private->tcp_sequence_valid = false;
+    socket_tcp_prepare_scale(private, true);
     private->tcp_state = SOCKET_TCP_SYN_SENT;
+    syn_window = socket_tcp_receive_window(private, true);
     uint8_t source_address[16];
     socket_copy(source_address, private->local_address6, 16U);
     socket_unlock(&socket->lock);
@@ -1295,7 +1590,15 @@ kstatus_t socket_connect_ipv6(socket_t *socket, const uint8_t address[16], uint1
     }
     output_status = output(output_context, source_address, private->local_port,
                            address, port, initial_sequence, 0U, NET_TCP_FLAG_SYN,
-                           SOCKET_STREAM_BUFFER_SIZE, 0, 0U);
+                           syn_window, 0, 0U);
+    socket_lock(&socket->lock);
+    bool failed = socket_tcp_local_output_locked(private, initial_sequence, initial_sequence + 1U,
+                                                  output_status, x86_read_tsc());
+    socket_unlock(&socket->lock);
+    if (failed) {
+        (void)wake_all(&socket->waitq);
+        object_notify_changed(socket);
+    }
     return output_status == K_EAGAIN ? K_OK : output_status;
 }
 

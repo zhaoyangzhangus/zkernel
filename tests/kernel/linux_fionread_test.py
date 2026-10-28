@@ -6,7 +6,8 @@ import tempfile
 root = Path(__file__).resolve().parents[2]
 linux = (root / 'kernel/syscall/linux.c').read_text()
 pipe = (root / 'kernel/ipc/pipe.c').read_text()
-helper = linux[linux.index('static int64_t linux_fionread('):linux.index('static int64_t linux_ioctl(')]
+start = linux.index('static int64_t linux_fionread(')
+helper = linux[start:linux.index('\n}', start) + 2]
 snapshot = pipe[pipe.index('kstatus_t pipe_pending_bytes('):pipe.index('kstatus_t pipe_stat(')]
 fixture = r'''
 #include <stdint.h>

@@ -12,7 +12,7 @@ from trace_build import validate_chrome_build,_chrome_build_id
 from guest_memory import read_user
 validate_chrome_build('Build ID: bade6abd6c51df18')
 expected='Build ID: 92ef122fa8ec44beedd1866b47c1bd2180669d26'
-for path in ('build/esp/compat/linux/lib/x86_64-linux-gnu/libos-vulkan-video.so.1',
+for path in ('build/esp/usr/apps/chrome/lib/libos-vulkan-video.so.1',
              'build/nvidia/vulkan/libos-vulkan-video.so.1'):
     if _chrome_build_id(Path(path))!=expected:
         raise gdb.GdbError('Refuse stale video-library reference probe offsets')

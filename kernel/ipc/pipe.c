@@ -248,6 +248,12 @@ kstatus_t pipe_shutdown(pipe_endpoint_t *endpoint) {
 
 kstatus_t pipe_read(pipe_endpoint_t *endpoint, void *buffer, size_t length,
                     uint64_t timeout_ns, uint64_t *bytes) {
+    return pipe_read_limited(endpoint, buffer, length, timeout_ns, bytes, 0, 0);
+}
+
+kstatus_t pipe_read_limited(pipe_endpoint_t *endpoint, void *buffer, size_t length,
+                            uint64_t timeout_ns, uint64_t *bytes,
+                            pipe_read_limit_fn limit, void *context) {
     pipe_state_t *state;
     size_t amount;
     if (!pipe_is_endpoint(endpoint) || !endpoint->read_end || bytes == 0 ||
@@ -265,6 +271,14 @@ kstatus_t pipe_read(pipe_endpoint_t *endpoint, void *buffer, size_t length,
         }
         if (state->count != 0U) {
             amount = state->count < length ? state->count : length;
+            if (limit != 0) {
+                size_t bounded = limit(context, amount);
+                if (bounded == 0U || bounded > amount) {
+                    pipe_unlock(state);
+                    return K_EINVAL;
+                }
+                amount = bounded;
+            }
             pipe_copy_out(state, (uint8_t *)buffer, amount);
             pipe_endpoint_t *peer = pipe_get_peer_locked(state, false);
             pipe_unlock(state);

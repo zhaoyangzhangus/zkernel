@@ -26,10 +26,10 @@ code = r'''
 typedef int kstatus_t;
 enum { K_OK, K_EINVAL, K_EOVERFLOW, K_EACCES, K_EIO };
 typedef struct entry { uint64_t index; void *page; bool dirty;
- struct entry *next, *hash_next; } vfs_cached_page_t;
+ struct entry *next, *hash_next; uint64_t writeback_generation; } vfs_cached_page_t;
 typedef struct { vfs_cached_page_t *head, *buckets[256];
  vfs_cached_page_t **expanded_buckets; uint32_t bucket_count;
- uint64_t entry_count, growth_retry_at; } vfs_page_cache_t;
+ uint64_t entry_count, growth_retry_at, writeback_generation; } vfs_page_cache_t;
 static void *kzalloc(size_t n, int flags) { (void)flags; return calloc(1,n); }
 static void kfree(void *p) { free(p); }
 typedef struct { void *context; int (*write)(void *, uint64_t, void *, size_t, uint64_t *); } vfs_backend_node_t;
@@ -39,6 +39,7 @@ static uint64_t last_offset; static size_t last_length;
 static void vfs_backend_lock(void *b) { (void)b; ++locks; }
 static void vfs_backend_unlock(void *b) { (void)b; --locks; }
 static void *page_to_phys(void *p) { return p; }
+static bool vfs_page_cache_still_mapped(vfs_cached_page_t *entry) { (void)entry; return false; }
 static void *phys_to_direct(void *p) { return p; }
 static int write_page(void *c, uint64_t o, void *p, size_t n, uint64_t *w) {
  (void)c; (void)p; assert(locks==1); ++writes; last_offset=o; last_length=n;

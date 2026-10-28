@@ -7,8 +7,8 @@ import tempfile
 
 root = Path(__file__).resolve().parents[2]
 source = (root/'tools/stage-chrome.sh').read_text()
-start = source.index('# The previous linked binary remains present')
-end = source.index('mkdir -p "$stage_dir"',start)
+start = source.index('# 增量构建期间，旧的已链接二进制仍然存在。')
+end = source.index('# 原生移植版的 H.264',start)
 gate = source[start:end]
 with tempfile.TemporaryDirectory(prefix='chrome-stage-gate-') as directory:
     path = Path(directory)

@@ -80,6 +80,21 @@ static void insert(unsigned id,unsigned count) {
     assert(comparisons<=2*log && updates<=2*log+5);check(count);
 }
 int main(void) {
+    /* 反复裁短内部区域：独立遍历统计原路径长度，验证摘要稳定后确实省去祖先更新。 */
+    prepare();
+    for(unsigned i=0;i<N;++i) {
+        areas[i].end=areas[i].start+2*PAGE_SIZE;link_area(i);
+    }
+    rebuild_area_tree(&space);check(N);
+    unsigned full_path=0,actual=0;
+    for(unsigned i=1;i<N-1;++i) {
+        for(rb_node_t *node=&areas[i].rb;node;node=rb_tree_parent(node))++full_path;
+        areas[i].end-=PAGE_SIZE;updates=0;update_area_tree(&areas[i]);actual+=updates;
+        if((i&63)==0)check(N);
+    }
+    check(N);
+    printf("VMA boundary summaries: %u updates versus %u full-path updates\n",actual,full_path);
+    assert(actual<full_path*3/4);
     for(unsigned order=0;order<4;++order){prepare();
         for(unsigned i=0;i<N;++i){unsigned id=i;
             if(order==1)id=N-1-i;
@@ -128,3 +143,14 @@ with tempfile.TemporaryDirectory(prefix='liteos-vma-insert-') as directory:
                     '-fno-pie', '-no-pie', '-x', 'c', '-', '-o', binary],
                    input=program, text=True, check=True)
     subprocess.run([binary], check=True, timeout=60)
+    # 同一工作负载应拒绝始终传播到根的旧策略，防止优化检查失效。
+    baseline = program.replace('update_area_path(&area->rb, true);',
+                               'update_area_path(&area->rb, false);')
+    assert baseline != program
+    subprocess.run(['cc', '-std=c11', '-O2', '-Wall', '-Wextra', '-Werror',
+                    '-I'+str(root/'include'), '-fno-pie', '-no-pie',
+                    '-x', 'c', '-', '-o', binary],
+                   input=baseline, text=True, check=True)
+    result = subprocess.run([binary], capture_output=True, timeout=10)
+    assert result.returncode != 0 and b'actual<full_path*3/4' in result.stderr
+    print('始终传播到根的负面对照已被更新预算检查拒绝')

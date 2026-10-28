@@ -6,7 +6,10 @@ import tempfile
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--sanitize', action='store_true')
+parser.add_argument('--repeat', type=int, default=1)
 args = parser.parse_args()
+if args.repeat < 1:
+    parser.error('--repeat must be positive')
 root = Path(__file__).resolve().parents[2]
 source = (root / 'user/libc/pthread.c').read_text()
 locks = source[source.index('static void key_lock(void)'):
@@ -64,7 +67,14 @@ static void *worker(void *argument) {
         int error=fixture_setspecific(changing,value);
         assert(error==0 || error==EINVAL);
         void *raced=fixture_getspecific(changing);
-        assert(!raced || raced==value);
+        if(raced && raced!=value){
+            fprintf(stderr,"TLS mismatch worker=%lu iteration=%u set_error=%d expected=%p got=%p slot_generation=%u key_generation=%u bitmap=%llx\n",
+                (unsigned long)id,i,error,value,raced,
+                __atomic_load_n(&local_thread.specific_generation[changing],__ATOMIC_ACQUIRE),
+                __atomic_load_n(&g_key_generation[changing],__ATOMIC_ACQUIRE),
+                (unsigned long long)__atomic_load_n(&g_key_bitmap,__ATOMIC_ACQUIRE));
+            assert(!raced || raced==value);
+        }
     }
     return 0;
 }
@@ -117,4 +127,5 @@ with tempfile.TemporaryDirectory(prefix='system-tls-fast-') as directory:
     subprocess.run(['cc', '-O2', '-std=c11', '-Wall', '-Wextra', '-Werror', *flags,
                     '-pthread', '-x', 'c', '-', '-o', binary],
                    input=program, text=True, check=True)
-    subprocess.run([binary], check=True, timeout=15)
+    for _ in range(args.repeat):
+        subprocess.run([binary], check=True, timeout=15)

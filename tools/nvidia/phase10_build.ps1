@@ -227,8 +227,8 @@ Invoke-CompileIfChanged (Join-Path $repoRoot 'tools\nvidia\phase10_egl_context_t
 $hostLinkArgs = @(
     '-nostdlib', '-nodefaultlibs', '-nostartfiles',
     '-Wl,--build-id=none',
-    '-Wl,-dynamic-linker,/lib64/ld-linux-x86-64.so.2',
-    '-Wl,-rpath,/compat/linux/lib/x86_64-linux-gnu:/compat/linux/lib',
+    '-Wl,-dynamic-linker,/usr/apps/p10-egl-context/lib/ld-linux-x86-64.so.2',
+    '-Wl,-rpath,/usr/apps/p10-egl-context/lib',
     '-Wl,--disable-new-dtags',
     '-Wl,--allow-shlib-undefined',
     ('-Wl,-rpath-link,{0}' -f $hostRunLib.Replace('\', '/')),

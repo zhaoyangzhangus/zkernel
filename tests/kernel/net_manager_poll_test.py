@@ -13,15 +13,16 @@ code=r'''
 #include <stdio.h>
 static unsigned event_builds;
 ''' + source + r'''
-static bool present,link,ipv6,interrupts,deny_ref,reenter;
+static bool present,link,ipv6,interrupts,deny_ref,reenter,mode_busy;
 static uint32_t ip,gateway;
 static uint8_t prefix,mac[6],address6[16];
 static unsigned tcp_polls,retries,kicks,samples,sends;
+static uint64_t clock_now=12345;
 static message_port_t ports[2];
 static os_net_event_t last_event;
-uint64_t x86_read_tsc(void) {return 12345;}
-void socket_tcp_poll(uint64_t now) {assert(now==12345);++tcp_polls;}
-bool e1000_interrupt_ready(void) {return interrupts;}
+uint64_t x86_read_tsc(void) {return clock_now;}
+void socket_tcp_poll(uint64_t now) {assert(now==clock_now);++tcp_polls;}
+bool e1000_polling_required(void) {return !mode_busy && !interrupts;}
 bool e1000_schedule_deferred_poll(void) {++kicks;return true;}
 void e1000_retry_deferred_poll(void) {++retries;}
 bool e1000_hardware_present(void) {++samples;return present;}
@@ -86,22 +87,31 @@ int main(void) {
     for(unsigned i=0;i<16;++i)assert(!status.ipv6_address[i]);
     for(unsigned i=0;i<6;++i)assert(!status.mac[i]);
     unsigned previous_kicks=kicks;interrupts=true;
+    net_manager_poll();assert(kicks==previous_kicks);
+    previous_kicks=kicks;
     for(unsigned i=0;i<10000;++i)net_manager_poll();
     assert(kicks==previous_kicks && retries==tcp_polls && event_builds==3);
     present=true;link=true;sample();
     previous_kicks=kicks;
     for(unsigned i=0;i<63;++i)net_manager_poll();
     assert(kicks==previous_kicks); /* MSI fast path stays interrupt-driven. */
-    net_manager_poll();assert(kicks==previous_kicks+1);
-    for(unsigned i=0;i<64*100;++i)net_manager_poll();
-    assert(kicks==previous_kicks+101); /* Bounded lost-interrupt watchdog. */
+    net_manager_poll();assert(kicks==previous_kicks);
+    for(unsigned i=0;i<10000;++i)net_manager_poll();
+    assert(kicks==previous_kicks); /* Loop count cannot accelerate the clock. */
+    clock_now+=2000;net_manager_poll();assert(kicks==previous_kicks);
+    clock_now=UINT64_MAX;net_manager_poll();assert(kicks==previous_kicks);
+    clock_now=10;net_manager_poll();assert(kicks==previous_kicks);
+    interrupts=false;mode_busy=true;
+    for(unsigned i=0;i<10000;++i)net_manager_poll();
+    assert(kicks==previous_kicks); /* Busy is not a request for fallback RX. */
+    mode_busy=false;
     interrupts=false;previous_kicks=kicks;
     for(unsigned i=0;i<128;++i)net_manager_poll();
     assert(kicks==previous_kicks+128); /* Never double-kick at sample ticks. */
     assert(net_manager_subscribe(NULL)==K_OK);refs(1,1);
     ports[0].object.type=KOBJECT_TYPE_SOCKET;
     assert(net_manager_subscribe(&ports[0])==K_EINVAL);refs(1,1);
-    puts("Net manager poll: cadence/TCP/retry clocks, complete status/event snapshots, silent polls, failed references/sends, reentrant subscriber replacement and balanced refs PASS");
+    puts("Net manager poll: MSI has no periodic RX fallback; TCP/retry clocks, status cadence, complete snapshots, subscriber lifetime and balanced refs PASS");
 }
 '''
 with tempfile.TemporaryDirectory(prefix='liteos-net-poll-') as directory:
@@ -111,3 +121,13 @@ with tempfile.TemporaryDirectory(prefix='liteos-net-poll-') as directory:
                     '-fno-pie','-no-pie','-x','c','-','-o',binary],
                    input=code,text=True,check=True)
     subprocess.run([binary],check=True,timeout=30)
+    for label,old,new in [
+        ('unconditional RX polling','if (e1000_polling_required())', 'if (true)')]:
+        assert old in code
+        broken=code.replace(old,new)
+        subprocess.run(['cc','-std=c11','-O2','-Wall','-Wextra','-Werror',
+                        '-I'+str(root/'include'),'-fsanitize=address,undefined',
+                        '-fno-pie','-no-pie','-x','c','-','-o',binary],
+                       input=broken,text=True,check=True)
+        assert subprocess.run([binary],capture_output=True,timeout=30).returncode != 0
+        print('Negative control rejected: '+label)

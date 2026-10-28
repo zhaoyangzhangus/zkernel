@@ -115,7 +115,7 @@ static int64_t runtime_syscall4(uint64_t number, uint64_t argument0,
                               argument3, 0U, 0U);
 }
 
-/* Failure-only loader diagnostics. */
+/* 仅在加载失败时输出诊断。 */
 static void runtime_diag(const char *message) {
     uint64_t length = 0U;
     if (message == 0) return;
@@ -599,11 +599,10 @@ static bool initialize_main_image(uint64_t stack, loaded_image_t *image) {
     return image->dynamic_address != 0U && parse_dynamic(image);
 }
 
-/* Keep a private TLS template and place a tiny System TCB after an aligned
- * copy of PT_TLS.  The FS offset is align_up(p_memsz, p_align), not p_memsz:
- * fs:0 is the TLS self pointer required by the local-exec ABI, fs:8 is the
- * exact TLS size, fs:16 is the template, fs:24 is a validation marker, and
- * fs:32 is the System pthread_t, fs:40 is PT_TLS alignment. */
+/* 保留私有 TLS 模板，并在按 PT_TLS 对齐的副本后放置精简的 System TCB。
+ * FS 偏移是 align_up(p_memsz, p_align)，而不是 p_memsz：fs:0 是 local-exec ABI
+ * 要求的 TLS 自指针，fs:8 是精确 TLS 大小，fs:16 是模板，fs:24 是验证标记，
+ * fs:32 是 System pthread_t，fs:40 是 PT_TLS 对齐值。 */
 static bool setup_main_tls(const loaded_image_t *image) {
     const runtime_elf64_program_header_t *tls = 0;
     uint64_t tls_source;
@@ -691,10 +690,9 @@ static bool setup_main_tls(const loaded_image_t *image) {
     return true;
 }
 
-/* x86-64 variant-II static TLS: keep the executable nearest FS, then put
- * startup DSOs below it. Respect the TLS segment's first-byte alignment phase.
- * The existing six-word TCB describes the whole immutable template, so pthread
- * creation can clone all startup modules without changing the deployed ABI. */
+/* x86-64 variant-II 静态 TLS：可执行文件最靠近 FS，启动时加载的 DSO 放在其下方。
+ * 遵循 TLS 段首字节的对齐相位。现有六字 TCB 描述整个不可变模板，因此 pthread
+ * 创建线程时可以复制所有启动模块，而无需更改已部署 ABI。 */
 static bool plan_static_tls(loaded_image_t *images, uint32_t count,
                             uint64_t *total, uint64_t *alignment) {
     const uint64_t limit = 1ULL << 20U;
@@ -905,7 +903,7 @@ static bool make_library_path(const char *name, char path[OS_RT_MAX_PATH]) {
     return true;
 }
 
-/* Absolute and SONAME dependencies must share one libc state. */
+/* 绝对路径和 SONAME 依赖必须共用同一份 libc 状态。 */
 static const char *canonical_library_name(const char *name) {
     if (same_string(name, "/lib/libsystemc.so.1")) return "libsystemc.so.1";
     return name;
@@ -1106,8 +1104,8 @@ static bool apply_relocation_table(const loaded_image_t *images, uint32_t count,
         uint64_t symbol = 0U;
         uint64_t value;
         if (type == OS_RT_R_X86_64_NONE) continue;
-        /* Resolvers can call other DSOs and read TLS. Defer their execution
-         * until every ordinary relocation, TLS and executable mapping is ready. */
+        /* 解析器可能调用其他 DSO 并读取 TLS。将其延后到所有常规重定位、TLS 和
+         * 可执行映射准备就绪后再执行。 */
         if (type == OS_RT_R_X86_64_IRELATIVE) {
             if (symbol_index != 0U ||
                 !relocation_target(image, rela->offset, sizeof(uint64_t), &target)) {
@@ -1271,9 +1269,8 @@ uint64_t runtime_linker_main(uint64_t initial_stack) {
         runtime_diag("OS_DIAG_RT_FAIL main-image\r\n");
         return 0U;
     }
-    /* A large PIE such as Chrome can extend past the historical fixed
-     * library base.  Place DSOs after the main image so their fixed mappings
-     * cannot collide with the executable's PT_LOAD span. */
+    /* Chrome 这样的大型 PIE 可能超出历史固定库基址。将 DSO 放在主映像之后，
+     * 避免其固定映射与可执行文件的 PT_LOAD 范围冲突。 */
     if (images[0].image_end >= next_base) {
         if (!add_u64(images[0].image_end, OS_RT_LIBRARY_GAP,
                      &library_floor) ||

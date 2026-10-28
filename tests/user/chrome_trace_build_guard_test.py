@@ -25,7 +25,7 @@ for configuration, output in (({'CHROMIUM_OUT':'/fixture/custom output'},'/fixtu
          patch('trace_build.subprocess.check_output',return_value='Build ID: ABC123\n') as read:
         validate_chrome_build(expected)
         assert [call.args[0] for call in read.call_args_list]==[
-            ['readelf','-n',str(ROOT/'build/esp/sbin/chrome')],
+            ['readelf','-n',str(ROOT/'build/esp/usr/apps/chrome/chrome')],
             ['readelf','-n',str(Path(output)/'chrome')]]
 reject(['Build ID: abc1230\n'])
 reject(['Build ID: abc123\n','Build ID: 123abc\n'])

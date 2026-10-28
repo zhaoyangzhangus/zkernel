@@ -1,12 +1,11 @@
 #pragma once
 
 /*
- * NVIDIA 595.84 kernel-open/nvidia frontend UAPI.
+ * NVIDIA 595.84 kernel-open/nvidia 前端 UAPI。
  *
- * This is a System-side ABI header.  The immutable vendor headers remain the
- * layout reference; do not change these structures into native System
- * objects.  The types below intentionally use fixed-width C types so the
- * Linux x86-64 ioctl ABI is identical in the kernel and in a probe binary.
+ * 这是 System 侧 ABI 头文件。不可修改的供应商头文件仍是布局参考；不要将这些结构改为
+ * System 原生对象。下方类型刻意采用固定宽度 C 类型，使内核与探测二进制中的
+ * Linux x86-64 ioctl ABI 保持一致。
  */
 
 #include <stdint.h>
@@ -27,8 +26,7 @@
 #define NV_FRONTEND_ESC_EXPORT_TO_DMABUF_FD (NV_FRONTEND_IOCTL_BASE + 17U)
 #define NV_FRONTEND_ESC_WAIT_OPEN_COMPLETE (NV_FRONTEND_IOCTL_BASE + 18U)
 
-/* These legacy RM escape numbers are not in the public ioctl-number header,
- * but are part of the 595.84 Linux frontend ABI. */
+/* 这些旧版 RM escape 编号未列入公共 ioctl 编号头文件，但属于 595.84 Linux 前端 ABI。 */
 #define NV_FRONTEND_ESC_RM_FREE             41U
 #define NV_FRONTEND_ESC_RM_CONTROL          42U
 #define NV_FRONTEND_ESC_RM_ALLOC            43U
@@ -134,8 +132,8 @@ typedef struct nv_frontend_wait_open_complete {
     uint32_t adapter_status;
 } nv_frontend_wait_open_complete_t;
 
-/* Vendor NVOS64_PARAMETERS (NV04_ALLOC_WITH_ACCESS), kept as a fixed-width
- * Linux x86-64 ABI type at the System frontend boundary. */
+/* 供应商 NVOS64_PARAMETERS（NV04_ALLOC_WITH_ACCESS），在 System 前端边界处保持为
+ * 固定宽度的 Linux x86-64 ABI 类型。 */
 typedef struct nv_frontend_nvos64_parameters {
     uint32_t h_root;
     uint32_t h_object_parent;
@@ -148,7 +146,7 @@ typedef struct nv_frontend_nvos64_parameters {
     uint32_t status;
 } nv_frontend_nvos64_parameters_t;
 
-/* Vendor NVOS00_PARAMETERS (NV04_FREE). */
+/* 供应商 NVOS00_PARAMETERS（NV04_FREE）。 */
 typedef struct nv_frontend_nvos00_parameters {
     uint32_t h_root;
     uint32_t h_object_parent;
@@ -156,7 +154,7 @@ typedef struct nv_frontend_nvos00_parameters {
     uint32_t status;
 } nv_frontend_nvos00_parameters_t;
 
-/* Vendor NVOS54_PARAMETERS (NV04_CONTROL). */
+/* 供应商 NVOS54_PARAMETERS（NV04_CONTROL）。 */
 typedef struct nv_frontend_nvos54_parameters {
     uint32_t h_client;
     uint32_t h_object;
@@ -167,7 +165,7 @@ typedef struct nv_frontend_nvos54_parameters {
     uint32_t status;
 } nv_frontend_nvos54_parameters_t;
 
-/* Linux x86-64 _IOC encoding used by the immutable 595.84 frontend. */
+/* 不可修改的 595.84 前端使用的 Linux x86-64 _IOC 编码。 */
 #define NV_FRONTEND_IOC_NRBITS    8U
 #define NV_FRONTEND_IOC_TYPEBITS  8U
 #define NV_FRONTEND_IOC_SIZEBITS  14U

@@ -95,5 +95,12 @@ kstatus_t audio_stream_period_write(audio_stream_t *stream, uint32_t period,
                                     const void *buffer, uint64_t bytes);
 kstatus_t audio_stream_period_read(audio_stream_t *stream, uint32_t period,
                                    void *buffer, uint64_t bytes);
+/* 一次性提交播放数据，写入与入队共同持有流锁。 */
+kstatus_t audio_stream_submit(audio_stream_t *stream, uint32_t period,
+                               const void *buffer, uint64_t bytes,
+                               uint32_t frames, uint64_t *submission);
+/* 仅撤销尚未完成且标识匹配的提交，供后端提交失败时回滚。 */
+kstatus_t audio_stream_cancel_submit(audio_stream_t *stream, uint32_t period,
+                                     uint64_t submission);
 void audio_stream_get_stats(audio_stream_t *stream, audio_stream_stats_t *stats);
 bool audio_core_self_test(void);

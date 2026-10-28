@@ -8,9 +8,12 @@ struct thread;
 struct wait_queue;
 struct waiter;
 
-/* Bound temporary stack storage for the common small wait set. Larger
- * sets retain checked dynamic allocation; subscription lifetime is unchanged. */
+/* 限制常见小型等待集合使用的临时栈空间。较大的集合仍通过检查后的动态分配处理；
+ * 订阅生命周期保持不变。 */
 #define WAIT_INLINE_QUEUE_COUNT 4U
+
+/* 栈等待者发布期间，取消策略不可变。 */
+#define WAIT_FLAG_UNINTERRUPTIBLE 1U
 
 typedef struct wait_subscription {
     list_head_t queue_node;
@@ -51,16 +54,20 @@ typedef struct completion {
 
 void wait_queue_init(wait_queue_t *q);
 kstatus_t wait_on_queue(wait_queue_t *q, bool (*predicate)(void *), void *ctx, uint64_t timeout_ns);
+/* 仅供内部关键操作使用：延迟取消并保留待处理终止标记。就绪或超时仍会正常结束等待。 */
+kstatus_t wait_on_queue_uninterruptible(wait_queue_t *q,
+                                       bool (*predicate)(void *), void *ctx,
+                                       uint64_t timeout_ns);
 kstatus_t wait_on_queues(wait_queue_t *const *queues, size_t count,
                          bool (*predicate)(void *), void *ctx,
                          uint64_t timeout_ns);
-/* Scratch array may be sorted/compacted; caller owns its storage throughout. */
+/* 临时数组可能被排序/压缩；整个过程中均由调用方管理其存储。 */
 kstatus_t wait_on_queues_in_place(wait_queue_t **queues, size_t count,
                                  bool (*predicate)(void *), void *ctx,
                                  uint64_t timeout_ns);
 uint32_t wake_one(wait_queue_t *q);
 uint32_t wake_all(wait_queue_t *q);
-/* Caller owns a thread reference; its stack waiter is loaded under the wait lock. */
+/* 调用方持有线程引用；栈等待者在等待锁保护下读取。 */
 bool wait_cancel_thread(struct thread *thread);
 void wait_poll_timeouts(uint64_t now_tsc);
 

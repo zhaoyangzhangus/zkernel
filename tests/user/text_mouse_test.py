@@ -2,6 +2,8 @@
 from pathlib import Path
 import subprocess
 import tempfile
+import resource
+import signal
 
 root = Path(__file__).resolve().parents[2]
 def extract(file, signature):
@@ -21,6 +23,7 @@ common = r'''
 #include <stddef.h>
 #include <string.h>
 #include <uapi/window.h>
+#include <uapi/utf8.h>
 #define OS_TEXT_WIDTH 8U
 #define OS_TEXT_HEIGHT 20U
 static uint32_t test_caption_height=0U,status_height=0U;
@@ -35,15 +38,14 @@ static char g_text[NOTEPAD_TEXT_CAPACITY];
 static size_t g_text_length,g_cursor,g_selection_anchor=SIZE_MAX;
 static uint32_t g_scroll_line;
 static bool g_follow_cursor,g_shift,g_dirty,g_mouse_selecting;
-static unsigned edits,renders;
+static unsigned edits,renders,hit_queries;
 static void begin_edit(void){++edits;}
 static void set_status(const char *s){(void)s;}
-static void notepad_damage_editor(void){}
 static void render(void){++renders;}
 static void scroll_editor(int32_t delta){if(delta>0)++g_scroll_line;else if(g_scroll_line)--g_scroll_line;}
-''' + '\n'.join(extract('user/desktop/notepad/main.c', signature) for signature in (
+''' + '\n'.join((extract('user/desktop/notepad/main.c', signature).replace('{', '{++hit_queries;',1) if signature=='static size_t editor_mouse_offset(' else extract('user/desktop/notepad/main.c', signature)) for signature in (
     'static uint32_t editor_columns(', 'static uint32_t editor_visible_lines(',
-    'static void advance_position(', 'static size_t offset_at_position(',
+    'static void prepare_position(', 'static void advance_position(', 'static size_t offset_at_position(',
     'static bool has_selection(', 'static void erase_selection(',
     'static void insert_character(', 'static void backspace(',
     'static void delete_character(', 'static size_t editor_mouse_offset(',
@@ -52,6 +54,7 @@ int main(void) {
  strcpy(g_text,"abc\ndef\tz\n");g_text_length=strlen(g_text);
  os_window_event_t e={.input={.type=OS_INPUT_EVENT_BUTTON,.code=OS_INPUT_BUTTON_LEFT,.value=OS_INPUT_VALUE_PRESS},.pointer_x=26,.pointer_y=0};
  assert(handle_editor_mouse(&e) && g_cursor==2 && g_selection_anchor==2);
+ assert(hit_queries==1);
  e.input.type=OS_INPUT_EVENT_RELATIVE;e.input.code=OS_INPUT_REL_X;e.pointer_x=42;e.pointer_y=20;
  assert(handle_editor_mouse(&e) && g_cursor==8);
  e.input.type=OS_INPUT_EVENT_BUTTON;e.input.code=OS_INPUT_BUTTON_LEFT;e.input.value=OS_INPUT_VALUE_RELEASE;
@@ -82,6 +85,29 @@ int main(void) {
  g_scroll_line=0;g_window.height=test_caption_height+status_height+2*OS_TEXT_HEIGHT-1;
  assert(editor_mouse_offset(10,(int32_t)(test_caption_height+OS_TEXT_HEIGHT+2))==0);
  assert(editor_mouse_offset(26,100000)==2); // Partial final row maps to the last complete row.
+ /* 端点未变但视口滚动仍须重绘；原地移动和松开不重建相同选区。 */
+ strcpy(g_text,"abc\ndef\nghi");g_text_length=strlen(g_text);
+ g_window.height=40;g_scroll_line=0;g_cursor=g_text_length;g_selection_anchor=0;g_mouse_selecting=true;
+ unsigned before=renders;
+ e.input=(os_input_event_t){.type=OS_INPUT_EVENT_RELATIVE,.code=OS_INPUT_REL_Y};
+ e.pointer_x=10000;e.pointer_y=40;
+ assert(handle_editor_mouse(&e)&&g_cursor==g_text_length&&g_scroll_line==1&&renders==before+1);
+ e.pointer_y=20;e.input.code=OS_INPUT_REL_X;before=renders;
+ assert(handle_editor_mouse(&e)&&renders==before);
+ e.input=(os_input_event_t){.type=OS_INPUT_EVENT_BUTTON,.code=OS_INPUT_BUTTON_LEFT,.value=OS_INPUT_VALUE_RELEASE};
+ assert(handle_editor_mouse(&e)&&!g_mouse_selecting&&renders==before);
+ e.input.value=OS_INPUT_VALUE_PRESS;g_shift=false;hit_queries=0;
+ assert(handle_editor_mouse(&e)&&hit_queries==1&&renders==before+1&&g_selection_anchor==g_cursor);
+ before=renders;e.input.value=OS_INPUT_VALUE_RELEASE;
+ assert(handle_editor_mouse(&e)&&renders==before);
+ /* 中文双列和四字节字符的点击、删除必须始终停在 UTF-8 字符边界。 */
+ strcpy(g_text,"a中😀b");g_text_length=strlen(g_text);g_scroll_line=0;g_window.height=172;
+ const size_t offsets[]={0,1,4,4,8,8,9};
+ for(unsigned column=0;column<7;++column)
+  assert(editor_mouse_offset(10+(int32_t)column*8,0)==offsets[column]);
+ g_selection_anchor=SIZE_MAX;g_cursor=8;backspace();
+ assert(!strcmp(g_text,"a中b") && g_cursor==4);
+ g_cursor=1;delete_character();assert(!strcmp(g_text,"ab") && g_cursor==1);
 }
 '''
 shell = common + r'''
@@ -164,10 +190,25 @@ with tempfile.TemporaryDirectory(prefix='text-mouse-') as directory:
     for name, program in [('notepad', note), ('terminal', shell)]:
         source = path / (name + '.c'); source.write_text(program)
         binary = path / name
-        subprocess.run(['cc', '-std=c11', '-Wall', '-Wextra', '-Werror',
+        command = ['cc', '-std=c11', '-Wall', '-Wextra', '-Werror',
                         '-Wno-unused-variable', '-fsanitize=address,undefined',
                         '-fno-pie', '-no-pie', '-I' + str(root / 'include'),
-                        str(source), '-o', str(binary)], check=True)
+                        str(source), '-o', str(binary)]
+        subprocess.run(command,check=True)
         subprocess.run([str(binary)], check=True)
         print(name + ': production mouse offsets, selection replacement and boundaries passed')
+        if name=='notepad':
+            for label,broken in (
+                ('scroll-only-change',program.replace(' || previous_scroll!=g_scroll_line','')),
+                ('unchanged-mouse-redraw',program.replace(
+                    'if(previous_cursor!=g_cursor || previous_anchor!=g_selection_anchor || previous_scroll!=g_scroll_line)',
+                    'if(true)')),
+            ):
+                assert broken!=program
+                source.write_text(broken);subprocess.run(command,check=True)
+                result=subprocess.run([str(binary)],capture_output=True,text=True,
+                    preexec_fn=lambda:resource.setrlimit(resource.RLIMIT_CORE,(0,0)))
+                assert result.returncode==-signal.SIGABRT and 'renders==' in result.stderr,result.stderr
+                print('Negative control rejected: '+label)
+
 print('Terminal: inline prompt after output, scrollback and short-window layout passed')

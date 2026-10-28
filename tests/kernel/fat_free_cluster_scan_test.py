@@ -23,6 +23,7 @@ typedef uint64_t UINT64;
 typedef struct {
     UINT32 ClusterCount,FatCount,FatType,BytesPerSector,FatSectors;
     UINT64 FatStartLba;
+    UINT32 FreeClusterSearchStart;
 } OS_FAT32;
 static UINT8 disk[131072];
 static unsigned reads;
@@ -56,6 +57,8 @@ static void put(OS_FAT32 *f,UINT32 c,UINT32 value) {
     for(unsigned i=0;i<size;++i) disk[c*size+i]=(UINT8)(value>>(8*i));
 }
 static void check(OS_FAT32 *f) {
+    /* 此测试直接重写模拟介质，显式使内存中的搜索下界失效。 */
+    f->FreeClusterSearchStart=2;
     UINT32 expected=0xdeadbeef,actual=expected;
     reads=0;
     BOOLEAN ok=oracle(f,&expected);
@@ -76,7 +79,7 @@ static void check(OS_FAT32 *f) {
 int main(void) {
     for(unsigned type=16;type<=32;type+=16) {
         for(unsigned bps=512;bps<=4096;bps*=2) {
-            OS_FAT32 f={8192,2,type,bps,64,17};
+            OS_FAT32 f={8192,2,type,bps,64,17,2};
             memset(disk,0xff,sizeof(disk));put(&f,8194,0);check(&f);
             unsigned per_sector=bps/(type==16?2:4);
             UINT32 positions[]={2,per_sector-1,per_sector,per_sector+1,8193};
@@ -105,7 +108,7 @@ int main(void) {
             assert(!fat32_find_free_cluster_from(&f,1,&found) && found==123 && !reads);
         }
     }
-    OS_FAT32 f={100,1,32,512,8,17}; UINT32 out=123;
+    OS_FAT32 f={100,1,32,512,8,17,2}; UINT32 out=123;
     assert(!fat32_find_free_cluster(NULL,&out) && out==123);
     assert(!fat32_find_free_cluster(&f,NULL));
     f.FatCount=0;assert(!fat32_find_free_cluster(&f,&out) && out==123);

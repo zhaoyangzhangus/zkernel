@@ -1,11 +1,9 @@
-/* REFACTOR_SYSCALL_DEBUG_OWNER: bounded user diagnostics stay serial-only. */
+/* REFACTOR_SYSCALL_DEBUG_OWNER：有界用户诊断仅写入串口。 */
 
 #include <arch/x86_64/uaccess.h>
 #include <kernel/console.h>
 #include <kernel/process.h>
-#include <kernel/vfs.h>
-#include <arch/x86_64/acpi.h>
-#include <arch/x86_64/reboot.h>
+#include <kernel/power.h>
 
 #include "internal.h"
 
@@ -15,28 +13,20 @@ int64_t syscall_system_power(uint64_t action, uint64_t unused1,
                              uint64_t unused2, uint64_t unused3,
                              uint64_t unused4, uint64_t unused5) {
     (void)unused1; (void)unused2; (void)unused3; (void)unused4; (void)unused5;
-    static atomic_bool busy;
     if (action > 1U) return K_EINVAL;
     if (current_process() == 0) return K_EPERM;
-    if (atomic_exchange_explicit(&busy, true, memory_order_acq_rel)) return K_EBUSY;
-    kstatus_t status = vfs_sync_all();
-    if (status == K_OK) {
-        if (action == 0U) x86_system_reboot();
-        status = x86_acpi_poweroff();
-    }
-    atomic_store_explicit(&busy, false, memory_order_release);
-    return status == K_OK ? K_EIO : status; /* Firmware returned without powering off. */
+    return power_system_request((uint32_t)action);
 }
 
 #ifndef OS_DEBUG_SERIAL
 #define OS_DEBUG_SERIAL 0
 #endif
 
-/* Temporary Chrome-only stderr capture for diagnosing guest aborts. */
+/* 临时捕获仅供 Chrome 使用的 stderr，以诊断来宾中止。 */
 #define OS_CHROME_DEBUG_SERIAL 1
 
 static bool debug_write_from_chrome(void) {
-    static const char chrome_path[] = "/sbin/chrome";
+    static const char chrome_path[] = "/usr/apps/chrome/chrome";
     process_t *process = current_process();
     if (process == 0) return false;
     for (size_t index = 0U; index < sizeof(chrome_path); ++index) {

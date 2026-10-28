@@ -1,5 +1,6 @@
 #include <kernel/kmem.h>
 #include <kernel/nv_frontend.h>
+#include <kernel/init_userspace.h>
 
 #include "include/nv_rm_driver.h"
 #include "include/nv_rm_vendor_bridge.h"
@@ -36,6 +37,8 @@ kstatus_t nv_frontend_open(bool control, uint32_t minor,
     if (out == 0)
         return K_EINVAL;
     *out = 0;
+
+    if (!nv_frontend_driver_ready()) return K_EDEVREMOVED;
 
     status = nv_rm_vendor_frontend_open(control, minor, &vendor_file);
     if (status != K_OK || vendor_file == 0)
@@ -214,6 +217,9 @@ uint32_t nv_frontend_live_count(void)
 
 bool nv_frontend_driver_ready(void)
 {
+    /* Only the process touching NVIDIA devices waits, never the compositor.
+     * The completion has boot-long lifetime, independent of worker cleanup. */
+    if (!userspace_wait_device_init()) return false;
     const nv_gpu_device_t *gpu = nv_rm_driver_current();
     return gpu != 0 && gpu->state == NV_GPU_GSP_READY;
 }

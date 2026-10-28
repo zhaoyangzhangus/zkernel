@@ -12,7 +12,7 @@ args = parser.parse_args()
 root = Path(__file__).resolve().parents[2]
 source = (root/'kernel/graphics/input_events.c').read_text()
 begin = source.index('void window_event_reset_ready_locked(')
-end = source.index('/* All producers share', begin)
+end = source.index('static bool window_event_discard_motion_locked(', begin)
 production = source[begin:end]
 production = re.sub(r'\bready\[index\]', '(*(++ready_accesses, &ready[index]))', production)
 program = r'''
@@ -32,8 +32,9 @@ struct window {
  atomic_uint refs,wakes,notifications;
 };
 static struct {
- window_server_window_t *windows[64],*event_ready_windows[64];
- uint32_t count,event_ready_count;bool event_ready_overflow;
+ struct {uint32_t count;window_server_window_t *children[64];} scene;
+ window_server_window_t *event_ready_windows[64];
+ uint32_t event_ready_count;bool event_ready_overflow;
 } g_window_server;
 static pthread_mutex_t mutex=PTHREAD_MUTEX_INITIALIZER;
 static _Thread_local unsigned locked;
@@ -49,7 +50,7 @@ static unsigned wake_one(wait_queue_t *q){
  assert(atomic_load(&w->refs)>0);atomic_fetch_add(&w->wakes,1);
  if(requeue==w){requeue=NULL;window_lock();window_event_schedule_wake_locked(w);window_unlock();}
  if(close_during_wake==w){
-  close_during_wake=NULL;window_lock();g_window_server.count=0;window_unlock();
+  close_during_wake=NULL;window_lock();g_window_server.scene.count=0;window_unlock();
   assert(atomic_fetch_sub(&w->refs,1)>1); // Remove the owner reference, not the batch reference.
  }
  return 1;
@@ -65,7 +66,7 @@ static void init(window_server_window_t *w){
 }
 static void reset(void){
  assert(!g_window_server.event_ready_count);
- window_lock();window_event_reset_ready_locked();g_window_server.count=0;window_unlock();
+ window_lock();window_event_reset_ready_locked();g_window_server.scene.count=0;window_unlock();
 }
 static void schedule(window_server_window_t *w){window_lock();window_event_schedule_wake_locked(w);window_unlock();}
 static void check(window_server_window_t *w,unsigned count){
@@ -92,20 +93,20 @@ int main(void){
  // Overflow overlaps the detached ready set: each window must wake exactly once.
  window_server_window_t all[65];
  reset();for(unsigned i=0;i<65;++i)init(&all[i]);
- for(unsigned i=0;i<64;++i){g_window_server.windows[i]=&all[i];schedule(&all[i]);}
- g_window_server.count=64;schedule(&all[64]);assert(g_window_server.event_ready_overflow);
+ for(unsigned i=0;i<64;++i){g_window_server.scene.children[i]=&all[i];schedule(&all[i]);}
+ g_window_server.scene.count=64;schedule(&all[64]);assert(g_window_server.event_ready_overflow);
  assert(window_flush_event_wakes());for(unsigned i=0;i<64;++i)check(&all[i],1);
  check(&all[64],0); // Not registered, so the fallback must not touch it.
  // Removed ready windows retain their references; all live overflow windows are notified.
  reset();window_server_window_t removed[64],active[64];
- for(unsigned i=0;i<64;++i){init(&removed[i]);init(&active[i]);schedule(&removed[i]);g_window_server.windows[i]=&active[i];}
- g_window_server.count=64;
+ for(unsigned i=0;i<64;++i){init(&removed[i]);init(&active[i]);schedule(&removed[i]);g_window_server.scene.children[i]=&active[i];}
+ g_window_server.scene.count=64;
  for(unsigned i=0;i<64;++i)schedule(&active[i]);
  assert(window_flush_event_wakes());
  for(unsigned i=0;i<64;++i){check(&removed[i],1);check(&active[i],1);}
  // Empty registry entries and empty queues don't create overflow references.
  reset();for(unsigned i=0;i<64;++i)schedule(&removed[i]);
- active[0].event_count=0;g_window_server.count=2;g_window_server.windows[0]=NULL;g_window_server.windows[1]=&active[0];
+ active[0].event_count=0;g_window_server.scene.count=2;g_window_server.scene.children[0]=NULL;g_window_server.scene.children[1]=&active[0];
  schedule(&active[0]);assert(window_flush_event_wakes());check(&active[0],1);
  // Publication occurs outside the lock, after membership is cleared.
  reset();init(&normal);schedule(&normal);requeue=&normal;
@@ -118,12 +119,12 @@ int main(void){
  assert(window_flush_event_wakes());
  assert(!atomic_load(&normal.refs) && atomic_load(&normal.wakes)==1 && atomic_load(&normal.notifications)==1);
  // Concurrent teardown during wake leaves the batch reference valid for object notification.
- reset();init(&normal);g_window_server.windows[0]=&normal;g_window_server.count=1;
+ reset();init(&normal);g_window_server.scene.children[0]=&normal;g_window_server.scene.count=1;
  schedule(&normal);close_during_wake=&normal;assert(window_flush_event_wakes());
  assert(!atomic_load(&normal.refs) && atomic_load(&normal.notifications)==1);
  // Real producer/consumer interleavings exercise pending-bit and reference ownership.
- reset();for(unsigned i=0;i<64;++i){init(&concurrent[i]);g_window_server.windows[i]=&concurrent[i];}
- g_window_server.count=64;atomic_init(&producer_done,false);
+ reset();for(unsigned i=0;i<64;++i){init(&concurrent[i]);g_window_server.scene.children[i]=&concurrent[i];}
+ g_window_server.scene.count=64;atomic_init(&producer_done,false);
  pthread_t thread;assert(!pthread_create(&thread,NULL,producer,NULL));
  while(!atomic_load(&producer_done))window_flush_event_wakes();
  assert(!pthread_join(thread,NULL));while(window_flush_event_wakes()){}

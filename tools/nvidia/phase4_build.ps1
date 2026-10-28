@@ -7,6 +7,7 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'app-layout.ps1')
 
 function Assert-RelativeBuild([string]$Name) {
     if ([string]::IsNullOrWhiteSpace($Name) -or
@@ -388,7 +389,14 @@ New-Item -ItemType Directory -Path $phase4Esp -Force | Out-Null
 if (-not (Test-Path -LiteralPath $systemEspRoot -PathType Container)) {
     throw "$systemBuildDescription ESP directory is missing: $systemEspRoot"
 }
-Copy-Item -Path (Join-Path $systemEspRoot '*') -Destination $phase4Esp -Recurse -Force
+Assert-AppGuestLayout $phase4Esp
+foreach ($source in @(Get-ChildItem -LiteralPath $systemEspRoot -Recurse -File)) {
+    $relative = $source.FullName.Substring($systemEspRoot.Length).TrimStart('\', '/')
+    if (Test-LegacyGuestPath $relative) { continue }
+    $target = Join-Path $phase4Esp $relative
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $target) | Out-Null
+    Copy-Item -LiteralPath $source.FullName -Destination $target -Force
+}
 New-Item -ItemType Directory -Path (Join-Path $phase4Esp 'EFI\OS') -Force |
     Out-Null
 Copy-Item -LiteralPath $kernelElf -Destination (Join-Path $phase4Esp 'EFI\OS\kernel.elf') -Force

@@ -1,4 +1,4 @@
-"""Actual enumeration with poisoned unused slots versus full-clear oracle."""
+"""真实枚举与逐项参考模型对比，并拒绝旧的 FAT 静默截断路径。"""
 from pathlib import Path
 import subprocess
 import tempfile
@@ -6,13 +6,13 @@ import tempfile
 root = Path(__file__).resolve().parents[2]
 source = (root / 'kernel/fs/vfs/core.c').read_text()
 header = (root / 'include/uapi/file.h').read_text()
-layout = header[header.index('enum os_file_type {'):header.index('/* Enumerate one direct child')]
-equals = source[source.index('static bool vfs_path_range_equals('):source.index('/* Memory-backed /tmp')]
+layout = header[header.index('enum os_file_type {'):header.index('typedef struct os_file_enumerate {')]
+equals = source[source.index('static bool vfs_path_range_equals('):source.index('static uint32_t vfs_free_node_slot_locked(')]
 append = source[source.index('static size_t vfs_file_name_length('):source.index('typedef struct vfs_directory_collection')]
-collection = source[source.index('typedef struct vfs_directory_collection'):source.index('/* Use one direct-child rule')]
-enumerate = source[source.index('static kstatus_t vfs_enumerate_kernel_batch('):source.index('kstatus_t vfs_enumerate_file(')]
+collection = source[source.index('typedef struct vfs_directory_collection'):source.index('static const char *vfs_mount_child_name(')]
+enumerate = source[source.index('kstatus_t vfs_enumerate_kernel_batch('):source.index('kstatus_t vfs_enumerate_file(')]
 batch_source, wrapper = enumerate.split('\nkstatus_t vfs_enumerate_kernel(', 1)
-old_signature = '''static kstatus_t vfs_enumerate_kernel_batch(const char *path, uint32_t index,
+old_signature = '''kstatus_t vfs_enumerate_kernel_batch(const char *path, uint32_t index,
                                             os_file_info_t *out, uint32_t capacity,
                                             uint32_t *count)'''
 assert old_signature in batch_source
@@ -26,20 +26,26 @@ batch_copy = '''    uint32_t copied = entry_count - index;
     *count = copied;'''
 assert batch_copy in previous_source
 previous_source = previous_source.replace(batch_copy, '    *out = entries[index];')
-comment = '    /* Only [0, entry_count) is read; append publishes complete entries. */'
+comment = '    os_file_info_t entries[VFS_DIRECTORY_ENTRY_LIMIT];'
 assert comment in enumerate
 bulk = '''        vfs_directory_collection_t collection = {entries, &entry_count, false};
+        /* 由收集器判断容量耗尽，不能让底层在第 256 项静默停止，否则后续批次会误报 EOF。
+         * 重名项不占新槽，因此必须继续访问到真正的末尾或首次追加失败。 */
         fat32_visit_directory(mount->filesystem, relative,
-                                     VFS_DIRECTORY_ENTRY_LIMIT,
+                                     UINT32_MAX,
                                      vfs_collect_fat_directory_entry, &collection);
         if (collection.failed) return K_ENOMEM;'''
-single = '''        for (uint32_t fat_index = 0U; fat_index < VFS_DIRECTORY_ENTRY_LIMIT; ++fat_index) {
+single = '''        for (uint32_t fat_index = 0U; fat_index < UINT32_MAX; ++fat_index) {
             os_file_info_t entry = {0};
             if (!fat32_enumerate_path(mount->filesystem, relative, fat_index, &entry)) break;
             if (!vfs_append_entry(entries, &entry_count, &entry)) return K_ENOMEM;
         }'''
 assert bulk in enumerate
-old = previous_source.replace('vfs_enumerate_kernel(', 'previous_enumerate(').replace(comment, '''
+truncated = batch_source.replace('vfs_enumerate_kernel_batch(', 'truncated_batch(')
+truncated = truncated.replace('                                     UINT32_MAX,',
+                              '                                     VFS_DIRECTORY_ENTRY_LIMIT,')
+assert truncated != batch_source
+old = previous_source.replace('vfs_enumerate_kernel(', 'previous_enumerate(').replace(comment, comment + '''
     for (uint32_t i = 0; i < VFS_DIRECTORY_ENTRY_LIMIT; ++i) {
         entries[i] = (os_file_info_t){0}; ++cleared;
     }''')
@@ -105,13 +111,13 @@ typedef bool BOOLEAN;
 typedef void VOID;
 enum {K_OK,K_EINVAL,K_ENOMEM,K_ENOENT};
 ''' + layout + r'''
-typedef struct {char path[256];bool directory;} vfs_backend_node_t;
+typedef struct {char path[256];bool directory,fat32_node;} vfs_backend_node_t;
 typedef struct {void *fs_private;uint32_t mode;uint64_t size;} vnode_t;
 typedef struct {void *filesystem;} vfs_fat32_mount_t;
 static vnode_t *g_vfs_nodes[300];static uint32_t g_vfs_node_capacity;
 static vfs_fat32_mount_t mount={(void*)(uintptr_t)1};
 static unsigned mount_mode,fat_count,child_count,cleared,locks,depth,stats,reads;
-static bool child_failure;
+static bool child_failure, fat_duplicate_prefix;
 static unsigned node_scans,avoided_scans;
 static size_t vfs_string_length(const char *p){
  for(unsigned i=0;i<g_vfs_node_capacity;++i)
@@ -133,7 +139,7 @@ static bool fat32_stat_path(void *fs,const char *p,os_file_info_t *out){
 static bool fat32_enumerate_path(void *fs,const char *p,unsigned index,os_file_info_t *out){
  assert(fs==mount.filesystem&&p);++reads;if(index>=fat_count)return false;
  *out=(os_file_info_t){.type=OS_FILE_TYPE_REGULAR,.mode=0644,.size=index+1};
- snprintf(out->name,sizeof(out->name),"node%03u",index);return true;
+ snprintf(out->name,sizeof(out->name),"node%03u",fat_duplicate_prefix&&index<300?0:index);return true;
 }
 ''' + equals + append + collection + r'''
 static void fat32_visit_directory(void *fs,const char *p,unsigned limit,
@@ -154,7 +160,7 @@ static bool vfs_append_mount_children(const char *p,size_t n,os_file_info_t *ent
  }
  return true;
 }
-''' + old + enumerate + r'''
+''' + old + truncated + enumerate + r'''
 static unsigned cases,clear_routes;
 static void compare(const char *p,unsigned index){
  os_file_info_t before,after;memset(&before,0x81,sizeof(before));after=before;
@@ -268,6 +274,38 @@ int main(void){
  assert(vfs_enumerate_kernel_batch("/dir",0,actual_batch,16,0)==K_EINVAL);
  assert(vfs_enumerate_kernel_batch(0,0,actual_batch,16,&written)==K_EINVAL&&!written);
  assert(vfs_enumerate_kernel_batch("/dir",0,0,16,&written)==K_EINVAL&&!written);
+ /* 负对照必须重现旧行为：第 257 项被省略，但首批仍成功、末批被误报 EOF。 */
+ fat_count=257;mount_mode=2;g_vfs_node_capacity=child_count=0;
+ memset(actual_batch,0x81,sizeof(actual_batch));
+ memcpy(expected_batch,actual_batch,sizeof(actual_batch));
+ assert(truncated_batch("/dir",0,actual_batch,16,&written)==K_OK&&written==16);
+ assert(truncated_batch("/dir",256,actual_batch,16,&written)==K_ENOENT&&!written);
+ memcpy(actual_batch,expected_batch,sizeof(actual_batch));
+ assert(vfs_enumerate_kernel_batch("/dir",0,actual_batch,16,&written)==K_ENOMEM&&!written);
+ assert(!memcmp(actual_batch,expected_batch,sizeof(actual_batch))&&!depth);
+ assert(vfs_enumerate_kernel_batch("/dir",256,actual_batch,16,&written)==K_ENOMEM&&!written);
+ assert(!memcmp(actual_batch,expected_batch,sizeof(actual_batch))&&!depth);
+ puts("FAT overflow: 257th entry rejects incomplete snapshots; legacy truncation negative control reproduced");
+ /* 超过 256 次回调但只有两个唯一名称，不应以回调次数为容量上限。 */
+ fat_count=301;fat_duplicate_prefix=true;
+ assert(truncated_batch("/dir",0,actual_batch,16,&written)==K_OK&&written==1);
+ assert(vfs_enumerate_kernel_batch("/dir",0,actual_batch,16,&written)==K_OK&&written==2);
+ assert(!strcmp(actual_batch[0].name,"node000")&&!strcmp(actual_batch[1].name,"node300"));
+ fat_duplicate_prefix=false;
+ /* 打开缓存的大小写别名不再作为额外目录项；内存后端仍正常参与合并。 */
+ fat_count=1;mount_mode=2;g_vfs_node_capacity=2;child_count=0;
+ memset(b,0,sizeof(b));v[0].fs_private=&b[0];v[1].fs_private=&b[1];
+ g_vfs_nodes[0]=&v[0];g_vfs_nodes[1]=&v[1];
+ strcpy(b[0].path,"/dir/NODE000");b[0].fat32_node=true;
+ strcpy(b[1].path,"/dir/virtual");
+ assert(vfs_enumerate_kernel_batch("/dir",0,actual_batch,16,&written)==K_OK&&written==2);
+ assert(!strcmp(actual_batch[0].name,"node000")&&actual_batch[0].size==1);
+ assert(!strcmp(actual_batch[1].name,"virtual"));
+ fat_count=0;
+ assert(vfs_enumerate_kernel_batch("/dir",0,actual_batch,16,&written)==K_OK&&written==1);
+ assert(!strcmp(actual_batch[0].name,"virtual"));
+ puts("FAT cached aliases: one authoritative disk name; removed/replaced cache entries never create ghost files; memory children retained");
+ puts("FAT duplicate names: 301 callbacks retain the final unique child; legacy callback limit misses it");
  printf("VFS batch: %u exact legacy output/count/error/canary cases, capacities 0..260 and every start/EOF preserved\n",batch_cases);
  assert(avoided_scans);
  printf("Enumeration direct-child scan: %u complete length scans removed; descendant tails no longer scanned\n",avoided_scans);

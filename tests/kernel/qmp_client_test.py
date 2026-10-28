@@ -66,6 +66,19 @@ def peer(respond, greeting=None):
 
 
 class QMPTests(unittest.TestCase):
+    def test_default_endpoint_uses_canonical_build(self):
+        def respond(request):
+            return [{'return': {'running': True}, 'id': request['id']}]
+        with peer(respond) as (path, requests):
+            build = path.parent / 'build'
+            build.mkdir()
+            (build / 'qemu-qmp.sock').symlink_to(path)
+            with mock.patch.object(qmp_module, 'ROOT', path.parent):
+                with QMPClient() as client:
+                    self.assertEqual(client.command('query-status'), {'running': True})
+            self.assertEqual([r['execute'] for r in requests],
+                             ['qmp_capabilities', 'query-status'])
+
     def test_handshake_events_ids_and_command_error_recovery(self):
         def respond(request):
             result = {'running': True} if request['execute'] == 'query-status' else None
@@ -132,9 +145,11 @@ class QMPTests(unittest.TestCase):
             client.move(125, 50)
             self.assertEqual(sum(c[1]['events'][0]['data']['value'] for c in calls), -2375)
             self.assertEqual(sum(c[1]['events'][1]['data']['value'] for c in calls), -1450)
-            self.assertTrue(all(abs(e['data']['value']) <= 100
+            self.assertTrue(all(abs(e['data']['value']) <= 80
                                 for c in calls for e in c[1]['events']))
-            self.assertEqual(sleep.call_args_list, [mock.call(.02)] * len(calls))
+            self.assertEqual(sleep.call_args_list,
+                             [mock.call(.15)] * 32 + [mock.call(.3)] +
+                             [mock.call(.15)] * 2 + [mock.call(.3)])
             calls.clear(); sleep.reset_mock()
             client.move = mock.Mock()
             client.click(10, 20, 'right')
@@ -152,6 +167,39 @@ class QMPTests(unittest.TestCase):
             client.screenshot(ROOT / 'build/test.png')
             self.assertEqual(calls, [('screendump', {
                 'filename': str(ROOT / 'build/test.png'), 'format': 'png'})])
+
+    def test_motion_pacing_with_bounded_coalescing_hid_reader(self):
+        # Conservative signed-byte reader: movements queued before a sample
+        # coalesce and clamp. A host enqueue ACK is not that sample.
+        for start in [(0, 0), (1919, 1079), (960, 540)]:
+            for target in [(0, 0), (815, 1020), (935, 30), (1666, 155)]:
+                position = list(start)
+                pending = [0, 0]
+                elapsed = 0.0
+                next_sample = .1
+                client = object.__new__(QMPClient)
+
+                def send(name, args):
+                    self.assertEqual(name, 'input-send-event')
+                    for event in args['events']:
+                        data = event['data']
+                        pending[data['axis'] == 'y'] += data['value']
+
+                def advance(seconds):
+                    nonlocal elapsed, next_sample
+                    elapsed += seconds
+                    while next_sample <= elapsed:
+                        for axis, maximum in [(0, 1919), (1, 1079)]:
+                            delta = max(-127, min(127, pending[axis]))
+                            position[axis] = max(0, min(maximum, position[axis] + delta))
+                            pending[axis] = 0
+                        next_sample += .1
+
+                client.command = send
+                with mock.patch.object(qmp_module.time, 'sleep', side_effect=advance):
+                    client.move(*target)
+                self.assertEqual(position, list(target), (start, target))
+                self.assertEqual(pending, [0, 0])
 
     def test_timeout_closes_connection_without_restart(self):
         def delay(request):

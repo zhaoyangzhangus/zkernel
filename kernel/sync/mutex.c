@@ -36,11 +36,13 @@ static void pi_initialize(void) {
 }
 
 static void pi_lock(void) {
+    sched_preempt_disable();
     spinlock_lock(&g_pi_lock);
 }
 
 static void pi_unlock(void) {
     spinlock_unlock(&g_pi_lock);
+    sched_preempt_enable();
 }
 
 static kmutex_t *mutex_from_owner_node(list_head_t *node) {
@@ -53,6 +55,13 @@ static kmutex_waiter_t *waiter_from_node(list_head_t *node) {
 }
 
 static uint8_t donation_priority(const thread_t *thread) {
+    /* 远端运行队列尚未消费邮箱时，PI 链也必须使用最新的逻辑优先级。 */
+    if (atomic_load_explicit(&thread->priority_queued, memory_order_acquire)) {
+        uint32_t request = atomic_load_explicit(&thread->priority_request,
+                                                memory_order_acquire);
+        return (request >> 8U) == SCHED_CLASS_RT ? (uint8_t)request :
+               (RT_PRIORITY_LEVELS - 1U);
+    }
     return thread->sched_class == SCHED_CLASS_RT ? thread->rt_priority :
            (RT_PRIORITY_LEVELS - 1U);
 }
@@ -82,7 +91,8 @@ static void recompute_thread_priority(thread_t *thread, uint32_t depth) {
             target_priority = donated;
         }
     }
-    if (thread->sched_class != target_class ||
+    if (atomic_load_explicit(&thread->priority_queued, memory_order_acquire) ||
+        thread->sched_class != target_class ||
         (target_class == SCHED_CLASS_RT && thread->rt_priority != target_priority)) {
         sched_set_effective_priority(thread, target_class, target_priority);
     }
@@ -104,6 +114,7 @@ static bool would_deadlock(thread_t *thread, kmutex_t *mutex) {
 
 static void assign_owner(kmutex_t *mutex, thread_t *thread) {
     mutex->owner = thread;
+    mutex->exit_deferred = false;
     if (mutex->pi_enabled) {
         list_add_tail(&thread->owned_mutexes, &mutex->owner_node);
     }
@@ -118,6 +129,7 @@ void kmutex_init(kmutex_t *mutex, bool priority_inheritance) {
     list_init(&mutex->pi_waiters);
     mutex->pi_enabled = priority_inheritance;
     mutex->initialized = true;
+    mutex->exit_deferred = false;
 }
 
 kstatus_t kmutex_try_lock(kmutex_t *mutex) {
@@ -131,6 +143,23 @@ kstatus_t kmutex_try_lock(kmutex_t *mutex) {
         status = K_OK;
     } else {
         status = mutex->owner == current ? K_EBUSY : K_EAGAIN;
+    }
+    pi_unlock();
+    return status;
+}
+
+kstatus_t kmutex_try_lock_bootstrap(kmutex_t *mutex) {
+    if (mutex == 0 || !mutex->initialized) return K_EINVAL;
+    thread_t *current = sched_current_thread();
+    if (current == 0 || current->sched_class != SCHED_CLASS_IDLE) return K_EPERM;
+    pi_lock();
+    kstatus_t status;
+    if (mutex->owner == 0) {
+        assign_owner(mutex, current);
+        status = K_OK;
+    } else {
+        status = mutex->owner == current ||
+                 mutex->owner->owner_cpu == current->owner_cpu ? K_EBUSY : K_EAGAIN;
     }
     pi_unlock();
     return status;
@@ -156,7 +185,8 @@ static bool kmutex_try_acquire_predicate(void *opaque) {
     return acquired;
 }
 
-kstatus_t kmutex_lock(kmutex_t *mutex, uint64_t timeout_ns) {
+static kstatus_t kmutex_lock_internal(kmutex_t *mutex, uint64_t timeout_ns,
+                                      bool uninterruptible) {
     if (mutex == 0 || !mutex->initialized) return K_EINVAL;
     thread_t *current = sched_current_thread();
     if (current == 0 || current->sched_class == SCHED_CLASS_IDLE) return K_EPERM;
@@ -183,8 +213,11 @@ kstatus_t kmutex_lock(kmutex_t *mutex, uint64_t timeout_ns) {
     pi_unlock();
 
     kmutex_wait_context_t context = {mutex, &waiter, current};
-    kstatus_t status = wait_on_queue(&mutex->waitq, kmutex_try_acquire_predicate,
-                                     &context, timeout_ns);
+    kstatus_t status = uninterruptible ?
+        wait_on_queue_uninterruptible(&mutex->waitq, kmutex_try_acquire_predicate,
+                                       &context, timeout_ns) :
+        wait_on_queue(&mutex->waitq, kmutex_try_acquire_predicate,
+                       &context, timeout_ns);
     pi_lock();
     if (waiter.linked) {
         list_del(&waiter.node);
@@ -195,6 +228,26 @@ kstatus_t kmutex_lock(kmutex_t *mutex, uint64_t timeout_ns) {
         recompute_thread_priority(mutex->owner, 0);
     }
     pi_unlock();
+    return status;
+}
+
+kstatus_t kmutex_lock(kmutex_t *mutex, uint64_t timeout_ns) {
+    return kmutex_lock_internal(mutex, timeout_ns, false);
+}
+
+kstatus_t kmutex_lock_uninterruptible(kmutex_t *mutex, uint64_t timeout_ns) {
+    if (mutex == 0 || !mutex->initialized) return K_EINVAL;
+    thread_t *current = sched_current_thread();
+    if (current == 0 || current->sched_class == SCHED_CLASS_IDLE) return K_EPERM;
+    /* 保护锁获取和所有等待栈清理，而不只是锁所有权。
+     * 否则 READY 等待者/所有者的续执行可能因 EXIT 而丢失。 */
+    sched_exit_defer_begin(current);
+    kstatus_t status = kmutex_lock_internal(mutex, timeout_ns, true);
+    if (status == K_OK) {
+        mutex->exit_deferred = true;
+    } else {
+        sched_exit_defer_end(current);
+    }
     return status;
 }
 
@@ -210,11 +263,14 @@ kstatus_t kmutex_unlock(kmutex_t *mutex) {
     if (mutex->pi_enabled && mutex->owner_node.next != &mutex->owner_node) {
         list_del(&mutex->owner_node);
     }
+    bool exit_deferred = mutex->exit_deferred;
+    mutex->exit_deferred = false;
     mutex->owner = 0;
     if (mutex->pi_enabled) recompute_thread_priority(current, 0);
     pi_unlock();
     /* 唤醒全部竞争者，让仍在等待的线程重新向新所有者传播优先级。 */
     (void)wake_all(&mutex->waitq);
+    if (exit_deferred) sched_exit_defer_end(current);
     return K_OK;
 }
 

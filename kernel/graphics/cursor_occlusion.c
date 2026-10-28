@@ -1,10 +1,9 @@
 #include "internal.h"
 
-/* REFACTOR_P7D_CURSOR_OCCLUSION_OWNER: cursor composition and cover tests. */
+/* REFACTOR_P7D_CURSOR_OCCLUSION_OWNER：光标合成和覆盖测试。 */
 
 /*
- * Return true only when this scene publication can overwrite pixels belonging
- * to the software cursor that is currently visible on scanout.
+ * 仅当此场景发布可能覆盖当前扫描输出中可见的软件光标像素时才返回 true。
  */
 bool compositor_snapshot_overwrites_presented_cursor(void) {
     int64_t cursor_left;
@@ -30,7 +29,7 @@ bool compositor_snapshot_overwrites_presented_cursor(void) {
     cursor_bottom =
         cursor_top + WINDOW_CURSOR_HEIGHT;
 
-    /* Drag publication publishes the complete transaction bounds. */
+    /* 拖动发布会提交完整事务边界。 */
     if (g_compositor_snapshot.dragging_identifier != 0U) {
         Rect transaction;
 
@@ -97,8 +96,7 @@ bool compositor_window_intersects_damage_locked(
 }
 
 /*
- * Return true only when the complete current damage rectangle lies in the
- * guaranteed opaque interior of the client surface.
+ * 仅当当前完整损坏矩形位于客户端表面保证不透明的内部区域时才返回 true。
  */
 bool compositor_damage_inside_surface_interior(
     const compositor_window_view_t *window) {
@@ -143,79 +141,14 @@ bool compositor_damage_inside_surface_interior(
         (int64_t)g_compositor_snapshot.damage_bounds.y1 <= bottom;
 }
 
+/* 回退绘制与空间规划共用不透明覆盖规则，透明表面不能淘汰下层。 */
 static bool compositor_window_fully_covers_damage(
     const compositor_window_view_t *window) {
-
-    int64_t frame_left;
-    int64_t frame_top;
-    int64_t frame_right;
-    int64_t frame_bottom;
-
-    int64_t opaque_left;
-    int64_t opaque_top;
-    int64_t opaque_right;
-    int64_t opaque_bottom;
-
-    uint64_t frame_width;
-    uint64_t frame_height;
-
-    if (window == 0 ||
-        (window->flags & OS_WINDOW_VISIBLE) == 0U) {
-        return false;
-    }
-
-    frame_width =
-        (uint64_t)window->width +
-        window_frame_extra(window->flags);
-
-    frame_height =
-        (uint64_t)window->height +
-        window_frame_extra(window->flags) +
-        window_titlebar_height(window->flags);
-
-    /* Tiny windows do not have a useful conservative interior. */
-    if (frame_width <= WINDOW_CORNER_RADIUS * 2U ||
-        frame_height <= WINDOW_CORNER_RADIUS * 2U) {
-        return false;
-    }
-
-    frame_left = window->x;
-    frame_top = window->y;
-
-    frame_right =
-        frame_left +
-        (int64_t)frame_width;
-
-    frame_bottom =
-        frame_top +
-        (int64_t)frame_height;
-
-    opaque_left =
-        frame_left +
-        WINDOW_CORNER_RADIUS;
-
-    opaque_top =
-        frame_top +
-        WINDOW_CORNER_RADIUS;
-
-    opaque_right =
-        frame_right -
-        WINDOW_CORNER_RADIUS;
-
-    opaque_bottom =
-        frame_bottom -
-        WINDOW_CORNER_RADIUS;
-
-    return
-        (int64_t)g_compositor_snapshot.damage_bounds.x0 >=
-            opaque_left &&
-        (int64_t)g_compositor_snapshot.damage_bounds.y0 >=
-            opaque_top &&
-        (int64_t)g_compositor_snapshot.damage_bounds.x1 <=
-            opaque_right &&
-        (int64_t)g_compositor_snapshot.damage_bounds.y1 <=
-            opaque_bottom;
+    return window != 0 && (window->flags & OS_WINDOW_VISIBLE) != 0U &&
+        compositor_view_fully_covers_snapshot_bounds(
+            window, &g_compositor_snapshot.damage_bounds);
 }
+
 
 uint32_t compositor_topmost_damage_cover(void) {
     uint32_t count =

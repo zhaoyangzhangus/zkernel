@@ -44,24 +44,24 @@ kstatus_t x86_map_page(paddr_t root, vaddr_t virtual_address, paddr_t physical_a
                        uint32_t flags, enum x86_cache_mode cache_mode);
 kstatus_t x86_unmap_page(paddr_t root, vaddr_t virtual_address, paddr_t *old_physical);
 #define X86_USER_UNMAP_BATCH_MAX 64U
-/* Sorted, distinct user addresses; synchronous root invalidation precedes
- * mapcount changes and page-table reclamation. A failed batch restores PTEs. */
+/* 用户地址必须有序且互不重复；先同步失效根页表，再修改映射计数并回收页表。
+ * 批处理失败时会恢复 PTE。 */
 kstatus_t x86_unmap_user_page_batch(paddr_t root, const vaddr_t *addresses,
                                    size_t count, size_t *unmapped);
 kstatus_t x86_protect_page(paddr_t root, vaddr_t virtual_address, uint32_t flags,
                            enum x86_cache_mode cache_mode);
-/* Fork-only user PTE update. The VM lock must remain held, and changed PTEs
- * require x86_tlb_shootdown_root before publishing the child. */
+/* 仅供 fork 更新用户 PTE。必须持续持有 VM 锁；发布子进程前，
+ * 对已修改的 PTE 必须调用 x86_tlb_shootdown_root。 */
 kstatus_t x86_protect_user_page_deferred(paddr_t root, vaddr_t address,
     uint32_t flags, enum x86_cache_mode cache_mode, bool *changed);
 bool x86_tlb_shootdown_root(paddr_t root);
-/* Return whether any present PTE/large mapping intersects [start, end).
- * Sparse VM reservations can be terabytes wide, so callers must not scan
- * every virtual 4 KiB page just to discover that no page is resident. */
+/* 判断是否存在 PTE/大页映射与 [start, end) 相交。
+ * 稀疏 VM 预留区可能宽达数 TB，因此调用方不能为了确认没有常驻页，
+ * 就扫描每个 4 KiB 虚拟页。 */
 bool x86_page_range_has_present_pages(paddr_t root, vaddr_t start,
                                       uint64_t end);
-/* Find the first present mapping in an aligned canonical user range.
- * K_ENOENT means no resident mapping; missing branches are skipped at once. */
+/* 在按页对齐的规范用户地址范围内查找第一个有效映射。
+ * K_ENOENT 表示没有常驻映射；遇到缺失分支时会直接跳过。 */
 kstatus_t x86_next_present_page(paddr_t root, vaddr_t start, uint64_t end,
                                 vaddr_t *address);
 kstatus_t x86_translate_page(paddr_t root, vaddr_t virtual_address,

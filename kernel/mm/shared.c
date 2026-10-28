@@ -10,10 +10,10 @@ kstatus_t vm_pin_user_page(vm_space_t *space, vaddr_t address, bool writable,
         .address = address,
         .access = writable ? VM_PROT_WRITE : VM_PROT_READ,
     };
-    /* Translation and backing-store reference acquisition must share the VMA
-     * guard with unmap/mprotect/discard. Never pin an unowned physical page. */
-    /* An absent COW page first materializes read-only, then a write fault
-     * makes its private writable copy. Revalidate after both transitions. */
+    /* 地址转换与后备存储引用获取必须和 unmap/mprotect/discard 共用 VMA 保护锁。
+     * 绝不固定未拥有的物理页。 */
+    /* 缺失的 COW 页面先以只读方式实例化，再由写缺页创建私有可写副本。
+     * 两次状态转换后都要重新验证。 */
     const unsigned attempts = 3U;
     for (unsigned attempt = 0U; attempt < attempts; ++attempt) {
         kstatus_t status;
@@ -49,9 +49,8 @@ kstatus_t vm_pin_user_page(vm_space_t *space, vaddr_t address, bool writable,
         }
         map_unlock(space);
         if (!needs_fault || attempt + 1U == attempts) return status;
-        /* Resident writable pages need no fault/invlpg transaction. For a
-         * missing/COW page, resolve outside the guard, then revalidate the
-         * entire VMA/PTE/backing relation. A racing unmap never gets pinned. */
+        /* 已驻留的可写页面无需缺页/invlpg 事务。对于缺失页/COW 页，在保护区外解析后，重新验证整个
+         * VMA/PTE/后备关系。并发取消映射的页面绝不会被固定。 */
         status = vm_handle_fault(space, &fault);
         if (status != K_OK) return status;
     }
@@ -59,7 +58,7 @@ kstatus_t vm_pin_user_page(vm_space_t *space, vaddr_t address, bool writable,
 }
 
 void vm_unpin_user_page(page_t *page) {
-    /* The last outstanding pin can outlive the VMA/object reference. */
+    /* 最后一个未释放的固定引用可能比 VMA/对象引用存续更久。 */
     anon_page_unpin(page);
 }
 
@@ -81,7 +80,7 @@ kstatus_t vm_object_shared_page_direct(vm_object_t *object, uint64_t offset,
 
     uint64_t index = (offset & ~(uint64_t)(PAGE_SIZE - 1U)) >> PAGE_SHIFT;
     page_t *page = 0;
-    kstatus_t status = anon_page_get(object, index, create, &page);
+    kstatus_t status = anon_page_get(object, index, create, false, &page);
     if (status != K_OK) return status;
     void *direct = phys_to_direct(page_to_phys(page));
     if (direct == 0) return K_EIO;

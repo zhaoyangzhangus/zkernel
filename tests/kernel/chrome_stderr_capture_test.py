@@ -12,7 +12,8 @@ identity = linux[linux.index("static bool linux_process_is_chrome_image("):
 capture = linux[linux.index("void linux_chrome_stderr_write("):
                 linux.index("\n#if OS_DEBUG_SERIAL", linux.index(
                     "void linux_chrome_stderr_write("))]
-debug = debug[debug.index("#define DEBUG_WRITE_MAX_BYTES"):]
+debug = ("#define DEBUG_WRITE_MAX_BYTES 240U\n" +
+         debug[debug.index("#ifndef OS_DEBUG_SERIAL"):])
 mock = r'''
 #include <assert.h>
 #include <stdbool.h>
@@ -41,7 +42,7 @@ int main(void) {
     char text[240]; memset(text,'x',sizeof(text));
     strcpy(process.linux_exe,"/sbin/other");
     assert(syscall_debug_write((uintptr_t)text,240,0,0,0,0)==240 && !emitted);
-    strcpy(process.linux_exe,"/sbin/chrome");
+    strcpy(process.linux_exe,"/usr/apps/chrome/chrome");
     const char *trace="LITEOS_FRAME_DIAGNOSTIC\n";
     for(unsigned i=0;i<1000;++i)
         linux_chrome_stderr_write(&process,trace,strlen(trace));

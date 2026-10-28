@@ -8,7 +8,15 @@
 
 #include "../../runtime/text.h"
 #include "../../runtime/caption.h"
+#include "../../runtime/caption_tree.h"
 #include "../../runtime/message_box.h"
+#include "../../runtime/file_picker.h"
+#include "../../runtime/modal_tree.h"
+#include "../../runtime/clipboard.h"
+
+/* 编辑器命中、换行与统一控件绘制必须使用同一字符单元。 */
+#undef OS_TEXT_WIDTH
+#define OS_TEXT_WIDTH os_control_text_cell_width(' ',ui_text_size())
 
 #define NOTEPAD_TEXT_CAPACITY 8192U
 #define NOTEPAD_CONTENT_TOP 0U
@@ -55,82 +63,25 @@ static bool g_shift;
 static bool g_ctrl;
 static bool g_dirty;
 static ui_message_box_t g_message;
+static ui_file_picker_t g_picker;
+static bool g_named_document=true;
+static bool g_picker_overwrite;
 enum notepad_pending { NOTEPAD_PENDING_NONE, NOTEPAD_PENDING_CLOSE,
-                      NOTEPAD_PENDING_NEW, NOTEPAD_PENDING_RELOAD };
+                      NOTEPAD_PENDING_NEW, NOTEPAD_PENDING_RELOAD, NOTEPAD_PENDING_OPEN };
 static enum notepad_pending g_pending;
 static notepad_history_t g_undo;
 static notepad_history_t g_redo;
 static char g_saved_text[NOTEPAD_TEXT_CAPACITY];
 static size_t g_saved_length;
-static uint32_t *g_target;
 static uint32_t g_target_width;
 static uint32_t g_target_height;
-
-#define NOTEPAD_DAMAGE_CAPACITY 8U
-typedef struct notepad_damage_rect {
-    uint32_t x;
-    uint32_t y;
-    uint32_t width;
-    uint32_t height;
-} notepad_damage_rect_t;
-static notepad_damage_rect_t g_damage[NOTEPAD_DAMAGE_CAPACITY];
-static uint32_t g_damage_count;
-static bool g_damage_full;
-
-static void notepad_damage_all(void) {
-    g_damage_count = 0U;
-    g_damage_full = true;
-}
-
-static void notepad_damage_reset(void) {
-    g_damage_count = 0U;
-    g_damage_full = false;
-}
-
-static void notepad_damage_rect(uint32_t x, uint32_t y,
-                                uint32_t width, uint32_t height) {
-    uint32_t right;
-    uint32_t bottom;
-    if (g_damage_full || width == 0U || height == 0U) return;
-    if (x >= g_window.width || y >= g_window.height) return;
-    if (width > g_window.width - x) width = g_window.width - x;
-    if (height > g_window.height - y) height = g_window.height - y;
-    right = x + width;
-    bottom = y + height;
-    for (uint32_t index = 0U; index < g_damage_count; ++index) {
-        notepad_damage_rect_t *current = &g_damage[index];
-        uint32_t current_right = current->x + current->width;
-        uint32_t current_bottom = current->y + current->height;
-        if (right < current->x || current_right < x ||
-            bottom < current->y || current_bottom < y) continue;
-        if (x > current->x) x = current->x;
-        if (y > current->y) y = current->y;
-        if (right < current_right) right = current_right;
-        if (bottom < current_bottom) bottom = current_bottom;
-        current->x = x;
-        current->y = y;
-        current->width = right - x;
-        current->height = bottom - y;
-        return;
-    }
-    if (g_damage_count >= NOTEPAD_DAMAGE_CAPACITY) {
-        notepad_damage_all();
-        return;
-    }
-    g_damage[g_damage_count++] = (notepad_damage_rect_t){x, y,
-                                                         width, height};
-}
-
-static void notepad_damage_editor(void) {
-    uint32_t top = NOTEPAD_CONTENT_TOP;
-    uint32_t bottom = g_window.height;
-    if (bottom > top) notepad_damage_rect(0U, top, g_window.width,
-                                          bottom - top);
-}
-
-static void notepad_damage_title(void) {
-    notepad_damage_all();
-}
+static os_control_node_t g_nodes[OS_CONTROL_TREE_MAX_NODES];
+static char g_tree_text[OS_CONTROL_TREE_MAX_TEXT];
+static os_window_control_tree_t g_tree;
+static uint32_t g_node_count,g_text_used,g_caption_height;
+static uint32_t g_text_run_right;
+static bool g_tree_overflow;
+static bool g_published_modal;
 
 /* MinGW 在标准 main 入口前会发出 __main；System 用户程序不链接 CRT。 */
 void __main(void) {
@@ -196,14 +147,13 @@ static bool set_file_path(const char *argument) {
 }
 
 static void set_status(const char *text) {
-    /* Routine editing is silent; explicit results and errors are dialogs. */
+    /* 常规编辑不弹出提示；明确的结果和错误通过对话框显示。 */
     if (!text || text_equals(text, "UNDO") || text_equals(text, "REDO") ||
         text_equals(text, "NOTHING TO UNDO") || text_equals(text, "NOTHING TO REDO") ||
         text_equals(text, "NEW DOCUMENT - CTRL+S TO SAVE") ||
         text_equals(text, "CTRL+S SAVE  CTRL+Z UNDO  CTRL+/- FONT  CTRL+Q EXIT")) return;
-    ui_message_show(&g_message, "Notepad", text, OS_MESSAGE_OK);
+    ui_message_show(&g_message, "记事本", text, OS_MESSAGE_OK);
     g_mouse_selecting = false;
-    notepad_damage_all();
 }
 
 static void snapshot_capture(notepad_snapshot_t *snapshot) {
@@ -299,20 +249,46 @@ static void redo_document(void) {
 
 static void fill_rect(uint32_t x, uint32_t y, uint32_t width, uint32_t height,
                       uint32_t color) {
-    if (g_target == 0 || x >= g_target_width || y >= g_target_height) return;
+    if (!width || !height || x >= g_target_width || y >= g_target_height) return;
     if (width > g_target_width - x) width = g_target_width - x;
     if (height > g_target_height - y) height = g_target_height - y;
-    for (uint32_t row = 0U; row < height; ++row) {
-        for (uint32_t column = 0U; column < width; ++column) {
-            g_target[(uint64_t)(y + row) * g_target_width + x + column] = color;
+    /* 同一行的选区合并成一个节点，不按字符产生海量小控件。 */
+    for (uint32_t back=1;back<=2U && back<g_node_count;++back) {
+        os_control_node_t *last=&g_nodes[g_node_count-back];
+        if (last->kind==OS_CONTROL_CONTAINER && last->background==color &&
+            last->y==(int32_t)y && last->height==(int32_t)height &&
+            (int64_t)last->x+last->width==x) {
+            last->width+=(int32_t)width;return;
         }
     }
+    if (g_node_count==OS_CONTROL_TREE_MAX_NODES) {g_tree_overflow=true;return;}
+    uint32_t index=g_node_count++;
+    g_nodes[index]=(os_control_node_t){.identifier=0x20000000U+index,
+        .parent=index?0:OS_CONTROL_NO_PARENT,.kind=OS_CONTROL_CONTAINER,
+        .flags=index?OS_CONTROL_POINTER_PASSTHROUGH:OS_CONTROL_CLIP_CHILDREN,
+        .x=(int32_t)x,.y=(int32_t)y,.width=(int32_t)width,.height=(int32_t)height,
+        .background=color,.foreground=NOTEPAD_CONTENT_TEXT,.font_size=ui_text_size()};
 }
 
-static void draw_character(uint32_t x, uint32_t y, char character, uint32_t color) {
-    char text[2] = {character, '\0'};
-    ui_text_draw(g_target, g_target_width, g_target_width, g_target_height,
-                     (int32_t)x, (int32_t)y, text, color);
+static void draw_character(uint32_t x, uint32_t y, uint32_t character, uint32_t color) {
+    if (x>=g_target_width || y>=g_target_height) return;
+    char encoded[4];size_t length=os_utf8_encode(character,encoded);
+    if (length>sizeof(g_tree_text)-g_text_used) {g_tree_overflow=true;return;}
+    os_control_node_t *last=g_node_count?&g_nodes[g_node_count-1U]:0;
+    if (last && last->kind==OS_CONTROL_TEXT && last->foreground==color &&
+        last->y==(int32_t)y && g_text_run_right==x) {
+        __builtin_memcpy(g_tree_text+g_text_used,encoded,length);
+        g_text_used+=(uint32_t)length;last->text_length+=(uint32_t)length;
+        g_text_run_right=x+os_control_text_cell_width(character,ui_text_size());return;
+    }
+    if (g_node_count==OS_CONTROL_TREE_MAX_NODES) {g_tree_overflow=true;return;}
+    uint32_t index=g_node_count++;
+    g_nodes[index]=(os_control_node_t){.identifier=0x20000000U+index,.parent=0,.kind=OS_CONTROL_TEXT,.value=OS_CONTROL_TEXT_APP_SELECTION,
+        .flags=OS_CONTROL_BACKGROUND_ALPHA|OS_CONTROL_POINTER_PASSTHROUGH|OS_CONTROL_INHERIT_FONT,
+        .x=(int32_t)x,.y=(int32_t)y,.width=(int32_t)(g_target_width-x),
+        .height=(int32_t)OS_TEXT_HEIGHT,.foreground=color,.text_offset=g_text_used,.text_length=(uint32_t)length};
+    __builtin_memcpy(g_tree_text+g_text_used,encoded,length);g_text_used+=(uint32_t)length;
+    g_text_run_right=x+os_control_text_cell_width(character,ui_text_size());
 }
 
 static uint32_t editor_columns(uint32_t width, uint32_t cell_width) {
@@ -328,8 +304,18 @@ static uint32_t editor_visible_lines(uint32_t height, uint32_t caption_height,
     return (height - caption_height - status_height) / cell_height;
 }
 
-static void advance_position(char character, uint32_t columns,
+/* 宽字符放不下时先换行；即使窗口只有一个单元，也始终能向前推进。 */
+static void prepare_position(uint32_t character,uint32_t columns,uint32_t *line,uint32_t *column) {
+    uint32_t cells=character<128U?1U:2U;
+    if (cells>columns) cells=columns;
+    if (character!='\n' && character!='\t' && *column && cells>columns-*column) {
+        ++*line;*column=0;
+    }
+}
+
+static void advance_position(uint32_t character, uint32_t columns,
                              uint32_t *line, uint32_t *column) {
+    prepare_position(character,columns,line,column);
     if (character == '\n') {
         ++*line;
         *column = 0U;
@@ -342,7 +328,8 @@ static void advance_position(char character, uint32_t columns,
             *column = next;
         }
     } else {
-        ++*column;
+        uint32_t cells=character<128U?1U:2U;
+        *column+=cells>columns?columns:cells;
         if (*column >= columns) {
             ++*line;
             *column = 0U;
@@ -353,8 +340,13 @@ static void advance_position(char character, uint32_t columns,
 static void cursor_position(uint32_t columns, uint32_t *line, uint32_t *column) {
     *line = 0U;
     *column = 0U;
-    for (size_t index = 0U; index < g_cursor; ++index) {
-        advance_position(g_text[index], columns, line, column);
+    for (size_t index = 0U; index < g_cursor;) {
+        size_t used;uint32_t code=os_utf8_next(g_text+index,g_text_length-index,&used);
+        advance_position(code,columns,line,column);index+=used?used:1U;
+    }
+    if (g_cursor<g_text_length) {
+        size_t used;uint32_t code=os_utf8_next(g_text+g_cursor,g_text_length-g_cursor,&used);
+        prepare_position(code,columns,line,column);
     }
 }
 
@@ -362,11 +354,20 @@ static size_t offset_at_position(uint32_t columns, uint32_t wanted_line,
                                  uint32_t wanted_column) {
     uint32_t line = 0U;
     uint32_t column = 0U;
-    for (size_t index = 0U; index <= g_text_length; ++index) {
+    size_t previous=0;
+    for (size_t index = 0U; index <= g_text_length;) {
+        size_t used=0;
+        uint32_t code=index<g_text_length?os_utf8_next(g_text+index,g_text_length-index,&used):0;
+        uint32_t old_line=line;
+        if (index<g_text_length) prepare_position(code,columns,&line,&column);
+        if (old_line==wanted_line && line>wanted_line) return index;
         if (line == wanted_line && column >= wanted_column) return index;
         if (index == g_text_length) break;
-        if (line > wanted_line) return index - 1U;
-        advance_position(g_text[index], columns, &line, &column);
+        if (line > wanted_line) return previous;
+        if (line==wanted_line && code>=128U && columns>1U && wanted_column==column+1U)
+            return index+(used?used:1U);
+        previous=index;
+        advance_position(code,columns,&line,&column);index+=used?used:1U;
     }
     return g_text_length;
 }
@@ -399,13 +400,14 @@ static void draw_editor(void) {
               NOTEPAD_CONTENT_BACKGROUND);
     const size_t selection_start = g_selection_anchor < g_cursor ? g_selection_anchor : g_cursor;
     const size_t selection_end = g_selection_anchor > g_cursor ? g_selection_anchor : g_cursor;
-    for (size_t index = 0U; visible_lines != 0U && index < g_text_length; ++index) {
+    for (size_t index = 0U; visible_lines != 0U && index < g_text_length;) {
+        size_t used;uint32_t character=os_utf8_next(g_text+index,g_text_length-index,&used);
+        prepare_position(character,columns,&line,&column);
         if (line >= g_scroll_line && line - g_scroll_line >= visible_lines) break;
-        char character = g_text[index];
         if (g_selection_anchor != SIZE_MAX && index >= selection_start &&
             index < selection_end && line >= g_scroll_line &&
             line < g_scroll_line + visible_lines) {
-            uint32_t cells = character == '\t' ? 4U - (column & 3U) : 1U;
+            uint32_t cells = character == '\t' ? 4U - (column & 3U) : character<128U?1U:2U;
             if (cells > columns - column) cells = columns - column;
             fill_rect(10U + column * cell_width,
                 text_top + (line - g_scroll_line) * cell_height,
@@ -427,6 +429,7 @@ static void draw_editor(void) {
             }
         }
         advance_position(character, columns, &line, &column);
+        index+=used?used:1U;
     }
     if (cursor_line >= g_scroll_line && cursor_line < g_scroll_line + visible_lines &&
         cursor_column < columns) {
@@ -434,8 +437,6 @@ static void draw_editor(void) {
                   text_top + (cursor_line - g_scroll_line) * cell_height,
                   2U, cell_height, NOTEPAD_CURSOR);
     }
-    ui_message_draw(&g_message, g_target, g_target_width,
-                         g_target_width, g_target_height);
 }
 
 static bool create_window(void) {
@@ -453,17 +454,18 @@ static bool create_window(void) {
     height = display.height * 3U / 4U;
     if (width < 640U && display.width > 640U) width = 640U;
     if (height < 420U && display.height > 420U) height = 420U;
+    /* 大屏也不按屏幕比例撑满，保留后续缩放与最大化。 */
+    if (width > 720U) width = 720U;
+    if (height > 480U) height = 480U;
     request.x = (int32_t)((display.width - width) / 2U);
     request.y = (int32_t)((display.height - height) / 2U);
     request.width = width;
     request.height = height;
     request.flags = OS_WINDOW_VISIBLE |
                     OS_WINDOW_RESIZABLE |
-                    OS_WINDOW_STANDARD_CAPTION_CONTROLS;
+                    OS_WINDOW_STANDARD_CAPTION_CONTROLS | OS_WINDOW_CAPTION_HEIGHT(user_caption_height());
     request.background = NOTEPAD_CONTENT_BACKGROUND;
-    request.title[0] = 'N'; request.title[1] = 'O'; request.title[2] = 'T';
-    request.title[3] = 'E'; request.title[4] = 'P'; request.title[5] = 'A';
-    request.title[6] = 'D';
+    user_caption_format_title(request.title, "记事本", false);
     request.address = NOTEPAD_MAP_BASE;
     if (notepad_syscall_one(OS_SYS_WINDOW_CREATE, (uint64_t)&request) != 0 ||
         request.window == OS_INVALID_HANDLE || request.address == 0U) return false;
@@ -475,43 +477,95 @@ static bool create_window(void) {
     return true;
 }
 
+/* 标题栏按钮与正文共用控件树，正文仍保持客户端坐标。 */
+static bool sync_caption_tree(void) {
+    static const char label[] = "打开";
+    if (g_node_count > OS_CONTROL_TREE_MAX_NODES - 2U ||
+        sizeof(label)-1U > sizeof(g_tree_text)-g_text_used) return false;
+    uint32_t caption=user_caption_height(),font=ui_text_size();
+    for (uint32_t i=g_node_count;i>0U;--i) {
+        g_nodes[i]=g_nodes[i-1U];
+        g_nodes[i].parent=i==1U?0U:g_nodes[i].parent+1U;
+    }
+    g_nodes[1].identifier=0x1ffffff0U;
+    g_nodes[1].y=(int32_t)caption;
+    g_nodes[0]=(os_control_node_t){.identifier=0x20000000U,
+        .parent=OS_CONTROL_NO_PARENT,.kind=OS_CONTROL_CONTAINER,
+        .flags=OS_CONTROL_WINDOW_FRAME|OS_CONTROL_CLIP_CHILDREN|OS_CONTROL_POINTER_PASSTHROUGH,
+        .width=OS_CONTROL_FILL,.height=OS_CONTROL_FILL,.font_size=font};
+    ++g_node_count;
+    uint32_t size=os_window_caption_button_width(OS_WINDOW_CAPTION_HEIGHT(caption));
+    uint32_t width=2U*font+24U,gap=8U;
+    bool fits=g_window.width>=3U*size+width+2U*gap;
+    memcpy(g_tree_text+g_text_used,label,sizeof(label)-1U);
+    g_nodes[g_node_count++]=(os_control_node_t){.identifier=0x1ffffff1U,.parent=0U,
+        .kind=OS_CONTROL_BUTTON,.flags=fits?0U:OS_CONTROL_HIDDEN,
+        .x=fits?(int32_t)(g_window.width-3U*size-width-gap):0,
+        .y=4,.width=(int32_t)width,.height=(int32_t)caption-8,
+        .radius=6,.font_size=font,.foreground=OS_THEME_TEXT,.background=OS_THEME_FIELD,
+        .text_offset=g_text_used,.text_length=sizeof(label)-1U};
+    g_text_used+=sizeof(label)-1U;
+    char title[32];user_caption_format_app_title(title,"记事本",g_file_path,g_dirty);
+    return user_caption_tree(g_nodes,&g_node_count,OS_CONTROL_TREE_MAX_NODES,g_tree_text,&g_text_used,
+        sizeof(g_tree_text),(user_caption_layout_t){.title=title,.width=g_window.width,
+            .height=caption,.font=font,.title_width=fits?g_window.width-3U*size-width-2U*gap:0U});
+}
+
+static bool sync_message_tree(void) {
+    if (!g_message.active) return true;
+    ui_message_document_t document;
+    return ui_message_build(&g_message,g_window.identifier,g_window.width,g_window.height,&document) &&
+        ui_modal_tree_attach(g_nodes,&g_node_count,OS_CONTROL_TREE_MAX_NODES,
+            g_tree_text,&g_text_used,sizeof(g_tree_text),&document.request);
+}
+
+static bool sync_file_picker_tree(void) {
+    if (!g_picker.active) return true;
+    ui_file_picker_document_t document;
+    return ui_file_picker_build(&g_picker,g_window.identifier,g_window.width,g_window.height,&document) &&
+        ui_modal_tree_attach(g_nodes,&g_node_count,OS_CONTROL_TREE_MAX_NODES,
+            g_tree_text,&g_text_used,sizeof(g_tree_text),&document.request);
+}
+
 static void update_window(void) {
     os_window_update_t request = {0};
-    request.flags = OS_WINDOW_CAPTION_HEIGHT(user_caption_height());
+    uint32_t caption=user_caption_height();
+    request.flags = OS_WINDOW_CAPTION_HEIGHT(caption);
     os_window_title_t title = {0};
     title.hdr.size = sizeof(title);
     title.hdr.version = OS_SYSCALL_ABI_VERSION;
     title.identifier = g_window.identifier;
-    user_caption_format_title(title.title, g_file_path, g_dirty);
+    user_caption_format_app_title(title.title, "记事本", g_file_path, g_dirty);
     (void)notepad_syscall_one(OS_SYS_WINDOW_TITLE, (uint64_t)&title);
-    if (!g_damage_full && g_damage_count == 0U) return;
+    if (caption==g_caption_height) return;
     request.hdr.size = sizeof(request);
     request.hdr.version = OS_SYSCALL_ABI_VERSION;
     request.identifier = g_window.identifier;
-    if (g_damage_full) {
-        request.width = g_window.width;
-        request.height = g_window.height;
-        (void)notepad_syscall_one(OS_SYS_WINDOW_UPDATE, (uint64_t)&request);
-    } else {
-        for (uint32_t index = 0U; index < g_damage_count; ++index) {
-            request.x = (int32_t)g_damage[index].x;
-            request.y = (int32_t)g_damage[index].y;
-            request.width = g_damage[index].width;
-            request.height = g_damage[index].height;
-            (void)notepad_syscall_one(OS_SYS_WINDOW_UPDATE,
-                                      (uint64_t)&request);
-        }
-    }
-    notepad_damage_reset();
+    request.width=g_window.width;request.height=g_window.height;
+    if (notepad_syscall_one(OS_SYS_WINDOW_UPDATE,(uintptr_t)&request)==0) g_caption_height=caption;
 }
 
 static void render(void) {
-    g_target = g_window.pixels;
     g_target_width = g_window.width;
     g_target_height = g_window.height;
-    if (g_target == 0) return;
-    if (!g_damage_full && g_damage_count == 0U) notepad_damage_all();
+    if (!g_target_width || !g_target_height) return;
+    g_node_count=g_text_used=0;g_tree_overflow=false;
     draw_editor();
+    if (g_tree_overflow || !sync_caption_tree() ||
+        !(g_message.active?sync_message_tree():sync_file_picker_tree())) {
+        g_tree.count=0;g_message.active=false;ui_file_picker_close(&g_picker);g_pending=NOTEPAD_PENDING_NONE;return;
+    }
+    os_window_control_tree_t tree={.hdr={sizeof(tree),OS_SYSCALL_ABI_VERSION},
+        .identifier=g_window.identifier,.count=g_node_count,.nodes=(uintptr_t)g_nodes,
+        .text=(uintptr_t)g_tree_text,.text_size=g_text_used};
+    if (notepad_syscall_one(OS_SYS_WINDOW_CONTROL_TREE,(uintptr_t)&tree)!=0) {
+        /* 发布失败不能执行不可见的确认动作，也不能使用被覆盖的旧节点元数据。 */
+        g_tree.count=0;g_message.active=false;ui_file_picker_close(&g_picker);g_pending=NOTEPAD_PENDING_NONE;return;
+    }
+    g_tree=tree;
+    bool modal=g_message.active || g_picker.active;
+    if (g_published_modal!=modal) g_ctrl=g_shift=false;
+    g_published_modal=modal;
     update_window();
 }
 
@@ -608,7 +662,7 @@ static bool save_document(void) {
             0U, (uint64_t)(uintptr_t)&handle);
         if (status == -17) {
             handle = OS_INVALID_HANDLE;
-            continue; /* A different editor owns this name. */
+            continue; /* 此名称由另一个编辑器占用。 */
         }
         if (status < 0 || handle == OS_INVALID_HANDLE) {
             set_status("SAVE FAILED: CANNOT CREATE TEMPORARY FILE");
@@ -660,14 +714,20 @@ failed:
     return false;
 }
 
+static void show_file_picker(bool save) {
+    g_mouse_selecting=false;g_picker_overwrite=false;
+    (void)ui_file_picker_show(&g_picker,save?UI_PICKER_SAVE_FILE:UI_PICKER_OPEN_FILE,
+        g_file_path,notepad_syscall_one);
+}
+
 static void request_action(enum notepad_pending action) {
     if (g_dirty) {
         g_pending = action;
         g_mouse_selecting = false;
-        ui_message_show(&g_message, "Unsaved changes",
-            "Save changes before continuing?", OS_MESSAGE_SAVE_DISCARD_CANCEL);
-        notepad_damage_all();
+        ui_message_show(&g_message, "尚未保存",
+            "是否保存修改后继续？", OS_MESSAGE_SAVE_DISCARD_CANCEL);
     } else if (action == NOTEPAD_PENDING_CLOSE) notepad_exit(0U);
+    else if (action == NOTEPAD_PENDING_OPEN) show_file_picker(false);
 }
 
 static void new_document(void) {
@@ -683,6 +743,7 @@ static void new_document(void) {
     g_selection_anchor = SIZE_MAX;
     g_follow_cursor = true;
     g_dirty = true;
+    g_named_document=false;g_file_path[0]=0;
     set_status("NEW DOCUMENT - CTRL+S TO SAVE");
 }
 
@@ -727,28 +788,63 @@ static bool has_selection(void) {
 
 static void complete_message(enum ui_message_result result) {
     enum notepad_pending action = g_pending;
+    if (result==OS_MESSAGE_SAVE && !g_named_document) {
+        show_file_picker(true);return;
+    }
     g_pending = NOTEPAD_PENDING_NONE;
     if (result == OS_MESSAGE_CANCEL || action == NOTEPAD_PENDING_NONE) return;
     if (result == OS_MESSAGE_SAVE && !save_document()) return;
     if (action == NOTEPAD_PENDING_CLOSE) notepad_exit(0U);
     if (action == NOTEPAD_PENDING_NEW) {
-        /* The confirmation has authorized replacing the unsaved document. */
+        /* 用户已确认允许替换未保存的文档。 */
         g_dirty = false;
         new_document();
     } else if (action == NOTEPAD_PENDING_RELOAD) {
         if (load_document()) set_status("RELOADED");
+    } else if (action == NOTEPAD_PENDING_OPEN) show_file_picker(false);
+}
+
+static void commit_file_picker(bool overwrite) {
+    char path[UI_PICKER_PATH];
+    if (!ui_file_picker_result(&g_picker,path,sizeof(path))) {g_picker.active=true;return;}
+    if (g_picker.save && !overwrite) {
+        os_file_stat_t stat={.hdr={sizeof(stat),OS_SYSCALL_ABI_VERSION},.path=(uintptr_t)path};
+        int64_t status=notepad_syscall_one(OS_SYS_FILE_STAT,(uintptr_t)&stat);
+        if (!status) {
+            if (stat.info.type!=OS_FILE_TYPE_REGULAR) {
+                g_picker.active=true;ui_message_copy(g_picker.error,sizeof(g_picker.error),"所选路径不是普通文件");return;
+            }
+            g_picker_overwrite=true;
+            ui_message_show(&g_message,"覆盖文件","文件已存在，是否替换？",OS_MESSAGE_YES_NO);return;
+        }
+        if (status!=-2) {
+            g_picker.active=true;ui_message_copy(g_picker.error,sizeof(g_picker.error),"无法检查目标文件");return;
+        }
     }
+    char previous[sizeof(g_file_path)];
+    __builtin_memcpy(previous,g_file_path,sizeof(previous));
+    __builtin_memcpy(g_file_path,path,__builtin_strlen(path)+1U);
+    bool success=g_picker.save?save_document():load_document();
+    if (!success) {
+        __builtin_memcpy(g_file_path,previous,sizeof(g_file_path));
+        /* 失败只回到选择器；保存重试成功后仍需完成原来的关闭或新建操作。 */
+        g_picker.active=true;
+        ui_message_copy(g_picker.error,sizeof(g_picker.error),
+            g_picker.save?"保存失败，请检查路径后重试":"打开失败，请检查路径后重试");
+        return;
+    }
+    g_named_document=true;ui_file_picker_close(&g_picker);
+    if (g_pending!=NOTEPAD_PENDING_NONE) complete_message(OS_MESSAGE_DISCARD);
 }
 
 static void reflow_editor(void) {
-    /* Start from the first row and then reveal the caret. This also removes
-     * a scroll offset inherited from a viewport smaller than the document. */
+    /* 从首行开始，再将插入光标滚动到可见区域。此操作也会清除因视口小于文档而遗留的
+     * 滚动偏移。 */
     g_scroll_line = 0U;
     g_follow_cursor = true;
-    notepad_damage_all();
 }
 
-/* Caller records one undo snapshot for the whole replacement. */
+/* 调用方为整个替换操作记录一个撤销快照。 */
 static void erase_selection(void) {
     if (!has_selection()) { g_selection_anchor = SIZE_MAX; return; }
     size_t first = g_selection_anchor < g_cursor ? g_selection_anchor : g_cursor;
@@ -759,6 +855,31 @@ static void erase_selection(void) {
     g_cursor = first;
     g_selection_anchor = SIZE_MAX;
     g_dirty = true;
+}
+
+/* 剪切必须先成功发布；粘贴先检查容量，再作为一个可撤销操作替换选区。 */
+static void copy_selection(bool cut) {
+    if (!has_selection()) return;
+    size_t first=g_selection_anchor<g_cursor?g_selection_anchor:g_cursor;
+    size_t last=g_selection_anchor>g_cursor?g_selection_anchor:g_cursor;
+    if (ui_clipboard_copy(notepad_syscall_one,g_text+first,last-first) && cut) {
+        begin_edit();erase_selection();
+    }
+}
+static void paste_selection(void) {
+    size_t removed=has_selection()?(g_selection_anchor>g_cursor?
+        g_selection_anchor-g_cursor:g_cursor-g_selection_anchor):0U;
+    size_t length=0;
+    char *text=ui_clipboard_paste(notepad_syscall_one,
+        NOTEPAD_TEXT_CAPACITY-1U-(g_text_length-removed),&length);
+    if (!text) return;
+    /* 文档使用零结尾文本，拒绝嵌入零而不是悄悄截断。 */
+    if (!memchr(text,0,length)) {
+        begin_edit();erase_selection();
+        memmove(g_text+g_cursor+length,g_text+g_cursor,g_text_length-g_cursor+1U);
+        memcpy(g_text+g_cursor,text,length);g_cursor+=length;g_text_length+=length;g_dirty=true;
+    }
+    free(text);
 }
 
 static void insert_character(char character) {
@@ -782,11 +903,11 @@ static void backspace(void) {
     g_selection_anchor = SIZE_MAX;
     if (g_cursor == 0U) return;
     begin_edit();
+    size_t first=os_utf8_previous(g_text,g_text_length,g_cursor);
     for (size_t index = g_cursor; index <= g_text_length; ++index) {
-        g_text[index - 1U] = g_text[index];
+        g_text[first+index-g_cursor] = g_text[index];
     }
-    --g_cursor;
-    --g_text_length;
+    g_text_length-=g_cursor-first;g_cursor=first;
     g_dirty = true;
 }
 
@@ -795,10 +916,11 @@ static void delete_character(void) {
     g_selection_anchor = SIZE_MAX;
     if (g_cursor >= g_text_length) return;
     begin_edit();
-    for (size_t index = g_cursor; index < g_text_length; ++index) {
-        g_text[index] = g_text[index + 1U];
+    size_t last=os_utf8_advance(g_text,g_text_length,g_cursor);
+    for (size_t index = last; index <= g_text_length; ++index) {
+        g_text[g_cursor+index-last] = g_text[index];
     }
-    --g_text_length;
+    g_text_length-=last-g_cursor;
     g_dirty = true;
 }
 
@@ -826,25 +948,24 @@ static void scroll_editor(int32_t direction) {
     uint32_t visible_lines = editor_visible_lines(g_window.height, NOTEPAD_CONTENT_TOP,
                                                   0U, OS_TEXT_HEIGHT);
     if (visible_lines == 0U || direction == 0) return;
+    uint32_t target;
+    if(direction<0) {
+        uint32_t distance=0U-(uint32_t)direction;
+        target=distance>g_scroll_line?0U:g_scroll_line-distance;
+    } else target=(uint32_t)direction>UINT32_MAX-g_scroll_line?UINT32_MAX:g_scroll_line+(uint32_t)direction;
+    /* 行号只增不减，确认目标视口存在后不再扫描余下正文；回到顶部无需扫描。 */
+    uint64_t required=(uint64_t)target+visible_lines;
     uint32_t line = 0U;
     uint32_t column = 0U;
     uint32_t total_lines;
     uint32_t maximum;
-    for (size_t index = 0U; index < g_text_length; ++index) {
-        advance_position(g_text[index], columns, &line, &column);
+    for (size_t index = 0U; target && index < g_text_length && (uint64_t)line+1U<required;) {
+        size_t used;uint32_t code=os_utf8_next(g_text+index,g_text_length-index,&used);
+        advance_position(code,columns,&line,&column);index+=used?used:1U;
     }
     total_lines = line == UINT32_MAX ? UINT32_MAX : line + 1U;
     maximum = total_lines > visible_lines ? total_lines - visible_lines : 0U;
-    if (direction < 0) {
-        uint32_t distance = 0U - (uint32_t)direction;
-        g_scroll_line = distance > g_scroll_line ? 0U : g_scroll_line - distance;
-    } else if ((uint32_t)direction > maximum -
-               (g_scroll_line < maximum ? g_scroll_line : maximum)) {
-        g_scroll_line = maximum;
-    } else {
-        g_scroll_line += (uint32_t)direction;
-    }
-    if (g_scroll_line > maximum) g_scroll_line = maximum;
+    g_scroll_line=target>maximum?maximum:target;
     g_follow_cursor = false;
 }
 
@@ -864,7 +985,6 @@ static bool key_matches(const os_input_event_t *input, uint32_t hid_code,
 static bool handle_key(const os_window_event_t *event) {
     const os_input_event_t *input = event != 0 ? &event->input : 0;
     char character;
-    bool dirty_before;
     if (event == 0 || event->type != OS_WINDOW_EVENT_INPUT ||
         input == 0 || input->type != OS_INPUT_EVENT_KEY) return false;
     if (input->code == 0xE1U || input->code == 0xE5U) {
@@ -876,7 +996,6 @@ static bool handle_key(const os_window_event_t *event) {
         return false;
     }
     if (input->value == OS_INPUT_VALUE_RELEASE) return false;
-    dirty_before = g_dirty;
     g_follow_cursor = true;
     bool navigation = input->code >= 0x4AU && input->code <= 0x52U && input->code != 0x4CU;
     if (navigation) {
@@ -892,8 +1011,15 @@ static bool handle_key(const os_window_event_t *event) {
     } else if (g_ctrl && key_matches(input, 0x04U, 'A')) {
         g_selection_anchor = 0U;
         g_cursor = g_text_length;
+    } else if (g_ctrl && key_matches(input, 0x06U, 'C')) {
+        copy_selection(false);
+    } else if (g_ctrl && key_matches(input, 0x1BU, 'X')) {
+        copy_selection(true);
+    } else if (g_ctrl && key_matches(input, 0x19U, 'V')) {
+        paste_selection();
     } else if (g_ctrl && key_matches(input, 0x16U, 'S')) {
-        if (save_document()) set_status("SAVED");
+        if (g_shift || !g_named_document) show_file_picker(true);
+        else if (save_document()) set_status("SAVED");
     } else if (g_ctrl && key_matches(input, 0x14U, 'Q')) {
         request_action(NOTEPAD_PENDING_CLOSE);
     } else if (g_ctrl && key_matches(input, 0x1DU, 'Z')) {
@@ -903,15 +1029,17 @@ static bool handle_key(const os_window_event_t *event) {
     } else if (g_ctrl && key_matches(input, 0x11U, 'N')) {
         new_document();
     } else if (g_ctrl && key_matches(input, 0x12U, 'O')) {
+        request_action(NOTEPAD_PENDING_OPEN);
+    } else if (g_ctrl && key_matches(input, 0x15U, 'R')) {
         reload_document();
     } else if (g_ctrl && input->code == 0x4AU) {
         g_cursor = 0U;
     } else if (g_ctrl && input->code == 0x4DU) {
         g_cursor = g_text_length;
     } else if (input->code == 0x4FU) {
-        if (g_cursor < g_text_length) ++g_cursor;
+        g_cursor=os_utf8_advance(g_text,g_text_length,g_cursor);
     } else if (input->code == 0x50U) {
-        if (g_cursor != 0U) --g_cursor;
+        g_cursor=os_utf8_previous(g_text,g_text_length,g_cursor);
     } else if (input->code == 0x52U) {
         move_vertical(-1);
     } else if (input->code == 0x51U) {
@@ -936,10 +1064,6 @@ static bool handle_key(const os_window_event_t *event) {
         character = key_to_ascii(input->code, g_shift);
         if (character != '\0') insert_character(character);
     }
-    notepad_damage_editor();
-    if (g_ctrl || g_dirty != dirty_before) {
-        notepad_damage_title();
-    }
     render();
     return true;
 }
@@ -963,6 +1087,8 @@ static size_t editor_mouse_offset(int32_t x, int32_t y) {
 
 static bool handle_editor_mouse(const os_window_event_t *event) {
     const os_input_event_t *input = &event->input;
+    size_t previous_cursor=g_cursor,previous_anchor=g_selection_anchor;
+    uint32_t previous_scroll=g_scroll_line;
     if (input->type == OS_INPUT_EVENT_BUTTON && input->code == OS_INPUT_BUTTON_LEFT) {
         if (input->value == OS_INPUT_VALUE_RELEASE) {
             if (!g_mouse_selecting) return false;
@@ -973,9 +1099,10 @@ static bool handle_editor_mouse(const os_window_event_t *event) {
                                         0U, OS_TEXT_HEIGHT) != 0U &&
                    event->pointer_y >= (int32_t)NOTEPAD_CONTENT_TOP &&
                    (int64_t)event->pointer_y < (int64_t)g_window.height) {
+            size_t next=editor_mouse_offset(event->pointer_x,event->pointer_y);
             if (!g_shift || g_selection_anchor == SIZE_MAX)
-                g_selection_anchor = g_shift ? g_cursor : editor_mouse_offset(event->pointer_x, event->pointer_y);
-            g_cursor = editor_mouse_offset(event->pointer_x, event->pointer_y);
+                g_selection_anchor = g_shift ? g_cursor : next;
+            g_cursor = next;
             g_mouse_selecting = true;
         } else return false;
     } else if (input->type == OS_INPUT_EVENT_RELATIVE && g_mouse_selecting &&
@@ -983,44 +1110,111 @@ static bool handle_editor_mouse(const os_window_event_t *event) {
         if (event->pointer_y < (int32_t)NOTEPAD_CONTENT_TOP) scroll_editor(-1);
         else if ((int64_t)event->pointer_y >= (int64_t)g_window.height) scroll_editor(1);
         size_t next = editor_mouse_offset(event->pointer_x, event->pointer_y);
-        if (next == g_cursor) return true;
         g_cursor = next;
     } else return false;
     g_follow_cursor = false;
-    notepad_damage_editor();
+    /* 选区端点和视口独立判定，自动滚动不能因端点不变而漏刷。 */
+    if(previous_cursor!=g_cursor || previous_anchor!=g_selection_anchor || previous_scroll!=g_scroll_line)
+        render();
+    return true;
+}
+
+static bool handle_message_event(const os_window_event_t *event) {
+    if (!event || !g_message.active ||
+        (event->type != OS_WINDOW_EVENT_INPUT && event->type != OS_WINDOW_EVENT_CONTROL &&
+         event->type != OS_WINDOW_EVENT_CLOSE_REQUEST)) return false;
+    /* 模态期间仍同步修饰键释放，避免回到编辑器后留下粘滞状态。 */
+    const os_input_event_t *raw = event->type == OS_WINDOW_EVENT_INPUT &&
+        event->input.type == OS_INPUT_EVENT_KEY ? &event->input : 0;
+    bool control_key = event->type == OS_WINDOW_EVENT_CONTROL && event->control.action == OS_CONTROL_KEY;
+    if (raw || control_key) {
+        uint32_t code = raw ? raw->code : event->control.code;
+        int32_t value = raw ? raw->value : event->control.value;
+        if (code == 0xE0U || code == 0xE4U) g_ctrl = value != OS_INPUT_VALUE_RELEASE;
+        if (code == 0xE1U || code == 0xE5U) g_shift = value != OS_INPUT_VALUE_RELEASE;
+    }
+    enum ui_message_result result = ui_message_event(&g_message, event);
+    if (result == OS_MESSAGE_NONE) return true;
+    if (g_picker_overwrite) {
+        g_picker_overwrite=false;
+        if (result==OS_MESSAGE_YES) commit_file_picker(true);
+        else g_picker.active=true;
+    } else complete_message(result);
     render();
     return true;
+}
+
+static bool handle_file_picker_event(const os_window_event_t *event) {
+    if (!g_picker.active || (event->type!=OS_WINDOW_EVENT_INPUT &&
+        event->type!=OS_WINDOW_EVENT_CONTROL && event->type!=OS_WINDOW_EVENT_CLOSE_REQUEST)) return false;
+    bool raw=event->type==OS_WINDOW_EVENT_INPUT && event->input.type==OS_INPUT_EVENT_KEY;
+    bool key=event->type==OS_WINDOW_EVENT_CONTROL && event->control.action==OS_CONTROL_KEY;
+    uint32_t code=raw?event->input.code:event->control.code;
+    int32_t value=raw?event->input.value:event->control.value;
+    if (event->type==OS_WINDOW_EVENT_CONTROL && !key &&
+        event->control.action!=OS_CONTROL_CLICK && event->control.action!=OS_CONTROL_WHEEL) return true;
+    if (event->type==OS_WINDOW_EVENT_INPUT && !raw) return true;
+    bool changed=false;
+    if ((raw || key) && g_picker.ctrl && value!=OS_INPUT_VALUE_RELEASE && (code==0x2eU || code==0x2dU)) {
+        changed=ui_text_adjust(code==0x2eU?1:-1);if(changed)reflow_editor();
+    } else {
+        enum ui_file_picker_event_result result=ui_file_picker_event(&g_picker,event,
+            (raw || key)?key_to_ascii(code,g_picker.shift):0);
+        if (result==UI_PICKER_SELECTED) commit_file_picker(false);
+        else if (result==UI_PICKER_CANCELLED) g_pending=NOTEPAD_PENDING_NONE;
+        changed=result!=UI_PICKER_IDLE;
+    }
+    if(changed)render();
+    return true;
+}
+
+static bool handle_caption_event(const os_window_event_t *event) {
+    if (event->type!=OS_WINDOW_EVENT_CONTROL || event->control.target!=0x1ffffff1U)
+        return false;
+    if (event->control.action==OS_CONTROL_CLICK) {
+        request_action(NOTEPAD_PENDING_OPEN);
+        render();
+    }
+    return true;
+}
+
+/* 正文根在重绘后保持同一语义，但模态窗口出现后不得接收正文的旧事件。 */
+static bool editor_control_event_valid(const os_control_event_t *event) {
+    if (os_control_event_node(&g_tree,g_nodes,event)) return true;
+    bool stable_action = event->action==OS_CONTROL_KEY ||
+        (g_mouse_selecting && (event->action==OS_CONTROL_UP || event->action==OS_CONTROL_MOVE));
+    return g_tree.count && g_tree.revision && !g_message.active && !g_picker.active &&
+        stable_action && event->target==0x20000000U && !event->node_index &&
+        event->node_kind==OS_CONTROL_CONTAINER && !event->user_data &&
+        event->tree_revision && event->tree_revision<=g_tree.revision;
 }
 
 static bool handle_event(const os_window_event_t *event) {
     const os_input_event_t *input;
     uint64_t pixels;
+    os_window_event_t translated;
 
     if (event == 0) return false;
+    if (event->type==OS_WINDOW_EVENT_CONTROL &&
+        !editor_control_event_valid(&event->control)) {
+        /* 文件名逐键重绘时，允许同一代控件已排队的按键，不放行旧目录的点击。 */
+        if (g_picker.active && !g_message.active && event->control.action==OS_CONTROL_KEY &&
+            event->control.tree_revision && event->control.tree_revision<g_tree.revision &&
+            (event->control.target&~255U)==ui_file_picker_target(&g_picker,0)) {
+            translated=*event;translated.control.tree_revision=g_tree.revision;
+            if (!os_control_event_node(&g_tree,g_nodes,&translated.control)) return false;
+            return handle_file_picker_event(&translated);
+        }
+        return false;
+    }
     if (event->type == OS_WINDOW_EVENT_MINIMIZED) {
         g_mouse_selecting = false;
         return true;
     }
 
-    if (g_message.active && (event->type == OS_WINDOW_EVENT_INPUT ||
-                            event->type == OS_WINDOW_EVENT_CLOSE_REQUEST)) {
-        /* Modifier releases must still reach the owner, even while modal. */
-        if (event->type == OS_WINDOW_EVENT_INPUT && event->input.type == OS_INPUT_EVENT_KEY) {
-            uint32_t code = event->input.code;
-            if (code == 0xE0U || code == 0xE4U) g_ctrl = event->input.value != OS_INPUT_VALUE_RELEASE;
-            if (code == 0xE1U || code == 0xE5U) g_shift = event->input.value != OS_INPUT_VALUE_RELEASE;
-        }
-        uint32_t focus = g_message.focus;
-        int32_t pressed = g_message.pressed;
-        enum ui_message_result result = ui_message_event(&g_message,
-            g_window.width, g_window.height, event);
-        if (result == OS_MESSAGE_NONE && focus == g_message.focus &&
-            pressed == g_message.pressed) return true;
-        if (result != OS_MESSAGE_NONE) complete_message(result);
-        notepad_damage_all();
-        render();
-        return true;
-    }
+    if (handle_message_event(event)) return true;
+    if (handle_file_picker_event(event)) return true;
+    if (handle_caption_event(event)) return true;
     if (event->type == OS_WINDOW_EVENT_CLOSE_REQUEST) {
         request_action(NOTEPAD_PENDING_CLOSE);
         render();
@@ -1034,10 +1228,20 @@ static bool handle_event(const os_window_event_t *event) {
         g_window.width = event->resize.width;
         g_window.height = event->resize.height;
         g_mouse_selecting = false;
-        g_message.pressed = -1;
         reflow_editor();
         render();
         return true;
+    }
+    if (event->type==OS_WINDOW_EVENT_CONTROL) {
+        translated=*event;translated.type=OS_WINDOW_EVENT_INPUT;
+        translated.input=(os_input_event_t){.code=event->control.code,.value=event->control.value};
+        switch (event->control.action) {
+        case OS_CONTROL_KEY:translated.input.type=OS_INPUT_EVENT_KEY;break;
+        case OS_CONTROL_WHEEL:case OS_CONTROL_MOVE:translated.input.type=OS_INPUT_EVENT_RELATIVE;break;
+        case OS_CONTROL_DOWN:case OS_CONTROL_UP:translated.input.type=OS_INPUT_EVENT_BUTTON;break;
+        default:return false;
+        }
+        event=&translated;
     }
     if (event->type != OS_WINDOW_EVENT_INPUT) return false;
 
@@ -1052,7 +1256,6 @@ static bool handle_event(const os_window_event_t *event) {
             return true;
         }
         scroll_editor(input->value > 0 ? -3 : 3);
-        notepad_damage_editor();
         render();
         return true;
     }
@@ -1067,7 +1270,7 @@ int main(int argc, char **argv) {
         notepad_exit(1U);
     }
     if (!create_window()) notepad_exit(1U);
-    (void)load_document();
+    g_named_document=load_document();
     render();
 #if OS_REALTEST
     (void)fprintf(stderr, "OS_NOTEPAD_READY SIZE=%u\n",

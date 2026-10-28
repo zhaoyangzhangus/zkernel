@@ -1,4 +1,7 @@
-/* REFACTOR_SYSCALL_GRAPHICS_OWNER: GPU, display, input and window handlers. */
+#include <uapi/syscall.h>
+#include <uapi/desktop.h>
+#include <uapi/window_theme.h>
+/* REFACTOR_SYSCALL_GRAPHICS_OWNER：GPU、显示、输入和窗口处理程序。 */
 
 #include <arch/x86_64/paging.h>
 #include <arch/x86_64/cpu.h>
@@ -6,6 +9,8 @@
 #include <kernel/display.h>
 #include <kernel/frame_trace.h>
 #include <kernel/gpu.h>
+#include "../drivers/gpu/nvidia/rm/include/nv_rm_driver.h"
+#include <kernel/pci.h>
 #include <kernel/input.h>
 #include <kernel/mm.h>
 #include <kernel/perf.h>
@@ -17,6 +22,7 @@
 #include <uapi/input.h>
 #include <uapi/mm.h>
 #include <uapi/window.h>
+#include <uapi/control_tree.h>
 
 #include "internal.h"
 #include "../process/internal.h"
@@ -294,6 +300,34 @@ done:
     return status;
 }
 
+/* 仅复制启动时缓存的设备信息，查询设置页面不会启动 RM/GSP。 */
+int64_t syscall_gpu_get_info(uint64_t pointer,uint64_t a,uint64_t b,uint64_t c,uint64_t d,uint64_t e) {
+    (void)a;(void)b;(void)c;(void)d;(void)e;
+    os_gpu_info_t request;
+    kstatus_t status=copy_from_user(&request,(const void __user *)(uintptr_t)pointer,sizeof(request));
+    if (status!=K_OK) return status;
+    if (!versioned_header_valid(&request.hdr,sizeof(request)) || request.reserved) return K_EINVAL;
+    const pci_host_t *host=pci_current_host();
+    if (!host || !host->initialized) return K_EAGAIN;
+    os_gpu_info_t info={.hdr={sizeof(info),OS_SYSCALL_ABI_VERSION},.index=request.index};
+    const pci_device_t *selected=0;
+    for (uint32_t i=0;i<host->device_count && i<PCI_MAX_DEVICES;++i) {
+        const pci_device_t *device=host->devices+i;
+        if (device->class_code!=3U) continue;
+        if (info.count++==request.index) selected=device;
+    }
+    if (!selected) return K_ENOENT;
+    info.vram_bytes=nv_rm_driver_memory_bytes(selected);
+    info.vendor_id=selected->vendor_id;info.device_id=selected->device_id;
+    info.segment=selected->segment;info.bus=selected->bus;
+    info.slot=selected->slot;info.function=selected->function;
+    uint32_t state=atomic_load_explicit(&selected->device.state,memory_order_acquire);
+    info.state=state==DEVICE_ACTIVE ? OS_GPU_DEVICE_ACTIVE : state==DEVICE_SUSPENDED ? OS_GPU_DEVICE_SUSPENDED :
+        state==DEVICE_RECOVERING ? OS_GPU_DEVICE_RECOVERING : state==DEVICE_REMOVING || state==DEVICE_REMOVED ? OS_GPU_DEVICE_REMOVED :
+        state==DEVICE_FAILED ? OS_GPU_DEVICE_FAILED : OS_GPU_DEVICE_DISCOVERED;
+    return copy_to_user((void __user *)(uintptr_t)pointer,&info,sizeof(info));
+}
+
 /* DISPLAY_COMMIT：提交 GPU 扫描缓冲，并通过 release fence 标记完成。 */
 /* 查询当前 GOP 输出的用户态提交参数。 */
 int64_t syscall_display_get_info(uint64_t arguments_pointer,
@@ -405,7 +439,10 @@ int64_t syscall_window_create(uint64_t arguments_pointer, uint64_t unused1,
         (arguments.flags & ~(OS_WINDOW_VISIBLE | OS_WINDOW_RESIZABLE |
                              OS_WINDOW_CLIENT_DECORATIONS |
                              OS_WINDOW_PREMULTIPLIED_ALPHA |
-                             OS_WINDOW_STANDARD_CAPTION_CONTROLS)) != 0U ||
+                             OS_WINDOW_DARK_CAPTION |
+                             OS_WINDOW_STANDARD_CAPTION_CONTROLS |
+                             OS_WINDOW_CAPTION_HEIGHT_MASK)) != 0U ||
+        !os_window_caption_create_valid(arguments.flags, arguments.height) ||
         arguments.width == 0U || arguments.height == 0U) return K_EINVAL;
     status = window_server_create(process, arguments.x, arguments.y,
                                   arguments.width, arguments.height,
@@ -476,6 +513,25 @@ int64_t syscall_window_update(uint64_t arguments_pointer, uint64_t unused1,
     return window_server_update(process, arguments.identifier, arguments.x,
                                 arguments.y, arguments.width, arguments.height,
                                 arguments.flags);
+}
+
+int64_t syscall_window_control_tree(uint64_t pointer, uint64_t a, uint64_t b,
+                                    uint64_t c, uint64_t d, uint64_t e) {
+    (void)a; (void)b; (void)c; (void)d; (void)e;
+    process_t *process = current_process();
+    os_window_control_tree_t request;
+    if (process == 0) return K_EPERM;
+    kstatus_t status = copy_from_user(&request,
+        (const void __user *)(uintptr_t)pointer, sizeof(request));
+    if (status != K_OK) return status;
+    if (!versioned_header_valid(&request.hdr, sizeof(request)) ||
+        request.reserved != 0U || request.identifier == 0U ||
+        request.count > OS_CONTROL_TREE_MAX_NODES || request.text_size > OS_CONTROL_TREE_MAX_TEXT ||
+        (request.count && !request.nodes) || (request.text_size && !request.text) ||
+        (!request.count && request.text_size)) return K_EINVAL;
+    status = window_server_control_tree(process, &request);
+    if (status != K_OK) return status;
+    return copy_to_user((void __user *)(uintptr_t)pointer, &request, sizeof(request));
 }
 
 int64_t syscall_window_title(uint64_t pointer, uint64_t a, uint64_t b,
@@ -777,3 +833,33 @@ display_commit_cleanup:
     return status;
 }
 
+
+int64_t syscall_desktop_wallpaper(uint64_t pointer,uint64_t a,uint64_t b,uint64_t c,uint64_t d,uint64_t e) {
+    (void)a;(void)b;(void)c;(void)d;(void)e;
+    os_desktop_wallpaper_t request;
+    if (!current_process()) return K_EPERM;
+    kstatus_t status=copy_from_user(&request,(void __user *)(uintptr_t)pointer,sizeof(request));
+    if (status!=K_OK) return status;
+    uint32_t length=0;while(length<sizeof(request.path) && request.path[length]) ++length;
+    if (!versioned_header_valid(&request.hdr,sizeof(request)) || request.path[0]!='/' ||
+        length==sizeof(request.path)) return K_EINVAL;
+    return desktop_wallpaper_set(request.path);
+}
+
+/* 外观设置只更新语义调色板，不改写应用的图像缓冲。 */
+int64_t syscall_theme_settings(uint64_t pointer,uint64_t a,uint64_t b,
+    uint64_t c,uint64_t d,uint64_t e) {
+    (void)a;(void)b;(void)c;(void)d;(void)e;
+    os_theme_settings_t request;
+    kstatus_t result=copy_from_user(&request,(const void __user *)(uintptr_t)pointer,sizeof(request));
+    if (result!=K_OK) return result;
+    if (!versioned_header_valid(&request.hdr,sizeof(request)) ||
+        request.operation>OS_THEME_WRITE || request.reserved) return K_EINVAL;
+    if (request.operation==OS_THEME_WRITE) {
+        result=window_server_set_theme(request.theme,request.background);
+        if (result!=K_OK) return result;
+    }
+    uint32_t palette=window_server_theme();
+    request.theme=palette&255U;request.background=palette>>8U;
+    return copy_to_user((void __user *)(uintptr_t)pointer,&request,sizeof(request));
+}

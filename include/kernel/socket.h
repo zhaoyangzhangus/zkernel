@@ -18,8 +18,12 @@ struct completion_port;
 #define SOCKET_RX_QUEUE_DEPTH 16U
 #define SOCKET_MAX_PAYLOAD 4096U
 #define SOCKET_LISTEN_BACKLOG 8U
-#define SOCKET_STREAM_BUFFER_SIZE 8192U
-#define SOCKET_TCP_RETRANSMIT_TIMEOUT_NS 200000000ULL
+/* 用于回环、小型 socket 和分配失败时的内嵌缓冲区后备方案。Internet TCP
+ * 可在协商缩放接收窗口前预留更大的环形缓冲区。 */
+#define SOCKET_STREAM_BUFFER_SIZE 32768U
+/* 在支持 RTT 估算前，初始 RTO 设为 1 秒。固定 200 ms 会在普通广域网握手
+ * 或短暂的 RX 调度延迟期间耗尽全部重试次数。 */
+#define SOCKET_TCP_RETRANSMIT_TIMEOUT_NS 1000000000ULL
 #define SOCKET_TCP_MAX_RETRANSMITS 5U
 
 #define SOCKET_POLL_READ  (1U << 0)
@@ -107,7 +111,7 @@ kstatus_t socket_shutdown(socket_t *socket, uint32_t how);
 kstatus_t socket_get_info(socket_t *socket, os_socket_info_t *info);
 kstatus_t socket_get_option(socket_t *socket, uint32_t option, int32_t *value);
 kstatus_t socket_set_option(socket_t *socket, uint32_t option, int32_t value);
-/* K_EAGAIN means an outbound TCP handshake is still in progress. */
+/* K_EAGAIN 表示主动 TCP 握手仍在进行。 */
 kstatus_t socket_connect_status(socket_t *socket);
 uint32_t socket_poll_state(socket_t *socket);
 kstatus_t socket_send_async_ipv6(socket_t *socket, const void *buffer, size_t length,
@@ -136,10 +140,32 @@ kstatus_t socket_inject_tcp_syn_ipv4(uint32_t source_address, uint16_t source_po
                                      uint32_t destination_address,
                                      uint16_t destination_port, uint32_t sequence,
                                      socket_tcp_reply_t *reply);
-kstatus_t socket_inject_tcp_ack_ipv4(uint32_t source_address, uint16_t source_port,
-                                     uint32_t destination_address,
-                                     uint16_t destination_port, uint32_t sequence,
-                                     uint32_t acknowledgement, uint8_t flags);
+kstatus_t socket_inject_tcp_syn_ipv4_scaled(uint32_t source, uint16_t source_port,
+    uint32_t destination, uint16_t destination_port, uint32_t sequence,
+    int peer_scale, socket_tcp_reply_t *reply);
+/* 在发布握手完成状态前，对已校验的 SYN 报文调用。 */
+void socket_tcp_mss_ipv4(uint32_t source, uint16_t source_port,
+                         uint32_t destination, uint16_t destination_port,
+                         uint32_t sequence, uint32_t acknowledgement,
+                         uint8_t flags, uint16_t mss);
+void socket_tcp_mss_ipv6(const uint8_t source[16], uint16_t source_port,
+                         const uint8_t destination[16], uint16_t destination_port,
+                         uint32_t sequence, uint32_t acknowledgement,
+                         uint8_t flags, uint16_t mss);
+/* 在已校验的握手状态转换前应用 SYN 选项元数据。
+ * scale 为负数表示选项不存在；仅首个可接受的 SYN 可以设置该值。 */
+void socket_tcp_scale_ipv4(uint32_t source, uint16_t source_port,
+    uint32_t destination, uint16_t destination_port, uint32_t sequence,
+    uint32_t acknowledgement, uint8_t flags, int scale);
+void socket_tcp_scale_ipv6(const uint8_t source[16], uint16_t source_port,
+    const uint8_t destination[16], uint16_t destination_port, uint32_t sequence,
+    uint32_t acknowledgement, uint8_t flags, int scale);
+/* 仅在传输层/设备保护区之外发送 SYN 时调用。除非固定连接拥有此握手且提供
+ * WS 选项，否则返回 -1。 */
+int socket_tcp_syn_scale_ipv4(uint32_t local, uint16_t local_port,
+    uint32_t peer, uint16_t peer_port, uint32_t sequence, uint32_t acknowledgement);
+int socket_tcp_syn_scale_ipv6(const uint8_t local[16], uint16_t local_port,
+    const uint8_t peer[16], uint16_t peer_port, uint32_t sequence, uint32_t acknowledgement);
 kstatus_t socket_inject_tcp_ack_ipv4_window(uint32_t source_address,
                                             uint16_t source_port,
                                             uint32_t destination_address,
@@ -167,6 +193,9 @@ kstatus_t socket_inject_tcp_syn_ipv6(const uint8_t source_address[16],
                                      const uint8_t destination_address[16],
                                      uint16_t destination_port, uint32_t sequence,
                                      socket_tcp_reply_t *reply);
+kstatus_t socket_inject_tcp_syn_ipv6_scaled(const uint8_t source[16], uint16_t source_port,
+    const uint8_t destination[16], uint16_t destination_port, uint32_t sequence,
+    int peer_scale, socket_tcp_reply_t *reply);
 kstatus_t socket_inject_tcp_ack_ipv6_reply(const uint8_t source_address[16],
                                            uint16_t source_port,
                                            const uint8_t destination_address[16],
@@ -185,5 +214,13 @@ void socket_set_tcp_ipv6_output(socket_tcp_ipv6_output_fn output, void *context)
 void socket_set_udp_ipv4_output(socket_udp_ipv4_output_fn output, void *context);
 void socket_set_udp_ipv6_output(socket_udp_ipv6_output_fn output, void *context);
 void socket_tcp_poll(uint64_t now_tsc);
+/* 使用外发方向的（本地、对端）端点，报告在本地受阻的纯 ACK。
+ * 仅保留 K_EAGAIN；SYN/FIN/RST 和数据使用各自的重试路径。 */
+void socket_tcp_ack_output_ipv4(uint32_t local, uint16_t local_port,
+                                uint32_t peer, uint16_t peer_port,
+                                uint8_t flags, kstatus_t status);
+void socket_tcp_ack_output_ipv6(const uint8_t local[16], uint16_t local_port,
+                                const uint8_t peer[16], uint16_t peer_port,
+                                uint8_t flags, kstatus_t status);
 
 bool socket_self_test(void);

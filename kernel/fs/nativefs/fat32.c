@@ -157,20 +157,20 @@ VOID fat32_visit_directory(OS_FAT32 *filesystem, const CHAR8 *path,
 
 static BOOLEAN make_creation_name(OS_FAT32 *filesystem, UINT32 parent,
                                   const CHAR8 *leaf, UINT32 length,
-                                  UINT8 short_name[11], UINT32 *lfn_count) {
-    if (filesystem == 0 || leaf == 0 || short_name == 0 || lfn_count == 0 ||
+                                  fat32_creation_name_t *name) {
+    if (filesystem == 0 || leaf == 0 || name == 0 ||
         length == 0U || length > 255U) return 0;
-    if (fat32_make_short_name(leaf, length, short_name)) {
-        *lfn_count = 0U;
-        return 1;
-    }
-    *lfn_count = (length + 12U) / 13U;
-    if (*lfn_count == 0U || *lfn_count > FAT32_MAX_LFN_ENTRIES) return 0;
-    for (UINT32 suffix = 1U; suffix < 1000U; ++suffix) {
-        if (!fat32_make_long_name_alias(leaf, length, suffix, short_name)) return 0;
-        if (!fat32_directory_short_name_exists(filesystem, parent, short_name)) return 1;
-    }
-    return 0;
+    name->units = 0U;
+    name->lfn_count = 0U;
+    name->checksum = 0U;
+    if (fat32_make_short_name(leaf, length, name->short_name)) return 1;
+    name->units = fat32_encode_long_name(leaf, length, name->characters);
+    if (name->units == 0U) return 0;
+    name->lfn_count = (name->units + 12U) / 13U;
+    if (!fat32_allocate_long_name_alias(filesystem, parent, leaf, length,
+                                        name->short_name)) return 0;
+    name->checksum = fat32_short_name_checksum(name->short_name);
+    return 1;
 }
 
 static BOOLEAN fat32_create_path_locked(OS_FAT32 *filesystem,
@@ -178,14 +178,13 @@ static BOOLEAN fat32_create_path_locked(OS_FAT32 *filesystem,
                                         BOOLEAN directory) {
     CHAR8 leaf[OS_FAT32_PATH_LENGTH];
     UINT8 entry[FAT32_ENTRY_SIZE];
-    UINT8 short_name[11];
+    fat32_creation_name_t name;
     UINT8 lfn_entry[FAT32_ENTRY_SIZE];
     UINT64 slot_lba[FAT32_MAX_CREATE_SLOTS];
     UINT32 slot_offset[FAT32_MAX_CREATE_SLOTS];
     UINT32 new_clusters[FAT32_MAX_CREATE_SLOTS];
     UINT32 parent;
     UINT32 leaf_length = 0U;
-    UINT32 lfn_count;
     UINT32 slot_count;
     UINT32 new_cluster_count = 0U;
     UINT32 extension_anchor = 0U;
@@ -197,14 +196,13 @@ static BOOLEAN fat32_create_path_locked(OS_FAT32 *filesystem,
     while (leaf_length < OS_FAT32_PATH_LENGTH && leaf[leaf_length] != 0) ++leaf_length;
     if (leaf_length == 0U || leaf_length > 255U ||
         fat32_find_directory_entry(filesystem, parent, leaf, leaf_length, entry, 0, 0) ||
-        !make_creation_name(filesystem, parent, leaf, leaf_length, short_name,
-                            &lfn_count)) return 0;
-    slot_count = lfn_count + 1U;
+        !make_creation_name(filesystem, parent, leaf, leaf_length, &name)) return 0;
+    slot_count = name.lfn_count + 1U;
     if (!fat32_find_directory_slots(filesystem, parent, slot_count, slot_lba, slot_offset,
                               new_clusters, &new_cluster_count, &extension_anchor)) return 0;
 
     for (UINT32 i = 0U; i < FAT32_ENTRY_SIZE; ++i) entry[i] = 0U;
-    for (UINT32 i = 0U; i < 11U; ++i) entry[i] = short_name[i];
+    for (UINT32 i = 0U; i < 11U; ++i) entry[i] = name.short_name[i];
     entry[11] = directory ? FAT32_DIRECTORY : 0x20U;
     if (directory) {
         if (!fat32_allocate_zero_cluster(filesystem, &first_cluster) ||
@@ -218,25 +216,25 @@ static BOOLEAN fat32_create_path_locked(OS_FAT32 *filesystem,
     fat32_write_u16(entry + 20U, (UINT16)(first_cluster >> 16));
     fat32_write_u16(entry + 26U, (UINT16)first_cluster);
     fat32_write_u32(entry + 28U, 0U);
-    for (UINT32 ordinal = lfn_count; ordinal != 0U; --ordinal) {
-        fat32_make_lfn_entry(leaf, leaf_length, lfn_count, ordinal,
-                       fat32_short_name_checksum(short_name), lfn_entry);
-        UINT32 slot = lfn_count - ordinal;
+    for (UINT32 ordinal = name.lfn_count; ordinal != 0U; --ordinal) {
+        fat32_make_lfn_entry(name.characters, name.units, ordinal,
+                             name.checksum, lfn_entry);
+        UINT32 slot = name.lfn_count - ordinal;
         if (!fat32_write_directory_slot(filesystem, slot_lba[slot], slot_offset[slot],
                                   lfn_entry)) break;
         ++written_slots;
     }
-    if (written_slots == lfn_count &&
-        fat32_write_directory_slot(filesystem, slot_lba[lfn_count], slot_offset[lfn_count],
+    if (written_slots == name.lfn_count &&
+        fat32_write_directory_slot(filesystem, slot_lba[name.lfn_count], slot_offset[name.lfn_count],
                              entry)) {
         return 1;
     }
     for (UINT32 i = 0U; i < written_slots; ++i) {
         (void)fat32_delete_directory_slot(filesystem, slot_lba[i], slot_offset[i]);
     }
-    if (written_slots == lfn_count) {
-        (void)fat32_delete_directory_slot(filesystem, slot_lba[lfn_count],
-                                     slot_offset[lfn_count]);
+    if (written_slots == name.lfn_count) {
+        (void)fat32_delete_directory_slot(filesystem, slot_lba[name.lfn_count],
+                                     slot_offset[name.lfn_count]);
     }
     if (first_cluster != 0U) (void)fat32_free_cluster_chain(filesystem, first_cluster);
     fat32_rollback_directory_extensions(filesystem, extension_anchor, new_clusters,
@@ -365,11 +363,9 @@ static BOOLEAN fat32_rename_path_locked(OS_FAT32 *filesystem,
     CHAR8 old_leaf[OS_FAT32_PATH_LENGTH];
     CHAR8 new_leaf[OS_FAT32_PATH_LENGTH];
     UINT8 source_entry[FAT32_ENTRY_SIZE];
-    UINT8 source_short[FAT32_ENTRY_SIZE];
-    UINT8 source_lfn[FAT32_MAX_LFN_ENTRIES][FAT32_ENTRY_SIZE];
     UINT8 destination_entry[FAT32_ENTRY_SIZE];
-    UINT8 destination_lfn[FAT32_MAX_LFN_ENTRIES][FAT32_ENTRY_SIZE];
-    UINT8 destination_short_name[11];
+    UINT8 destination_lfn[FAT32_ENTRY_SIZE];
+    fat32_creation_name_t name;
     UINT64 source_lba[FAT32_MAX_LFN_ENTRIES];
     UINT32 source_offset[FAT32_MAX_LFN_ENTRIES];
     UINT64 destination_lba[FAT32_MAX_CREATE_SLOTS];
@@ -379,13 +375,13 @@ static BOOLEAN fat32_rename_path_locked(OS_FAT32 *filesystem,
     UINT32 old_leaf_length = 0U;
     UINT32 new_leaf_length = 0U;
     UINT32 source_lfn_count = 0U;
-    UINT32 destination_lfn_count = 0U;
     UINT32 destination_slot_count;
     UINT32 destination_new_clusters[FAT32_MAX_CREATE_SLOTS];
     UINT32 destination_new_cluster_count = 0U;
     UINT32 destination_extension_anchor = 0U;
     UINT64 source_short_lba = 0U;
     UINT32 source_short_offset = 0U;
+    /* 直接读取到回滚快照，避免保存两份相同目录项；目标项逐个生成并写入。 */
     UINT8 saved_slots[FAT32_MAX_CREATE_SLOTS][FAT32_ENTRY_SIZE];
     UINT64 saved_lba[FAT32_MAX_CREATE_SLOTS];
     UINT32 saved_offset[FAT32_MAX_CREATE_SLOTS];
@@ -425,41 +421,39 @@ static BOOLEAN fat32_rename_path_locked(OS_FAT32 *filesystem,
             source_lba, source_offset, source_lfn_count, target_lba, target_offset);
     }
     if ((source_entry[11] & FAT32_DIRECTORY) != 0U && old_parent != new_parent) {
-        /* Moving a directory also requires changing its '..' entry.  Keep
-         * that operation out of this small transaction until the native FAT
-         * directory parent update is available. */
+        /* 移动目录还必须修改其 '..' 项。在原生 FAT 目录父项更新实现前，
+         * 暂不将该操作纳入此小型事务。 */
         return 0;
     }
     if (!fat32_read_directory_slot(filesystem, source_short_lba,
-                                   source_short_offset, source_short)) return 0;
+                                   source_short_offset, saved_slots[source_lfn_count])) return 0;
     for (UINT32 index = 0U; index < source_lfn_count; ++index) {
         if (!fat32_read_directory_slot(filesystem, source_lba[index],
-                                       source_offset[index], source_lfn[index])) {
+                                       source_offset[index], saved_slots[index])) {
             return 0;
         }
     }
-    if (!make_creation_name(filesystem, new_parent, new_leaf, new_leaf_length,
-                            destination_short_name, &destination_lfn_count)) {
+    if (!make_creation_name(filesystem, new_parent, new_leaf, new_leaf_length, &name)) {
         return 0;
     }
-    destination_slot_count = destination_lfn_count + 1U;
+    destination_slot_count = name.lfn_count + 1U;
     same_parent = old_parent == new_parent;
     if (same_parent && destination_slot_count <= source_lfn_count + 1U) {
         reuse_source_slots = 1;
-        for (UINT32 index = 0U; index < destination_lfn_count; ++index) {
+        for (UINT32 index = 0U; index < name.lfn_count; ++index) {
             if (index < source_lfn_count) {
                 destination_lba[index] = source_lba[index];
                 destination_offset[index] = source_offset[index];
             }
         }
-        if (destination_lfn_count < source_lfn_count) {
-            destination_lba[destination_lfn_count] =
-                source_lba[destination_lfn_count];
-            destination_offset[destination_lfn_count] =
-                source_offset[destination_lfn_count];
+        if (name.lfn_count < source_lfn_count) {
+            destination_lba[name.lfn_count] =
+                source_lba[name.lfn_count];
+            destination_offset[name.lfn_count] =
+                source_offset[name.lfn_count];
         } else {
-            destination_lba[destination_lfn_count] = source_short_lba;
-            destination_offset[destination_lfn_count] = source_short_offset;
+            destination_lba[name.lfn_count] = source_short_lba;
+            destination_offset[name.lfn_count] = source_short_offset;
         }
     } else {
         if (!fat32_find_directory_slots(filesystem, new_parent,
@@ -473,59 +467,50 @@ static BOOLEAN fat32_rename_path_locked(OS_FAT32 *filesystem,
     for (UINT32 index = 0U; index < source_lfn_count; ++index) {
         saved_lba[index] = source_lba[index];
         saved_offset[index] = source_offset[index];
-        for (UINT32 byte = 0U; byte < FAT32_ENTRY_SIZE; ++byte) {
-            saved_slots[index][byte] = source_lfn[index][byte];
-        }
     }
     saved_lba[source_lfn_count] = source_short_lba;
     saved_offset[source_lfn_count] = source_short_offset;
-    for (UINT32 byte = 0U; byte < FAT32_ENTRY_SIZE; ++byte) {
-        saved_slots[source_lfn_count][byte] = source_short[byte];
-    }
     saved_count = source_lfn_count + 1U;
 
-    for (UINT32 ordinal = destination_lfn_count; ordinal != 0U; --ordinal) {
-        fat32_make_lfn_entry(new_leaf, new_leaf_length, destination_lfn_count,
-                             ordinal,
-                             fat32_short_name_checksum(destination_short_name),
-                             destination_lfn[written_count]);
+    for (UINT32 ordinal = name.lfn_count; ordinal != 0U; --ordinal) {
+        fat32_make_lfn_entry(name.characters, name.units, ordinal,
+                             name.checksum, destination_lfn);
         if (!fat32_write_directory_slot(filesystem, destination_lba[written_count],
                                         destination_offset[written_count],
-                                        destination_lfn[written_count])) goto rollback;
+                                        destination_lfn)) goto rollback;
         ++written_count;
     }
     for (UINT32 byte = 0U; byte < FAT32_ENTRY_SIZE; ++byte) {
-        destination_entry[byte] = source_short[byte];
+        destination_entry[byte] = saved_slots[source_lfn_count][byte];
     }
     for (UINT32 byte = 0U; byte < 11U; ++byte) {
-        destination_entry[byte] = destination_short_name[byte];
+        destination_entry[byte] = name.short_name[byte];
     }
     if (!fat32_write_directory_slot(filesystem,
-                                    destination_lba[destination_lfn_count],
-                                    destination_offset[destination_lfn_count],
+                                    destination_lba[name.lfn_count],
+                                    destination_offset[name.lfn_count],
                                     destination_entry)) goto rollback;
     written_count = destination_slot_count;
 
     if (reuse_source_slots) {
-        UINT32 used_source_lfn = destination_lfn_count < source_lfn_count ?
-                                  destination_lfn_count + 1U : source_lfn_count;
+        UINT32 used_source_lfn = name.lfn_count < source_lfn_count ?
+                                  name.lfn_count + 1U : source_lfn_count;
         for (UINT32 index = used_source_lfn; index < source_lfn_count; ++index) {
             if (!fat32_delete_directory_slot(filesystem, source_lba[index],
                                              source_offset[index])) goto rollback;
         }
-        if (destination_lfn_count < source_lfn_count &&
+        if (name.lfn_count < source_lfn_count &&
             !fat32_delete_directory_slot(filesystem, source_short_lba,
                                          source_short_offset)) goto rollback;
     } else if (!fat32_delete_directory_slots(filesystem, source_lba,
                                               source_offset, source_lfn_count) ||
                !fat32_delete_directory_slot(filesystem, source_short_lba,
                                             source_short_offset)) goto rollback;
-    /* Keep saved directory slots available until writeback succeeds. A
-     * failed commit must not publish new coordinates to open handles. */
+    /* 回写成功前保留已保存的目录槽位。提交失败时不得向打开的句柄发布新坐标。 */
     if (!fat32_writeback(filesystem)) goto rollback;
     fat32_rebind_open_file(filesystem, source_short_lba, source_short_offset,
-                           destination_lba[destination_lfn_count],
-                           destination_offset[destination_lfn_count]);
+                           destination_lba[name.lfn_count],
+                           destination_offset[name.lfn_count]);
     return 1;
 
 rollback:
@@ -541,9 +526,8 @@ rollback:
                                             destination_new_clusters,
                                             destination_new_cluster_count);
     }
-    /* Best-effort recovery for transient write failures. Persistent media
-     * failure cannot provide a durability guarantee; leave the dirty cache
-     * available for a later sync retry. */
+    /* 尽力恢复暂时性写入失败。介质持续故障时无法保证持久性；保留脏缓存，
+     * 供之后的 sync 重试。 */
     (void)fat32_writeback(filesystem);
     return 0;
 }
@@ -564,7 +548,7 @@ BOOLEAN fat32_rename_path(OS_FAT32 *filesystem,
 
 BOOLEAN fat32_writeback(OS_FAT32 *filesystem) {
     if (filesystem == 0 || filesystem->Device == 0) return 0;
-    /* Tests and early direct-I/O recovery can temporarily bypass the cache. */
+    /* 测试和早期直接 I/O 恢复路径可能会暂时绕过缓存。 */
     return !filesystem->Cache.Initialized ||
            block_cache_writeback(&filesystem->Cache);
 }
@@ -640,6 +624,9 @@ BOOLEAN fat32_init(OS_FAT32 *filesystem,
     filesystem->RootCluster = root_cluster;
     filesystem->RootDirectorySectors = root_directory_sectors;
     filesystem->ClusterCount = (UINT32)(data_sectors / sectors_per_cluster);
+    filesystem->FreeClusterCount = 0U;
+    filesystem->FreeClusterSearchStart = 2U;
+    filesystem->FreeClusterCountValid = 0;
     filesystem->FatStartLba = reserved;
     filesystem->RootDirectoryLba = reserved + (UINT64)fat_count * fat_sectors;
     filesystem->DataStartLba = filesystem->RootDirectoryLba + root_directory_sectors;
@@ -659,6 +646,9 @@ BOOLEAN fat32_init(OS_FAT32 *filesystem,
     }
     filesystem->OpenFileLock = 0U;
     filesystem->MutationLock = 0U;
+#ifdef OS_KERNEL_BUILD
+    io_mutex_init(&filesystem->MutationMutex, true);
+#endif
     for (UINT32 i = 0; i < OS_FAT32_MAX_OPEN_FILES; ++i) {
         filesystem->OpenFiles[i].Used = 0;
     }

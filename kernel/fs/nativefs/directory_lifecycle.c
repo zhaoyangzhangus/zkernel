@@ -1,7 +1,7 @@
 #include <kernel/fat32.h>
 #include "internal.h"
 
-/* REFACTOR_FS_FAT32_DIRECTORY_LIFECYCLE_OWNER: path and directory mutation state. */
+/* REFACTOR_FS_FAT32_DIRECTORY_LIFECYCLE_OWNER：路径和目录变更状态。 */
 
 #define FAT32_EOC_MIN       0x0FFFFFF8U
 #define FAT32_DIRECTORY     0x10U
@@ -10,8 +10,8 @@
 #define FAT32_MAX_LFN_ENTRIES 20U
 #define FAT32_MAX_CREATE_SLOTS (FAT32_MAX_LFN_ENTRIES + 1U)
 
-/* Keep the public UINT32 lock fields unchanged; no atomic-type alias casts.
- * A held lock needs read polling, not a cache-line-invalidating exchange. */
+/* 保持公共 UINT32 锁字段不变；不进行 atomic 类型别名转换。
+ * 锁已被持有时应只读轮询，不要执行会使缓存行失效的交换。 */
 static void fat32_lock_word(UINT32 *word) {
     for (;;) {
         UINT32 expected = 0U;
@@ -24,11 +24,17 @@ static void fat32_lock_word(UINT32 *word) {
 }
 
 VOID fat32_open_files_lock(OS_FAT32 *filesystem) {
+#ifdef OS_KERNEL_BUILD
+    sched_preempt_disable();
+#endif
     fat32_lock_word(&filesystem->OpenFileLock);
 }
 
 VOID fat32_open_files_unlock(OS_FAT32 *filesystem) {
     __atomic_store_n(&filesystem->OpenFileLock, 0U, __ATOMIC_RELEASE);
+#ifdef OS_KERNEL_BUILD
+    sched_preempt_enable();
+#endif
 }
 
 VOID fat32_rebind_open_file(OS_FAT32 *filesystem, UINT64 old_lba,
@@ -48,45 +54,95 @@ VOID fat32_rebind_open_file(OS_FAT32 *filesystem, UINT64 old_lba,
 }
 
 /*
- * The block-cache lock only protects one cached sector.  FAT allocation and
- * directory updates are multi-sector transactions, so writers need a
- * filesystem-wide mutation lock to keep two threads from allocating or
- * linking the same free cluster concurrently.
+ * 块缓存锁只保护一个缓存扇区。FAT 分配和目录更新是跨多个扇区的事务，因此写入方需要
+ * 文件系统级变更锁，避免两个线程并发分配或链接同一个空闲簇。
  */
 VOID fat32_mutation_lock(OS_FAT32 *filesystem) {
+#ifdef OS_KERNEL_BUILD
+    io_mutex_lock_required(&filesystem->MutationMutex);
+#else
     fat32_lock_word(&filesystem->MutationLock);
+#endif
 }
 
 VOID fat32_mutation_unlock(OS_FAT32 *filesystem) {
+#ifdef OS_KERNEL_BUILD
+    io_mutex_unlock_required(&filesystem->MutationMutex);
+#else
     __atomic_store_n(&filesystem->MutationLock, 0U, __ATOMIC_RELEASE);
+#endif
 }
 
 /*
- * 鍒犻櫎鎿嶄綔闇€瑕佸悓鏃朵慨鏀圭洰褰曢」鍜屾墍鏈?FAT 鍓湰銆傜皣閾惧揩鐓у彧淇濆瓨灏嗚
- * 娓呯┖鐨?FAT 椤癸紝澶辫触鏃跺彲浠ユ妸宸插啓鍏ョ殑椤规仮澶嶅埌鎿嶄綔鍓嶇殑鍊硷紱杩欐瘮鍙? * 鎭㈠ FAT1 鏇村畨鍏紝涔熷吋瀹瑰彲閫夌殑绗笁浠?extent FAT銆? */
+ * 删除操作需要同时修改目录项和所有 FAT 副本。链表快照只保存将被清零的 FAT 项，
+ * 失败时可将已写入的项恢复到操作前的值。这比仅恢复 FAT1 更安全，也兼容可选的第三份 extent FAT。
+ */
 
-BOOLEAN fat32_directory_short_name_exists(OS_FAT32 *filesystem,
-                                           UINT32 directory, const UINT8 name[11]) {
+/* 一次遍历收集已占用后缀，避免每遇到一个冲突就重新扫描整个目录。 */
+static void fat32_mark_alias(const UINT8 entry[32], const CHAR8 *name,
+                              UINT32 length, UINT8 occupied[125]) {
+    UINT32 separator = 8U;
+    for (UINT32 i = 0U; i < 8U; ++i) {
+        if (entry[i] == '~') separator = i;
+    }
+    if (separator == 8U) return;
+    UINT32 suffix = 0U;
+    for (UINT32 i = separator + 1U; i < 8U && entry[i] != ' '; ++i) {
+        if (entry[i] < '0' || entry[i] > '9') return;
+        suffix = suffix * 10U + entry[i] - '0';
+        if (suffix >= 1000U) return;
+    }
+    UINT8 candidate[11];
+    /* 重新生成后比较全部 11 字节，排除其他前缀、扩展名及非标准数字形式。 */
+    if (suffix != 0U && fat32_make_long_name_alias(name, length, suffix, candidate) &&
+        fat32_short_name_equal(entry, candidate)) {
+        occupied[suffix >> 3U] |= (UINT8)(1U << (suffix & 7U));
+    }
+}
+
+BOOLEAN fat32_allocate_long_name_alias(OS_FAT32 *filesystem, UINT32 directory,
+                                        const CHAR8 *name, UINT32 length,
+                                        UINT8 result[11]) {
     UINT8 sector[4096];
+    UINT8 occupied[125] = {0};
+    UINT8 candidate[11];
     UINT32 cluster = directory;
-    if (filesystem == 0 || name == 0 || !fat32_cluster_valid(filesystem, directory) ||
-        filesystem->BytesPerSector > sizeof(sector)) return 0;
+    if (filesystem == 0 || result == 0 ||
+        !fat32_make_long_name_alias(name, length, 1U, candidate) ||
+        filesystem->BytesPerSector < FAT32_ENTRY_SIZE ||
+        filesystem->BytesPerSector > sizeof(sector) ||
+        filesystem->BytesPerSector % FAT32_ENTRY_SIZE != 0U) return 0;
     for (UINT32 hops = 0U; hops < filesystem->ClusterCount; ++hops) {
-        UINT64 first_sector = fat32_cluster_lba(filesystem, cluster);
-        for (UINT32 sector_index = 0U; sector_index < filesystem->SectorsPerCluster;
-             ++sector_index) {
+        BOOLEAN fixed_root = fat32_root_directory_cluster(filesystem, cluster);
+        if (!fixed_root && !fat32_cluster_valid(filesystem, cluster)) return 0;
+        UINT64 first_sector = fixed_root ? filesystem->RootDirectoryLba :
+                              fat32_cluster_lba(filesystem, cluster);
+        UINT32 sector_count = fixed_root ? filesystem->RootDirectorySectors :
+                              filesystem->SectorsPerCluster;
+        if (sector_count == 0U) return 0;
+        for (UINT32 sector_index = 0U; sector_index < sector_count; ++sector_index) {
             if (!fat32_read_sector(filesystem, first_sector + sector_index, sector)) return 0;
             for (UINT32 offset = 0U; offset < filesystem->BytesPerSector;
                  offset += FAT32_ENTRY_SIZE) {
                 const UINT8 *entry = sector + offset;
-                if (entry[0] == 0U) return 0;
+                if (entry[0] == 0U) goto select_alias;
                 if (entry[0] == 0xE5U || entry[11] == FAT32_ATTRIBUTE_LFN) continue;
-                if (fat32_short_name_equal(entry, name)) return 1;
+                fat32_mark_alias(entry, name, length, occupied);
             }
         }
+        if (fixed_root) goto select_alias;
         UINT32 next;
-        if (!fat32_read_next_cluster(filesystem, cluster, &next) || next == 0U) return 0;
+        if (!fat32_read_next_cluster(filesystem, cluster, &next)) return 0;
+        if (next == 0U) goto select_alias;
         cluster = next;
+    }
+    return 0;
+
+select_alias:
+    for (UINT32 suffix = 1U; suffix < 1000U; ++suffix) {
+        if ((occupied[suffix >> 3U] & (1U << (suffix & 7U))) == 0U) {
+            return fat32_make_long_name_alias(name, length, suffix, result);
+        }
     }
     return 0;
 }
@@ -112,6 +168,9 @@ BOOLEAN fat32_find_directory_entry_ex(OS_FAT32 *filesystem, UINT32 directory_clu
                                        UINT32 *lfn_count) {
     UINT8 sector[4096];
     UINT16 lfn_characters[260];
+    UINT16 query_characters[260];
+    UINT32 query_units = 0U;
+    BOOLEAN query_ready = 0;
     UINT8 short_name[11];
     BOOLEAN have_short_name = fat32_make_short_name(name, name_length, short_name);
     UINT32 cluster = directory_cluster;
@@ -162,10 +221,15 @@ BOOLEAN fat32_find_directory_entry_ex(OS_FAT32 *filesystem, UINT32 directory_clu
                 for (UINT32 i = 0; equal && i < 11U; ++i) {
                     if (entry[i] != short_name[i]) equal = 0;
                 }
-                if (lfn_valid && lfn_expected == 0U &&
-                    fat32_short_name_checksum(entry) == lfn_checksum &&
-                    fat32_lfn_name_equal(lfn_characters, name, name_length)) {
-                    equal = 1;
+                BOOLEAN matching_lfn = lfn_valid && lfn_expected == 0U &&
+                    fat32_short_name_checksum(entry) == lfn_checksum;
+                if (!equal && matching_lfn) {
+                    /* 查询名只在首次需要比较长名称时编码；非法 UTF-8 也不重复解析。 */
+                    if (!query_ready) {
+                        query_units = fat32_encode_long_name(name, name_length, query_characters);
+                        query_ready = 1;
+                    }
+                    equal = fat32_lfn_units_equal(lfn_characters, query_characters, query_units);
                 }
                 if (equal) {
                     for (UINT32 i = 0; i < FAT32_ENTRY_SIZE; ++i) result[i] = entry[i];
@@ -173,7 +237,7 @@ BOOLEAN fat32_find_directory_entry_ex(OS_FAT32 *filesystem, UINT32 directory_clu
                         *result_lba = first_sector + sector_index;
                     }
                     if (result_offset != 0) *result_offset = offset;
-                    if (lfn_count != 0 && lfn_valid && lfn_expected == 0U) {
+                    if (lfn_count != 0 && matching_lfn) {
                         *lfn_count = found_lfn_count;
                     }
                     return 1;
@@ -300,7 +364,8 @@ BOOLEAN fat32_resolve_parent_directory(OS_FAT32 *filesystem,
     return 1;
 }
 
-/* 鍦ㄧ洰褰曢摼涓鎵捐繛缁殑鐩綍椤癸紱闀挎枃浠跺悕闇€瑕佷竴娆′繚鐣?LFN 椤瑰拰鐭悕椤广€?*/
+/* 当目录扫描到已读完的目录项时，若新目录名需要一次性扩展 LFN 项和短名称项，
+ * 需要保留该目录中的扩展槽位。 */
 BOOLEAN fat32_find_directory_slots(OS_FAT32 *filesystem, UINT32 directory,
                                     UINT32 slot_count, UINT64 lba[21],
                                     UINT32 offset[21], UINT32 new_clusters[21],

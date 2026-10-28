@@ -2,6 +2,7 @@
 from pathlib import Path
 import subprocess
 import tempfile
+import resource
 root=Path(__file__).resolve().parents[2]
 source=(root/'kernel/mm/vmalloc.c').read_text()
 area=source[source.index('typedef struct {'):source.index('static uint64_t g_vmalloc_bitmap')]
@@ -16,11 +17,12 @@ previous=previous.replace('    uint32_t remaining = 0U;', '    bool complete = t
 previous=previous.replace('            remaining = i + 1U;', '            complete = false;')
 previous=previous.replace('    if (remaining != 0U) {', '    if (!complete) {')
 previous=previous.replace('        area->data_pages = remaining;\n', '')
-previous=previous.replace('''            /* Borrowed mappings retire PTEs, not physical ownership. */
-            if (area->owns_pages) {
+borrowed_release='''            if (area->owns_pages) {
                 page_t *page = phys_to_page(physical);
                 if (page != 0) page_free(page);
-            }''', '''            page_t *page = phys_to_page(physical);
+            }'''
+assert borrowed_release in previous
+previous=previous.replace(borrowed_release, '''            page_t *page = phys_to_page(physical);
             if (area->owns_pages && page != 0) page_free(page);''')
 program=r'''
 #include <kernel/bitmap.h>
@@ -226,6 +228,22 @@ int main(void) {
     p=vmalloc(PAGE_SIZE);assert(p && !g_vmalloc_pending_cleanup);vfree(p);empty();
     for(unsigned i=0;i<3;++i) { page_free(borrowed[i]); }
     assert(!live);
+    /* 公共事务在每个映射位置失败时都须保持所有权与输出发布规则。 */
+    unsigned failure_cases=0;
+    for(unsigned count=1;count<=8;++count)for(unsigned failed=1;failed<=count;++failed) {
+        fail_alloc=alloc_calls+failed;
+        assert(!vmalloc(count*PAGE_SIZE)&&!live);empty();fail_alloc=0;
+        fail_map=map_calls+failed;
+        assert(!vmalloc(count*PAGE_SIZE)&&!live);empty();fail_map=0;
+        page_t *borrowed_failure[8];
+        for(unsigned i=0;i<count;++i)borrowed_failure[i]=page_alloc(0,PAGE_ALLOC_ZERO);
+        out=(void*)123;fail_map=map_calls+failed;
+        assert(vmalloc_map_pages(borrowed_failure,count,X86_CACHE_UC,&out)==K_EIO);
+        assert(out==(void*)123&&live==count);empty();fail_map=0;
+        for(unsigned i=0;i<count;++i)page_free(borrowed_failure[i]);
+        assert(!live);failure_cases+=3;
+    }
+    printf("Unified mapping rollback: %u allocation/owned-map/borrowed-map failure positions PASS\n",failure_cases);
     static const unsigned batch_sizes[]={1,2,64,1024,4096};
     page_t *batch[4096];
     for(unsigned b=0;b<sizeof(batch_sizes)/sizeof(batch_sizes[0]);++b) {
@@ -289,8 +307,19 @@ int main(void) {
 }
 '''
 with tempfile.TemporaryDirectory(prefix='liteos-vmalloc-lifecycle-') as directory:
-    path=Path(directory);(path/'test.c').write_text(program)
-    subprocess.run(['cc','-std=c11','-O2','-Wall','-Wextra','-Werror',
+    path=Path(directory)
+    def compile_test(actual):
+        subprocess.run(['cc','-std=c11','-O2','-Wall','-Wextra','-Werror',
                     '-I',str(root/'include'),'-fsanitize=address,undefined',
-                    '-fno-pie','-no-pie',str(path/'test.c'),'-o',str(path/'test')],check=True)
+                    '-fno-pie','-no-pie','-x','c','-','-o',str(path/'test')],
+                       input=actual,text=True,check=True)
+    compile_test(program)
     subprocess.run([str(path/'test')],check=True,timeout=20)
+    borrowed_free=program.replace('if (area->owns_pages) {\n                g_vmalloc_failure',
+                                  'if (true) {\n                g_vmalloc_failure',1)
+    assert borrowed_free != program
+    compile_test(borrowed_free)
+    failed=subprocess.run([str(path/'test')],capture_output=True,text=True,timeout=20,
+                          preexec_fn=lambda:resource.setrlimit(resource.RLIMIT_CORE,(0,0)))
+    assert failed.returncode and 'live==3' in failed.stderr,failed.stderr
+    print('Negative control rejected: mapping failure frees a borrowed page')

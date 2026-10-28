@@ -30,7 +30,9 @@ code = '''
 #include <boot/sha256.h>
 #define CHECK(c) _Static_assert((c), #c)
 CHECK(OS_DRIVER_API_VERSION == 1);
-CHECK(OS_LINUX_FD_LIMIT == 256);
+CHECK(OS_LINUX_FD_LIMIT == 1024);
+CHECK(sizeof(((linux_fd_table_t *)0)->entries) / sizeof(linux_fd_entry_t)
+      == OS_LINUX_FD_LIMIT);
 CHECK(OS_PROCESS_PERSONALITY_NATIVE == 0);
 CHECK(OS_PROCESS_PERSONALITY_LINUX_X86_64 == 1);
 CHECK(OS_SHA256_DIGEST_SIZE == 32);
@@ -54,7 +56,7 @@ steps = ('ENTER', 'LOAD', 'CREATE', 'START', 'READY', 'EXIT',
          'USER_MARK', 'STRESS', 'PENDING', 'PROGRESS', 'FAIL')
 for value, name in enumerate(steps, 1):
     code += f'CHECK(OS_DEBUG_STEP_{name} == {value});\n'
-code += 'int main(void) { puts("Kernel protocol: 60 diagnostic values, interface limits, serial guard and font bitmap unchanged"); }\n'
+code += 'int main(void) { puts("Kernel protocol: 60 diagnostic values, 1024 descriptor slots, serial guard and font bitmap verified"); }\n'
 with tempfile.TemporaryDirectory(prefix='kernel-protocol-') as directory:
     binary = str(Path(directory) / 'test')
     subprocess.run(['cc', '-std=c11', '-Wall', '-Wextra', '-Werror',

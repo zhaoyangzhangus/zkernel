@@ -18,7 +18,7 @@ static uint32_t g_dma_next_free_slot;
 static uint64_t g_dma_next_iova = DMA_IOVA_BASE;
 
 static void dma_lock(void) {
-    /* Keep the registry owner runnable while other CPUs spin. */
+    /* 其他 CPU 自旋等待期间，确保注册表所有者仍可运行。 */
     sched_preempt_disable();
     spinlock_lock(&g_dma_lock);
 }
@@ -78,8 +78,7 @@ static bool dma_choose_iova(uint64_t length, uint64_t *out) {
             if (dma_range_overlaps(candidate, length, mapping)) {
                 if (end > UINT64_MAX - (PAGE_SIZE - 1ULL)) return false;
                 candidate = (end + PAGE_SIZE - 1ULL) & ~(PAGE_SIZE - 1ULL);
-                /* Earlier ranges are safe only when the new candidate lies
-                 * beyond every end already scanned. Otherwise restart now. */
+                /* 仅当新候选范围位于所有已扫描范围末端之后时，较早的范围才安全。否则立即重新开始扫描。 */
                 if (scanned_end > candidate) {
                     restart = true;
                     break;
@@ -196,8 +195,7 @@ kstatus_t dma_map_pages(struct device *dev, page_t **pages, uint32_t page_count,
         }
         previous_physical = physical;
         uintptr_t page_address = (uintptr_t)page;
-        /* New maxima cannot equal earlier pointers. Unordered lists still
-         * use the full check, without scratch allocations or reordering. */
+        /* 新最大值不可能等于先前的指针。无序列表仍执行完整检查，不分配临时内存，也不重新排序。 */
         if (page_address > highest_page_address) {
             highest_page_address = page_address;
         } else {
@@ -213,8 +211,7 @@ kstatus_t dma_map_pages(struct device *dev, page_t **pages, uint32_t page_count,
         pages[i]->flags |= PAGE_PINNED;
     }
 
-    /* All page pointers and active segment fields are assigned before the
-     * mapping is published; unused segment capacity is never exposed. */
+    /* 发布映射前先设置所有页面指针和活动段字段；绝不暴露未使用的段容量。 */
     dma_segment_t *segments = (dma_segment_t *)kmalloc(
         (size_t)segment_capacity * sizeof(*segments), 0);
     if (segments == 0) {
@@ -291,21 +288,20 @@ kstatus_t dma_map_pages(struct device *dev, page_t **pages, uint32_t page_count,
 }
 
 /*
- * V3.10.6B9E-FIX2 DMA MAPPING OWNERSHIP MOVE
+ * V3.10.6B9E-FIX2 DMA 映射所有权转移
  *
- * g_dma_mappings[] stores dma_mapping_t object addresses.
+ * g_dma_mappings[] 保存 dma_mapping_t 对象地址。
  *
- * Therefore a live mapping is non-copyable.  Moving ownership must
- * relocate that registry pointer under g_dma_lock while preserving:
+ * 因此活动映射不可复制。转移所有权时，必须在 g_dma_lock 下更新注册表指针，同时保留：
  *
- *   pages / pins
- *   segments
+ *   页面/固定引用
+ *   段
  *   IOVA
- *   IOMMU PTEs
- *   device reference
- *   direction
+ *   IOMMU 页表项
+ *   设备引用
+ *   方向
  *
- * No DMA remap occurs here.
+ * 此处不会重新映射 DMA。
  */
 kstatus_t dma_mapping_move(dma_mapping_t *destination, dma_mapping_t *source) {
     if (destination == 0 || source == 0) return K_EINVAL;
@@ -330,12 +326,10 @@ kstatus_t dma_mapping_move(dma_mapping_t *destination, dma_mapping_t *source) {
         (active && (source->flags & DMA_MAPPING_UNMAPPING_FLAG) != 0U)) {
         status = K_EBUSY;
     } else if (active != (source_slot >= 0)) {
-        /* Active ownership requires registration; inactive values must not
-         * occupy a registry slot. */
+        /* 活动所有权必须有注册项；非活动值不得占用注册表槽位。 */
         status = K_EINVAL;
     } else {
-        /* Relocate address identity without remapping, repinning or changing
-         * the device reference. Inactive aggregate values use the same copy. */
+        /* 仅迁移地址身份，不重新映射、不重复固定，也不改变设备引用。非活动聚合值同样按此方式复制。 */
         *destination = *source;
         if (active) g_dma_mappings[(uint32_t)source_slot] = destination;
         *source = (dma_mapping_t){0};
@@ -382,7 +376,7 @@ kstatus_t dma_unmap_checked(dma_mapping_t *mapping) {
         }
     }
     dma_lock();
-    /* UNMAPPING prevents ownership moves until this registered slot is freed. */
+    /* 在释放此注册槽位前，UNMAPPING 状态会阻止所有权转移。 */
     if (g_dma_mappings[slot] == mapping) dma_clear_slot((uint32_t)slot);
     dma_unlock();
     dma_unpin_pages(mapping->pages, mapping->page_count);

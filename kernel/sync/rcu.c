@@ -98,9 +98,8 @@ kstatus_t rcu_call(rcu_callback_fn callback, void *argument) {
     return K_OK;
 }
 
-/* Caller holds the callback queue lock and supplies a non-aliasing buffer
- * with room for the selected batch. Copy in at most two contiguous spans
- * and publish its indices once, rather than after every callback. */
+/* 调用方持有回调队列锁，并提供与队列不别名且容量足以容纳所选批次的缓冲区。
+ * 最多复制两个连续区间，并在最后统一发布索引，而不是每个回调后都更新。 */
 static uint32_t rcu_take_callbacks_locked(rcu_callback_t *out, uint32_t budget) {
     uint32_t count = g_rcu.count < budget ? g_rcu.count : budget;
     if (count == 0U) return 0U;

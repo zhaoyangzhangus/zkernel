@@ -82,37 +82,30 @@ void net_manager_poll(void) {
     uint8_t mac[6] = {0};
     bool ipv6_configured = false;
     bool link_changed = false;
-    bool interrupt_ready;
+    uint64_t now;
     message_port_t *event_port = 0;
     os_net_event_t event;
     if (atomic_load_explicit(&g_net_manager_init_state, memory_order_acquire) != 2U) {
         return;
     }
-    /* RX is interrupt-driven when MSI is available, but TCP retransmission
-     * and ARP/NDP resolution still need a periodic poll after an initial
-     * output returned K_EAGAIN.  In particular, wget's first SYN can be
-     * queued behind an ARP request; an IRQ for the ARP reply alone is not a
-     * timer.  The deferred-poll gate coalesces this with an IRQ-triggered
-     * poll, so keeping the kick here is bounded and does not duplicate work. */
-    interrupt_ready = e1000_interrupt_ready();
-    if (!interrupt_ready) (void)e1000_schedule_deferred_poll();
-    /* An acknowledged MSI must survive a temporarily full work queue.
-     * This is only an atomic flag check when no enqueue failure occurred. */
+    /* MSI 可用时 RX 由中断驱动，但 TCP 重传和 ARP/NDP 解析在首次发送返回
+     * K_EAGAIN 后仍需要周期性轮询。尤其是 wget 的首个 SYN 可能排在 ARP 请求后；
+     * ARP 回复中断本身并不能充当定时器。延迟轮询门会与中断触发的轮询合并，
+     * 因此保留此处的触发既有界，也不会重复执行工作。 */
+    now = x86_read_tsc();
+    if (e1000_polling_required()) {
+        (void)e1000_schedule_deferred_poll();
+    }
+    /* 已确认的 MSI 即使遇到暂时已满的工作队列也必须保留。
+     * 若入队未失败，此处只需检查一个 atomic 标志。 */
     e1000_retry_deferred_poll();
-    /* Keep the retransmission clock independent from RX/deferred-worker
-     * progress.  An ARP reply may be the last packet received before a
-     * pending SYN needs to be emitted. */
-    socket_tcp_poll(x86_read_tsc());
+    /* 使重传时钟独立于 RX/延迟工作线程的进度。待发送 SYN 需要发出前，
+     * ARP 回复可能已经是最后一个收到的数据包。 */
+    socket_tcp_poll(now);
     if (++g_net_manager_poll_divider < 64U) return;
     g_net_manager_poll_divider = 0U;
     hardware_present = e1000_hardware_present();
     if (hardware_present) {
-        /* A configured MSI vector is not proof that notifications arrive.
-         * Recover a lost RX notification at the existing status cadence,
-         * rather than draining DMA rings in every idle-loop iteration.
-         * The deferred gate coalesces this with IRQ work and retains retries
-         * if its queue is full. No extra kick in polling-only mode. */
-        if (interrupt_ready) (void)e1000_schedule_deferred_poll();
         link_up = e1000_link_up();
         ipv4_address = e1000_ipv4_address();
         ipv4_prefix_length = e1000_ipv4_prefix_length();

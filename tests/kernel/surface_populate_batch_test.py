@@ -50,8 +50,8 @@ static kstatus_t x86_translate_page(paddr_t root,vaddr_t address,paddr_t *out,ui
     if(kind==1 && i==fail_index)return K_EIO;
     return present[i]?K_OK:K_ENOENT;
 }
-static kstatus_t anon_page_get(vm_object_t *o,uint64_t index,bool create,page_t **out) {
-    assert(held && o==&object && create && index>=5);
+static kstatus_t anon_page_get(vm_object_t *o,uint64_t index,bool create,bool pin,page_t **out) {
+    assert(!pin && held && o==&object && create && index>=5);
     unsigned i=(unsigned)(index-5);assert(i<n && !present[i]);
     if(kind==2 && i==fail_index)return K_ENOMEM;
     *out=&pages[i];return K_OK;

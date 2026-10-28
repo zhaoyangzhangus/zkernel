@@ -6,6 +6,7 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'app-layout.ps1')
 . (Join-Path $PSScriptRoot 'log-records.ps1')
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 
@@ -30,6 +31,10 @@ function Require-Text([string]$Text, [string]$Pattern, [string]$Description) {
 
 $buildRoot = Resolve-RepoPath $Build
 $espRoot = Join-Path $buildRoot 'esp'
+Assert-AppGuestLayout $espRoot
+$checker = Join-Path $PSScriptRoot 'check_userspace_59584.ps1'
+& $checker -AppRoot (Join-Path $espRoot 'usr\apps\cube')
+if (-not $?) { Fail-Gate 'cube private userspace check failed' }
 $binary = Join-Path $espRoot 'tests\p12-window'
 $source = Join-Path $repoRoot 'tools\nvidia\opengl_cube_demo.c'
 $buildSource = Join-Path $repoRoot 'tools\nvidia\cube_demo_build.ps1'
@@ -122,7 +127,7 @@ if ($LASTEXITCODE -ne 0 -or
 $program = @(& $readelf.Source '-lW' '--' $binary 2>&1 |
     ForEach-Object { $_.ToString() })
 if ($LASTEXITCODE -ne 0 -or @($program | Where-Object {
-        $_ -match 'Requesting program interpreter:\s+/lib64/ld-linux-x86-64\.so\.2'
+        $_ -match 'Requesting program interpreter:\s+/usr/apps/cube/lib/ld-linux-x86-64\.so\.2'
     }).Count -ne 1) {
     Fail-Gate 'cube demo has no pinned Linux interpreter'
 }
@@ -130,7 +135,7 @@ $dynamic = @(& $readelf.Source '-dW' '--' $binary 2>&1 |
     ForEach-Object { $_.ToString() })
 if ($LASTEXITCODE -ne 0 -or
     @($dynamic | Where-Object { $_ -match 'Shared library:\s+\[libc\.so\.6\]' }).Count -ne 1 -or
-    @($dynamic | Where-Object { $_ -match '/compat/linux/lib/x86_64-linux-gnu' }).Count -ne 1) {
+    @($dynamic | Where-Object { $_ -match '/usr/apps/cube/lib' }).Count -ne 1) {
     Fail-Gate 'cube demo has no pinned glibc dependency/RPATH'
 }
 
@@ -138,10 +143,10 @@ foreach ($relative in @(
         'EFI\BOOT\BOOTX64.EFI',
         'EFI\OS\kernel.elf',
         'EFI\OS\firmware\gsp_ga10x.bin',
-        'lib64\ld-linux-x86-64.so.2',
-        'lib\x86_64-linux-gnu\libc.so.6',
-        'compat\linux\lib\x86_64-linux-gnu\libEGL.so.1',
-        'compat\linux\lib\x86_64-linux-gnu\libEGL_nvidia.so.0')) {
+        'usr\apps\cube\lib\ld-linux-x86-64.so.2',
+        'usr\apps\cube\lib\libc.so.6',
+        'usr\apps\cube\lib\libEGL.so.1',
+        'usr\apps\cube\lib\libEGL_nvidia.so.0')) {
     Require-File (Join-Path $espRoot $relative) "cube demo ESP asset $relative"
 }
 $firmware = Join-Path $espRoot 'EFI\OS\firmware\gsp_ga10x.bin'

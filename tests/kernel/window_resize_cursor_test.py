@@ -1,12 +1,15 @@
 """Actual resize hit testing, cursor selection, capture and raster geometry."""
 from pathlib import Path
 import hashlib
+import resource
 import subprocess
 import tempfile
 
 root = Path(__file__).resolve().parents[2]
 hit = (root/'kernel/graphics/input.c').read_text().replace('#include "internal.h"', '')
 router = (root/'kernel/graphics/input_router.c').read_text()
+scene = (root/'kernel/graphics/scene.c').read_text()
+policy = scene[scene.index('bool window_scene_pointer_captured_locked('):]
 select = router[router.index('uint32_t window_input_cursor_shape_locked('):
                 router.index('static window_server_window_t *keyboard_window_locked(')]
 code = r'''
@@ -22,14 +25,17 @@ code = r'''
 #define WINDOW_RESIZE_TOP 4U
 #define WINDOW_RESIZE_BOTTOM 8U
 typedef struct {int32_t x,y;uint32_t width,height,flags;bool maximized;} window_server_window_t;
-static struct {uint32_t pointer_x,pointer_y,resize_edges,dragging_identifier;} g_window_server;
+enum {DESKTOP_APP_NONE=0};
+static struct {uint32_t pointer_x,pointer_y,resize_edges,dragging_identifier;
+ struct {bool menu_open,switch_open;uint32_t pressed_app;} desktop;} g_window_server;
+static unsigned hit_queries;
 static window_server_window_t window={100,100,200,100,OS_WINDOW_RESIZABLE,false};
 static bool covered;
 const uint32_t g_linux_cursor_argb[24*24]={[27]=0xff123456};
 static uint32_t window_outer_width(uint32_t w,uint32_t f){return w+((f&OS_WINDOW_CLIENT_DECORATIONS)?0:2);}
 static uint32_t window_outer_height(uint32_t h,uint32_t f){return h+((f&OS_WINDOW_CLIENT_DECORATIONS)?0:40);}
-static window_server_window_t *window_at_locked(uint32_t x,uint32_t y){(void)x;(void)y;return covered?0:&window;}
-''' + hit + select + r'''
+static window_server_window_t *window_scene_hit_test_locked(uint32_t x,uint32_t y){(void)x;(void)y;++hit_queries;return covered?0:&window;}
+''' + hit + policy + select + r'''
 static void hover(uint32_t x,uint32_t y,uint32_t expected){
  g_window_server.pointer_x=x;g_window_server.pointer_y=y;
  assert(window_input_cursor_shape_locked()==expected);
@@ -48,11 +54,22 @@ int main(void){
   hover(right+1,150,WINDOW_CURSOR_ARROW);
   window.maximized=true;hover(100,100,WINDOW_CURSOR_ARROW);window.maximized=false;
  }
+ /* 桌面捕获不允许后方窗口设置缩放光标，也不必扫描窗口。 */
+ unsigned queries=hit_queries;
+ g_window_server.desktop.menu_open=true;hover(100,100,WINDOW_CURSOR_ARROW);
+ g_window_server.desktop.menu_open=false;g_window_server.desktop.switch_open=true;
+ hover(100,100,WINDOW_CURSOR_ARROW);
+ g_window_server.desktop.switch_open=false;g_window_server.desktop.pressed_app=7;
+ hover(100,100,WINDOW_CURSOR_ARROW);
+ assert(hit_queries==queries);g_window_server.desktop.pressed_app=DESKTOP_APP_NONE;
+ hover(100,100,WINDOW_CURSOR_SIZE_NWSE);assert(hit_queries==queries+1);
  covered=true;hover(100,100,WINDOW_CURSOR_ARROW);covered=false;
  window.flags=0;hover(100,100,WINDOW_CURSOR_ARROW);window.flags=OS_WINDOW_RESIZABLE;
  g_window_server.dragging_identifier=1;
  g_window_server.resize_edges=WINDOW_RESIZE_RIGHT|WINDOW_RESIZE_TOP;
+ queries=hit_queries;g_window_server.desktop.menu_open=true;
  hover(900,900,WINDOW_CURSOR_SIZE_NESW); // captured direction survives leaving the window
+ assert(hit_queries==queries);g_window_server.desktop.menu_open=false;
  g_window_server.resize_edges=0;hover(100,100,WINDOW_CURSOR_ARROW); // title drag
  g_window_server.dragging_identifier=0;hover(900,900,WINDOW_CURSOR_ARROW);
  assert(window_cursor_pixel(WINDOW_CURSOR_ARROW,3,1)==0xff123456);
@@ -74,6 +91,7 @@ int main(void){
  }
 }
 '''
+resource.setrlimit(resource.RLIMIT_CORE,(0,0))
 with tempfile.TemporaryDirectory(prefix='liteos-resize-cursor-') as directory:
     binary = str(Path(directory)/'test')
     subprocess.run(['cc','-std=c11','-Wall','-Wextra','-Werror',
@@ -90,4 +108,13 @@ with tempfile.TemporaryDirectory(prefix='liteos-resize-cursor-') as directory:
     for number, digest in enumerate(expected):
         assert hashlib.sha256(pixels[number*2304:(number+1)*2304]).hexdigest() == digest, \
             'Compiled cursor differs from the original Windows raster'
+    negative=code.replace('window_scene_pointer_window_locked(),',
+        'window_scene_hit_test_locked(g_window_server.pointer_x,g_window_server.pointer_y),')
+    assert negative!=code
+    subprocess.run(['cc','-std=c11','-Wall','-Wextra','-Werror',
+                    '-I'+str(root/'include'),'-I'+str(root/'kernel/graphics'),
+                    '-x','c','-','-o',binary],input=negative,text=True,check=True)
+    result=subprocess.run([binary],capture_output=True)
+    assert result.returncode!=0 and b'Assertion' in result.stderr
+    print('负面对照通过：桌面捕获期间查询后方窗口会触发光标回归')
 print('Resize cursor: enlarged eight-pixel native/client edges, capture/release, exclusions and four Windows alpha rasters/hotspots passed')

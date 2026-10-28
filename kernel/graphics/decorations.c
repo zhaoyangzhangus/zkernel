@@ -1,10 +1,11 @@
 #include <ascii_font.h>
 #include <uapi/window_theme.h>
 #include <uapi/chrome_caption.h>
+#include <uapi/utf8.h>
 #include "internal.h"
 
 
-/* REFACTOR_P7C_DECORATION_OWNER: titlebar, controls, and window chrome. */
+/* REFACTOR_P7C_DECORATION_OWNER：标题栏、控件和窗口装饰。 */
 
 static void compositor_put_pixel_locked(int32_t x, int32_t y,
                                             uint32_t color) {
@@ -22,11 +23,12 @@ static void compositor_put_pixel_locked(int32_t x, int32_t y,
 
     g_window_server.composite_framebuffer[
         (uint64_t)(uint32_t)y * g_window_server.display_stride +
-        (uint32_t)x] = color;
+        (uint32_t)x] = os_theme_resolve(color,g_compositor_snapshot.theme);
 }
 
 static void compositor_blend_pixel_locked(int32_t x, int32_t y,
                                            uint32_t color, uint32_t alpha) {
+    color=os_theme_resolve(color,g_compositor_snapshot.theme);
     uint32_t destination;
     uint32_t inverse;
     uint32_t red;
@@ -64,27 +66,6 @@ static void compositor_blend_pixel_locked(int32_t x, int32_t y,
         (uint32_t)x] = (destination & 0xFF000000U) |
                         (red << 16U) | (green << 8U) | blue;
 }
-
-void compositor_draw_small_glyph_locked(int32_t x, int32_t y,
-                                        char character, uint32_t color) {
-    const UINT8 *glyph = ascii_font_glyph((UINT8)character);
-    uint32_t width = ascii_font_width();
-    uint32_t height = ascii_font_height();
-
-    if (glyph == 0) return;
-    if (width == 0U || height == 0U) return;
-
-    for (uint32_t row = 0U; row < height; ++row) {
-        for (uint32_t column = 0U; column < width; ++column) {
-            compositor_blend_pixel_locked(
-                x + (int32_t)column,
-                y + (int32_t)row,
-                color,
-                glyph[row * width + column]);
-        }
-    }
-}
-
 
 static void compositor_title_controls_locked(
     const compositor_window_view_t *window) {
@@ -166,7 +147,7 @@ static void compositor_title_controls_locked(
             WINDOW_TITLE_BUTTON_MAXIMIZE) {
 
             if (!window->maximized) {
-                /* Normal maximize glyph. */
+                /* 普通最大化图标。 */
                 compositor_fill_locked(
                     x + 6,
                     y + 6,
@@ -196,7 +177,7 @@ static void compositor_title_controls_locked(
                     glyph);
 
             } else {
-                /* Restore glyph: two overlapping rectangles. */
+                /* 还原图标：两个重叠矩形。 */
                 compositor_fill_locked(
                     x + 8,
                     y + 6,
@@ -243,7 +224,7 @@ static void compositor_title_controls_locked(
             button ==
             WINDOW_TITLE_BUTTON_CLOSE) {
 
-            /* Small X. */
+            /* 小型 X。 */
             for (uint32_t step = 0U;
                  step < 7U;
                  ++step) {
@@ -270,13 +251,37 @@ static void compositor_title_controls_locked(
     }
 }
 
+/* 声明式按钮与原生标题栏共用同一套图标轮廓。 */
+void compositor_control_caption_icon(int64_t x,int64_t y,uint32_t width,uint32_t height,
+    uint32_t action,bool maximized,bool active) {
+    uint32_t icon=action==OS_CONTROL_WINDOW_MAXIMIZE && maximized ? 4U : action;
+    uint32_t side=(width<height?width:height)*12U/32U;
+    if (!side || icon<1U || icon>4U) return;
+    static uint8_t cache[4][12][12];
+    static bool ready;
+    if (!ready) {
+        for (uint32_t k=1;k<=4;++k) for(uint32_t row=0;row<12;++row)
+            for(uint32_t col=0;col<12;++col) cache[k-1U][row][col]=chrome_caption_alpha(k,col,row);
+        ready=true;
+    }
+    for(uint32_t row=0;row<side;++row) for(uint32_t col=0;col<side;++col)
+        compositor_blend_pixel_locked((int32_t)(x+(width-side)/2U+col),
+            (int32_t)(y+(height-side)/2U+row),OS_THEME_MUTED,
+            (cache[icon-1U][row*12U/side][col*12U/side]*(active?255U:97U)+127U)/255U);
+}
+
 void compositor_standard_caption_locked(const compositor_window_view_t *window) {
     uint32_t caption_height = os_window_caption_height(window->flags);
-    if (!window_standard_caption(window->flags) || window->width < 96U ||
+    uint32_t button_width=os_window_caption_button_width(window->flags);
+    bool dark = (window->flags & OS_WINDOW_DARK_CAPTION) != 0U;
+    if (!window_standard_caption(window->flags) || window->width < 3U*button_width ||
         window->height < caption_height) return;
     bool active = window->identifier == g_compositor_snapshot.focused_identifier;
-    /* The single compositor worker rasterizes immutable paths once. No heap
-     * allocation and no supersampling work in subsequent mouse repaints. */
+    /* 服务端按钮区与标题栏共用焦点底色；客户端自绘标题栏仍由应用决定底色。 */
+    uint32_t background = dark ? 0x001E1E1EU :
+        (!active && !window_client_decorations(window->flags) ?
+            OS_THEME_HEADER_INACTIVE : OS_THEME_HEADER);
+    /* 单个合成器工作线程只会对不变路径做一次光栅化。后续鼠标重绘不再分配堆内存，也不再执行超采样工作。 */
     static uint8_t icon_alpha[4][12][12];
     static bool icon_alpha_ready;
     if (!icon_alpha_ready) {
@@ -286,61 +291,79 @@ void compositor_standard_caption_locked(const compositor_window_view_t *window) 
                     icon_alpha[icon - 1U][row][col] = chrome_caption_alpha(icon, col, row);
         icon_alpha_ready = true;
     }
-    /* Clients paint the same header background. Cover obsolete client controls. */
+    /* 客户端会绘制相同的标题栏背景。覆盖掉旧的客户端控件。 */
     for (uint32_t button = 1; button <= 3; ++button) {
         int32_t x, y;
         if (!window_caption_button_rect(window->flags, window->x, window->y,
                                         window->width, button, &x, &y)) continue;
+        if ((int64_t)x + button_width <= g_compositor_snapshot.damage_bounds.x0 ||
+            x >= g_compositor_snapshot.damage_bounds.x1 ||
+            (int64_t)y + caption_height <= g_compositor_snapshot.damage_bounds.y0 ||
+            y >= g_compositor_snapshot.damage_bounds.y1) continue;
         for (uint32_t row = 0; row < caption_height; ++row) {
             uint32_t cut = window->maximized ? 0U : chrome_frame_row_inset(row,
                 window_outer_width(window->width, window->flags),
                 window_outer_height(window->height, window->flags));
             uint32_t right_cut = button == 3U ? cut : 0U;
-            compositor_fill_locked(x, y + (int32_t)row, 32U - right_cut, 1U, OS_THEME_HEADER);
+            compositor_fill_locked(x, y + (int32_t)row, button_width - right_cut, 1U, background);
         }
-        bool hover = (int64_t)g_compositor_snapshot.pointer_x >= x &&
-            (int64_t)g_compositor_snapshot.pointer_x < (int64_t)x + 32 &&
-            (int64_t)g_compositor_snapshot.pointer_y >= y &&
-            (int64_t)g_compositor_snapshot.pointer_y < (int64_t)y + caption_height;
+        /* 绘制消费场景路由的悬停快照，不能让被遮挡的同坐标按钮自行亮起。 */
+        bool hover = g_compositor_snapshot.hovered_window_identifier == window->identifier &&
+            g_compositor_snapshot.hovered_title_button == button;
         bool pressed = g_compositor_snapshot.title_pressed_identifier == window->identifier &&
             g_compositor_snapshot.title_pressed_button == button;
-        /* FrameCaptionButton::OnPaint(): highlight alpha 0x14; ripple is 6%. */
-        if (hover || pressed) {
-            for (int row = 6; row < 34; ++row)
-                for (int col = 2; col < 30; ++col) {
-                    int dx = col < 16 ? 16 - col : col - 15;
-                    int dy = row < 20 ? 20 - row : row - 19;
-                    if (dx * dx + dy * dy <= 196)
-                        compositor_blend_pixel_locked(x + col, y + row + (int32_t)(caption_height - 40U) / 2, 0U, 20U);
+        /* FrameCaptionButton::OnPaint(): 高亮 alpha 为 0x14；波纹为 6%。 */
+        if (dark || hover || pressed) {
+            /* 所有缩放共用圆形覆盖率，不能在放大后改走矩形高亮。 */
+            uint32_t diameter=(dark ? 26U : 28U)*button_width/32U;
+            for (uint32_t row=0;row<diameter;++row)
+                for (uint32_t col=0;col<diameter;++col) {
+                    uint32_t alpha=os_window_caption_circle_alpha(diameter,col,row);
+                    if (!alpha) continue;
+                    compositor_blend_pixel_locked(
+                        x+(int32_t)(button_width-diameter)/2+(int32_t)col,
+                        y+(int32_t)(caption_height-diameter)/2+(int32_t)row,
+                        dark ? (pressed ? 0x00636363U : hover ? 0x00535353U : 0x00353535U) : 0U,
+                        dark ? alpha : (alpha*20U+127U)/255U);
                 }
         }
         uint32_t icon = button == 2U && window->maximized ? 4U : button;
         uint32_t opacity = active || hover ? 255U : 97U;
-        for (uint32_t row = 0; row < 12; ++row)
-            for (uint32_t col = 0; col < 12; ++col)
-                compositor_blend_pixel_locked(x + 10 + (int32_t)col,
-                    y + (int32_t)(caption_height - 12U) / 2 + (int32_t)row, OS_THEME_MUTED,
-                    (icon_alpha[icon - 1U][row][col] * opacity + 127U) / 255U);
+        uint32_t icon_size=12U*button_width/32U;
+        for (uint32_t row = 0; row < icon_size; ++row)
+            for (uint32_t col = 0; col < icon_size; ++col)
+                compositor_blend_pixel_locked(x + (int32_t)(button_width-icon_size)/2 + (int32_t)col,
+                    y + (int32_t)(caption_height - icon_size) / 2 + (int32_t)row,
+                    dark ? 0x00EEEEEEU : OS_THEME_MUTED,
+                    (icon_alpha[icon - 1U][row*12U/icon_size][col*12U/icon_size] * opacity + 127U) / 255U);
     }
-    /* Chromium Linux frame_view_utils_linux.cc: 1px interior black, alpha 0x26.
-     * Maximized windows have no restored frame border. */
+    /* Chromium Linux frame_view_utils_linux.cc：1px 内边框为黑色，alpha 为 0x26。
+     * 最大化窗口没有恢复状态的边框。 */
     if (!window->maximized && window_client_decorations(window->flags)) {
-        /* RestoredFrameBorderInsets() retains four DIPs of frame color at
-         * the sides and bottom when the platform has no frame shadow. */
+        /* 平台没有窗口阴影时，RestoredFrameBorderInsets() 会在侧边和底部保留 4 DIP 的
+         * 窗框颜色。 */
         compositor_fill_locked(window->x, window->y + (int32_t)caption_height,
-            CHROME_FRAME_BORDER_WIDTH, window->height - caption_height, OS_THEME_HEADER);
+            CHROME_FRAME_BORDER_WIDTH, window->height - caption_height, background);
         compositor_fill_locked(window->x + (int32_t)window->width - 4,
             window->y + (int32_t)caption_height, CHROME_FRAME_BORDER_WIDTH,
-            window->height - caption_height, OS_THEME_HEADER);
+            window->height - caption_height, background);
         compositor_fill_locked(window->x, window->y + (int32_t)window->height - 4,
-            window->width, CHROME_FRAME_BORDER_WIDTH, OS_THEME_HEADER);
-        for (uint32_t row = 0; row < window->height; ++row) {
+            window->width, CHROME_FRAME_BORDER_WIDTH, background);
+        int64_t first_row = (int64_t)g_compositor_snapshot.damage_bounds.y0 - window->y;
+        int64_t last_row = (int64_t)g_compositor_snapshot.damage_bounds.y1 - window->y;
+        if (first_row < 0) first_row = 0;
+        if (last_row > window->height) last_row = window->height;
+        for (int64_t row = first_row; row < last_row; ++row) {
             uint32_t cut = chrome_frame_row_inset(row, window->width, window->height);
             compositor_blend_pixel_locked(window->x + (int32_t)cut, window->y + (int32_t)row, 0U, 38U);
             compositor_blend_pixel_locked(window->x + (int32_t)window->width - 1 - (int32_t)cut,
                 window->y + (int32_t)row, 0U, 38U);
         }
-        for (uint32_t col = 0; col < window->width; ++col) {
+        int64_t first_col = (int64_t)g_compositor_snapshot.damage_bounds.x0 - window->x;
+        int64_t last_col = (int64_t)g_compositor_snapshot.damage_bounds.x1 - window->x;
+        if (first_col < 0) first_col = 0;
+        if (last_col > window->width) last_col = window->width;
+        for (int64_t col = first_col; col < last_col; ++col) {
             uint32_t cut = chrome_frame_inset(0U, window->width);
             if (col > cut && col + cut + 1U < window->width)
                 compositor_blend_pixel_locked(window->x + (int32_t)col, window->y, 0U, 38U);
@@ -362,8 +385,6 @@ void compositor_titlebar_locked(
 
     uint32_t outer_width;
     uint32_t outer_height;
-
-    uint32_t max_chars;
 
     int32_t text_x;
     int32_t text_y;
@@ -400,7 +421,7 @@ void compositor_titlebar_locked(
         window_frame_extra(window->flags) +
         window_titlebar_height(window->flags);
 
-    /* Complete flat outer frame. */
+    /* 绘制完整的平面外框。 */
     compositor_fill_rounded_locked(
         window->x,
         window->y,
@@ -409,38 +430,13 @@ void compositor_titlebar_locked(
         WINDOW_CORNER_RADIUS,
         frame_color);
 
-    /* Keep the topmost rounded corner pixels owned by the outer frame. */
-    if (window->width >
-        WINDOW_CORNER_RADIUS * 2U) {
+    /* 标题底色完整覆盖内框，四角的内外轮廓由最终遮罩统一处理。
+     * 不能为两侧各保留一个半径宽的方块，否则会露出边框底色。 */
+    compositor_fill_locked(window->x+(int32_t)window_frame_border(window->flags),
+        window->y+(int32_t)window_frame_border(window->flags),
+        window->width,window_titlebar_height(window->flags),title_color);
 
-        compositor_fill_locked(
-            window->x +
-                (int32_t)WINDOW_CORNER_RADIUS,
-            window->y +
-                (int32_t)window_frame_border(window->flags),
-            window->width -
-                WINDOW_CORNER_RADIUS * 2U,
-            window_titlebar_height(window->flags),
-            title_color);
-    }
-
-    /* Fill the central/lower titlebar portion. */
-    if (window_titlebar_height(window->flags) >
-        WINDOW_CORNER_RADIUS) {
-
-        compositor_fill_locked(
-            window->x +
-                (int32_t)window_frame_border(window->flags),
-            window->y +
-                (int32_t)WINDOW_CORNER_RADIUS,
-            window->width,
-            window_titlebar_height(window->flags) -
-                WINDOW_CORNER_RADIUS +
-                window_frame_border(window->flags),
-            title_color);
-    }
-
-    /* Client/titlebar separator. */
+    /* 客户区/标题栏分隔线。 */
     compositor_fill_locked(
         window->x +
             (int32_t)window_frame_border(window->flags),
@@ -454,45 +450,20 @@ void compositor_titlebar_locked(
     if (!window_standard_caption(window->flags))
         compositor_title_controls_locked(window);
 
-    /* Window title uses the A8 font cache loaded from the root volume. */
-    if (ascii_font_width() == 0U || ascii_font_height() == 0U) {
-        return;
-    }
-    if (window->width <=
-        WINDOW_TITLE_CONTROLS_WIDTH + ascii_font_width() * 3U) {
-        return;
-    }
-
-    max_chars =
-        (window->width -
-         WINDOW_TITLE_CONTROLS_WIDTH -
-         ascii_font_width() * 3U) /
-        ascii_font_width();
-
-    if (max_chars > 31U) {
-        max_chars = 31U;
-    }
-
-    text_x =
-        window->x + 12;
-
-    text_y =
-        window->y +
-        (int32_t)window_frame_border(window->flags) +
-        (int32_t)(window_titlebar_height(window->flags) > ascii_font_height() ?
-            (window_titlebar_height(window->flags) - ascii_font_height()) /
-                2U : 0U);
-
-    for (uint32_t index = 0U;
-         index < max_chars &&
-         window->title[index] != '\0';
-         ++index) {
-
-        compositor_draw_small_glyph_locked(
-            text_x +
-                (int32_t)(index * ascii_font_width()),
-            text_y,
-            window->title[index],
-            text_color);
-    }
+    /* 与正文共用字体服务；快照在提交阶段生成，绘制不解析字体或分配内存。 */
+    if (window_control_has_caption(window->controls)) return;
+    const caption_text_t *text=window->caption;
+    uint32_t controls=window_standard_caption(window->flags) ?
+        3U*os_window_caption_button_width(window->flags) : WINDOW_TITLE_CONTROLS_WIDTH;
+    if (!text || !text->width || window->width<=controls+24U) return;
+    uint32_t width=window->width-controls-24U;
+    if (width>text->width) width=text->width;
+    text_x=window->x+12;
+    uint32_t bar=window_titlebar_height(window->flags);
+    text_y=window->y+(int32_t)window_frame_border(window->flags)+
+        (int32_t)(bar>text->height ? (bar-text->height)/2U : 0U);
+    for (uint32_t row=0;row<text->height;++row)
+        for (uint32_t col=0;col<width;++col)
+            compositor_blend_pixel_locked(text_x+(int32_t)col,text_y+(int32_t)row,
+                text_color,text->pixels[(size_t)row*text->width+col]);
 }

@@ -11,9 +11,7 @@ previous = function[:cache_start] + '        status = vfs_enumerate_file(entry.f
 previous = previous.replace('static int64_t linux_getdents64(', 'static int64_t previous_getdents(')
 previous = previous.replace('    os_file_info_t batch[16U];\n    uint32_t batch_count = 0U;\n    uint32_t batch_cursor = 0U;\n    uint64_t batch_start = 0U;\n', '')
 previous = previous.replace('        info = batch[batch_cursor];\n', '').replace('        ++batch_cursor;\n', '')
-padding = '''        /* Header and name are overwritten below; initialize only alignment
-         * padding, the remaining bytes that will be exposed to userspace. */
-        linux_zero(record + sizeof(header) + name_length + 1U,
+padding = '''        linux_zero(record + sizeof(header) + name_length + 1U,
                     record_length - sizeof(header) - name_length - 1U);'''
 assert padding in previous
 previous = previous.replace(padding, '        linux_zero(record, sizeof(record));')
@@ -46,10 +44,18 @@ static bool bad_range;
 static unsigned name_length_override;
 static size_t zero_bytes;
 static unsigned lock_depth;
+static unsigned position_lock_depth;
+static bool position_lock_failure;
 static unsigned kind=LINUX_FD_FILE;
+static kstatus_t vfs_file_position_lock(file_t *f){
+ assert(f==&file && !position_lock_depth);
+ if(position_lock_failure)return K_EIO;
+ position_lock_depth=1;return K_OK;
+}
+static void vfs_file_position_unlock(file_t *f){assert(f==&file&&position_lock_depth==1);position_lock_depth=0;}
 static bool x86_user_range_valid(void *p,size_t n){return p&&n&&!bad_range;}
 static kstatus_t linux_fd_lookup(process_t *p,int64_t d,linux_fd_entry_t *out){assert(p&&d==3);*out=(linux_fd_entry_t){kind,&file,0};return K_OK;}
-static void linux_fd_entry_put(linux_fd_entry_t *e){assert(e->file==&file);++drops;}
+static void linux_fd_entry_put(linux_fd_entry_t *e){assert(e->file==&file&&!position_lock_depth);++drops;}
 static bool linux_proc_node_is_directory(unsigned node){return node==1;}
 static void spinlock_lock(unsigned *lock){(void)lock;assert(!lock_depth);++lock_depth;}
 static void spinlock_unlock(unsigned *lock){(void)lock;assert(lock_depth==1);--lock_depth;}
@@ -62,14 +68,14 @@ static bool linux_proc_directory_entry(linux_proc_file_t *p,uint64_t i,char *nam
  *type=i%3==0?4:i%3==1?1:8;*inode=i+1;return true;
 }
 static kstatus_t vfs_enumerate_file(file_t *f,uint32_t i,os_file_info_t *out){
- assert(f==&file);++enumerations;if(i==fail_index)return K_EIO;if(i>=entries)return K_ENOENT;
+ assert(f==&file&&position_lock_depth==1);++enumerations;if(i==fail_index)return K_EIO;if(i>=entries)return K_ENOENT;
  memset(out,0,sizeof(*out));out->type=i%3==0?OS_FILE_TYPE_DIRECTORY:i%3==1?OS_FILE_TYPE_FIFO:1;
  snprintf(out->name,64,"entry%03u",i);
  if(name_length_override){memset(out->name,'a'+i%26,name_length_override);out->name[name_length_override]=0;}
  return K_OK;
 }
 static kstatus_t vfs_enumerate_file_batch(file_t *f,uint32_t start,os_file_info_t *out,uint32_t capacity,uint32_t *count){
- assert(f==&file&&capacity==16);*count=0;++enumerations;
+ assert(f==&file&&capacity==16&&position_lock_depth==1);*count=0;++enumerations;
  if(start==fail_index)return K_EIO;
  if(start>=entries)return K_ENOENT;
  for(unsigned i=start;i<entries&&i<fail_index&&*count<capacity;++i){
@@ -86,7 +92,7 @@ static kstatus_t copy_to_user(void *p,const void *s,size_t n){++copies;if(copies
 ''' + old_proc + proc + previous + function + r'''
 static process_t process;
 static uint8_t output[16384];
-static void reset(unsigned n){entries=n;enumerations=copies=drops=0;zero_bytes=0;name_length_override=0;fail_index=UINT32_MAX;fail_copy=0;file.position=0;bad_range=false;kind=LINUX_FD_FILE;memset(output,0x81,sizeof(output));}
+static void reset(unsigned n){assert(!position_lock_depth);position_lock_failure=false;entries=n;enumerations=copies=drops=0;zero_bytes=0;name_length_override=0;fail_index=UINT32_MAX;fail_copy=0;file.position=0;bad_range=false;kind=LINUX_FD_FILE;memset(output,0x81,sizeof(output));}
 static void records(unsigned start,unsigned count){
  for(unsigned i=0;i<count;++i){
   linux_dirent64_header_t h;memcpy(&h,output+i*32,sizeof(h));
@@ -138,6 +144,8 @@ int main(void){
  assert(linux_getdents64(&process,3,(uintptr_t)output,sizeof(output))==LINUX_EFAULT&&!enumerations&&!drops);
  reset(256);kind=99;
  assert(linux_getdents64(&process,3,(uintptr_t)output,sizeof(output))==K_ENOTDIR&&drops==1);
+ reset(256);position_lock_failure=true;
+ assert(linux_getdents64(&process,3,(uintptr_t)output,sizeof(output))==K_EIO&&drops==1&&!enumerations&&!file.position);
  for(unsigned start=0;start<=257;++start)compare(256,sizeof(output),0,start);
  size_t avoided_zero=0;unsigned padding_cases=0;
  for(unsigned length=1;length<64;++length)for(unsigned fault=0;fault<5;++fault)

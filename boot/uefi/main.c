@@ -47,7 +47,7 @@ static const CHAR8 g_default_cmdline[] = "";
 #if OS_REALTEST
 static EFI_FILE_PROTOCOL *g_realtest_loader_log;
 static CHAR16 g_realtest_loader_log_path[] = {
-    '\\', 'E', 'F', 'I', '\\', 'O', 'S', '\\',
+    '\\', 'l', 'o', 'g', '\\',
     'r', 'e', 'a', 'l', 't', 'e', 's', 't', '.', 'l', 'o', 'g', 0
 };
 static const EFI_GUID g_realtest_variable_guid = {

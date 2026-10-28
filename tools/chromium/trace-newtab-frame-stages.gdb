@@ -5,7 +5,7 @@ import gdb, subprocess, struct, json, time, os, sys
 from pathlib import Path
 sys.path.insert(0, str(Path("tools/chromium").resolve()))
 from trace_build import validate_chrome_build
-expected = 'Build ID: ccd5fc305e3b0600'
+expected = 'Build ID: 2ea4a62ae34e05c9'
 try:
     validate_chrome_build(expected)
 except RuntimeError as error:
@@ -56,22 +56,22 @@ class Stage(gdb.Breakpoint):
             return True
         return False
 
-TabEntry('*0x51e890e0',gdb.BP_HARDWARE_BREAKPOINT,internal=True)
+TabEntry('*0x520f0100',gdb.BP_HARDWARE_BREAKPOINT,internal=True)
 frame_stage = os.environ.get('OS_FRAME_STAGE', 'schedule')
 if frame_stage not in ('paint','pipeline','schedule'):
     raise gdb.GdbError('Unknown frame stage')
 if frame_stage == 'paint':
-    Stage('*0x4eb671d0','BEGIN_PAINT')
-    Stage('*0x4eb672b0','END_PAINT')
+    Stage('*0x4edaf0c0','BEGIN_PAINT')
+    Stage('*0x4edaf1a0','END_PAINT')
 elif frame_stage == 'pipeline':
-    Stage('*0x4eaad300','DRAW_AND_SWAP')
-    Stage('*0x4eb671d0','BEGIN_PAINT')
+    Stage('*0x4ecf4de0','DRAW_AND_SWAP')
+    Stage('*0x4edaf0c0','BEGIN_PAINT')
 else:
     # LiteOS deliberately disables its external platform ACK-loop adapter in
     # DesktopWindowTreeHostPlatform. Trace the actual Viz scheduler, not the
     # registered-but-unused NativeGuestBeginFrameSource::MaybeIssueFrame method.
-    Stage('*0x4ea8ca70','DISPLAY_BEGIN_FRAME')
-    Stage('*0x4eaad300','DRAW_AND_SWAP')
+    Stage('*0x4ecd4510','DISPLAY_BEGIN_FRAME')
+    Stage('*0x4ecf4de0','DRAW_AND_SWAP')
 Stage('window_server_present','PRESENT')
 end
 continue

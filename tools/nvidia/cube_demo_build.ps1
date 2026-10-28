@@ -9,6 +9,7 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'app-layout.ps1')
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $phase12Build = Join-Path $repoRoot 'tools\nvidia\phase12_build.ps1'
 $phase12Esp = Join-Path $repoRoot 'build\nvidia\phase12\esp'
@@ -94,9 +95,11 @@ function Copy-FileIfChanged([string]$Source, [string]$Target) {
 }
 
 function Copy-DirectoryContents([string]$SourceRoot, [string]$TargetRoot) {
+    Assert-AppGuestLayout $TargetRoot
     Require-Directory $SourceRoot 'Phase 12 source ESP'
     foreach ($source in @(Get-ChildItem -LiteralPath $SourceRoot -Recurse -File)) {
         $relative = $source.FullName.Substring($SourceRoot.Length).TrimStart('\', '/')
+        if (Test-LegacyGuestPath $relative) { continue }
         Copy-FileIfChanged $source.FullName (Join-Path $TargetRoot $relative)
     }
 }
@@ -157,8 +160,8 @@ $compilerPath = (Get-Command $Compiler -ErrorAction Stop).Source
 $hostLinkArgs = @(
     '-nostdlib', '-nodefaultlibs', '-nostartfiles',
     '-Wl,--build-id=none',
-    '-Wl,-dynamic-linker,/lib64/ld-linux-x86-64.so.2',
-    '-Wl,-rpath,/compat/linux/lib/x86_64-linux-gnu:/compat/linux/lib',
+    '-Wl,-dynamic-linker,/usr/apps/cube/lib/ld-linux-x86-64.so.2',
+    '-Wl,-rpath,/usr/apps/cube/lib',
     '-Wl,--disable-new-dtags',
     '-Wl,--allow-shlib-undefined',
     ('-Wl,-rpath-link,{0}' -f $hostRunLib.Replace('\', '/')),
@@ -194,19 +197,22 @@ if (-not ((Test-Path -LiteralPath $cubeBinary -PathType Leaf) -and
 else { Write-Output 'CUBE_HOST_LINK=INCREMENTAL_SKIP' }
 
 Require-File $cubeBinary 'linked OpenGL cube demo'
+Assert-AppInterpreter $cubeBinary 'cube'
 $script:stageCopied = 0
 $script:stageSkipped = 0
 Copy-DirectoryContents $phase12Esp $cubeEsp
+Install-NvidiaApp (Join-Path $repoRoot 'build\nvidia\userspace') $cubeEsp 'cube'
 Copy-FileIfChanged $cubeBinary (Join-Path $cubeEsp 'tests\p12-window')
+Copy-FileIfChanged $cubeBinary (Join-Path $cubeEsp 'usr\apps\cube\cube')
 foreach ($required in @(
         (Join-Path $cubeEsp 'EFI\BOOT\BOOTX64.EFI'),
         (Join-Path $cubeEsp 'EFI\OS\kernel.elf'),
         (Join-Path $cubeEsp 'EFI\OS\firmware\gsp_ga10x.bin'),
         (Join-Path $cubeEsp 'tests\p12-window'),
-        (Join-Path $cubeEsp 'lib64\ld-linux-x86-64.so.2'),
-        (Join-Path $cubeEsp 'lib\x86_64-linux-gnu\libc.so.6'),
-        (Join-Path $cubeEsp 'compat\linux\lib\x86_64-linux-gnu\libEGL.so.1'),
-        (Join-Path $cubeEsp 'compat\linux\lib\x86_64-linux-gnu\libEGL_nvidia.so.0'))) {
+        (Join-Path $cubeEsp 'usr\apps\cube\lib\ld-linux-x86-64.so.2'),
+        (Join-Path $cubeEsp 'usr\apps\cube\lib\libc.so.6'),
+        (Join-Path $cubeEsp 'usr\apps\cube\lib\libEGL.so.1'),
+        (Join-Path $cubeEsp 'usr\apps\cube\lib\libEGL_nvidia.so.0'))) {
     Require-File $required 'cube demo ESP asset'
 }
 Write-Output ('CUBE_STAGE_COPIED={0}' -f $script:stageCopied)

@@ -63,8 +63,8 @@ static int64_t syscall_pipe_transfer(bool write, uint64_t handle,
                                      uint64_t timeout_ns, uint64_t output_bytes) {
     process_t *process = current_process();
     pipe_endpoint_t *endpoint = 0;
-    /* Small control/output records need no allocator round trip. Keep this
-     * syscall-local so sleeping I/O cannot share or overwrite the staging. */
+    /* 小型控制/输出记录无需经过分配器往返。将暂存区保留在系统调用栈上，
+     * 使休眠中的 I/O 不会共享或覆盖该暂存区。 */
     uint8_t inline_buffer[256];
     uint8_t *temporary = 0;
     uint64_t bytes = 0U;

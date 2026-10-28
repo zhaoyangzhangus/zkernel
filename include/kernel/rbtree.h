@@ -77,7 +77,7 @@ static inline void rb_tree_rotate_right(rb_root_t *root, rb_node_t *node) {
     else parent->right = left;
 }
 
-/* The caller links node below parent and marks it red before calling this. */
+/* 调用方须先将 node 链接到 parent 下方并标记为红色，再调用此函数。 */
 static inline void rb_tree_insert_rebalance_augmented(
     rb_root_t *root, rb_node_t *node,
     void (*rotate)(rb_node_t *old_root, rb_node_t *new_root)) {
@@ -284,8 +284,8 @@ static inline void rb_tree_erase_augmented(
         rb_tree_set_parent(moved->left, moved);
         rb_tree_set_color(moved, rb_tree_color(node));
     }
-    /* The successor's old parent now leads through its new position to the
-     * root. Repair that path before balancing consumes child summaries. */
+    /* 后继节点的原父节点现在可沿其新位置到达根节点。
+     * 在平衡操作读取子树摘要前，先修复这条路径。 */
     if (propagate != 0 && child_parent != 0) propagate(child_parent);
     if (moved_color == RB_TREE_BLACK) {
         rb_tree_erase_rebalance_augmented(root, child, child_parent, rotate);

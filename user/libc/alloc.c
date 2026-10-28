@@ -190,11 +190,9 @@ void free(void *pointer) {
 }
 
 /*
- * Chromium exports its own malloc/free shim.  Calls made inside this shared
- * libc are bound locally by -Bsymbolic, but a pointer allocated here can still
- * cross the ABI boundary and be released by Chromium.  Keep private entry
- * points for that boundary so the two allocators never call each other's
- * implementation by symbol interposition.
+ * Chromium 会导出自己的 malloc/free 垫片。此共享 libc 内部的调用通过 -Bsymbolic
+ * 绑定到本地实现，但此处分配的指针仍可能跨越 ABI 边界并由 Chromium 释放。
+ * 为该边界保留私有入口，避免两个分配器通过符号插入调用对方的实现。
  */
 void __system_free(void *pointer) {
     libc_free_impl(pointer);

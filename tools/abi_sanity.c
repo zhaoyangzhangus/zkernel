@@ -292,8 +292,8 @@ ABI_ASSERT(sizeof(os_window_enumerate_t) == 96, "window enumerate ABI size chang
 ABI_ASSERT(offsetof(os_window_enumerate_t, info) == 16, "window enumerate.info offset changed");
 ABI_ASSERT(sizeof(os_window_map_t) == 32, "window map ABI size changed");
 ABI_ASSERT(sizeof(os_window_set_t) == 28, "window set ABI size changed");
-ABI_ASSERT(sizeof(os_window_event_t) == 40, "window event ABI size changed");
-ABI_ASSERT(sizeof(os_window_event_read_t) == 64, "window event read ABI size changed");
+ABI_ASSERT(sizeof(os_window_event_t) == 64, "window event ABI size changed");
+ABI_ASSERT(sizeof(os_window_event_read_t) == 88, "window event read ABI size changed");
 ABI_ASSERT(sizeof(os_window_input_dispatch_t) == 40, "window dispatch ABI size changed");
 
 static int abi_runtime_checks(void) {

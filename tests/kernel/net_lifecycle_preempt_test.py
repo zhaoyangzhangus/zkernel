@@ -6,7 +6,7 @@ import tempfile
 root = Path(__file__).resolve().parents[2]
 source = (root/'kernel/drivers/net/core.c').read_text()
 start = source.index('static bool e1000_lifecycle_try_lock(void)')
-end = source.index('static void e1000_zero(', start)
+end = source.index('void e1000_configure_link_local(', start)
 program = r'''
 #include <assert.h>
 #include <stdbool.h>

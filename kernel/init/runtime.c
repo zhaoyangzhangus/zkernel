@@ -1,4 +1,5 @@
 #include <kernel/bootinfo.h>
+#include <kernel/boot_profile.h>
 #include <arch/x86_64/cpu.h>
 #include <arch/x86_64/interrupt.h>
 #include <arch/x86_64/paging.h>
@@ -25,7 +26,6 @@
 #include <kernel/dma.h>
 #include <kernel/gpu.h>
 #include <kernel/display.h>
-#include <kernel/qemu_stdvga.h>
 #include <kernel/iommu.h>
 #include <kernel/device.h>
 #include <kernel/io.h>
@@ -114,8 +114,28 @@
 #define OS_DEBUG_SERIAL 0
 #endif
 
-/* REFACTOR_P3_RUNTIME_OWNER: post-init high-half continuation. */
+/* REFACTOR_P3_RUNTIME_OWNER：初始化后的高半区续执行路径。 */
 static UINT64 g_framebuffer_virtual_base;
+
+#if OS_REALTEST || OS_DEBUG_SERIAL
+static void runtime_record_display_cache(bool write_combining) {
+    const char *text = write_combining ? "OS_GOP_CACHE_WC_OK\n" :
+                                         "OS_GOP_CACHE_UC_RETAINED\n";
+    size_t length = write_combining ? sizeof("OS_GOP_CACHE_WC_OK\n") - 1U :
+                                     sizeof("OS_GOP_CACHE_UC_RETAINED\n") - 1U;
+    file_t *file = 0;
+    if (vfs_open_kernel("/log/display-cache.log", VFS_OPEN_WRITE | VFS_OPEN_CREATE |
+                        VFS_OPEN_TRUNCATE, 0644U, &file) != K_OK || file == 0) return;
+    for (size_t offset = 0U; offset < length;) {
+        uint64_t written = 0U;
+        if (vfs_write_kernel(file, text + offset, length - offset, &written) != K_OK ||
+            written == 0U || written > length - offset) break;
+        offset += (size_t)written;
+    }
+    (void)vfs_fsync(file);
+    vfs_close(file);
+}
+#endif
 
 #define halt_forever() kernel_halt_forever_at(__FILE__, __LINE__)
 #define OS_REALTEST_NETWORK_TIMEOUT_NS 15000000000ULL
@@ -125,9 +145,8 @@ static void __attribute__((noreturn)) kernel_runtime_main(void *context) {
     UINT64 benchmark_start;
     UINT64 direct_span = X86_64_DIRECT_MAP_END - X86_64_DIRECT_MAP_BASE + 1ULL;
 #if OS_REALTEST
-    /* This is the first C-side instruction after the high-stack call.  Keep
-     * the checkpoint before dereferencing the handoff so a missing marker
-     * distinguishes entry/prologue failure from a bad handoff pointer. */
+    /* 这是切换到高栈后的第一条 C 指令。先记录检查点，再解引用交接数据；
+     * 缺少标记时可据此区分入口/序言失败和交接指针错误。 */
     realtest_checkpoint("RUNTIME_HIGH_ENTRY");
 #endif
     if (info == 0 || info->BootstrapStackBase >= direct_span ||
@@ -187,10 +206,8 @@ static void __attribute__((noreturn)) kernel_runtime_main(void *context) {
     realtest_checkpoint("RUNTIME_HIGH_FRAMEBUFFER_VALIDATED");
 #endif
 
-    /* Keep the firmware-owned scanout description separate from the kernel
-     * virtual alias and the userspace XRGB8888 surface contract.  This is a
-     * one-time diagnostic because a valid CPU-side render/readback does not
-     * by itself prove that the physical GOP target is the active scanout. */
+    /* 固件所有的扫描输出描述、内核虚拟别名和用户态 XRGB8888 surface 约定彼此独立。
+     * 此诊断仅执行一次，因为 CPU 侧渲染/回读有效本身不能证明物理 GOP 目标就是活动扫描输出。 */
     kernel_serial_printf_serial_only(
         "OS_FRAMEBUFFER_INFO base_lo=%u base_hi=%u size_lo=%u size_hi=%u "
         "width=%u height=%u stride=%u format=%u mask0=%u mask1=%u mask2=%u mask3=%u\r\n",
@@ -227,9 +244,8 @@ static void __attribute__((noreturn)) kernel_runtime_main(void *context) {
     realtest_checkpoint("RUNTIME_HIGH_FRAMEBUFFER_ALIAS_READY");
     realtest_checkpoint("RUNTIME_HIGH_CONSOLE_DISABLE_BEGIN");
 #endif
-    /* The GOP terminal is an early-boot diagnostic surface only.  Do not
-     * recreate it here: the framebuffer is now owned by display/window code,
-     * and the physical realtest path records diagnostics on the FAT volume. */
+    /* GOP 终端仅用于早期启动诊断。此处不要重新创建：帧缓冲现在由 display/window 代码管理，
+     * 真机测试路径会将诊断写入 FAT 卷。 */
     kernel_console_disable();
 #if OS_REALTEST
     realtest_checkpoint("RUNTIME_HIGH_CONSOLE_DISABLED");
@@ -239,6 +255,15 @@ static void __attribute__((noreturn)) kernel_runtime_main(void *context) {
     for (UINTN byte = 0; byte < sizeof(display_info); ++byte) {
         ((UINT8 *)&display_info)[byte] = ((const UINT8 *)info)[byte];
     }
+    bool framebuffer_wc = framebuffer_enable_wc(info, framebuffer_virtual);
+#if OS_REALTEST || OS_DEBUG_SERIAL
+    /* 不要在每次普通桌面启动时创建并同步刷新诊断 FAT 文件。缓存设置本身仍无条件执行。 */
+    runtime_record_display_cache(framebuffer_wc);
+#endif
+    if (framebuffer_wc)
+        kernel_serial_write("OS_GOP_CACHE_WC_OK\r\n");
+    else
+        kernel_serial_write("OS_GOP_CACHE_UC_RETAINED\r\n");
     display_info.FrameBufferBase = framebuffer_virtual;
 #if OS_REALTEST
     realtest_checkpoint("RUNTIME_HIGH_BOOTINFO_COPY_OK");
@@ -277,26 +302,6 @@ static void __attribute__((noreturn)) kernel_runtime_main(void *context) {
     realtest_checkpoint("RUNTIME_HIGH_DISPLAY_POST_OK");
 #endif
 
-    /*
-     * Optional QEMU Standard VGA page-flip backend. Physical machines simply
-     * miss PCI 1234:1111 and keep the existing GOP path.
-     */
-    if (qemu_stdvga_flip_init(
-            info->FrameBufferBase,
-            framebuffer_virtual,
-            info->FrameBufferSize)) {
-
-        kernel_serial_write("OS_QEMU_STDVGA_FLIP_OK\r\n");
-
-    } else if (qemu_stdvga_hardware_present()) {
-        kernel_serial_write("OS_QEMU_STDVGA_FLIP_DISABLED ERR=");
-        kernel_serial_write_u32(qemu_stdvga_last_error());
-        kernel_serial_write("\r\n");
-    }
-#if OS_REALTEST
-    realtest_checkpoint("RUNTIME_QEMU_PROBE_DONE");
-#endif
-
     realtest_disable_runtime_services();
 #if OS_REALTEST
     realtest_checkpoint("RUNTIME_SERVICES_DISABLED");
@@ -315,7 +320,7 @@ static void __attribute__((noreturn)) kernel_runtime_main(void *context) {
     realtest_checkpoint("RUNTIME_IDENTITY_REMOVED");
 #endif
 
-    /* Keep the framebuffer probe serial-only. */
+    /* 帧缓冲探测结果仅写入串口。 */
     kernel_serial_write("OS_FRAMEBUFFER_UC_OK\r\n");
 #if OS_REALTEST
     realtest_checkpoint("RUNTIME_FRAMEBUFFER_PROBE_OK");
@@ -347,6 +352,14 @@ static void __attribute__((noreturn)) kernel_runtime_main(void *context) {
 #else
     kernel_serial_write("OS_SMP_USER_DISPATCH_SKIPPED_FOR_INTERACTIVE_DESKTOP\r\n");
 #endif
+#if OS_NVIDIA_PHASE5
+    /* 仅显式 GPU 诊断/原生扫描输出启动需要提前等待设备初始化。
+     * 常规 GOP 桌面可在固件初始化期间运行。 */
+    if (realtest_enabled() || OS_PHASE8 || OS_PHASE9 || OS_PHASE10 ||
+        OS_PHASE11 || OS_PHASE12 || OS_NVKMS_W3) {
+        if (!userspace_finish_device_init()) halt_forever();
+    }
+#endif
 #if OS_REALTEST
     realtest_checkpoint(smp_user_dispatch_ok ?
                                "RUNTIME_SMP_USER_DISPATCH_OK" :
@@ -357,11 +370,6 @@ static void __attribute__((noreturn)) kernel_runtime_main(void *context) {
         halt_forever();
     }
     kernel_serial_write("OS_SMP_USER_DISPATCH_OK\r\n");
-    nv_rm_driver_set_screen_info(
-        info->FrameBufferBase, info->FrameBufferWidth,
-        info->FrameBufferHeight, 32U,
-        info->FrameBufferPixelsPerScanLine * 4U,
-        info->FrameBufferSize);
 #if OS_PHASE13
     kernel_serial_write_serial_only("OS_P13_LINUX_EVENTS_BEGIN\r\n");
     if (!linux_phase13_realtest()) {
@@ -483,18 +491,16 @@ static void __attribute__((noreturn)) kernel_runtime_main(void *context) {
     }
 #endif
 #if OS_NVIDIA_PHASE5
-    {
-        kstatus_t nvidia_probe_status;
-        nvidia_probe_status = nv_rm_driver_probe();
-        if (nvidia_probe_status != K_OK ||
-            nv_rm_driver_current() == 0 ||
+    if (userspace_device_init_done()) {
+        /* 待处理不等于失败。只观察已发布的最终状态；后台 GPU 初始化不能阻塞 GOP 桌面。 */
+        if (nv_rm_driver_current() == 0 ||
             nv_rm_driver_current()->state != NV_GPU_GSP_READY) {
             kernel_serial_write_serial_only("OS_NVIDIA_GSP_FAIL\r\n");
             realtest_mark("OS_NVIDIA_GSP_FAIL");
             if (realtest_enabled())
                 realtest_finish_failure();
-            /* A production desktop must retain GOP and services when the
-             * optional GPU is absent or fails.  Do not claim GSP readiness. */
+            /* 可选 GPU 缺失或失败时，正式桌面必须继续使用 GOP 和系统服务。
+             * 不要宣称 GSP 已就绪。 */
         } else {
             kernel_serial_write_serial_only("OS_NVIDIA_GSP_READY\r\n");
         }
@@ -521,9 +527,8 @@ static void __attribute__((noreturn)) kernel_runtime_main(void *context) {
     {
         kstatus_t nvkms_status = nv_nvkms_bootstrap_init();
         if (nvkms_status != K_OK) {
-            /* A realtest failure must be terminal.  Continuing through the
-             * GOP path here would let the later generic completion path claim
-             * success even though the requested native modeset did not run. */
+            /* 真机测试失败必须终止。若此处继续走 GOP 路径，后续通用完成路径可能会错误报告成功，
+             * 尽管请求的原生 modeset 并未运行。 */
             kernel_serial_printf_serial_only(
                 "OS_NVKMS_NATIVE_SCANOUT_FALLBACK status=%d\r\n",
                 (int)nvkms_status);
@@ -549,7 +554,7 @@ static void __attribute__((noreturn)) kernel_runtime_main(void *context) {
     }
     kernel_perf_emit_scope("graphics.window", benchmark_start);
     kernel_serial_write("OS_WINDOW_OK\r\n");
-    /* Exclude boot graphics self-tests from the first real window sample. */
+    /* 首次真实窗口采样不包含启动阶段的图形自测。 */
     vm_fault_telemetry_reset();
     kernel_init_userspace_hooks_t deferred_userspace_hooks = {
         .write = kernel_serial_write,
@@ -561,11 +566,9 @@ static void __attribute__((noreturn)) kernel_runtime_main(void *context) {
         halt_forever();
     }
     /*
-     * Keep the optional artwork read out of the boot-critical hand-off.  On
-     * a one-CPU machine the worker shares the BSP with the UAS/VFS path and
-     * can take an unbounded amount of time from the runtime test's point of
-     * view.  The compositor already has a solid hold surface, so publish the
-     * desktop-running result first and start artwork loading afterwards.
+    * 不要让可选图稿读取进入启动关键交接路径。在单 CPU 机器上，该工作线程与 BSP 共用 UAS/VFS 路径，
+    * 从运行时测试角度看可能耗时无界。合成器已有纯色占位 surface，因此先发布桌面运行状态，
+    * 再开始加载图稿。
      */
     kernel_console_disable();
     bool realtest_network_required =
@@ -583,6 +586,8 @@ static void __attribute__((noreturn)) kernel_runtime_main(void *context) {
         realtest_success_reported = true;
     }
     (void)window_server_start_asset_worker();
+    kernel_boot_end(BOOT_PROFILE_RUNTIME);
+    kernel_boot_end(BOOT_PROFILE_TOTAL);
     /*
      * 启动自测完成后，BSP 仍需保留一个真正的 Ring0 普通上下文。
      * LAPIC 中断只投递 deferred work；这里在可抢占的内核上下文中消费
@@ -594,14 +599,12 @@ static void __attribute__((noreturn)) kernel_runtime_main(void *context) {
     bool reported_link_up = false;
     for (;;) {
         net_manager_status_t net_status;
-        /* The BSP keeps its bootstrap/idle C continuation. Service local
-         * command refs here too, even when no runnable thread needs a switch;
-         * destructors must never run in the following CLI sleep decision. */
+        userspace_poll_device_init();
+        /* BSP 保留启动/idle C 续执行路径。即使没有可运行线程需要切换，也要在此处理本地命令引用；
+         * 析构函数绝不能在随后的 CLI 休眠判断中运行。 */
         sched_finish_switch();
-        /* A device critical section may defer an IPI into the level-triggered
-         * pending bit. Subsequent wakes then coalesce without another IPI.
-         * Never sleep with that request already pending. CLI closes the
-         * check-to-sleep race; a new hardware IPI wakes the atomic STI;HLT. */
+        /* 设备临界区可能将 IPI 延迟到电平触发待处理位中。之后的唤醒会合并，而不会再发 IPI。
+         * 待处理请求存在时绝不休眠。CLI 关闭检查到休眠之间的竞争；新的硬件 IPI 会唤醒原子 STI;HLT。 */
         __asm__ volatile ("cli" : : : "memory");
         if (x86_smp_take_reschedule_request() || sched_runnable_count() != 0U) {
             __asm__ volatile ("sti" : : : "memory");
@@ -610,15 +613,12 @@ static void __attribute__((noreturn)) kernel_runtime_main(void *context) {
             __asm__ volatile ("sti; hlt" : : : "memory");
         }
         /*
-         * The BSP remains on this bootstrap continuation after the normal
-         * scheduler starts, while its queue.current is still the logical
-         * idle thread.  AP idle loops consume reschedule IPIs themselves;
-         * poll the same request here so a READY deferred worker cannot wait
-         * for an unrelated timer tick on the BSP.
+         * 常规调度器启动后，BSP 仍运行在此启动续执行路径中，而 queue.current 仍是逻辑 idle 线程。
+         * AP idle 循环会自行消费重新调度 IPI；此处也轮询同一请求，避免 READY 延迟工作线程
+         * 在 BSP 上等待无关时钟节拍。
          */
-        /* Remote wakes are still in the command inbox and are not counted
-         * as runnable until sched_try_run_ready drains it. Do not consume
-         * and discard that request merely because the published rq is empty. */
+        /* 远端唤醒仍在命令邮箱中，只有 sched_try_run_ready 排空邮箱后才计为可运行。
+         * 不能仅因已发布运行队列为空就消费并丢弃该请求。 */
         if (x86_smp_take_reschedule_request() || sched_runnable_count() != 0U) {
             (void)sched_try_run_ready();
         }

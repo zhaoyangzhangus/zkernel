@@ -12,7 +12,7 @@
 
 typedef struct futex_entry {
     list_head_t node;
-    /* Shared keys use a physical word; private keys use an address-space VA. */
+    /* 共享键使用物理字；私有键使用地址空间虚拟地址。 */
     uint64_t key;
     vm_space_t *space;
     bool private_key;
@@ -44,9 +44,8 @@ static futex_bucket_t g_futex_buckets[FUTEX_BUCKET_COUNT];
 static atomic_uint g_futex_init_state;
 
 /*
- * Futex bucket ownership protects the entry list.  The lock is also taken
- * from the wake path on a different CPU, so a holder must not be switched
- * away while another CPU is spinning for it.
+ * Futex 桶所有权用于保护条目链表。唤醒路径也可能从另一颗 CPU 获取此锁，因此当其他 CPU 正在自旋等待时，
+ * 不能将锁持有者调度离开当前 CPU。
  */
 static void futex_bucket_lock(spinlock_t *lock) {
     sched_preempt_disable();
@@ -118,13 +117,9 @@ static kstatus_t futex_resolve_key(process_t *process, vaddr_t address,
     }
 
     if (private_key) {
-        /* Linux private futex identity is (address space, virtual address).
-         * Walking all four page-table levels here used to take the global
-         * page-table spinlock for every pthread lock/unlock, even though the
-         * physical page is irrelevant to this key.  Validate and fault in
-         * the word through uaccess instead: mapped pages take the hardware
-         * translation fast path, while absent pages still get normal VM
-         * demand-fault handling. */
+        /* Linux 私有 futex 的标识为（地址空间、虚拟地址）。此前每次 pthread 加锁/解锁都会遍历四级页表，
+         * 并获取全局页表自旋锁，尽管物理页与该键无关。改为通过 uaccess 验证并访问此字：已映射页面走硬件
+         * 地址转换快速路径，缺失页面仍由 VM 正常按需缺页处理。 */
         uint32_t value;
         status = get_user_u32(&value, (const uint32_t __user *)address);
         if (status != K_OK) {
@@ -159,8 +154,7 @@ static kstatus_t futex_resolve_key(process_t *process, vaddr_t address,
         if (status != K_OK) return status;
     }
 
-    /* Include the byte offset so different words in one shared page do not
-     * wake each other.  Callers already enforce 4-byte user alignment. */
+    /* 将字节偏移也纳入键，避免同一共享页中的不同字相互唤醒。调用方已保证用户地址按 4 字节对齐。 */
     out_key->value = physical.value;
     out_key->space = 0;
     out_key->private_key = false;
@@ -280,11 +274,9 @@ kstatus_t futex_wake_keyed(process_t *process, uint32_t __user *address,
     *woken = 0;
     if (maximum == 0) return K_OK;
     futex_entry_t *entry = 0;
-    /* A wake with no registered waiter is a no-op.  The waiter publishes its
-     * entry before checking the user word under the wait-queue lock, so a
-     * concurrent store+wake cannot be lost: either wake sees the entry or
-     * the waiter's subsequent predicate observes the changed word.  Creating
-     * an entry here allocates and frees on every uncontended mutex unlock. */
+    /* 没有已注册等待者时，wake 是空操作。等待者会先发布条目，再在等待队列锁下检查用户字，因此并发的
+     * store+wake 不会丢失：要么 wake 能看到条目，要么等待者后续谓词会观察到已变化的字。
+     * 在此创建条目会导致每次无竞争互斥量解锁都进行分配和释放。 */
     kstatus_t status = futex_get(process, (vaddr_t)(uintptr_t)address, false,
                                  private_key, &entry);
     if (status == K_ENOENT) return K_OK;

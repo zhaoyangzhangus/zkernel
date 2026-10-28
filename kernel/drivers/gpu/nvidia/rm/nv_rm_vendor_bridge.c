@@ -31,6 +31,7 @@
 #include <kernel/mm.h>
 #include <kernel/sched.h>
 #include <gpu/gpu.h>
+#include <gpu/mem_mgr/mem_mgr.h>
 #include <gpu/gpu_arch.h>
 #include <core/hal.h>
 #include <core/hal_mgr.h>
@@ -671,6 +672,11 @@ static void nv_rm_vendor_set_result(nv_rm_vendor_context_t *context,
         result->gb205 ? 1U : 0U);
 }
 
+/* One boot snapshot, retained in RAM after failure cleanup. No serial or
+ * per-frame output: phase, preemption gate, APIC, top/handled/bottom IRQs,
+ * pending bottom half and failed bottom-half scheduling. */
+static volatile uint32_t g_nv_rm_boot_diagnostic[8];
+
 static bool nv_rm_vendor_init_adapter(nv_rm_vendor_context_t *context)
 {
     uint64_t cpu_flags;
@@ -680,11 +686,20 @@ static bool nv_rm_vendor_init_adapter(nv_rm_vendor_context_t *context)
      * with IF clear.  RM's real interrupt verification requires interrupts,
      * after the handler and MSI/MSI-X table have been installed.  RM also
      * waits on semaphores/workers, so this must remain a sleepable context. */
-    if (sched_preempt_disabled())
+    g_nv_rm_boot_diagnostic[0] = 1U;
+    g_nv_rm_boot_diagnostic[1] = sched_preempt_disabled() ? 1U : 0U;
+    g_nv_rm_boot_diagnostic[2] = x86_current_apic_id();
+    if (g_nv_rm_boot_diagnostic[1] != 0U)
         return false;
     __asm__ volatile ("pushfq; popq %0" : "=r"(cpu_flags) : : "memory");
     __asm__ volatile ("sti" : : : "memory");
     ready = rm_init_adapter(context->stack, context->state) != NV_FALSE;
+    g_nv_rm_boot_diagnostic[3] = atomic_load(&context->irq_top_hits);
+    g_nv_rm_boot_diagnostic[4] = atomic_load(&context->irq_rm_handled_hits);
+    g_nv_rm_boot_diagnostic[5] = atomic_load(&context->irq_bottom_hits);
+    g_nv_rm_boot_diagnostic[6] = atomic_load(&context->irq_bottom_pending);
+    g_nv_rm_boot_diagnostic[7] = atomic_load(&context->irq_bottom_schedule_failed);
+    g_nv_rm_boot_diagnostic[0] = ready ? 2U : 3U;
     if ((cpu_flags & (1ULL << 9)) == 0U)
         __asm__ volatile ("cli" : : : "memory");
     else
@@ -824,6 +839,12 @@ kstatus_t nv_rm_vendor_start(const pci_device_t *device,
         return K_EIO;
     }
     context->adapter_initialized = true;
+    /* GSP 已完成初始化，读取其实际显存描述，不使用可调整的 BAR1 窗口。 */
+    nv_priv_t *private_state=(nv_priv_t *)NV_GET_NV_PRIV(context->state);
+    OBJGPU *active_gpu=private_state ? private_state->pGpu : NULL;
+    MemoryManager *memory_manager=active_gpu ? GPU_GET_MEMORY_MANAGER(active_gpu) : NULL;
+    if (memory_manager && memory_manager->Ram.fbTotalMemSizeMb <= (UINT64_MAX >> 20U))
+        result->vram_bytes=(uint64_t)memory_manager->Ram.fbTotalMemSizeMb << 20U;
     kernel_serial_write_serial_only(
         "OS_NVIDIA_GSP_BOOT_FINISH status=ready\r\n");
 #if OS_NVIDIA_PHASE6

@@ -20,7 +20,7 @@ typedef struct {UINT32 BytesPerSector,SectorsPerCluster,ClusterCount;} OS_FAT32;
 typedef struct {OS_FAT32 *FileSystem;UINT64 Size;UINT32 FirstCluster;BOOLEAN CursorValid;} OS_FAT32_FILE;
 static UINT32 table[8194],baseline[8194];
 static unsigned visits,writes,fail_write;
-static BOOLEAN fail_directory;
+static BOOLEAN fail_directory,fail_zero;
 static BOOLEAN count_file_clusters(const OS_FAT32 *f,UINT32 c,UINT64 *n,UINT32 *last) {
     *n=0;*last=0;
     while(c) {
@@ -51,6 +51,9 @@ static BOOLEAN fat32_free_cluster_chain(OS_FAT32 *f,UINT32 c) {
     }
     return 1;
 }
+static BOOLEAN zero_file_range(OS_FAT32_FILE *file, UINT32 first, UINT64 begin, UINT64 end) {
+    (void)file;(void)first;(void)begin;(void)end;return !fail_zero;
+}
 static BOOLEAN update_file_directory_entry(OS_FAT32_FILE *f,UINT32 first,UINT64 size) {
     (void)f;(void)first;(void)size;return !fail_directory;
 }
@@ -60,7 +63,7 @@ static void reset(OS_FAT32_FILE *file,BOOLEAN existing) {
     for(unsigned c=2;c<2002;++c) table[c]=FAT32_EOC_MIN;
     if(existing) table[2]=3;
     file->FirstCluster=existing?2:0;file->Size=existing?1024:0;file->CursorValid=1;
-    memcpy(baseline,table,sizeof(table));visits=writes=fail_write=0;fail_directory=0;
+    memcpy(baseline,table,sizeof(table));visits=writes=fail_write=0;fail_directory=fail_zero=0;
 }
 int main(void) {
     OS_FAT32 fs={512,1,8192};OS_FAT32_FILE file={.FileSystem=&fs};
@@ -69,7 +72,7 @@ int main(void) {
     for(unsigned existing=0;existing<=1;++existing) {
         reset(&file,existing);
         UINT64 target=file.Size+1024*512ULL;
-        assert(extend_file_to(&file,target) && file.Size==target && !file.CursorValid);
+        assert(extend_file_to(&file,target,target) && file.Size==target && !file.CursorValid);
         UINT64 count;UINT32 last;assert(count_file_clusters(&fs,file.FirstCluster,&count,&last));
         assert(count==1024+existing*2 && last==3025);
         printf("1024-cluster extension: scanned %u entries\n",visits);
@@ -80,29 +83,34 @@ int main(void) {
         for(unsigned i=0;i<sizeof(failures)/sizeof(*failures);++i) {
             if(!existing && failures[i]==2048) continue;
             reset(&file,existing);fail_write=failures[i];
-            assert(!extend_file_to(&file,file.Size+1024*512ULL));
+            assert(!extend_file_to(&file,file.Size+1024*512ULL,file.Size+1024*512ULL));
             assert(!memcmp(table,baseline,sizeof(table)));
             assert(file.FirstCluster==(existing?2U:0U) && file.Size==(existing?1024U:0U));
             assert(file.CursorValid);
         }
+        /* 清空新区域失败时，刚分配和连接的簇也必须回滚。 */
+        reset(&file,existing);fail_zero=1;
+        assert(!extend_file_to(&file,file.Size+1024*512ULL,file.Size+1024*512ULL));
+        assert(!memcmp(table,baseline,sizeof(table)) && file.CursorValid);
+        assert(file.FirstCluster==(existing?2U:0U) && file.Size==(existing?1024U:0U));
         reset(&file,existing);fail_directory=1;
-        assert(!extend_file_to(&file,file.Size+1024*512ULL));
+        assert(!extend_file_to(&file,file.Size+1024*512ULL,file.Size+1024*512ULL));
         assert(!memcmp(table,baseline,sizeof(table)) && file.CursorValid);
         fail_directory=0;visits=0;
-        assert(extend_file_to(&file,file.Size+1024*512ULL) && visits==3024);
-        visits=0;assert(extend_file_to(&file,file.Size) && !visits);
+        assert(extend_file_to(&file,file.Size+1024*512ULL,file.Size+1024*512ULL) && visits==3024);
+        visits=0;assert(extend_file_to(&file,file.Size,file.Size) && !visits);
         /* Exhaustion after a partial chain must roll back and retry from 2. */
         reset(&file,existing);
         for(unsigned c=2002;c<8194;++c) table[c]=FAT32_EOC_MIN;
         table[8190]=table[8192]=0;memcpy(baseline,table,sizeof(table));
-        assert(!extend_file_to(&file,file.Size+3*512ULL));
+        assert(!extend_file_to(&file,file.Size+3*512ULL,file.Size+3*512ULL));
         assert(!memcmp(table,baseline,sizeof(table)));
-        assert(extend_file_to(&file,file.Size+2*512ULL));
+        assert(extend_file_to(&file,file.Size+2*512ULL,file.Size+2*512ULL));
         assert(table[8190]==8192 && table[8192]==FAT32_EOC_MIN);
         reset(&file,existing);
         for(unsigned c=2002;c<8194;++c) table[c]=FAT32_EOC_MIN;
         memcpy(baseline,table,sizeof(table));
-        assert(!extend_file_to(&file,file.Size+512));
+        assert(!extend_file_to(&file,file.Size+512,file.Size+512));
         assert(!memcmp(table,baseline,sizeof(table)));
     }
     puts("FAT extension: linear search, empty/existing chains, table/link/directory rollback and full volume passed");

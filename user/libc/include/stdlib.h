@@ -8,14 +8,13 @@
 #define RAND_MAX 2147483647
 #define MB_CUR_MAX 4
 
-/* The compiler provides alloca for this freestanding target; expose the
- * usual libc spelling without importing the host's alloca.h. */
+/* 编译器为此 freestanding 目标提供 alloca；公开常见的 libc 名称，
+ * 无需引入宿主的 alloca.h。 */
 #ifndef alloca
 #define alloca(size) __builtin_alloca(size)
 #endif
 
-/* glibc exposes these process-name pointers and Chromium uses the short-name
- * slot when updating its title. */
+/* glibc 公开这些进程名称指针，Chromium 更新标题时会使用短名称槽位。 */
 extern char *program_invocation_name;
 extern char *program_invocation_short_name;
 
@@ -42,9 +41,8 @@ void srand(unsigned int seed);
 int rand(void);
 int rand_r(unsigned int *seed);
 
-/* Reentrant BSD/glibc-style random state used by fontconfig.  System keeps
- * the state intentionally small; callers only rely on the documented
- * initstate_r/random_r contract, not on glibc's internal polynomial fields. */
+/* fontconfig 使用的可重入 BSD/glibc 风格随机状态。System 刻意保持状态结构精简；
+ * 调用方只依赖 initstate_r/random_r 的文档约定，不依赖 glibc 内部的多项式字段。 */
 struct random_data {
     unsigned int state;
 };

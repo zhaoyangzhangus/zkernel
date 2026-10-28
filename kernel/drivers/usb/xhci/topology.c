@@ -3,7 +3,7 @@
 #define USB_HID_PROTOCOL_KEYBOARD 0x01U
 #define USB_HID_PROTOCOL_MOUSE 0x02U
 
-/* Topology.c owns the Slot Table storage and its derived presence snapshot. */
+/* topology.c 管理 Slot Table 存储及由其推导出的设备存在状态快照。 */
 static xhci_slot_device_t g_xhci_slot_devices[XHCI_MAX_SLOT_TABLE]
     __attribute__((used));
 static bool g_xhci_usb_enumerated;
@@ -36,7 +36,7 @@ void xhci_clear_topology(void) {
 
 static bool xhci_topology_slot_valid(uint8_t slot)
 {
-    /* XHCI_MAX_SLOT_TABLE is 256 and Slot IDs are uint8_t values. */
+    /* XHCI_MAX_SLOT_TABLE 为 256，Slot ID 使用 uint8_t 表示。 */
     return slot != 0U;
 }
 
@@ -100,8 +100,7 @@ bool xhci_topology_bluetooth_configured(void)
 }
 
 /*
- * The enumeration Owner supplies immutable topology inputs here.  This is
- * the only entry point that creates a tentative Slot Table node.
+ * 枚举所有者在此提供不可变拓扑输入。这是创建临时 Slot Table 节点的唯一入口。
  */
 bool xhci_topology_begin_slot(
     uint8_t slot,
@@ -140,7 +139,7 @@ bool xhci_topology_begin_slot(
     return true;
 }
 
-/* Publish the cache fields after the working context becomes canonical. */
+/* 工作上下文成为规范上下文后，发布缓存字段。 */
 void xhci_topology_publish_slot(uint8_t slot)
 {
     if(!xhci_topology_slot_valid(slot))
@@ -188,7 +187,7 @@ void xhci_topology_publish_slot(uint8_t slot)
     }
 }
 
-/* Remove one published child from the Slot Table acceleration cache. */
+/* 从 Slot Table 加速缓存中移除一个已发布的子设备。 */
 void xhci_topology_detach_slot(
     uint8_t slot,
     uint8_t parent_slot,
@@ -211,7 +210,7 @@ void xhci_topology_detach_slot(
     }
 }
 
-/* Clear a tentative or published Slot Table node after hardware teardown. */
+/* 硬件拆除后清除临时或已发布的 Slot Table 节点。 */
 void xhci_topology_clear_slot(uint8_t slot)
 {
     if(!xhci_topology_slot_valid(slot))
@@ -226,8 +225,7 @@ void xhci_topology_clear_slot(uint8_t slot)
 }
 
 /*
- * REFACTOR_P8_XHCI_TOPOLOGY_OWNER: Slot Table-derived presence and
- * downstream topology state are recomputed in this dedicated unit.
+ * REFACTOR_P8_XHCI_TOPOLOGY_OWNER：基于 Slot Table 的存在状态和下游拓扑状态在此专用单元中重新计算。
  */
 void xhci_recompute_topology(
     xhci_state_t *state)
@@ -294,14 +292,11 @@ void xhci_recompute_topology(
 
 
         /*
-         * V3.2 creates a tentative Slot Table node before
-         * enumeration has completely succeeded.
+         * V3.2 会在枚举完全成功前创建暂定的 Slot 表节点。
          *
-         * Only a published context whose hardware Slot ID
-         * matches the table index counts as a live USB device.
+         * 只有已发布上下文的硬件 Slot ID 与表索引匹配时，才计为活动 USB 设备。
          *
-         * This prevents a failed enumeration from becoming a
-         * phantom device in global topology state.
+         * 这可防止失败的枚举在全局拓扑状态中变成虚假设备。
          */
         if(slot_dev->context.device_slot !=
            (uint8_t)slot)
@@ -360,8 +355,7 @@ void xhci_recompute_topology(
                         hub_port_count;
 
                 /*
-                 * Compatibility fallback while Hub fields are
-                 * still being migrated out of xHCI context.
+                 * Hub 字段尚未完全迁出 xHCI 上下文期间使用的兼容回退。
                  */
                 if(hub_ports == 0U)
                 {
@@ -374,12 +368,11 @@ void xhci_recompute_topology(
 
 
         /*
-         * Any non-root device proves that a downstream topology
-         * exists, including:
+         * 任何非根设备都表明存在下游拓扑，包括：
          *
-         * Hub -> device
-         * Hub -> Hub
-         * Hub -> Hub -> device
+         * Hub -> 设备
+         * 集线器 -> 集线器
+         * Hub -> Hub -> 设备
          */
         if(slot_dev->parent_slot != 0U ||
            device->parent_slot != 0U)
@@ -421,8 +414,7 @@ void xhci_recompute_topology(
         hub_ports;
 
     /*
-     * Keep the existing public/runtime diagnostic field alive
-     * until Hub class migration removes the legacy name.
+    * 在 Hub 类迁移移除旧名称前，保留现有的公开/运行时诊断字段。
      */
     g_xhci_usb_hub_inventory_ports =
         hub_ports;
@@ -431,7 +423,7 @@ void xhci_recompute_topology(
         downstream;
 }
 
-/* Device-kind classification is derived from the canonical Slot context. */
+/* 设备类型分类由规范 Slot 上下文推导。 */
 uint8_t xhci_context_kind(
     const xhci_device_context_t *context)
 {
@@ -447,8 +439,7 @@ uint8_t xhci_context_kind(
 }
 
 /*
- * The parent_slot/parent_port relation is canonical.  child_slots[] is only
- * an acceleration cache and is repaired from the Slot Table when stale.
+ * parent_slot/parent_port 关系是权威数据。child_slots[] 仅为加速缓存，过期时会根据 Slot 表修复。
  */
 bool xhci_topology_find_child(
     uint8_t parent_slot,
@@ -519,7 +510,7 @@ bool xhci_topology_find_child(
     return false;
 }
 
-/* Build the xHCI route-string nibble for one downstream Hub port. */
+/* 为一个下游 Hub 端口构建 xHCI 路由字符串半字节。 */
 bool xhci_topology_child_route(
     const xhci_device_context_t *hub,
     uint8_t port,

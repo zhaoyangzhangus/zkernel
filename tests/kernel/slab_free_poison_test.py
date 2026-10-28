@@ -1,5 +1,6 @@
 """Production small-object free versus full-poison oracle, including flush."""
 from pathlib import Path
+import resource
 import subprocess
 import tempfile
 
@@ -10,9 +11,10 @@ fill = source[source.index('static void bytes_fill('):source.index('static void 
 fill = fill.replace('__builtin_memset(memory, value, size)', 'tracked_fill(memory, value, size)')
 accessors = source[source.index('static size_t class_capacity('):source.index('static void record_fastpath_hit(')]
 guards = source[source.index('static uint64_t allocation_cookie('):source.index('static slab_page_t *create_slab(')]
-lists = source[source.index('static slab_page_t *cache_partial_head('):source.index('/* Caller holds cache->lock;')]
+lists = source[source.index('static slab_page_t *cache_partial_head('):source.index('static void *cache_take_payload_locked(')]
 flush = source[source.index('static void magazine_flush('):source.index('static void *activate_payload(')]
 free = source[source.index('static void kfree_internal('):source.index('void kfree(')]
+wrapper = source[source.index('void kfree('):source.index('uint64_t kmem_error_count(')]
 old = free.replace('kfree_internal(', 'previous_free(').replace(
     'bytes_fill((uint8_t *)pointer + sizeof(void *), KMEM_POISON_FREE,\n'
     '               capacity - sizeof(void *));',
@@ -33,15 +35,23 @@ typedef struct {unsigned owner;} page_t;
 typedef struct {atomic_uint state;} spinlock_t;
 ''' + layout + r'''
 static size_t poisoned;static unsigned errors,frees,locks,depth,cpu;
+static unsigned pin_depth,initial_pin,pin_calls;
+static bool wrapper_test;
+static void sched_preempt_disable(void){++pin_depth;++pin_calls;}
+static void sched_preempt_enable(void){assert(pin_depth);--pin_depth;}
 static void tracked_fill(void *p,uint8_t v,size_t n){
+ if(wrapper_test && n>2048)assert(pin_depth==initial_pin);
  if(v==KMEM_POISON_FREE)poisoned+=n;memset(p,v,n);
 }
 static void record_error(void){++errors;}
 static void page_free(page_t *p){assert(p&&p->owner==PAGE_OWNER_SLAB);++frees;}
 static void cache_lock(kmem_cache_t *c){assert(c&&!depth);++depth;++locks;}
 static void cache_unlock(kmem_cache_t *c){assert(c&&depth==1);--depth;}
-static unsigned x86_current_cpu_index(void){return cpu;}
-''' + fill + accessors + guards + lists + flush + free + old + r'''
+static unsigned x86_current_cpu_index(void){
+ if(wrapper_test)assert(pin_depth==initial_pin+1);
+ return cpu;
+}
+''' + fill + accessors + guards + lists + flush + free + wrapper + old + r'''
 static _Alignas(64) uint8_t arena[65536];
 static page_t page;
 static void *setup(unsigned cls,unsigned request,unsigned count,unsigned corrupt){
@@ -109,6 +119,34 @@ int main(void){
   h->cookie=allocation_cookie(h,p);write_trailer(p,n,h->cookie);
   kfree_internal(p);assert(!errors&&frees==1&&poisoned==n&&!locks);
  }
+ /* The public wrapper pins small CPU-local frees, but must not extend an
+  * existing guard across large-object poison fills/page reclamation. */
+ unsigned wrapper_cases=0;
+ for(initial_pin=0;initial_pin<4;++initial_pin){
+  for(unsigned n=2048;n<=32768;n*=2){
+   void *p=setup(9,0,0,0);allocation_header_t *h=payload_header(p);
+   h->class_index=KMEM_CLASS_LARGE;h->owner=(uintptr_t)&page;h->requested=n;
+   h->cookie=allocation_cookie(h,p);write_trailer(p,n,h->cookie);
+   pin_depth=initial_pin;pin_calls=0;wrapper_test=true;
+   kfree(p);
+   assert(pin_depth==initial_pin && !pin_calls && !errors && frees==1 && poisoned==n);
+   kfree(p);assert(errors==1 && frees==1 && !pin_calls);
+   ++wrapper_cases;wrapper_test=false;
+  }
+  for(unsigned cls=0;cls<KMEM_CLASS_COUNT;++cls){
+   cpu=0;void *p=setup(cls,1,0,0);
+   pin_depth=initial_pin;pin_calls=0;wrapper_test=true;
+   kfree(p);assert(pin_depth==initial_pin && pin_calls==1 && !errors && !depth);
+   ++wrapper_cases;wrapper_test=false;
+  }
+  void *p=setup(9,0,0,0);allocation_header_t *h=payload_header(p);
+  h->magic=0;h->class_index=KMEM_CLASS_LARGE;
+  pin_depth=initial_pin;pin_calls=0;wrapper_test=true;
+  kfree(p);assert(pin_depth==initial_pin && pin_calls==1 && errors==1 && !poisoned && !frees);
+  pin_calls=0;kfree(NULL);assert(!pin_calls && pin_depth==initial_pin);
+  wrapper_test=false;++wrapper_cases;
+ }
+ printf("Public free guard: %u small/large/corrupt/nested cases; large fills add no pin, caller guards preserved\n",wrapper_cases);
  printf("Small free: %u exact old/new memory, guards, magazine/flush/cache states; 8 fewer poison bytes per release; invalid/double-free and large paths preserved\n",cases);
 }
 '''
@@ -120,3 +158,15 @@ with tempfile.TemporaryDirectory(prefix='liteos-slab-free-') as directory:
                     '-fno-pie', '-no-pie', '-x', 'c', '-', '-o', binary],
                    input=code, text=True, check=True)
     subprocess.run([binary], check=True)
+    negative=code.replace('if (header->magic == KMEM_MAGIC && header->class_index == KMEM_CLASS_LARGE)',
+                          'if (false && header->magic == KMEM_MAGIC && header->class_index == KMEM_CLASS_LARGE)')
+    assert negative!=code
+    subprocess.run(['cc', '-std=c11', '-O2', '-Wall', '-Wextra', '-Werror',
+                    '-Wno-unused-variable', '-Wno-unused-function',
+                    '-Wno-misleading-indentation', '-fsanitize=address,undefined',
+                    '-fno-pie', '-no-pie', '-x', 'c', '-', '-o', binary],
+                   input=negative, text=True, check=True)
+    result=subprocess.run([binary],capture_output=True,text=True,
+                          preexec_fn=lambda: resource.setrlimit(resource.RLIMIT_CORE,(0,0)))
+    assert result.returncode!=0 and 'Assertion' in result.stderr
+    print('Negative control rejected: public free pins large-object poison fills')

@@ -68,7 +68,7 @@ static uint32_t g_user_runtime_cpu_current_state;
 static uint32_t g_user_runtime_cpu_runnable;
 static uint64_t g_user_runtime_cpu_current_tid;
 
-/* Final execution-ref / process-resource teardown diagnostics. */
+/* 执行引用/进程资源拆除阶段的最终诊断。 */
 static uint32_t g_user_runtime_thread_flags;
 static uint32_t g_user_runtime_process_flags;
 static uint32_t g_user_runtime_process_thread_lock;
@@ -140,8 +140,7 @@ typedef struct runtime_wait_child_snapshot {
     uint32_t sched_flags;
 } runtime_wait_child_snapshot_t;
 
-/* CHILD_* is a snapshot of the runtime parent thread, not waitpid's target.
- * Capture the actual unreaped child once, before the failure record is emitted. */
+/* CHILD_* 是运行时父线程的快照，并非 waitpid 的目标。在输出失败记录前，只捕获一次实际尚未回收的子进程。 */
 static void runtime_snapshot_wait_child(
     process_t *parent, runtime_wait_child_snapshot_t *snapshot) {
     if (parent == 0 || snapshot == 0) return;
@@ -200,9 +199,8 @@ static void runtime_log_wait_child(const runtime_wait_child_snapshot_t *snapshot
     kernel_serial_write("\r\n");
 }
 
-/* A dead user thread releases its VM on the CPU that owned its stack.  The
- * self-test runs from another CPU, so wait for that deferred teardown instead
- * of treating a temporarily held global page-table lock as a test failure. */
+/* 用户线程死亡后，会在其栈所属 CPU 上释放 VM。自测运行于另一 CPU，因此应等待延迟拆除完成，而不是
+ * 将暂时持有的全局页表锁误判为测试失败。 */
 static bool runtime_wait_for_cleanup(process_t *process, thread_t *thread) {
     uint64_t deadline = x86_read_tsc();
     uint64_t budget = x86_timeout_ns_to_tsc(USER_RUNTIME_REAP_TIMEOUT_NS);
@@ -305,20 +303,20 @@ bool user_elf_runtime_self_test(void) {
     timer_arguments->argument = 0x5678U;
     *(uint64_t *)(void *)(image + 0x3000U + 0xF0U) = 0x400000ULL +
         (uint64_t)(user_runtime_vm_worker - user_runtime_blob_start);
-    static const char boot_path[] = "/sbin/gshell";
+    static const char boot_path[] = "/usr/apps/gshell/gshell";
     for (size_t i = 0; i < sizeof(boot_path); ++i) {
         image[0x3000U + 0x100U + i] = (uint8_t)boot_path[i];
     }
-    static const char fat32_path[] = "/sbin/notepad";
+    static const char fat32_path[] = "/usr/apps/notepad/notepad";
     for (size_t i = 0; i < sizeof(fat32_path); ++i) {
         image[0x3000U + 0x180U + i] = (uint8_t)fat32_path[i];
     }
-    static const char exec_path[] = "/sbin/libc-test";
+    static const char exec_path[] = "/usr/apps/libc-test/libc-test";
     for (size_t i = 0; i < sizeof(exec_path); ++i) {
-        image[0x3000U + 0x110U + i] = (uint8_t)exec_path[i];
+        image[0x3000U + 0x1A0U + i] = (uint8_t)exec_path[i];
     }
-    uint64_t *exec_argv = (uint64_t *)(void *)(image + 0x3000U + 0x120U);
-    exec_argv[0] = 0x00402110ULL;
+    uint64_t *exec_argv = (uint64_t *)(void *)(image + 0x3000U + 0x1D0U);
+    exec_argv[0] = 0x004021A0ULL;
     exec_argv[1] = 0;
 
     process_t *process = 0;
@@ -426,19 +424,17 @@ bool user_elf_runtime_self_test(void) {
     runtime_space = process->vm;
     vm_space_get(runtime_space);
 
-    /*
-     * 涓€娆?schedule() 鍙繚璇佸彂鐢熶竴娆¤皟搴﹀喅绛栵紝涓嶈兘淇濊瘉鐢ㄦ埛杩涚▼宸茬粡閫€鍑恒€?     * 褰撴墍鏈夌敤鎴风嚎绋嬬煭鏆傞樆濉炴椂锛宨dle 浼氭仮澶嶈繖閲岋紱姝ゆ椂鑻ョ珛鍗?cleanup锛屽氨浼氭妸
-     * 浠嶅彲鑳借瀹氭椂鍣ㄥ敜閱掔殑杩涚▼閲婃斁鎺夈€傛寔缁┍鍔ㄨ皟搴︼紝鐩村埌涓荤嚎绋嬪拰杩涚▼鍧囧彂甯?     * DEAD锛屾垨杈惧埌鑷祴鐨勭‖鎴鏃堕棿銆?     */
+    /* 单次 schedule() 只保证执行一次调度决策，不保证用户进程已经退出。当所有用户线程短暂阻塞时，
+     * idle 会恢复执行；此时若立即 cleanup，可能释放仍会被定时器唤醒的进程。应持续调度，直到主线程
+     * 和进程都发布 DEAD，或达到自测硬截止时间。 */
     uint64_t runtime_deadline = x86_read_tsc();
     /*
-     * COM1 stage tracing is intentionally byte-accurate so every transition
-     * remains locatable.  In a non-PTY Windows/WSL launch, high-frequency
-     * xHCI diagnostics can make that file backend much slower than the guest
-     * itself.  The realtest also executes the 4.4 MB NASM image twice, so it
-     * gets the same bounded budget even when COM1 mirroring is disabled.
+    * COM1 阶段跟踪有意精确到字节，以便定位每次状态转换。在非 PTY 的 Windows/WSL 启动方式下，
+    * 高频 xHCI 诊断会使文件后端变得比客户机本身慢得多。realtest 还会执行两次 4.4 MB 的 NASM 映像，
+    * 因此即使禁用 COM1 镜像，也使用相同的有界预算。
      */
 #if OS_DEBUG_SERIAL || OS_REALTEST
-    /* The first Blend2D pipeline is JIT-compiled inside the bounded test. */
+    /* 首条 Blend2D 流水线会在有界测试期间进行 JIT 编译。 */
     uint64_t runtime_budget =
         x86_timeout_ns_to_tsc(USER_RUNTIME_TEST_TIMEOUT_NS);
 #else
@@ -528,7 +524,7 @@ bool user_elf_runtime_self_test(void) {
         if ((int64_t)(x86_read_tsc() - runtime_deadline) >= 0) break;
         __asm__ volatile ("pause");
     }
-    /* PROCESS_DEAD is published before the execution CPU finishes VM teardown. */
+    /* 执行 CPU 完成 VM 拆除前，PROCESS_DEAD 就会先发布。 */
     bool cleanup_complete = runtime_wait_for_cleanup(process, thread);
 
     if (atomic_load_explicit(&thread->state, memory_order_acquire) != THREAD_DEAD ||
@@ -560,24 +556,25 @@ bool user_elf_runtime_self_test(void) {
         }
     }
     /*
-     * Runtime wait diagnostic:
-     * 濡傛灉杈呭姪绾跨▼宸茬粡閫€鍑猴紝澶嶇敤 CHILD_* 杈撳嚭 main thread 鏈韩銆?     *
-     * CHILD_STATE:
-     *   0 NEW
-     *   1 READY
-     *   2 RUNNING
-     *   3 BLOCKED
-     *   4 STOPPED
-     *   5 DEAD
+    * 运行时等待诊断：
+    * 如果辅助线程已经退出，则复用 CHILD_* 输出 main thread 本身。
+    *
+    * CHILD_STATE：
+    *   0 NEW（新建）
+    *   1 READY（就绪）
+    *   2 RUNNING（运行中）
+    *   3 BLOCKED（阻塞）
+    *   4 STOPPED（已停止）
+    *   5 DEAD（已死亡）
      *
-     * CHILD_FLAGS:
-     *   bit0      = SCHED_ENTITY_ENQUEUED
-     *   bit16     = blocked_waiter != NULL
-     *   bits24-31 = waiter_state
-     *               0 WAITING
-     *               1 WOKEN
-     *               2 TIMED_OUT
-     *               3 CANCELLED
+    * CHILD_FLAGS：
+    *   bit0      = 已加入 SCHED_ENTITY_ENQUEUED 队列
+    *   bit16     = blocked_waiter != NULL
+    *   bits24-31 = waiter_state
+    *               0 WAITING（等待中）
+    *               1 WOKEN（已唤醒）
+    *               2 TIMED_OUT（超时）
+    *               3 CANCELLED（已取消）
      */
     if (g_user_runtime_child_state == UINT32_MAX && thread != 0) {
         g_user_runtime_child_state =
@@ -603,15 +600,15 @@ bool user_elf_runtime_self_test(void) {
                               &g_user_runtime_cpu_runnable);
 
         /*
-         * Runtime CPU scheduler-stall diagnostic.
+         * 运行时 CPU 调度停滞诊断。
          *
-         * CHILD_FLAGS:
-         *   bit0      = main is enqueued
-         *   bits8-15  = target CPU PreemptDisable
-         *   bit16     = main blocked_waiter != NULL
-         *   bit17     = target CPU g_tlb_waiting
-         *   bit18     = target CPU reschedule pending
-         *   bits24-31 = waiter state
+         * CHILD_FLAGS：
+         *   bit0      = 主线程已入队
+         *   bits8-15  = 目标 CPU 的 PreemptDisable 值
+         *   bit16     = 主线程 blocked_waiter != NULL
+         *   bit17     = 目标 CPU 的 g_tlb_waiting 状态
+         *   bit18     = 目标 CPU 存在待处理的重新调度请求
+         *   bits24-31 = waiter 状态
          */
         uint32_t preempt_count =
             x86_cpu_preempt_disable_count(g_user_runtime_child_cpu);
@@ -650,7 +647,7 @@ bool user_elf_runtime_self_test(void) {
             g_user_runtime_stage = page[0xA8U];
             g_user_runtime_result = *(const uint64_t *)(const void *)(page + 0xB0U);
             g_user_runtime_cow_pass = page[0xBCU];
-            /* VM 骞跺彂楠屾敹鏍囪浣嶄簬鐢ㄦ埛鏁版嵁椤电殑 0x1F0锛岄伩寮€瀹氭椂鍣ㄥ弬鏁板尯銆?*/
+            /* VM 并发测试标记位于用户数据页的 0x1F0，避开定时器参数区域。 */
             g_user_runtime_vm_concurrent_pass = page[0x1F0U];
             g_user_runtime_uaccess_pass = page[0x1F2U];
             g_user_runtime_wait_race_pass =
@@ -662,9 +659,8 @@ bool user_elf_runtime_self_test(void) {
                 (g_user_runtime_wait_race_pass << 24U);
         }
     }
-    /* Snapshot the shared COW handshake and the parent's private byte before
-     * the retained runtime address space is released.  These values make a
-     * child-side page-fault failure distinguishable from a scheduling timeout. */
+    /* 释放保留的运行时地址空间前，记录共享 COW 握手状态和父进程的私有字节。这些值可区分子进程缺页
+     * 故障与调度超时。 */
     paddr_t cow_physical;
     if (runtime_page_table_available() && runtime_space != 0 &&
         x86_translate_page(runtime_space->root_table,
@@ -685,10 +681,9 @@ bool user_elf_runtime_self_test(void) {
         if (cow_page != 0) g_user_runtime_cow_private = cow_page[0];
     }
     /*
-     * Snapshot the actual lifetime/resource flags.
+    * 获取实际的生命周期/资源标志快照。
      *
-     * Important: CHILD_FLAGS is based primarily on thread->sched.flags and
-     * therefore cannot tell us whether EXECUTION_REF is still owned.
+    * 注意：CHILD_FLAGS 主要来自 thread->sched.flags，因此无法判断 EXECUTION_REF 是否仍由线程持有。
      */
     g_user_runtime_thread_flags =
         __atomic_load_n(&thread->flags, __ATOMIC_ACQUIRE);
@@ -762,11 +757,8 @@ bool user_elf_runtime_self_test(void) {
     bool kernel_thread_current = current != 0 && current->process == 0;
     bool kernel_root_current = x86_current_root_table().value == kernel_root.value;
     /*
-     * The final runtime step intentionally executes a second ELF and exits
-     * it.  That transition releases the old runtime address space, so the
-     * original 0xA5 marker is no longer readable by this inspection code.
-     * EXEC_STAGE=14 is published by the replacement image's clean exit and
-     * is the success marker for that expected path.
+    * 最终运行时阶段会有意执行并退出第二个 ELF。此转换会释放旧运行时地址空间，因此检查代码不再能读取
+    * 原来的 0xA5 标记。替换映像正常退出时会发布 EXEC_STAGE=14，该值即为此预期路径的成功标记。
      */
     bool exec_exit_completed =
         g_user_runtime_exec_stage == 14U &&

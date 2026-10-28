@@ -51,10 +51,9 @@
 #define F_DUPFD_CLOEXEC 1030
 #define FD_CLOEXEC 1
 
-/* Linux memfd sealing values.  System currently does not implement memfd or
- * these fcntl operations; the definitions are kept for source compatibility
- * with the Linux Mojo channel implementation, which disables that optional
- * fast path on System. */
+/* Linux memfd 密封标志取值。System 当前尚未实现 memfd 或这些 fcntl 操作；
+ * 保留定义是为了兼容 Linux Mojo 通道实现的源代码，该实现会在 System 上
+ * 禁用此可选快速路径。 */
 #define F_ADD_SEALS 1033
 #define F_GET_SEALS 1034
 #define F_SEAL_SEAL 0x0001
@@ -62,10 +61,8 @@
 #define F_SEAL_GROW 0x0004
 #define F_SEAL_WRITE 0x0008
 
-/* POSIX advisory-lock ABI used by SQLite's Unix VFS.  The kernel-side
- * fcntl implementation does not support these operations yet; keeping the
- * layout and constants here prevents the target build from accidentally
- * consuming the host glibc definitions. */
+/* SQLite Unix VFS 使用的 POSIX 建议锁 ABI。内核侧 fcntl 实现尚不支持这些操作；
+ * 在此保留布局和常量可避免目标构建意外使用宿主 glibc 定义。 */
 #define F_GETLK  5
 #define F_SETLK  6
 #define F_SETLKW 7

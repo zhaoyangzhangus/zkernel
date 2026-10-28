@@ -13,8 +13,7 @@
 #define OS_DEBUG_SERIAL 0
 #endif
 
-/* The console is a fixed-cell terminal.  Its source glyphs are compile-time
- * A8 data, so boot logging never depends on VFS or a TTF parser. */
+/* 控制台是固定单元格终端。字形源数据以 A8 格式在编译期生成，因此启动日志不依赖 VFS 或 TTF 解析器。 */
 #define GOP_DEBUG_GLYPH_WIDTH  OS_CONSOLE_FONT_WIDTH
 #define GOP_DEBUG_GLYPH_HEIGHT OS_CONSOLE_FONT_HEIGHT
 #define GOP_DEBUG_TAB_SPACES   4U
@@ -49,14 +48,12 @@ static UINT8 g_gop_debug_text_buffer[GOP_DEBUG_BUFFER_CELLS];
 static UINT32 g_gop_debug_color_buffer[GOP_DEBUG_BUFFER_CELLS];
 
 #if OS_DEBUG_SERIAL
-/* COM1 is byte-serial and is shared by every CPU.  Keep one diagnostic call
- * contiguous; otherwise SMP workers interleave individual bytes and destroy
- * the failure markers used by the QEMU tests. */
+/* COM1 按字节串行工作，并由所有 CPU 共用。每次诊断调用必须保持连续；否则 SMP 工作线程会交错输出字节，
+ * 破坏 QEMU 测试使用的故障标记。 */
 static atomic_flag g_serial_lock = ATOMIC_FLAG_INIT;
 static BOOLEAN g_serial_line_open;
-/* Static storage gives both atomics a valid zero initialization on toolchains
- * whose freestanding stdatomic.h does not provide ATOMIC_VAR_INIT.  The owner
- * sentinel is installed immediately before concurrency is enabled. */
+/* 静态存储可确保两个原子变量都正确初始化为零，兼容不提供 ATOMIC_VAR_INIT 的独立运行环境 stdatomic.h。
+ * 并发启用前会立即设置所有者哨兵。 */
 static atomic_uint g_serial_owner_cpu;
 static atomic_uint g_serial_concurrency_ready;
 
@@ -66,12 +63,9 @@ static UINT64 serial_lock(BOOLEAN *owned) {
     __asm__ volatile ("pushfq; popq %0" : "=r"(flags) : : "memory");
     __asm__ volatile ("cli" : : : "memory");
 
-    /* Before the architecture CPU-local area exists, keep interrupts off for
-     * the whole write.  Once SMP is live, keep them off after ownership is
-     * acquired as well: an IRQ must not splice its diagnostic bytes into a
-     * record that another CPU is already emitting.  A contending CPU briefly
-     * enables interrupts between lock attempts so TLB/IPI delivery remains
-     * live while it waits. */
+    /* 架构 CPU 本地存储建立前，整个写入期间都要关闭中断。SMP 启用后，获取所有权后也要继续关闭中断：
+     * IRQ 不得将诊断字节插入另一 CPU 正在输出的记录。发生竞争的 CPU 会在尝试获取锁之间短暂开启中断，
+     * 以便等待期间 TLB/IPI 仍可送达。 */
     if (atomic_load_explicit(&g_serial_concurrency_ready,
                              memory_order_acquire) == 0U) {
         *owned = true;
@@ -94,16 +88,14 @@ static UINT64 serial_lock(BOOLEAN *owned) {
                                                memory_order_acquire)) {
             break;
         }
-        /* Keep TLB/IPI delivery alive while waiting on the shared COM1 lock.
-         * A page-table owner may be waiting for this CPU's acknowledgement
-         * before it can release its own mapping lock. */
+        /* 等待共享 COM1 锁时保持 TLB/IPI 可送达。页表所有者可能正等待此 CPU 确认，之后才能释放自己的
+         * 映射锁。 */
         if ((flags & (1ULL << 9)) != 0U) {
             __asm__ volatile ("sti" : : : "memory");
         }
         __asm__ volatile ("pause");
-        /* The lock acquisition itself must happen with interrupts disabled;
-         * otherwise an IRQ can enter in the instruction window after the
-         * successful atomic exchange and deadlock on this same lock. */
+        /* 获取锁的操作本身必须在关闭中断时执行；否则成功完成原子交换后、中断屏蔽前的指令窗口中可能进入
+         * IRQ，并因争用同一把锁而死锁。 */
         __asm__ volatile ("cli" : : : "memory");
     }
     atomic_store_explicit(&g_serial_owner_cpu, cpu, memory_order_release);
@@ -347,7 +339,7 @@ static void gop_debug_write_locked(const CHAR8 *text) {
             gop_debug_put_char_locked(character);
         }
     }
-    /* The character/color buffers are complete before any GOP store begins. */
+    /* 所有字符/颜色缓冲区准备完成后，才开始写入 GOP。 */
     gop_debug_render_locked();
 }
 
@@ -522,9 +514,8 @@ void kernel_serial_write_guarded(const char *text) {
 void kernel_serial_write_record_guarded(const char *text) {
     if (text == 0) return;
 #if OS_DEBUG_SERIAL
-    /* Other diagnostics are assembled from several printf calls.  Keep a
-     * location-aware record at a physical line boundary even when one of
-     * those partial messages is currently open. */
+    /* 其他诊断信息由多次 printf 调用拼接而成。即使某条部分消息尚未结束，也要在物理行边界输出带位置
+     * 信息的记录。 */
     if (g_serial_line_open) kernel_serial_write_guarded("\r\n");
     kernel_serial_write_guarded(text);
 #endif

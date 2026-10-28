@@ -8,6 +8,7 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'app-layout.ps1')
 . (Join-Path $PSScriptRoot 'object-paths.ps1')
 
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
@@ -95,9 +96,11 @@ function Copy-FileIfChanged([string]$Source, [string]$Target) {
 }
 
 function Copy-DirectoryContents([string]$SourceRoot, [string]$TargetRoot) {
+    Assert-AppGuestLayout $TargetRoot
     Require-Directory $SourceRoot 'Phase 6 ESP'
     foreach ($source in @(Get-ChildItem -LiteralPath $SourceRoot -Recurse -File)) {
         $relative = $source.FullName.Substring($SourceRoot.Length).TrimStart('\', '/')
+        if (Test-LegacyGuestPath $relative) { continue }
         Copy-FileIfChanged $source.FullName (Join-Path $TargetRoot $relative)
     }
 }
@@ -347,7 +350,8 @@ Invoke-CompileIfChanged (Join-Path $repoRoot 'tools\nvidia\phase8_frontend_test.
 $hostLinkArgs = @(
     '-nostdlib', '-nodefaultlibs', '-nostartfiles',
     '-Wl,--build-id=none',
-    '-Wl,-dynamic-linker,/lib64/ld-linux-x86-64.so.2',
+    '-Wl,-dynamic-linker,/usr/apps/p8-frontend/lib/ld-linux-x86-64.so.2',
+    '-Wl,-rpath,/usr/apps/p8-frontend/lib',
     '-Wl,--allow-shlib-undefined',
     ('-Wl,-rpath-link,{0}' -f $hostRunLib.Replace('\', '/')),
     '-Wl,-z,now',

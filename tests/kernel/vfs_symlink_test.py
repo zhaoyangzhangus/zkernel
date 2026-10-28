@@ -6,16 +6,22 @@ import tempfile
 root = Path(__file__).resolve().parents[2]
 source = (root/'kernel/fs/vfs/core.c').read_text()
 begin = source.index('kstatus_t vfs_symlink_kernel(')
-end = source.index('/* Resolve components in order:', begin)
+end = source.index('kstatus_t vfs_resolve_path_kernel(', begin)
+publish = source[source.index('static kstatus_t vfs_publish_memory_node('):
+                 source.index('static kstatus_t vfs_create_memory_node(')]
 program = r'''
 #include <assert.h>
 #include <stdlib.h>
 #include <string.h>
 #include <kernel/base.h>
 #define VFS_PATH_LIMIT 256
+typedef struct {atomic_uint state;} io_mutex_t;
+static void io_mutex_init(io_mutex_t *mutex, bool pi) {
+    assert(pi); atomic_init(&mutex->state, 0U);
+}
 typedef struct {
     char path[256]; unsigned char *data; uint64_t size, data_capacity;
-    uint32_t mode; bool mutable_node; struct {atomic_uint state;} io_lock;
+    uint32_t mode; bool mutable_node; io_mutex_t io_lock;
 } vfs_backend_node_t;
 typedef struct {void *fs_private;} vnode_t;
 typedef int vfs_fat32_mount_t;
@@ -59,7 +65,7 @@ static kstatus_t vfs_stat_kernel(const char *path,os_file_info_t *info) {
     assert(!locked); (void)info; ++stats;
     return !strcmp(path,"/tmp/directory")?K_OK:K_ENOENT;
 }
-''' + source[begin:end] + r'''
+''' + publish + source[begin:end] + r'''
 static void clear(void) {
     if(node && node!=&collision) object_put(node);
     node=0;assert(!live && !locked);

@@ -12,13 +12,21 @@ code=r'''
 #include <stdint.h>
 #include <stddef.h>
 #include <string.h>
+#include <stdlib.h>
 typedef int process_t,kstatus_t;
-enum {K_OK=0,K_EINVAL=-22,K_EIO=-5,K_EPERM=-1};
-typedef struct {process_t *owner;char title[32];int32_t x,y;uint32_t width,flags;} window_server_window_t;
+enum {K_OK=0,K_EINVAL=-22,K_EIO=-5,K_EPERM=-1,K_ENOMEM=-12,K_EAGAIN=-11};
+typedef struct {unsigned height;} caption_text_t;
+typedef struct {process_t *owner;char title[32];int32_t x,y;uint32_t width,flags;caption_text_t *caption;} window_server_window_t;
 static process_t owner,other;
 static window_server_window_t window={.owner=&owner,.x=10,.y=20,.width=640};
 static bool locked,ready=true;
 static unsigned marks,wakes,lookups;
+static bool allocation_fails;
+static unsigned caption_text_height(uint32_t flags){(void)flags;return 16;}
+static caption_text_t *caption_text_create(const char *text,unsigned height){
+ assert(!locked&&text&&height==16);return allocation_fails?NULL:calloc(1,sizeof(caption_text_t));
+}
+static void caption_text_put(caption_text_t *caption){assert(!locked);free(caption);}
 static bool window_server_kernel_ready(void){return ready;}
 static void window_lock(void){assert(!locked);locked=true;}
 static void window_unlock(void){assert(locked);locked=false;}
@@ -40,6 +48,9 @@ int main(void){
  assert(!window_server_title_owned(&owner,7,title)&&marks==1&&wakes==1&&!strcmp(window.title,title));
  for(unsigned i=0;i<1000;++i)assert(!window_server_title_owned(&owner,7,title));
  assert(marks==1&&wakes==1);
+ allocation_fails=true;strcpy(title,"failed");
+ assert(window_server_title_owned(&owner,7,title)==K_ENOMEM&&marks==1&&!strcmp(window.title,"* /notes.txt"));
+ allocation_fails=false;
  window.flags=4;strcpy(title,"saved");
  assert(!window_server_title_owned(&owner,7,title)&&marks==2&&wakes==2);
  for(unsigned i=6;i<32;++i)assert(!window.title[i]);
@@ -47,6 +58,7 @@ int main(void){
  assert(window_server_title_owned(NULL,7,title)==K_EINVAL);
  assert(window_server_title_owned(&owner,0,title)==K_EINVAL);
  assert(window_server_title_owned(&owner,7,NULL)==K_EINVAL);
+ caption_text_put(window.caption);
 }
 '''
 with tempfile.TemporaryDirectory(prefix='window-title-') as directory:

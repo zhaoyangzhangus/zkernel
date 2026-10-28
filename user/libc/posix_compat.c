@@ -29,10 +29,9 @@
 #include <uapi/memory.h>
 
 /*
- * System intentionally keeps the native ABI small.  Chromium, libc++, and
- * fontconfig still reference a few Linux/POSIX entry points even when their
- * feature is disabled at runtime.  Keep these shims in one translation unit
- * so the freestanding libc exports a coherent, C-linkage surface.
+ * System 刻意保持原生 ABI 精简。即使 Chromium、libc++ 和 fontconfig 的相关功能
+ * 在运行时被禁用，它们仍会引用少量 Linux/POSIX 入口。将这些兼容函数集中在一个编译单元，
+ * 使 freestanding libc 导出一致的 C 链接接口。
  */
 
 static int parse_decimal(const char **input, unsigned int digits,
@@ -132,7 +131,7 @@ char *strptime(const char *text, const char *format, struct tm *value) {
 }
 
 unsigned int alarm(unsigned int seconds) {
-    /* Signals are delivered only through the explicit System signal ABI. */
+    /* 信号仅通过显式的 System 信号 ABI 投递。 */
     (void)seconds;
     return 0U;
 }
@@ -142,7 +141,7 @@ int sched_yield(void) {
 }
 
 int sched_getcpu(void) {
-    /* System currently exposes no user-space CPU query; CPU zero is valid. */
+    /* System 当前不提供用户态 CPU 查询；CPU 0 是有效值。 */
     return 0;
 }
 
@@ -222,7 +221,7 @@ int sigaltstack(const stack_t *stack, stack_t *old_stack) {
     return 0;
 }
 
-/* Linux eventfd is implemented by the kernel personality. */
+/* Linux eventfd 由内核兼容模式实现。 */
 int eventfd(unsigned int initial_value, int flags) {
     long result = syscall(LINUX_SYS_EVENTFD2, initial_value, flags);
     if (result < 0) return -1;
@@ -247,9 +246,8 @@ int eventfd_write(int descriptor, eventfd_t value) {
     return result == (long)sizeof(value) ? 0 : -1;
 }
 
-/* Linux-compatible epoll entry points.  The kernel personality already
- * exposes the Linux syscall numbers; keep the libc surface thin so Chromium's
- * MessagePumpEpoll and WebRTC can use the native wait path. */
+/* Linux 兼容 epoll 入口。内核兼容模式已提供 Linux 系统调用号；libc 接口保持精简，
+ * 使 Chromium 的 MessagePumpEpoll 和 WebRTC 能使用原生等待路径。 */
 int epoll_create(int size) {
     long result;
     if (size <= 0) {
@@ -498,9 +496,8 @@ size_t strftime_l(char *buffer, size_t capacity, const char *format,
     return strftime(buffer, capacity, format, value);
 }
 
-/* The System image has no account database.  Return stable synthetic records
- * so diagnostics and policy-path expansion can proceed without pulling a
- * host NSS implementation into the freestanding image. */
+/* System 映像没有账户数据库。返回稳定的合成记录，使诊断和策略路径扩展能够继续，
+ * 而无需将宿主 NSS 实现引入 freestanding 映像。 */
 struct passwd {
     char *pw_name;
     char *pw_passwd;
@@ -516,7 +513,7 @@ static char g_libc_user_name[] = "user";
 static char g_libc_user_password[] = "x";
 static char g_libc_user_gecos[] = "System user";
 static char g_libc_user_home[] = "/tmp";
-static char g_libc_user_shell[] = "/sbin/gshell";
+static char g_libc_user_shell[] = "/usr/apps/gshell/gshell";
 
 struct passwd *getpwuid(uid_t uid) {
     g_libc_passwd.pw_name = g_libc_user_name;
@@ -560,8 +557,8 @@ struct group *getgrnam(const char *name) {
     return getgrgid(0U);
 }
 
-/* File ownership is not enforced by the current System VFS.  Treat these as
- * successful no-ops so portable permission setup remains non-fatal. */
+/* 当前 System VFS 不强制文件所有权。将这些操作视为成功的空操作，
+ * 避免可移植权限设置导致程序失败。 */
 int chown(const char *path, uid_t owner, gid_t group) {
     (void)path;
     (void)owner;
@@ -580,8 +577,8 @@ int lchown(const char *path, uid_t owner, gid_t group) {
     return chown(path, owner, group);
 }
 
-/* The kernel currently has no directory-watch object.  ENOSYS makes Chromium
- * select its polling/fallback path instead of leaving a fake fd in epoll. */
+/* 内核当前没有目录监视对象。返回 ENOSYS 可让 Chromium 选择轮询/后备路径，
+ * 而不是在 epoll 中留下无效 fd。 */
 int inotify_init(void) {
     errno = ENOSYS;
     return -1;
@@ -607,8 +604,8 @@ int inotify_rm_watch(int descriptor, int watch_descriptor) {
     return -1;
 }
 
-/* System currently has no interface-list ABI.  Returning ENOSYS is the
- * documented fallback used by Chromium's network discovery code. */
+/* System 当前没有网络接口列表 ABI。返回 ENOSYS 是 Chromium 网络发现代码使用的
+ * 文档化后备行为。 */
 struct ifaddrs;
 
 int getifaddrs(struct ifaddrs **interfaces) {
@@ -660,16 +657,16 @@ int socketpair(int domain, int type, int protocol, int descriptors[2]) {
     return 0;
 }
 
-/* The Linux personality does not expose filesystem timestamp mutation yet.
- * Keep the ABI available; callers that only preserve metadata can continue. */
+/* Linux 兼容模式尚未提供文件系统时间戳修改功能。
+ * 保留此 ABI，使仅需保留元数据的调用方仍可继续运行。 */
 int utime(const char *path, const void *times) {
     (void)path;
     (void)times;
     return 0;
 }
 
-/* Terminal probing is optional in Dawn/Tint.  Report a non-terminal rather
- * than dereferencing a host termios layout that System does not implement. */
+/* Dawn/Tint 的终端探测是可选功能。报告当前不是终端，而不是解引用 System 未实现的
+ * 宿主 termios 布局。 */
 int tcgetattr(int descriptor, void *attributes) {
     (void)descriptor;
     (void)attributes;
@@ -685,13 +682,12 @@ int tcsetattr(int descriptor, int action, const void *attributes) {
     return -1;
 }
 
-/* Resolver state is deliberately opaque here.  The DNS configuration reader
- * only needs the lifecycle calls; actual lookups use System netdb.
+/* 此处有意将解析器状态设为不透明类型。DNS 配置读取器只需要生命周期接口；实际查询
+ * 使用 System netdb。
  *
- * Do not initialize the caller-provided state as if it were this old private
- * 4096-byte buffer.  Chromium passes a glibc-compatible struct __res_state,
- * which is smaller.  Writing the private buffer size through that pointer
- * corrupts the allocator metadata immediately following the object. */
+ * 不要把调用方提供的状态初始化为这个旧版私有 4096 字节缓冲区。Chromium 传入的是
+ * 更小的 glibc 兼容 struct __res_state。通过该指针写入私有缓冲区大小会破坏对象后方
+ * 紧邻的分配器元数据。 */
 static unsigned char g_libc_resolver_state[4096];
 
 void *__res_state(void) {
@@ -703,7 +699,7 @@ int __res_ninit(void *state) {
         errno = EINVAL;
         return -1;
     }
-    /* The caller owns the ABI-sized state and has already zeroed it. */
+    /* 调用方拥有符合 ABI 大小的状态，并已将其清零。 */
     return 0;
 }
 
@@ -711,9 +707,8 @@ void __res_nclose(void *state) {
     (void)state;
 }
 
-/* Optional host-style dynamic loading is not available in the current
- * freestanding loader.  Returning a normal lookup failure lets Chromium's
- * feature probes disable Pulse/Vulkan/speech-dispatcher cleanly. */
+/* 当前 freestanding 加载器不支持可选的宿主风格动态加载。返回常规查找失败，
+ * 可让 Chromium 的功能探测正常关闭 Pulse/Vulkan/speech-dispatcher。 */
 static const char g_libc_dl_error[] = "dynamic loading is unavailable";
 
 void *dlopen(const char *file, int mode) {
@@ -732,24 +727,20 @@ int dlclose(void *handle) {
 
 void *dlsym(void *handle, const char *name) {
     (void)handle;
-    /* Chromium's Linux ScopedFD wrapper resolves RTLD_NEXT, "close" once
-     * during startup and forwards every close through the returned pointer.
-     * System links the libc into the same image instead of using the host
-     * loader, so expose the local POSIX entry point for that lookup. */
+    /* Chromium 的 Linux ScopedFD 封装会在启动时解析一次 RTLD_NEXT 的 "close"，并通过
+     * 返回的指针转发后续所有 close 调用。System 将 libc 链接进同一映像，而非使用宿主
+     * 加载器，因此此处为该查找公开本地 POSIX 入口。 */
     if (name != 0 && strcmp(name, "close") == 0) {
         return (void *)(uintptr_t)close;
     }
-    /* Chromium's sandbox libc interceptor uses RTLD_NEXT to reach the
-     * resolver beneath its own getaddrinfo wrapper. System has no separate
-     * host libc, so resolve that lookup to the local POSIX implementation. */
+    /* Chromium 的沙箱 libc 拦截器使用 RTLD_NEXT，访问其 getaddrinfo 封装下方的解析器。
+     * System 没有独立的宿主 libc，因此将该查找解析到本地 POSIX 实现。 */
     if (name != 0 && strcmp(name, "getaddrinfo") == 0) {
         return (void *)(uintptr_t)getaddrinfo;
     }
-    /* Chromium's sandbox libc interceptor asks RTLD_NEXT for the host
-     * localtime family during startup. System uses UTC and already provides
-     * the corresponding gmtime implementations; returning those symbols
-     * avoids the interceptor's error-log path, which recursively calls
-     * localtime while its pthread_once guard is held. */
+    /* Chromium 的沙箱 libc 拦截器会在启动时通过 RTLD_NEXT 查询宿主的 localtime 系列函数。
+     * System 使用 UTC，且已提供对应的 gmtime 实现；返回这些符号可避开拦截器的错误日志
+     * 路径，避免其持有 pthread_once 守卫时递归调用 localtime。 */
     if (name != 0 &&
         (strcmp(name, "localtime") == 0 ||
          strcmp(name, "localtime64") == 0)) {
@@ -783,14 +774,12 @@ char *dgettext(const char *domain, const char *message) {
 }
 
 time_t timegm(struct tm *value) {
-    /* System's timezone is fixed to UTC, so mktime already has timegm
-     * semantics. */
+    /* System 时区固定为 UTC，因此 mktime 已具备 timegm 语义。 */
     return mktime(value);
 }
 
-/* C++ local-static ABI: the compiler tests the first byte directly. It must
- * stay zero until construction finishes. Keep the initialization lock in
- * the second byte; publish the object with a release store of byte zero=1. */
+/* C++ 局部静态变量 ABI：编译器会直接检查首字节。在构造完成前，该字节必须保持为零。
+ * 将初始化锁保存在第二字节；通过 release 存储将首字节设为 1，以发布对象。 */
 int __cxa_guard_acquire(uint64_t *guard) {
     if (guard == 0) return 0;
     for (;;) {
@@ -910,11 +899,9 @@ char **backtrace_symbols(void *const *buffer, int count) {
     return symbols;
 }
 
-/* Chromium queries the capacity of /dev/shm while sizing discardable memory.
- * The System VFS does not expose a statfs ABI yet, but returning a bounded
- * filesystem capacity estimate preserves existing behavior until VFS exports
- * real volume statistics. Keep the two x86-64 layouts distinct: statfs starts
- * with f_type, whereas statvfs starts with f_bsize. */
+/* Chromium 在确定可丢弃内存大小时会查询 /dev/shm 的容量。System VFS 尚未公开 statfs
+ * ABI，但返回有界的文件系统容量估算值可在 VFS 提供真实卷统计前维持现有行为。注意区分
+ * 两种 x86-64 布局：statfs 以 f_type 开始，而 statvfs 以 f_bsize 开始。 */
 typedef struct libc_statvfs_abi {
     unsigned long f_bsize;
     unsigned long f_frsize;
@@ -954,9 +941,9 @@ static int fill_libc_statvfs(void *status) {
     memset(value, 0, sizeof(*value));
     value->f_bsize = 4096UL;
     value->f_frsize = 4096UL;
-    value->f_blocks = 2097152UL; /* 8 GiB total */
+    value->f_blocks = 2097152UL; /* 总计 8 GiB */
     value->f_bfree = 1048576UL;
-    value->f_bavail = 1048576UL; /* 4 GiB available */
+    value->f_bavail = 1048576UL; /* 可用 4 GiB */
     value->f_files = 65536UL;
     value->f_ffree = 65535UL;
     value->f_favail = 65535UL;
@@ -973,7 +960,7 @@ static int fill_libc_statfs(void *status) {
     }
     (void)fill_libc_statvfs(&capacity);
     memset(value, 0, sizeof(*value));
-    /* No filesystem type is claimed without a real VFS volume query. */
+    /* 未查询到真实 VFS 卷信息时，不声明文件系统类型。 */
     value->f_bsize = (long)capacity.f_bsize;
     value->f_blocks = capacity.f_blocks;
     value->f_bfree = capacity.f_bfree;
@@ -1013,8 +1000,8 @@ ssize_t sendfile(int output_descriptor, int input_descriptor, off_t *offset,
     off_t position;
     if (count == 0U) return 0;
     if (count > (size_t)SSIZE_MAX) count = (size_t)SSIZE_MAX;
-    /* Positional reads avoid consuming unsent input on short writes/EAGAIN.
-     * With no explicit offset, commit the input cursor after each write. */
+    /* 使用定位读取可避免短写或遇到 EAGAIN 时消耗尚未发送的输入数据。
+     * 未指定偏移时，每次写入后提交输入游标。 */
     position = offset != 0 ? *offset : lseek(input_descriptor, 0, SEEK_CUR);
     if (position < 0) {
         if (offset != 0) errno = EINVAL;
@@ -1061,12 +1048,9 @@ ssize_t sendfile(int output_descriptor, int input_descriptor, off_t *offset,
     return (ssize_t)total;
 }
 
-/* The Rust standard library keeps its complete Unix process/filesystem ABI in
- * the final rlib even when Chromium does not exercise every operation.  These
- * entry points are deliberately conservative on System: identity changes and
- * chroot are harmless no-ops in the single-user image, while process-spawn
- * bookkeeping reports ENOSYS until the native process manager grows a
- * posix_spawn implementation. */
+/* 即使 Chromium 不会调用所有操作，Rust 标准库仍会在最终 rlib 中保留完整的 Unix
+ * 进程/文件系统 ABI。System 上这些入口有意采用保守行为：单用户映像中的身份更改和
+ * chroot 是无害空操作；在原生进程管理器实现 posix_spawn 前，进程创建记账返回 ENOSYS。 */
 int setuid(uid_t uid) {
     (void)uid;
     return 0;
@@ -1097,7 +1081,7 @@ void *mmap64(void *address, size_t length, int protection, int flags,
     return mmap(address, length, protection, flags, descriptor, offset);
 }
 
-/* The System VFS has no zero-copy splice operation yet. */
+/* System VFS 尚未提供零拷贝 splice 操作。 */
 ssize_t splice(int input_descriptor, off_t *input_offset,
                int output_descriptor, off_t *output_offset, size_t length,
                unsigned int flags) {
@@ -1252,10 +1236,8 @@ int mkfifo(const char *path, mode_t mode) {
     return -1;
 }
 
-/* Rust's float formatting and Skia's color paths can request the compiler
- * helper when the target has no native half-precision conversion instruction.
- * Keep the conversion integer-only so this freestanding libc does not pull in
- * the host floating-point runtime. */
+/* 目标平台没有原生半精度转换指令时，Rust 浮点格式化和 Skia 颜色路径可能会请求编译器
+ * 辅助函数。转换过程仅使用整数运算，避免此独立运行的 libc 引入宿主浮点运行时。 */
 uint16_t __truncsfhf2(float value) {
     union {
         float value;

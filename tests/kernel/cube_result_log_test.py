@@ -5,7 +5,7 @@ import tempfile
 
 root = Path(__file__).resolve().parents[2]
 source = (root / 'tools/nvidia/opengl_cube_demo.c').read_text()
-function = source[source.index('static void cube_record_result('):
+function = source[source.index('static void cube_record_log('):
                   source.index('static void cube_emit(')]
 program = r'''
 #include <assert.h>
@@ -17,7 +17,7 @@ program = r'''
 static char result[128];
 static unsigned used,calls,syncs,closes,opens,mode;
 static int mock_open(const char *path,int flags,int perms){
- assert(!strcmp(path,"/cube-result.log"));
+ assert(!strcmp(path,"/log/cube-result.log"));
  assert(flags==(O_WRONLY|O_CREAT|O_TRUNC) && perms==0644);++opens;
  if(mode==1)return -1;return 17;
 }

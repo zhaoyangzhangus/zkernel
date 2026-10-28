@@ -5,8 +5,8 @@
 #include <kernel/xhci.h>
 #include "internal.h"
 
-/* REFACTOR_P8_XHCI_INTERRUPT_OWNER: MSI-X binding, ISR acknowledgement,
- * deferred-work trigger, pending-edge consumption, and interrupt diagnostics. */
+/* REFACTOR_P8_XHCI_INTERRUPT_OWNER：MSI-X 绑定、ISR 确认、延迟工作触发、
+ * 待处理中断边消费及中断诊断。 */
 
 #define XHCI_RUNTIME_INTR0 (0x20U)
 #define XHCI_IMAN_IE      (1U << 1)
@@ -56,11 +56,9 @@ static void xhci_msix_handler(uint8_t vector, struct arch_trap_frame *frame,
             vector);
     }
 
-    /* The ISR only acknowledges the interrupter and queues bounded work.  It
-     * never walks the event ring or emits user input at interrupt level. */
-    /* IMAN.IP is RW1C.  Clear the pending bit while retaining IE; leaving IP
-     * set after the first HID completion makes QEMU suppress subsequent
-     * interrupt edges, leaving hid_transfer_pending stuck forever. */
+    /* ISR 仅确认中断器并排入有界工作；绝不在中断级遍历事件环或生成用户输入。 */
+    /* IMAN.IP 为 RW1C。清除待处理位的同时保留 IE；首次 HID 完成后若 IP 仍置位，
+     * QEMU 会屏蔽后续中断边，使 hid_transfer_pending 永远无法清除。 */
     (void)xhci_controller_write32(state, state->runtime_offset + XHCI_RUNTIME_INTR0,
                        XHCI_IMAN_IP | XHCI_IMAN_IE);
     atomic_store_explicit(&g_xhci_irq_pending, true, memory_order_release);
@@ -106,9 +104,8 @@ bool xhci_core_bind_msix(xhci_state_t *state) {
         xhci_report_msix_metadata(state->pci);
         return false;
     }
-    /* Enumeration may have left the interrupter pending while MSI-X was
-     * disabled.  Clear that stale edge before enabling the PCI vector; new
-     * transfer completions will then generate a fresh interrupt. */
+    /* MSI-X 禁用期间，枚举过程可能使中断器保持待处理状态。启用 PCI 向量前先清除该旧中断边；
+     * 随后的新传输完成便会产生新的中断。 */
     xhci_event_handler_complete(state);
     if (!xhci_controller_write32(state, state->runtime_offset + XHCI_RUNTIME_INTR0,
                       XHCI_IMAN_IP | XHCI_IMAN_IE)) {

@@ -1,7 +1,6 @@
 #include "internal.h"
 
-/* REFACTOR_P8_XHCI_COMMAND_RUNTIME_OWNER: command-ring submission and
- * completion are isolated from controller lifecycle and protocol Owners. */
+/* REFACTOR_P8_XHCI_COMMAND_RUNTIME_OWNER：命令环提交和完成处理与控制器生命周期及协议所有者分离。 */
 
 #define XHCI_COMMAND_RING_TRB_COUNT 256U
 #define XHCI_LINK_TRB_TYPE 6U

@@ -5,7 +5,7 @@ import gdb, subprocess, struct, json, time, os, sys
 from pathlib import Path
 sys.path.insert(0, str(Path("tools/chromium").resolve()))
 from trace_build import validate_chrome_build
-expected = 'Build ID: ccd5fc305e3b0600'
+expected = 'Build ID: 2ea4a62ae34e05c9'
 try:
     validate_chrome_build(expected)
 except RuntimeError as error:
@@ -127,10 +127,10 @@ class Capture(gdb.Breakpoint):
         samples+=1
         emit('TAB_THUMBNAIL_REQUEST',{'tid':int(thread['tid'])})
         return False
-Input('*0x51e890e0',gdb.BP_HARDWARE_BREAKPOINT,internal=True)
-Frame('*0x4ead5650',gdb.BP_HARDWARE_BREAKPOINT,internal=True)
-if mode=='passes':RenderPass('*0x4eaeb750',gdb.BP_HARDWARE_BREAKPOINT,internal=True)
-else:Capture('*0x49e52390',gdb.BP_HARDWARE_BREAKPOINT,internal=True)
-Paint('*0x4eb671d0',gdb.BP_HARDWARE_BREAKPOINT,internal=True)
+Input('*0x520f0100',gdb.BP_HARDWARE_BREAKPOINT,internal=True)
+Frame('*0x4ed1d180',gdb.BP_HARDWARE_BREAKPOINT,internal=True)
+if mode=='passes':RenderPass('*0x4ed332a0',gdb.BP_HARDWARE_BREAKPOINT,internal=True)
+else:Capture('*0x49f1d7e0',gdb.BP_HARDWARE_BREAKPOINT,internal=True)
+Paint('*0x4edaf0c0',gdb.BP_HARDWARE_BREAKPOINT,internal=True)
 end
 continue

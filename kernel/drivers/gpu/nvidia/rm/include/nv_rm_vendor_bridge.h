@@ -21,6 +21,7 @@ typedef struct nv_rm_vendor_result {
     bool blackwell;
     bool gb205;
     bool hal_valid;
+    uint64_t vram_bytes;
 } nv_rm_vendor_result_t;
 
 typedef struct nv_rm_vendor_frontend_mapping {

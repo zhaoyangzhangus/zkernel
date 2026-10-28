@@ -49,10 +49,10 @@ typedef struct slab_page {
 
 typedef struct {
     spinlock_t lock;
-    /* Contains only slabs with at least one globally available slot. */
+    /* 仅包含至少有一个全局可用槽位的 slab。 */
     slab_page_t *slabs;
     uint16_t slot_size;
-    uint16_t slot_count; /* immutable after allocator initialization */
+    uint16_t slot_count; /* 分配器初始化后不可变 */
 } kmem_cache_t;
 
 /* 每个 CPU 的小对象缓存；缓存对象已从全局 slab 链表摘除。 */
@@ -62,7 +62,7 @@ typedef struct {
     uint16_t reserved;
 } kmem_magazine_t;
 
-/* Keep independently written CPU-local allocator state on separate cache lines. */
+/* 将由不同 CPU 独立写入的分配器状态放在不同缓存行。 */
 typedef struct __attribute__((aligned(CACHELINE_SIZE))) {
     kmem_magazine_t classes[KMEM_CLASS_COUNT];
 } kmem_cpu_magazines_t;
@@ -89,8 +89,7 @@ _Static_assert(sizeof(allocation_header_t) == 32U, "kmalloc header layout");
 _Static_assert(sizeof(slab_page_t) <= KMEM_SLAB_HEADER_SIZE, "slab page header layout");
 
 static void bytes_fill(void *memory, uint8_t value, size_t size) {
-    /* Keep poison/redzone semantics, but do not fill large allocations one
-     * byte at a time while the allocator has disabled preemption. */
+    /* 保留毒化/红区语义，但分配器禁用抢占期间不要逐字节填充大型分配。 */
     __builtin_memset(memory, value, size);
 }
 
@@ -99,8 +98,7 @@ static bool bytes_equal(const void *memory, uint8_t value, size_t size) {
     uint64_t repeated = UINT64_C(0x0101010101010101) * value;
     while (size >= sizeof(repeated)) {
         uint64_t word;
-        /* An explicit builtin copy avoids alignment/aliasing assumptions;
-         * the freestanding x86 build emits an integer load, not SIMD. */
+        /* 显式使用内建复制可避免对齐/别名假设；独立运行的 x86 构建会生成整数加载，而非 SIMD 指令。 */
         __builtin_memcpy(&word, bytes, sizeof(word));
         if (word != repeated) return false;
         bytes += sizeof(word);
@@ -113,10 +111,8 @@ static bool bytes_equal(const void *memory, uint8_t value, size_t size) {
 }
 
 static void cache_lock(kmem_cache_t *cache) {
-    /* A refill may allocate a slab and therefore remain in this lock long
-     * enough for a timer tick.  Keep the owner on its CPU until the cache
-     * state is published; otherwise another CPU can spin forever if the owner
-     * is never selected again. */
+    /* 补充缓存时可能分配 slab，因此持锁时间可能长到跨越一次定时器节拍。缓存状态发布前必须让锁所有者
+     * 留在当前 CPU；否则如果所有者之后未再次获选，其他 CPU 可能永久自旋。 */
     sched_preempt_disable();
     uint32_t cpu_index = x86_current_cpu_index();
     uint32_t class_index = cache >= g_caches &&
@@ -143,8 +139,7 @@ static void cache_unlock(kmem_cache_t *cache) {
     uint32_t class_index = cache >= g_caches &&
                            cache < g_caches + KMEM_CLASS_COUNT ?
                            (uint32_t)(cache - g_caches) : UINT32_MAX;
-    /* Clear diagnostics before releasing ownership: a successor may publish
-     * its CPU immediately after unlock, and must not be erased by us. */
+    /* 释放所有权前清除诊断信息：后继者可能在解锁后立即发布自己的 CPU，不能再被当前线程清除。 */
     if (class_index < KMEM_CLASS_COUNT) {
         __atomic_store_n(&g_cache_owner[class_index], UINT32_MAX,
                          __ATOMIC_RELEASE);
@@ -224,8 +219,8 @@ static uint16_t class_index_for_size(size_t size) {
     if (size > (size_t)g_slot_sizes[KMEM_CLASS_COUNT - 1U] -
                    KMEM_PAYLOAD_OFFSET - KMEM_TRAILER_SIZE)
         return KMEM_CLASS_COUNT;
-    /* Slots alternate 3/4 and full powers of two: 96,128,...,1536,2048.
-     * Bounds above make both addition and clz's nonzero operand safe. */
+    /* 槽位大小依次为 3/4 次幂和完整的 2 次幂：96、128、……、1536、2048。
+     * 上方的边界保证加法安全，且 clz 的操作数非零。 */
     uint32_t slot = (uint32_t)size + KMEM_PAYLOAD_OFFSET + KMEM_TRAILER_SIZE;
     unsigned exponent = 32U - (unsigned)__builtin_clz(slot - 1U);
     uint32_t three_quarters = 3U << (exponent - 2U);
@@ -272,8 +267,7 @@ static uint64_t allocation_cookie(const allocation_header_t *header, const void 
 static void write_trailer(void *payload, uint32_t requested, uint64_t cookie) {
     _Static_assert(KMEM_TRAILER_SIZE == sizeof(cookie), "allocation trailer width");
     _Static_assert(__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__, "allocation trailer encoding");
-    /* The trailer follows an arbitrary byte-sized request, so use a builtin
-     * copy rather than an aligned uint64_t pointer dereference. */
+    /* 尾部数据紧跟任意字节长度的请求，因此使用内建复制，而非对齐的 uint64_t 指针解引用。 */
     __builtin_memcpy((uint8_t *)payload + requested, &cookie, sizeof(cookie));
 }
 
@@ -291,8 +285,7 @@ static bool header_redzones_valid(const allocation_header_t *header, const void 
 }
 
 static slab_page_t *create_slab(uint16_t class_index) {
-    /* Headers, guards and payload poison are initialized below. Avoid a
-     * redundant full-page clear while the cache lock is held. */
+    /* 下方会初始化头部、保护区和负载毒化值。持有缓存锁期间避免重复清零整页。 */
     page_t *page = page_alloc(0, 0);
     if (page == 0) return 0;
     page->owner = PAGE_OWNER_SLAB;
@@ -326,8 +319,7 @@ static slab_page_t *create_slab(uint16_t class_index) {
         bytes_fill((uint8_t *)header + sizeof(*header), KMEM_REDZONE_BYTE,
                    KMEM_FRONT_SIZE);
         void *payload = header_payload(header);
-        /* The free-list link owns the first word; activation checks only
-         * the poison after it. Do not fill bytes immediately overwritten. */
+        /* 空闲链表链接占用首字；激活时只检查其后的毒化值。不要填充随后会立即被覆盖的字节。 */
         bytes_fill((uint8_t *)payload + sizeof(void *), KMEM_POISON_FREE,
                    capacity - sizeof(void *));
         *(void **)payload = slab->free_list;
@@ -336,7 +328,7 @@ static slab_page_t *create_slab(uint16_t class_index) {
     return slab;
 }
 
-/* cache->lock must be held for all partial-slab list operations. */
+/* 所有部分 slab 链表操作都必须持有 cache->lock。 */
 static slab_page_t *cache_partial_head(kmem_cache_t *cache) {
     while (cache->slabs != 0 && cache->slabs->free_list == 0) {
         slab_page_t *empty = cache->slabs;
@@ -372,8 +364,8 @@ static void cache_partial_remove_head(kmem_cache_t *cache,
     slab->prev_link = 0;
 }
 
-/* All slots being globally free implies none remain in a CPU magazine or
- * belong to a live allocation.  Drop the partial-list link before freeing. */
+/* 所有槽位均为全局空闲，意味着它们不再位于 CPU 缓存，也不属于任何活动分配。释放 slab 前先移除
+ * 部分 slab 链表链接。 */
 static void cache_release_empty(kmem_cache_t *cache, slab_page_t *slab) {
     if (slab == 0 || slab->free_count != slab->slot_count) return;
     (void)cache;
@@ -391,8 +383,8 @@ static void cache_release_empty(kmem_cache_t *cache, slab_page_t *slab) {
     page_free(page);
 }
 
-/* Return a validated free payload while cache->lock is held. Neither caller
- * may touch the slab after this operation: its last slot can release it. */
+/* 持有 cache->lock 时返回已验证的空闲负载。此操作后调用方不得再访问该 slab，因为释放最后一个槽位
+ * 可能会释放整个 slab。 */
 static void cache_put_payload_locked(kmem_cache_t *cache, slab_page_t *slab,
                                      void *payload) {
     bool was_empty = slab->free_list == 0;
@@ -403,7 +395,7 @@ static void cache_put_payload_locked(kmem_cache_t *cache, slab_page_t *slab,
     cache_release_empty(cache, slab);
 }
 
-/* Caller holds cache->lock; both allocation routes share slot ownership. */
+/* 调用方持有 cache->lock；两条分配路径共用槽位所有权。 */
 static void *cache_take_payload_locked(kmem_cache_t *cache, uint16_t class_index) {
     slab_page_t *slab = cache_partial_head(cache);
     if (slab == 0) {
@@ -511,8 +503,8 @@ static void *allocate_large(size_t requested, uint32_t flags, bool zero) {
     if (requested > UINT32_MAX || requested > UINT64_MAX -
         (KMEM_PAYLOAD_OFFSET + KMEM_TRAILER_SIZE)) return 0;
     uint64_t needed = requested + KMEM_PAYLOAD_OFFSET + KMEM_TRAILER_SIZE;
-    /* ceil(log2(needed)) gives the smallest covering power of two. The
-     * one-page case also avoids clz(0); bounded requests keep order in range. */
+    /* ceil(log2(needed)) 可得到覆盖需求的最小二次幂。单页情况也可避免 clz(0)；请求有界，因此阶数
+     * 始终有效。 */
     uint8_t order = needed <= PAGE_SIZE ? 0U :
         (uint8_t)(64U - (unsigned)__builtin_clzll(needed - 1U) - PAGE_SHIFT);
     if (order > BUDDY_MAX_ORDER) return 0;
@@ -538,13 +530,12 @@ static void *allocate_large(size_t requested, uint32_t flags, bool zero) {
     return payload;
 }
 
-/* Select initialization before activation: kzalloc must not poison and then
- * overwrite the same requested bytes. Keep slack poison and all guards. */
+/* 激活前先选择初始化方式：kzalloc 不应先毒化再覆盖相同的请求字节。保留未使用空间的毒化值和所有保护区。 */
 static void *kmalloc_internal(size_t size, uint32_t flags, bool zero) {
     void *result = 0;
+    bool large = false;
     if (size == 0) return 0;
-    /* Take one CPU snapshot after pinning; use it for the magazine,
-     * hit statistics and diagnostics throughout this allocation. */
+    /* 固定到 CPU 后只读取一次 CPU 编号；此次分配期间，缓存、命中统计和诊断都使用该值。 */
     sched_preempt_disable();
     uint32_t cpu_index = x86_current_cpu_index();
     if (cpu_index < MAX_CPUS) {
@@ -585,18 +576,16 @@ static void *kmalloc_internal(size_t size, uint32_t flags, bool zero) {
         result = allocate_from_cache(i, size, flags, zero);
         goto done;
     }
-    if (cpu_index < MAX_CPUS) {
-        __atomic_store_n(&g_kmem_progress[cpu_index], 60U,
-                         __ATOMIC_RELEASE);
-    }
-    result = allocate_large(size, flags, zero);
+    /* 大型分配独占页面，不使用 CPU 本地缓存。page_alloc 会管理自身保护区；填充/清零数 MB 负载时，
+     * 不要继续固定当前 CPU。先完成 CPU 本地诊断。 */
+    large = true;
 done:
     if (cpu_index < MAX_CPUS) {
         __atomic_store_n(&g_kmem_progress[cpu_index], 90U,
                          __ATOMIC_RELEASE);
     }
     sched_preempt_enable();
-    return result;
+    return large ? allocate_large(size, flags, zero) : result;
 }
 
 void *kmalloc(size_t size, uint32_t flags) {
@@ -610,8 +599,7 @@ void *kmalloc_try_cached(size_t size, uint32_t flags) {
     uint16_t index = class_index_for_size(size);
     if (index >= KMEM_CLASS_COUNT) return 0;
     kmem_cache_t *cache = &g_caches[index];
-    /* A hard interrupt can have interrupted this very lock's owner. Do not
-     * spin or call cache_lock(): a failed try is an allocation failure. */
+    /* 硬中断可能打断了此锁的持有者。不要自旋或调用 cache_lock()：尝试获取失败即视为分配失败。 */
     if (!spinlock_try_lock(&cache->lock)) return 0;
     slab_page_t *slab = cache_partial_head(cache);
     void *payload = 0;
@@ -622,13 +610,35 @@ void *kmalloc_try_cached(size_t size, uint32_t flags) {
         if (slab->free_list == 0) cache_partial_remove_head(cache, slab);
     }
     spinlock_unlock(&cache->lock);
-    /* The detached slot keeps its slab alive. Activation does not access a
-     * magazine or allocate, so it is safe outside the cache critical section. */
+    /* 已分离槽位会使 slab 保持有效。激活过程不会访问本地缓存或分配内存，因此可在缓存临界区之外安全执行。 */
     return activate_payload(index, payload, size, flags, false);
 }
 
 void *kzalloc(size_t size, uint32_t flags) {
     return kmalloc_internal(size, flags, true);
+}
+
+bool kmalloc_try_grow(void *pointer, size_t size) {
+    if (pointer == 0 || size == 0U || size > UINT32_MAX) return false;
+    allocation_header_t *header = payload_header(pointer);
+    if (header->magic != KMEM_MAGIC ||
+        header->class_index != KMEM_CLASS_LARGE ||
+        header->state != KMEM_STATE_ALLOCATED) return false;
+    page_t *page = (page_t *)header->owner;
+    if (page == 0 || page->owner != PAGE_OWNER_SLAB ||
+        page->order > BUDDY_MAX_ORDER) return false;
+    size_t capacity = ((size_t)PAGE_SIZE << page->order) -
+        KMEM_PAYLOAD_OFFSET - KMEM_TRAILER_SIZE;
+    if (header->requested > capacity || size < header->requested ||
+        size > capacity || !header_redzones_valid(header, pointer)) return false;
+    /* 此分配不在本地缓存或共享空闲链表中。其所有者会串行化访问，因此无需固定 CPU、获取分配器锁或
+     * 执行 TLB 操作。 */
+    bytes_fill((uint8_t *)pointer + header->requested, KMEM_POISON_ALLOC,
+               size - header->requested);
+    header->requested = (uint32_t)size;
+    header->cookie = allocation_cookie(header, pointer);
+    write_trailer(pointer, header->requested, header->cookie);
+    return true;
 }
 
 static void kfree_internal(void *pointer) {
@@ -667,8 +677,7 @@ static void kfree_internal(void *pointer) {
     }
     if (!header_redzones_valid(header, pointer)) record_error();
     size_t capacity = class_capacity(header->class_index);
-    /* Both return routes overwrite the first word with their free-list link;
-     * activation validates only the remaining poison bytes. */
+    /* 两条释放路径都会用空闲链表链接覆盖首字；激活时仅验证剩余的毒化字节。 */
     bytes_fill((uint8_t *)pointer + sizeof(void *), KMEM_POISON_FREE,
                capacity - sizeof(void *));
     header->requested = 0;
@@ -692,6 +701,13 @@ static void kfree_internal(void *pointer) {
 
 void kfree(void *pointer) {
     if (pointer == 0) return;
+    /* 大对象路径不会访问 CPU 本地空闲链表。可能耗时的毒化填充无需额外的抢占保护；page_free 会提供
+     * 自身保护。绝不能放宽调用方已有的保护。 */
+    allocation_header_t *header = payload_header(pointer);
+    if (header->magic == KMEM_MAGIC && header->class_index == KMEM_CLASS_LARGE) {
+        kfree_internal(pointer);
+        return;
+    }
     sched_preempt_disable();
     kfree_internal(pointer);
     sched_preempt_enable();

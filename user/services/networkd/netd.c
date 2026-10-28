@@ -132,7 +132,7 @@ static void netd_persist_debug(const char *text, size_t length) {
     if (!attempted) {
         attempted = true;
         if (netd_syscall_four(OS_SYS_FILE_OPEN,
-                (uint64_t)(uintptr_t)"/netd.log",
+                (uint64_t)(uintptr_t)"/log/netd.log",
                 OS_FILE_OPEN_WRITE | OS_FILE_OPEN_CREATE | OS_FILE_OPEN_TRUNCATE,
                 0644U, (uint64_t)(uintptr_t)&file) < 0)
             file = OS_INVALID_HANDLE;
@@ -197,8 +197,8 @@ static bool resolver_append_decimal(char *buffer, size_t capacity,
 }
 
 static void write_resolver_config(uint32_t address) {
-    static const char directory[] = "/etc";
-    static const char path[] = "/etc/resolv.conf";
+    static const char directory[] = "/EFI/OS";
+    static const char path[] = "/EFI/OS/resolv.conf";
     os_file_path_op_t operation = {0};
     os_handle_t file = OS_INVALID_HANDLE;
     char line[64] = "nameserver ";

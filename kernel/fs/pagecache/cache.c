@@ -1,14 +1,14 @@
 #include <kernel/block_cache.h>
 #include <kernel/string.h>
 #ifdef OS_KERNEL_BUILD
+#include <arch/x86_64/paging.h>
 #include <kernel/process.h>
 #include <kernel/sched.h>
 #endif
 
 #ifndef OS_BLOCK_CACHE_READ_AHEAD_BLOCKS
-/* Leave room for hot FAT/directory sectors when admitting a data extent.
- * Filling all cache slots on every miss defeats LRU and repeatedly reloads
- * metadata between otherwise sequential file reads. */
+/* 接纳数据范围时，为常用 FAT/目录扇区预留空间。每次未命中都占满缓存会破坏 LRU，并在原本连续的文件
+ * 读取之间反复重新加载元数据。 */
 #define OS_BLOCK_CACHE_READ_AHEAD_BLOCKS (OS_BLOCK_CACHE_ENTRY_COUNT - 1U)
 #endif
 
@@ -80,10 +80,33 @@ static BOOLEAN cache_lock(OS_BLOCK_CACHE *cache, UINT64 lba) {
     if (current != 0) {
         if (current->sched_class == SCHED_CLASS_IDLE) {
             kstatus_t status;
+            UINT64 flags = 0U;
+            bool delivering = false;
+            bool already_waiting = false;
             do {
                 status = kmutex_try_lock(&cache->WaitLock);
-                if (status == K_EAGAIN) __asm__ volatile ("pause");
+                if (status == K_EAGAIN) {
+                    if (!delivering) {
+                        /* BSP 引导续接路径不能在互斥锁上休眠。锁所有者可能需要页表锁，而另一 CPU 正等待 BSP
+                         * 确认 TLB。自旋等待期间允许接收 IPI，但不允许定时器切走这个尚未保存上下文的 idle
+                         * 续接路径。遵循页表/vmalloc 的竞争处理协议。 */
+                        __asm__ volatile ("pushfq; popq %0"
+                                          : "=r"(flags) : : "memory");
+                        sched_preempt_disable();
+                        already_waiting = x86_tlb_shootdown_active();
+                        if (!already_waiting) x86_tlb_wait_begin();
+                        __asm__ volatile ("sti" : : : "memory");
+                        delivering = true;
+                    }
+                    __asm__ volatile ("pause");
+                }
             } while (status == K_EAGAIN);
+            if (delivering) {
+                if ((flags & (1ULL << 9)) == 0U)
+                    __asm__ volatile ("cli" : : : "memory");
+                if (!already_waiting) x86_tlb_wait_end();
+                sched_preempt_enable();
+            }
             if (status != K_OK) block_cache_diag((UINT32)status, lba, cache);
             return status == K_OK;
         }
@@ -96,7 +119,7 @@ static BOOLEAN cache_lock(OS_BLOCK_CACHE *cache, UINT64 lba) {
     (void)lba;
 #endif
 
-    /* Before the scheduler has a current thread, boot I/O is BSP-confined. */
+    /* 调度器尚无当前线程前，启动 I/O 仅在 BSP 上执行。 */
     while (__atomic_exchange_n(&cache->Lock, 1U, __ATOMIC_ACQUIRE) != 0U) {
         __asm__ volatile ("pause");
     }
@@ -127,13 +150,35 @@ static OS_BLOCK_CACHE_ENTRY *find_entry_locked(OS_BLOCK_CACHE *cache,
 static BOOLEAN flush_entry_locked(OS_BLOCK_CACHE *cache,
                                   OS_BLOCK_CACHE_ENTRY *entry) {
     if (!entry->Valid || !entry->Dirty) return 1;
-    if (!block_write(cache->Device, entry->Lba, 1U, entry->Data)) return 0;
-    entry->Dirty = 0;
+    UINT8 staging[OS_BLOCK_CACHE_MAX_SIZE];
+    OS_BLOCK_CACHE_ENTRY *group[OS_BLOCK_CACHE_ENTRY_COUNT];
+    UINT32 bytes = cache->Device->BlockSize;
+    UINT32 count = 1U;
+    if (bytes == 0U || bytes > sizeof(staging) ||
+        entry->Lba >= cache->Device->BlockCount) return 0;
+    group[0] = entry;
+    /* 淘汰和显式写回共用连续脏块合并；单块直接使用缓存，批量暂存不超过 4 KiB。
+     * 保持缓存锁直到设备完成，失败时整组仍为脏，覆盖设备可能已经部分写入的情况。 */
+    while (count < OS_BLOCK_CACHE_ENTRY_COUNT &&
+           count < sizeof(staging) / bytes &&
+           count < cache->Device->BlockCount - entry->Lba) {
+        OS_BLOCK_CACHE_ENTRY *next = find_entry_locked(cache, entry->Lba + count);
+        if (next == 0 || !next->Dirty) break;
+        group[count++] = next;
+    }
+    const UINT8 *data = entry->Data;
+    if (count > 1U) {
+        for (UINT32 i = 0U; i < count; ++i)
+            copy_bytes(staging + (size_t)i * bytes, group[i]->Data, bytes);
+        data = staging;
+    }
+    if (!block_write(cache->Device, entry->Lba, count, data)) return 0;
+    for (UINT32 i = 0U; i < count; ++i) group[i]->Dirty = 0;
     return 1;
 }
 
-/* Zero mask is an ordinary write victim; prefetch excludes its reserved slots.
- * Both paths prefer the first invalid slot, then the first oldest LRU slot. */
+/* 零掩码表示普通写入替换项；预取路径会排除预留槽位。两条路径都优先选择第一个无效槽位，否则选择 LRU
+ * 中最旧的槽位。 */
 static OS_BLOCK_CACHE_ENTRY *select_entry_locked(
     OS_BLOCK_CACHE *cache, UINT32 reserved_mask) {
     _Static_assert(OS_BLOCK_CACHE_ENTRY_COUNT <= 32U,
@@ -150,8 +195,7 @@ static OS_BLOCK_CACHE_ENTRY *select_entry_locked(
     return selected;
 }
 
-/* Writes need both hit lookup and a victim. Do not stop at an invalid slot:
- * a later matching block must win over eviction. */
+/* 写入既要查找命中项，也要选择替换项。遇到无效槽位时不要立即停止：后续匹配块应优先于淘汰操作。 */
 static OS_BLOCK_CACHE_ENTRY *find_write_entry_locked(
     OS_BLOCK_CACHE *cache, UINT64 lba, BOOLEAN *hit) {
     OS_BLOCK_CACHE_ENTRY *selected = 0;
@@ -193,29 +237,26 @@ static BOOLEAN load_entry_locked(OS_BLOCK_CACHE *cache, UINT64 lba,
         if (prefetch_limit > OS_BLOCK_CACHE_READ_AHEAD_BLOCKS) {
             prefetch_limit = OS_BLOCK_CACHE_READ_AHEAD_BLOCKS;
         }
-        /* Bound speculative admission so the last few demanded sectors
-         * survive interleaved metadata/data reads.  Older demand entries
-         * remain normal LRU victims; this is not permanent pinning. */
+        /* 限制推测性接纳数量，使最近请求的扇区能在元数据/数据交错读取时保留。较旧的需求条目仍可作为
+         * 普通 LRU 替换项；这不是永久固定。 */
         UINT32 hot_count = 0U;
         for (UINT32 i = 0; i < OS_BLOCK_CACHE_ENTRY_COUNT; ++i) {
             OS_BLOCK_CACHE_ENTRY *candidate = &cache->Entries[i];
             if (candidate->Valid && candidate->LastUse != 0U &&
-                cache->Clock - candidate->LastUse < 4U &&
-                /* Just-consumed sequential sectors need not displace the
-                 * next extent; distant metadata still gets protection. */
-                !(candidate->Lba < lba && lba - candidate->Lba <= 4U)) {
+                /* 多级目录与 FAT 会反复交错访问；保留近期需求数据，并为预读留下空间。
+                 * 连续消费的冷预读数据不会升级，因此不会把整个扫描范围都当作热点。 */
+                cache->Clock - candidate->LastUse <
+                    OS_BLOCK_CACHE_ENTRY_COUNT * 5U / 8U) {
                 ++hot_count;
+                reserved_mask |= 1U << i;
             }
         }
         UINT32 admission_limit = OS_BLOCK_CACHE_ENTRY_COUNT - hot_count;
         if (admission_limit == 0U) admission_limit = 1U;
         if (prefetch_limit > admission_limit) prefetch_limit = admission_limit;
 
-        /* A FAT read commonly spans one or two 4 KiB pages.  Reserve the
-         * cache slots first, then issue one contiguous request and split it
-         * into the reserved slots.  The staging buffer is deliberately
-         * separate from the first entry: the NVMe backend may use a compound
-         * two-page DMA buffer for a 16-sector read. */
+        /* FAT 读取通常跨越一到两个 4 KiB 页面。先预留缓存槽位，再发出一个连续读取请求，并将结果拆分到
+         * 预留槽位中。暂存缓冲区有意与首个缓存项分离：NVMe 后端可能使用复合双页 DMA 缓冲区读取 16 个扇区。 */
         while (reserved_count < prefetch_limit &&
                reserved_count < cache->Device->BlockCount - lba) {
             uint64_t next_lba = lba + reserved_count;
@@ -248,16 +289,21 @@ static BOOLEAN load_entry_locked(OS_BLOCK_CACHE *cache, UINT64 lba,
             entry->Valid = 1;
             entry->Dirty = 0;
             entry->Lba = lba + i;
-            /* Speculative sectors are cold until actually requested.  Giving
-             * the entire extent demand-read recency evicts hot FAT/directory
-             * sectors merely because a different file triggered read-ahead. */
+            /* 推测读取的扇区在实际请求前都视为冷数据。若将整个范围标为需求读取，会仅因另一文件触发预读，
+             * 就驱逐常用 FAT/目录扇区。 */
             entry->LastUse = 0U;
         }
         entry = reserved[0];
     }
 
-    ++cache->Clock;
-    entry->LastUse = cache->Clock;
+    /* 连续消费预读扇区不应把一次目录扫描的每个扇区都升级为热点，
+     * 否则较深目录会挤出每次路径查询都需要的父目录。非连续命中仍正常提升。 */
+    if (entry->LastUse != 0U || !cache->LastReadValid ||
+        cache->LastReadLba >= lba || lba - cache->LastReadLba != 1U) {
+        entry->LastUse = ++cache->Clock;
+    }
+    cache->LastReadLba = lba;
+    cache->LastReadValid = 1;
     *result = entry;
     return 1;
 }
@@ -280,6 +326,8 @@ BOOLEAN block_cache_init(OS_BLOCK_CACHE *cache,
 
     cache->Device = device;
     cache->Clock = 0;
+    cache->LastReadLba = 0;
+    cache->LastReadValid = 0;
     cache->Lock = 0U;
 #ifdef OS_KERNEL_BUILD
     kmutex_init(&cache->WaitLock, false);
@@ -311,58 +359,63 @@ BOOLEAN block_cache_read(OS_BLOCK_CACHE *cache, UINT64 lba,
 
 BOOLEAN block_cache_read_range(OS_BLOCK_CACHE *cache, UINT64 lba,
                                       UINT32 count, VOID *buffer) {
-    if (cache == 0 || buffer == 0 || count == 0U || count > 128U) return 0;
+    if (cache == 0 || buffer == 0 || count == 0U) return 0;
     if (!cache_lock(cache, lba)) return 0;
     const OS_BLOCK_DEVICE *device = cache->Device;
     if (!cache->Initialized || device == 0 || device->BlockSize == 0U ||
         device->BlockSize > OS_BLOCK_CACHE_MAX_SIZE ||
+        count > OS_BLOCK_CACHE_MAX_READ_BYTES / device->BlockSize ||
         lba >= device->BlockCount || count > device->BlockCount - lba) {
         cache_unlock(cache);
         return 0;
     }
-    /* One bounded metadata scan for the whole extent. The lock keeps these
-     * slot indices valid across the backend read; bulk misses never evict.
-     * One byte per requested sector avoids a 128-pointer stack allocation. */
-    _Static_assert(OS_BLOCK_CACHE_ENTRY_COUNT < 256U, "range slot index fits byte");
-    UINT8 slots[128];
-    for (UINT32 offset = 0U; offset < count; ++offset)
-        slots[offset] = OS_BLOCK_CACHE_ENTRY_COUNT;
+    /* 仅排序实际命中的缓存槽位，空间与请求长度无关。未命中区间可直接作为一个设备请求，
+     * 不必为了固定的逐扇区索引把连续数据切成 64 KiB。重复 LBA 仍优先采用首个槽位。 */
+    UINT8 slots[OS_BLOCK_CACHE_ENTRY_COUNT];
+    UINT32 offsets[OS_BLOCK_CACHE_ENTRY_COUNT];
+    UINT32 hits = 0U;
+    _Static_assert(OS_BLOCK_CACHE_ENTRY_COUNT <= 256U, "range slot index fits byte");
     if (count == 1U) {
         OS_BLOCK_CACHE_ENTRY *single = find_entry_locked(cache, lba);
-        if (single != 0) slots[0] = (UINT8)(single - cache->Entries);
-    } else {
-        for (UINT32 index = 0U; index < OS_BLOCK_CACHE_ENTRY_COUNT; ++index) {
-            OS_BLOCK_CACHE_ENTRY *candidate = &cache->Entries[index];
-            if (!candidate->Valid || candidate->Lba < lba) continue;
-            UINT64 offset = candidate->Lba - lba;
-            if (offset < count && slots[offset] == OS_BLOCK_CACHE_ENTRY_COUNT)
-                slots[offset] = (UINT8)index;
+        if (single != 0) {
+            slots[0] = (UINT8)(single - cache->Entries);
+            offsets[0] = 0U;
+            hits = 1U;
         }
+    } else for (UINT32 index = 0U; index < OS_BLOCK_CACHE_ENTRY_COUNT; ++index) {
+        OS_BLOCK_CACHE_ENTRY *candidate = &cache->Entries[index];
+        if (!candidate->Valid || candidate->Lba < lba) continue;
+        UINT64 offset = candidate->Lba - lba;
+        if (offset >= count) continue;
+        UINT32 at = 0U;
+        while (at < hits && offsets[at] < offset) ++at;
+        if (at < hits && offsets[at] == offset) continue;
+        for (UINT32 move = hits; move > at; --move) {
+            offsets[move] = offsets[move - 1U];
+            slots[move] = slots[move - 1U];
+        }
+        offsets[at] = (UINT32)offset;
+        slots[at] = (UINT8)index;
+        ++hits;
     }
     UINT32 done = 0U;
-    while (done < count) {
-        OS_BLOCK_CACHE_ENTRY *entry = slots[done] < OS_BLOCK_CACHE_ENTRY_COUNT ?
-            &cache->Entries[slots[done]] : 0;
+    for (UINT32 hit = 0U; hit <= hits; ++hit) {
+        UINT32 next = hit < hits ? offsets[hit] : count;
         UINT8 *out = (UINT8 *)buffer + (size_t)done * device->BlockSize;
-        if (entry != 0) {
-            copy_bytes(out, entry->Data, device->BlockSize);
-            entry->LastUse = ++cache->Clock;
-            ++done;
-            continue;
-        }
-        UINT32 run = 1U;
-        while (run < count - done) {
-            if (slots[done + run] < OS_BLOCK_CACHE_ENTRY_COUNT) break;
-            ++run;
-        }
-        /* Keep the cache lock across the backend read: a concurrent dirty
-         * write must not disappear behind an older on-disk version. Bulk
-         * misses do not evict hot FAT metadata or need speculative slots. */
-        if (!block_read(device, lba + done, run, out)) {
+        /* 后端读取期间保持缓存锁：并发脏写不得被较旧的磁盘版本覆盖。批量未命中不会淘汰常用 FAT 元数据，
+         * 也不需要预留推测读取槽位。 */
+        if (next > done && !block_read(device, lba + done, next - done, out)) {
             cache_unlock(cache);
             return 0;
         }
-        done += run;
+        done = next;
+        if (hit < hits) {
+            OS_BLOCK_CACHE_ENTRY *entry = &cache->Entries[slots[hit]];
+            copy_bytes((UINT8 *)buffer + (size_t)done * device->BlockSize,
+                       entry->Data, device->BlockSize);
+            entry->LastUse = ++cache->Clock;
+            ++done;
+        }
     }
     cache_unlock(cache);
     return 1;
@@ -401,6 +454,40 @@ BOOLEAN block_cache_write(OS_BLOCK_CACHE *cache, UINT64 lba,
 
     cache_unlock(cache);
     return 1;
+}
+
+/* 在缓存锁内协调连续写入：先保存覆盖范围中的旧脏数据，再丢弃覆盖范围缓存。
+ * 设备即使只写了一部分就报错，后续读取也会看到实际设备内容，其他脏块不会丢失。 */
+BOOLEAN block_cache_write_range(OS_BLOCK_CACHE *cache, UINT64 lba,
+                                UINT32 count, const VOID *buffer) {
+    if (cache == 0 || buffer == 0 || count == 0U) return 0;
+    if (!cache_lock(cache, lba)) return 0;
+    const OS_BLOCK_DEVICE *device = cache->Device;
+    if (!cache->Initialized || device == 0 || device->BlockSize == 0U ||
+        device->BlockSize > OS_BLOCK_CACHE_MAX_SIZE ||
+        count > OS_BLOCK_CACHE_MAX_WRITE_BYTES / device->BlockSize ||
+        lba >= device->BlockCount || count > device->BlockCount - lba) {
+        cache_unlock(cache);
+        return 0;
+    }
+    for (UINT32 i = 0U; i < OS_BLOCK_CACHE_ENTRY_COUNT; ++i) {
+        OS_BLOCK_CACHE_ENTRY *entry = &cache->Entries[i];
+        if (entry->Valid && entry->Dirty && entry->Lba >= lba &&
+            entry->Lba - lba < count && !flush_entry_locked(cache, entry)) {
+            cache_unlock(cache);
+            return 0;
+        }
+    }
+    for (UINT32 i = 0U; i < OS_BLOCK_CACHE_ENTRY_COUNT; ++i) {
+        OS_BLOCK_CACHE_ENTRY *entry = &cache->Entries[i];
+        if (entry->Valid && entry->Lba >= lba && entry->Lba - lba < count) {
+            entry->Valid = 0;
+            entry->Dirty = 0;
+        }
+    }
+    BOOLEAN success = block_write(device, lba, count, buffer);
+    cache_unlock(cache);
+    return success;
 }
 
 BOOLEAN block_cache_flush(OS_BLOCK_CACHE *cache) {

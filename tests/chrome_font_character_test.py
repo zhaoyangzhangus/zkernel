@@ -49,7 +49,7 @@ int main() {
  gfx::FallbackFontData data;
  data.ttc_index=7;data.is_bold=true;
  assert(route(65,"en",&data));
- assert(data.filepath=="/etc/fonts/default.ttf" && data.ttc_index==0 && !data.is_bold);
+ assert(data.filepath=="/EFI/OS/fonts/default.ttf" && data.ttc_index==0 && !data.is_bold);
  assert(!route(0x4e2d,"zh",&data));
  assert(!route(65,nullptr,nullptr));
  available=false;

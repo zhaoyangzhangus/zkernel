@@ -16,6 +16,8 @@ code = r'''
 typedef struct {unsigned rtl_xid;} e1000_state_t;
 static unsigned milliseconds, pulse_start, pulse_done, reads, busy_reads;
 static bool read_fail, config_fail;
+/* ASPM has its own production-path regression; isolate MCU startup here. */
+static bool rtl8126_disable_aspm(e1000_state_t *s) {(void)s;return true;}
 static uint8_t rtl8126_read8(e1000_state_t *s,unsigned r) {(void)s;(void)r;return 0xff;}
 static uint16_t rtl8126_read16(e1000_state_t *s,unsigned r) {(void)s;(void)r;return 0xffff;}
 static uint32_t rtl8126_read32(e1000_state_t *s,unsigned r) {(void)s;(void)r;return 0xffffffff;}

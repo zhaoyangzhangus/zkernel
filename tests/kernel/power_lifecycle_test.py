@@ -26,6 +26,10 @@ static _Bool counted_cas(atomic_uint *p,unsigned *expected,unsigned value,
 }
 ''' + source.replace('atomic_compare_exchange_strong_explicit(&g_power.init_state',
                      'counted_cas(&g_power.init_state') + r'''
+kstatus_t vfs_sync_all(void) { assert(0); return K_EIO; }
+kstatus_t e1000_shutdown(void) { assert(0); return K_EIO; }
+void x86_system_reboot(void) { assert(0); __builtin_trap(); }
+kstatus_t x86_acpi_poweroff(void) { assert(0); return K_EIO; }
 static bool sleep_supported;
 static kstatus_t sleep_status;
 static unsigned sleeps;

@@ -8,7 +8,7 @@ root=Path(__file__).resolve().parents[2]
 process=(root/'kernel/process/process.c').read_text()
 lookup=process[process.index('uint64_t linux_thread_visible_tid('):process.index('kstatus_t process_task_query(')]
 linux=(root/'kernel/syscall/linux.c').read_text()
-adapter=linux[linux.index('static int64_t linux_sched_read('):linux.index('static int64_t linux_sched_getaffinity(')]
+adapter=linux[linux.index('static int64_t linux_sched_read('):linux.index('static int64_t linux_sigaction(')]
 identity='''static int64_t identity_syscall(uint64_t number, uint64_t pointer) {
     thread_t *thread=current;
     process_t *process=thread ? thread->process : 0;
@@ -32,6 +32,8 @@ static list_head_t g_process_registry;
 static thread_t *current;
 static unsigned gets,puts,registry_depth,process_depth;
 static bool fault;
+static uint32_t x86_smp_discovered_count(void){return 4;}
+static void linux_zero(void *p,size_t size){memset(p,0,size);}
 thread_t *sched_current_thread(void) { return current; }
 bool linux_process_is(process_t *p) { return p->personality==OS_PROCESS_PERSONALITY_LINUX_X86_64; }
 void object_get(void *p) { assert(p);++gets; }
@@ -53,6 +55,7 @@ static process_t own,foreign;
 static thread_t leader,sibling,other,dead;
 static void add(thread_t *t,process_t *p,uint64_t tid) {
     t->process=p;t->tid=tid;t->base_sched_class=SCHED_CLASS_FAIR;
+    t->affinity.bits[0]=15;
     atomic_init(&t->state,THREAD_RUNNING);list_add_tail(&p->threads,&t->process_node);
 }
 int main(void) {
@@ -74,6 +77,14 @@ int main(void) {
     assert(linux_sched_read(11,true,0)==K_ESRCH); /* Native leader ID is not its Linux TID. */
     assert(linux_sched_read(20,true,0)==0&&linux_sched_read(21,true,0)==K_ESRCH);
     assert(linux_sched_read(22,true,0)==K_ESRCH&&linux_sched_read(999,true,0)==K_ESRCH);
+    uint64_t mask=0;
+    assert(linux_sched_getaffinity(10,sizeof(mask),(uintptr_t)&mask)==8&&mask==15);
+    sibling.affinity.bits[0]=5;
+    assert(linux_sched_getaffinity(12,sizeof(mask),(uintptr_t)&mask)==8&&mask==5);
+    assert(linux_sched_getaffinity(20,sizeof(mask),(uintptr_t)&mask)==8&&mask==15);
+    assert(linux_sched_getaffinity(11,sizeof(mask),(uintptr_t)&mask)==K_ESRCH);
+    assert(linux_sched_getaffinity(22,sizeof(mask),(uintptr_t)&mask)==K_ESRCH);
+    assert(linux_sched_getaffinity((42ULL<<32)|10,sizeof(mask),(uintptr_t)&mask)==8);
     assert(linux_sched_read(UINT64_MAX,true,0)==K_EINVAL);
     assert(linux_sched_read((42ULL<<32)|10,true,0)==0); /* pid_t is 32-bit. */
     current=&sibling;assert(linux_sched_read(0,true,0)==0&&linux_sched_read(10,true,0)==0);

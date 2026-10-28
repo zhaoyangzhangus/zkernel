@@ -7,6 +7,7 @@
 #include <kernel/net_core.h>
 #include <kernel/pci.h>
 #include <kernel/socket.h>
+#include <kernel/string.h>
 #include <kernel/vfs.h>
 #include <kernel/console.h>
 
@@ -33,7 +34,6 @@
 #define RTL8126_REG_TX_POLL       0x0090U
 #define RTL8126_REG_RX_MAX_SIZE   0x00DAU
 #define RTL8126_REG_CPLUS_CMD     0x00E0U
-#define RTL8126_REG_INTR_MITIGATE 0x00E2U
 #define RTL8126_REG_RX_DESC_LO    0x00E4U
 #define RTL8126_REG_MAC0_BACKUP   0x19E0U
 #define RTL8126_REG_CSIDR         0x0064U
@@ -42,18 +42,20 @@
 #define RTL8126_REG_GPHY_OCP      0x00B8U
 #define RTL8126_REG_CONFIG1       0x0052U
 #define RTL8126_REG_CONFIG3       0x0054U
+#define RTL8126_REG_CONFIG5       0x0056U
 #define RTL8126_REG_MAR0          0x0008U
 #define RTL8126_REG_RSS_CTRL      0x4500U
 #define RTL8126_REG_QUEUE_CTRL    0x4800U
 #define RTL8126_REG_INT_CFG1      0x007AU
 #define RTL8126_REG_MISC          0x00F0U
 #define RTL8126_REG_MCU           0x00D3U
+#define RTL8126_REG_FIFO_STATUS   0x00E2U
 
 #define RTL8126_CHIP_RESET  (1U << 4)
 #define RTL8126_CHIP_RX_EN  (1U << 3)
 #define RTL8126_CHIP_TX_EN  (1U << 2)
 #define RTL8126_CHIP_STOP_REQ (1U << 7)
-#define RTL8126_TXCFG_AUTO_FIFO (1U << 7)
+#define RTL8126_TX_MIN_FRAME_SIZE 60U
 #define RTL8126_PHY_LINK     (1U << 1)
 #define RTL8126_CONFIG3_L23   (1U << 1)
 #define RTL8126_MCU_NOW_IS_OOB (1U << 7)
@@ -125,14 +127,10 @@ _Static_assert(sizeof(rtl8126_firmware_header_t) == 45U,
 
 #define RTL8126_RX_PAGE_COUNT \
     ((RTL8126_RING_COUNT * RTL8126_RX_BUFFER_SIZE) / PAGE_SIZE)
+_Static_assert(RTL8126_RING_COUNT * sizeof(rtl8126_descriptor_t) <= PAGE_SIZE,
+               "RTL8126 descriptor rings must fit their one-page DMA allocation");
 #define RTL8126_IRQ_VECTOR 0x51U
 #define RTL8126_ERROR_BASE 0x81260000U
-
-static void rtl8126_copy(void *destination, const void *source, size_t size) {
-    uint8_t *out = (uint8_t *)destination;
-    const uint8_t *in = (const uint8_t *)source;
-    while (size-- != 0U) *out++ = *in++;
-}
 
 const pci_device_t *rtl8126_pci_find(void) {
     const pci_host_t *host = pci_current_host();
@@ -554,59 +552,16 @@ static bool rtl8126_firmware_run(e1000_state_t *state,
 }
 
 static bool rtl8126_load_firmware(e1000_state_t *state) {
-    const char *paths[4];
-    uint8_t *data = 0;
+    void *data = 0;
     size_t size = 0U;
     const uint32_t *actions;
     uint32_t action_count;
-    file_t *file = 0;
 
     if (state == 0) return false;
-    paths[0] = state->rtl_xid == RTL8126_XID_3 ?
-               "/rtl_nic/rtl8126a-3.fw" : "/rtl_nic/rtl8126a-2.fw";
-    paths[1] = "/lib/firmware/rtl_nic/rtl8126a-3.fw";
-    paths[2] = "/usr/lib/firmware/rtl_nic/rtl8126a-3.fw";
-    paths[3] = "/boot/firmware/rtl_nic/rtl8126a-3.fw";
-    if (state->rtl_xid == RTL8126_XID_2) {
-        paths[1] = "/lib/firmware/rtl_nic/rtl8126a-2.fw";
-        paths[2] = "/usr/lib/firmware/rtl_nic/rtl8126a-2.fw";
-        paths[3] = "/boot/firmware/rtl_nic/rtl8126a-2.fw";
-    }
-    for (uint32_t index = 0U; index < 4U; ++index) {
-        uint64_t file_size;
-        uint64_t bytes;
-        if (vfs_open_kernel(paths[index], VFS_OPEN_READ, 0U, &file) != K_OK ||
-            file == 0 || file->vnode == 0) {
-            if (file != 0) vfs_close(file);
-            file = 0;
-            continue;
-        }
-        file_size = file->vnode->size;
-        if (file_size == 0U || file_size > RTL8126_FIRMWARE_MAX_BYTES ||
-            file_size > SIZE_MAX) {
-            vfs_close(file);
-            file = 0;
-            continue;
-        }
-        data = (uint8_t *)kmalloc((size_t)file_size, 0U);
-        if (data == 0) {
-            vfs_close(file);
-            file = 0;
-            continue;
-        }
-        bytes = 0U;
-        if (vfs_read_kernel(file, data, (size_t)file_size, &bytes) == K_OK &&
-            bytes == file_size) {
-            size = (size_t)file_size;
-            vfs_close(file);
-            file = 0;
-            break;
-        }
-        kfree(data);
-        data = 0;
-        vfs_close(file);
-        file = 0;
-    }
+    const char *path = state->rtl_xid == RTL8126_XID_3 ?
+        "/EFI/OS/firmware/rtl8126/rtl8126a-3.fw" :
+        "/EFI/OS/firmware/rtl8126/rtl8126a-2.fw";
+    (void)vfs_load_file_kernel(path, 1U, RTL8126_FIRMWARE_MAX_BYTES, &data, &size);
     if (data == 0 || !rtl8126_firmware_format(data, size, &actions,
                                                &action_count) ||
         !rtl8126_firmware_run(state, actions, action_count)) {
@@ -615,6 +570,20 @@ static bool rtl8126_load_firmware(e1000_state_t *state) {
     }
     kfree(data);
     return true;
+}
+
+static bool rtl8126_phy_wait_reset(e1000_state_t *state) {
+    /* 固件完成不代表 PHY 复位也已完成。修改 PHY 设置前，遵循 r8169 固件后的 BMCR 握手流程。
+     * 等待必须有界；复位失败或 PHY 不可读时不得启动 DMA。 */
+        if (state == 0) return false;
+    for (uint32_t attempt = 0U; attempt <= 12U; ++attempt) {
+        uint16_t bmcr;
+        if (!rtl8126_gphy_ocp_read(state, RTL8126_PHY_OCP_BASE, &bmcr) ||
+            bmcr == UINT16_MAX) return false;
+        if ((bmcr & (1U << 15)) == 0U) return true;
+        if (attempt != 12U) rtl8126_delay_ms(50U);
+    }
+    return false;
 }
 
 static bool rtl8126_phy_page(e1000_state_t *state, uint16_t page,
@@ -635,10 +604,9 @@ static bool rtl8126_phy_page(e1000_state_t *state, uint16_t page,
 }
 
 static bool rtl8126_phy_start_autoneg(e1000_state_t *state) {
-    /* Clause-22 BMCR is mapped into vendor OCP at A400. Firmware and a
-     * previous OS may leave power-down/isolate set; a MAC reset alone does
-     * not restart copper negotiation. Preserve speed advertisements. */
-    const uint16_t stopped = (1U << 11) | (1U << 10) | (1U << 14);
+    /* Clause-22 BMCR 映射到厂商 OCP 地址 A400。固件或先前的操作系统可能保留 power-down/isolate 状态；
+     * 单独复位 MAC 不会重新启动铜缆协商。保留速率通告设置。 */
+        const uint16_t stopped = (1U << 11) | (1U << 10) | (1U << 14);
     const uint16_t negotiate = (1U << 12) | (1U << 9);
     return rtl8126_phy_page(state, 0U, 0U, stopped, negotiate);
 }
@@ -649,8 +617,9 @@ static bool rtl8126_phy_config(e1000_state_t *state) {
 
     firmware_loaded = rtl8126_load_firmware(state);
     state->rtl_firmware_required = !firmware_loaded;
-    /* RTL8126A MAC version 70 PHY setup from the upstream r8169 path. */
-    success = rtl8126_phy_page(state, 0x0A44U, 0x11U, 0U,
+    if (firmware_loaded && !rtl8126_phy_wait_reset(state)) return false;
+    /* RTL8126A MAC 版本 70 的 PHY 设置沿用上游 r8169 路径。 */
+        success = rtl8126_phy_page(state, 0x0A44U, 0x11U, 0U,
                                (uint16_t)(1U << 11)) && success;
     success = rtl8126_phy_page(state, 0x0A43U, 0x10U, (uint16_t)(1U << 2),
                                0U) && success;
@@ -666,12 +635,28 @@ static bool rtl8126_phy_config(e1000_state_t *state) {
     return success && rtl8126_phy_start_autoneg(state);
 }
 
+static bool rtl8126_disable_aspm(e1000_state_t *state) {
+    uint8_t interrupt_config = rtl8126_read8(state, RTL8126_REG_INT_CFG);
+    uint8_t config5 = rtl8126_read8(state, RTL8126_REG_CONFIG5);
+
+    if (interrupt_config == UINT8_MAX || config5 == UINT8_MAX) return false;
+    /* RTL8126 使用 INT_CFG0 的 bit 3，而非旧版 Config2 CLKREQ 位。保持芯片侧 ASPM 关闭：此驱动不管理
+     * PCIe LTR 和 L1 子状态。PCIe 链路报告 ASPM 已关闭，仍不足以清除控制器继承的内部省电状态。 */
+    if (!rtl8126_mac_ocp_modify(state, 0xE092U, 0x00FFU, 0U)) return false;
+    rtl8126_write8(state, RTL8126_REG_INT_CFG,
+                   interrupt_config & (uint8_t)~(1U << 3));
+    rtl8126_write8(state, RTL8126_REG_CONFIG5,
+                   config5 & (uint8_t)~1U);
+    return true;
+}
+
 static bool rtl8126_hardware_start(e1000_state_t *state) {
     bool success = true;
 
     if (state == 0 || (state->rtl_xid != RTL8126_XID_2 &&
                        state->rtl_xid != RTL8126_XID_3)) return false;
-    /* RTL8126A hardware start: disable PCIe L2/L3 readiness and ZRXDC. */
+    if (!rtl8126_disable_aspm(state)) return false;
+    /* RTL8126A 硬件启动：禁用 PCIe L2/L3 就绪状态和 ZRXDC。 */
     rtl8126_write8(state, RTL8126_REG_CONFIG3,
                    rtl8126_read8(state, RTL8126_REG_CONFIG3) &
                    (uint8_t)~RTL8126_CONFIG3_L23);
@@ -708,7 +693,7 @@ static bool rtl8126_hardware_start(e1000_state_t *state) {
     success = rtl8126_mac_ocp_modify(state, 0xD430U, 0x0FFFU, 0x047FU) && success;
     success = rtl8126_mac_ocp_modify(state, 0xEA1CU, 0x0004U, 0U) && success;
     success = rtl8126_mac_ocp_modify(state, 0xEB54U, 0U, 0x0001U) && success;
-    /* The MCU reset pulse must not collapse into consecutive PCI writes. */
+    /* MCU 复位脉冲不得被合并为连续的 PCI 写入。 */
     rtl8126_delay_ms(1U);
     success = rtl8126_mac_ocp_modify(state, 0xEB54U, 0x0001U, 0U) && success;
     rtl8126_write16(state, 0x1880U,
@@ -795,33 +780,83 @@ static bool rtl8126_identify(e1000_state_t *state) {
 }
 
 /*
- * RTL8126A needs the shared-MCU FIFO released before the MAC reset.  Without
- * this vendor-driver sequence the link can come up while the RX DMA engine
- * remains stopped on real hardware.
+ * RTL8126A 必须先释放共享 MCU FIFO，再复位 MAC。真实硬件上若缺少此厂商驱动初始化序列，链路可能已经
+ * 建立，但 RX DMA 引擎仍处于停止状态。
  */
-static void rtl8126_hardware_initialize(e1000_state_t *state) {
+static bool rtl8126_wait_fifo_empty(const e1000_state_t *state) {
+    uint64_t deadline = 0U;
+    if (!rtl8126_wait_mcu_flags(state, RTL8126_MCU_RXTX_EMPTY, true)) {
+        e1000_record_error(RTL8126_ERROR_BASE | 0x21U);
+        return false;
+    }
+    if (x86_boot_cpu_features.tsc_hz != 0U)
+        deadline = x86_read_tsc() + x86_timeout_ns_to_tsc(10000000ULL);
+    for (uint32_t spin = 0U; spin < 1000000U; ++spin) {
+        uint16_t status = rtl8126_read16(state, RTL8126_REG_FIFO_STATUS);
+        if (status == UINT16_MAX) {
+            e1000_record_error(RTL8126_ERROR_BASE | 0x22U);
+            return false;
+        }
+        if ((status & 0x0103U) == 0x0103U) return true;
+        if (deadline != 0U &&
+            (int64_t)(x86_read_tsc() - deadline) >= 0) break;
+        __asm__ volatile ("pause");
+    }
+    e1000_record_error(RTL8126_ERROR_BASE | 0x23U);
+    return false;
+}
+
+static bool rtl8126_hardware_initialize(e1000_state_t *state) {
     uint8_t command;
     uint32_t misc;
 
-    if (state == 0) return;
+    if (state == 0) return false;
     misc = rtl8126_read32(state, RTL8126_REG_MISC);
+    if (misc == UINT32_MAX) {
+        e1000_record_error(RTL8126_ERROR_BASE | 0x24U);
+        return false;
+    }
     rtl8126_write32(state, RTL8126_REG_MISC,
                     misc | RTL8126_MISC_RXDV_GATED_EN);
+    rtl8126_delay_ms(2U);
     command = rtl8126_read8(state, RTL8126_REG_CHIP_CMD);
+    if (command == UINT8_MAX) {
+        e1000_record_error(RTL8126_ERROR_BASE | 0x25U);
+        return false;
+    }
+    /* 只有在发出 StopReq 后，TXFIFO_EMPTY 状态才有意义。查询任一空状态前，先等待设备要求的 200 微秒静默期。 */
+    rtl8126_write8(state, RTL8126_REG_CHIP_CMD,
+                   command | RTL8126_CHIP_STOP_REQ);
+    rtl8126_delay_ms(1U);
+    if (!rtl8126_wait_fifo_empty(state)) return false;
+    command = rtl8126_read8(state, RTL8126_REG_CHIP_CMD);
+    if (command == UINT8_MAX) {
+        e1000_record_error(RTL8126_ERROR_BASE | 0x25U);
+        return false;
+    }
     rtl8126_write8(state, RTL8126_REG_CHIP_CMD,
                    command & (uint8_t)~(RTL8126_CHIP_RX_EN |
                                         RTL8126_CHIP_TX_EN));
-    (void)rtl8126_wait_mcu_flags(state, RTL8126_MCU_RXTX_EMPTY, true);
     rtl8126_delay_ms(1U);
     rtl8126_write8(state, RTL8126_REG_MCU,
                    rtl8126_read8(state, RTL8126_REG_MCU) &
                    (uint8_t)~RTL8126_MCU_NOW_IS_OOB);
-    (void)rtl8126_mac_ocp_modify(state, 0xE8DEU, (uint16_t)(1U << 14), 0U);
-    (void)rtl8126_wait_mcu_flags(state, RTL8126_MCU_LINK_LIST_READY, true);
-    (void)rtl8126_mac_ocp_write(state, 0xC0AAU, 0x07D0U);
-    (void)rtl8126_mac_ocp_write(state, 0xC0A6U, 0x0150U);
-    (void)rtl8126_mac_ocp_write(state, 0xC01EU, 0x5555U);
-    (void)rtl8126_wait_mcu_flags(state, RTL8126_MCU_LINK_LIST_READY, true);
+    /* 保留第一个失败步骤，不在握手临界区打印日志。 */
+    if (!rtl8126_mac_ocp_modify(state, 0xE8DEU, (uint16_t)(1U << 14), 0U)) {
+        e1000_record_error(RTL8126_ERROR_BASE | 0x26U); return false;
+    }
+    if (!rtl8126_wait_mcu_flags(state, RTL8126_MCU_LINK_LIST_READY, true)) {
+        e1000_record_error(RTL8126_ERROR_BASE | 0x27U); return false;
+    }
+    if (!rtl8126_mac_ocp_write(state, 0xC0AAU, 0x07D0U) ||
+        !rtl8126_mac_ocp_write(state, 0xC0A6U, 0x0150U) ||
+        !rtl8126_mac_ocp_write(state, 0xC01EU, 0x5555U)) {
+        e1000_record_error(RTL8126_ERROR_BASE | 0x28U); return false;
+    }
+    if (!rtl8126_wait_mcu_flags(state, RTL8126_MCU_LINK_LIST_READY, true)) {
+        e1000_record_error(RTL8126_ERROR_BASE | 0x29U); return false;
+    }
+    return true;
 }
 
 static uint8_t rtl8126_order_for_pages(uint32_t page_count) {
@@ -860,14 +895,16 @@ static bool rtl8126_alloc_region(const pci_device_t *pci, uint32_t page_count,
     if (dma_map_pages((device_t *)&pci->device, pages, page_count, direction,
                       mapping) != K_OK || mapping->segment_count != 1U ||
         mapping->segments[0].length < (uint64_t)page_count * PAGE_SIZE) {
-        if (dma_mapping_active(mapping)) (void)dma_unmap_checked(mapping);
+        if (dma_mapping_active(mapping) && dma_unmap_checked(mapping) != K_OK) {
+            return false;
+        }
         page_free(*head);
         *head = 0;
         return false;
     }
     *cpu = phys_to_direct(physical);
     if (*cpu == 0) {
-        (void)dma_unmap_checked(mapping);
+        if (dma_unmap_checked(mapping) != K_OK) return false;
         page_free(*head);
         *head = 0;
         return false;
@@ -914,25 +951,13 @@ static bool rtl8126_alloc_dma(e1000_state_t *state) {
             state->pci, RTL8126_RX_PAGE_COUNT, DMA_FROM_DEVICE,
             &state->rtl_rx_buffer_page, &state->rtl_rx_buffer_dma,
             (void **)&state->rtl_rx_buffers)) {
-        (void)rtl8126_free_region(&state->rtl_rx_buffer_page,
-                                  &state->rtl_rx_buffer_dma);
-        (void)rtl8126_free_region(&state->rtl_tx_buffer_page,
-                                  &state->rtl_tx_buffer_dma);
-        (void)rtl8126_free_region(&state->rtl_rx_ring_page,
-                                  &state->rtl_rx_ring_dma);
-        (void)rtl8126_free_region(&state->rtl_tx_ring_page,
-                                  &state->rtl_tx_ring_dma);
-        state->rtl_tx_ring = 0;
-        state->rtl_rx_ring = 0;
-        state->rtl_tx_buffers = 0;
-        state->rtl_rx_buffers = 0;
+        /* 生命周期回滚负责处理部分分配结果，包括释放失败的情况。 */
         return false;
     }
 
     tx_address = rtl8126_dma_address(&state->rtl_tx_buffer_dma);
     rx_address = rtl8126_dma_address(&state->rtl_rx_buffer_dma);
     if (tx_address == 0U || rx_address == 0U) {
-        rtl8126_free_dma(state);
         return false;
     }
     for (uint32_t index = 0U; index < RTL8126_RING_COUNT; ++index) {
@@ -947,6 +972,8 @@ static bool rtl8126_alloc_dma(e1000_state_t *state) {
         rx->address = rx_address + (uint64_t)index * RTL8126_RX_BUFFER_SIZE;
     }
     state->rtl_tx_next = 0U;
+    state->rtl_tx_clean = 0U;
+    state->rtl_tx_pending = 0U;
     state->rtl_rx_next = 0U;
     dma_sync_for_device(&state->rtl_tx_ring_dma);
     dma_sync_for_device(&state->rtl_rx_ring_dma);
@@ -1025,9 +1052,8 @@ static void rtl8126_program_mac(const e1000_state_t *state) {
     (void)rtl8126_read8(state, RTL8126_REG_CHIP_CMD);
 }
 
-/* Only the normal manager context calls this, never the ISR/RX worker.
- * Eight small records per boot keep physical-machine evidence on its boot
- * volume even when no serial cable is attached. Values are hexadecimal. */
+/* 仅由常规管理器上下文调用，ISR/RX 工作线程绝不调用。每次启动最多写入八条小记录，即使没有连接串口线，
+ * 也能将真实机器诊断信息保存在启动卷。数值均以十六进制表示。 */
 static void rtl8126_persist_diagnostic(uint32_t report, const uint32_t values[27]) {
     static const char *const labels[27] = {
         " IRQ=", " IRQSTATUS=", " RXDESC=", " RXFRAME=", " TX=",
@@ -1050,7 +1076,7 @@ static void rtl8126_persist_diagnostic(uint32_t report, const uint32_t values[27
             line[used++] = hex[(values[i] >> (28U - 4U * digit)) & 15U];
     }
     line[used++] = '\n';
-    if (vfs_open_kernel("/rtl8126.log", VFS_OPEN_WRITE | VFS_OPEN_CREATE |
+    if (vfs_open_kernel("/log/rtl8126.log", VFS_OPEN_WRITE | VFS_OPEN_CREATE |
                         (report == 0U ? VFS_OPEN_TRUNCATE : VFS_OPEN_APPEND),
                         0644U, &file) != K_OK || file == 0) return;
     for (size_t offset = 0U; offset < used;) {
@@ -1143,8 +1169,8 @@ void rtl8126_emit_diagnostic(void) {
         rx_next = state->rtl_rx_ring[state->rtl_rx_next].options1;
     if (state->rtl_tx_ring != 0) {
         dma_sync_for_cpu(&state->rtl_tx_ring_dma);
-        tx_last = state->rtl_tx_ring[(state->rtl_tx_next + RTL8126_RING_COUNT - 1U) %
-                                     RTL8126_RING_COUNT].options1;
+        tx_last = state->rtl_tx_ring[((state->rtl_tx_next + RTL8126_RING_COUNT - 1U) %
+                                    RTL8126_RING_COUNT)].options1;
         tx_first = state->rtl_tx_ring[0].options1;
         for (uint32_t i = 0U; i < RTL8126_RING_COUNT; ++i)
             if ((state->rtl_tx_ring[i].options1 & RTL8126_DESC_OWN) != 0U) ++tx_owned;
@@ -1188,16 +1214,41 @@ static bool rtl8126_reset_controller(e1000_state_t *state) {
     return false;
 }
 
+static bool rtl8126_set_busmaster(e1000_state_t *state, bool enabled) {
+    uint32_t value;
+    if (state == 0 || state->pci == 0 ||
+        pci_read_config32(state->pci, 4U, &value) != K_OK ||
+        value == UINT32_MAX) return false;
+    uint16_t command = (uint16_t)value;
+    command = (uint16_t)((command | 2U) & (uint16_t)~4U);
+    if (enabled) command |= 4U;
+    /* PCI Status 是 W1C 寄存器：高半部分写零，不得执行读-改-写。 */
+    if (pci_write_config32(state->pci, 4U, command) != K_OK ||
+        pci_read_config32(state->pci, 4U, &value) != K_OK ||
+        value == UINT32_MAX || (value & 6U) != (command & 6U)) return false;
+    ((pci_device_t *)state->pci)->command = (uint16_t)value;
+    return true;
+}
+
+static bool rtl8126_quiesce_dma(e1000_state_t *state) {
+    rtl8126_clear_interrupts(state);
+    rtl8126_write8(state, RTL8126_REG_CHIP_CMD, 0U);
+    /* 复位完成后才能释放设备所有的描述符或页面。即使复位失败也要尝试关闭 PCI 门控；任一操作出错时都
+     * 保留资源。 */
+    bool reset = rtl8126_reset_controller(state);
+    bool gated = rtl8126_set_busmaster(state, false);
+    return reset && gated;
+}
+
 static void rtl8126_write_dma_base(const e1000_state_t *state,
                                    uint32_t low_offset, uint64_t address) {
-    /* Realtek documents the high dword as the first half of a 64-bit update. */
+    /* Realtek 文档规定先写高双字，作为 64 位更新的第一步。 */
     rtl8126_write32(state, low_offset + 4U, (uint32_t)(address >> 32));
     rtl8126_write32(state, low_offset, (uint32_t)address);
 }
 
-/* Caller owns the controller lifecycle. Never reset DMA rings here: hardware
- * may still own descriptors. Only restart a stopped, already configured MAC.
- * Failed readback is an error, never a successful packet submission. */
+/* 调用方负责控制器生命周期。此处绝不复位 DMA 环：硬件可能仍拥有其中的描述符。仅重新启动已配置但处于
+ * 停止状态的 MAC。读回失败必须报告错误，不能当作报文提交成功。 */
 static bool rtl8126_ensure_mac_enabled(e1000_state_t *state) {
     const uint8_t enabled = RTL8126_CHIP_RX_EN | RTL8126_CHIP_TX_EN;
     if (state == 0) return false;
@@ -1206,7 +1257,7 @@ static bool rtl8126_ensure_mac_enabled(e1000_state_t *state) {
     if ((command & (enabled | RTL8126_CHIP_STOP_REQ)) == enabled) return true;
     state->rtl_cmd_last_before_enable = command;
     ++state->rtl_enable_attempts;
-    /* One retry after a short settling interval; bounded even on broken HW. */
+    /* 短暂稳定间隔后重试一次；即使硬件故障，操作也保持有界。 */
     for (unsigned attempt = 0U; attempt < 2U; ++attempt) {
         rtl8126_write8(state, RTL8126_REG_CHIP_CMD,
                        (uint8_t)((command & (uint8_t)~RTL8126_CHIP_STOP_REQ) | enabled));
@@ -1240,6 +1291,7 @@ static bool rtl8126_start_controller(e1000_state_t *state) {
     rtl8126_program_mac(state);
     rtl8126_write8(state, RTL8126_REG_INT_CFG, 0U);
     rtl8126_write16(state, RTL8126_REG_INT_CFG1, 0U);
+    /* 0xE2 在 RTL8126 上是 FIFO 状态寄存器，而非旧版 IntrMitigate 寄存器。仅通过逐向量寄存器关闭合并。 */
     for (uint32_t offset = 0x0A00U; offset < 0x0A80U; offset += 4U) {
         rtl8126_write32(state, offset, 0U);
     }
@@ -1249,20 +1301,21 @@ static bool rtl8126_start_controller(e1000_state_t *state) {
     rtl8126_write16(state, RTL8126_REG_RX_MAX_SIZE,
                     (uint16_t)RTL8126_RX_BUFFER_SIZE);
     rtl8126_write16(state, RTL8126_REG_CPLUS_CMD, 0U);
-    rtl8126_write16(state, RTL8126_REG_INTR_MITIGATE, 0U);
     rtl8126_write32(state, RTL8126_REG_MAR0 + 4U, UINT32_MAX);
     rtl8126_write32(state, RTL8126_REG_MAR0, UINT32_MAX);
 
-    /* Match r8169's RTL8126 start order: lock/commit descriptors, enable
-     * the MAC, then program RX/TX configuration. Its FIFO is dynamic, not
-     * the legacy static-FIFO layout selected when AUTO_FIFO is absent. */
+    /* 提交描述符并启用 MAC，然后配置 RX/TX。TXCFG_AUTO_FIFO（bit 7）属于旧款 8111E-VL MAC，不适用于
+     * RTL8126。r8169 的 rtl_is_8168evl_up() 明确仅适用于 MAC 版本不高于 52 的设备。 */
     rtl8126_write8(state, RTL8126_REG_CFG9346, 0U);
     (void)rtl8126_read8(state, RTL8126_REG_CHIP_CMD);
+    /* 环形队列和 DMA 映射已准备完成。启动 MAC 前先打开 PCI DMA 门控：在 busmaster 关闭时启用 MAC，可能
+     * 导致 RTL8126 TX 在后续 MAC 复位或驱动交接后仍停滞。 */
+    if (!rtl8126_set_busmaster(state, true)) return false;
     rtl8126_write8(state, RTL8126_REG_CHIP_CMD,
                    RTL8126_CHIP_RX_EN | RTL8126_CHIP_TX_EN);
     rx_config = (8U << 27) | (7U << 8) | (1U << 11) | 0x0EU;
     rtl8126_write32(state, RTL8126_REG_RX_CONFIG, rx_config);
-    tx_config = (7U << 8) | (3U << 24) | RTL8126_TXCFG_AUTO_FIFO;
+    tx_config = (7U << 8) | (3U << 24);
     rtl8126_write32(state, RTL8126_REG_TX_CONFIG, tx_config);
     state->rtl_cmd_after_start = rtl8126_read8(state, RTL8126_REG_CHIP_CMD);
     return true;
@@ -1279,6 +1332,13 @@ static void rtl8126_irq_handler(uint8_t vector, struct arch_trap_frame *frame,
     status = rtl8126_read32(state, RTL8126_REG_INT_STATUS);
     if (status == 0U || status == UINT32_MAX) return;
     __atomic_add_fetch(&state->rtl_irq_status_count, 1U, __ATOMIC_RELAXED);
+    /* 排空 RX 后必须重新布置 MSI。数据包突发时，若状态更新与描述符回收竞争，不得让 MSI 一直保持启用。 */
+    if ((status & RTL8126_INT_MASK_VALUE) != 0U) {
+        rtl8126_write32(state, RTL8126_REG_INT_MASK, 0U);
+        /* 屏蔽操作是已投递的 PCIe 写入。其他 CPU 执行延迟批次前必须先排空写入；仅使用 CPU 栅栏无法确保
+         * 写入到达网卡。 */
+        (void)rtl8126_read32(state, RTL8126_REG_INT_MASK);
+    }
     rtl8126_write32(state, RTL8126_REG_INT_STATUS, status);
     if ((status & RTL8126_INT_MASK_VALUE) != 0U) {
         (void)e1000_schedule_deferred_poll();
@@ -1295,9 +1355,8 @@ bool rtl8126_bind_interrupt_state(e1000_state_t *state) {
         state->rtl_irq_bound || RTL8126_IRQ_VECTOR > IRQ_VECTOR_LAST) {
         return false;
     }
-    /* RTL8126 V2 maps RX/link events to separate MSI-X message IDs.  This
-     * driver owns one IRQ slot, so use the documented single-vector MSI
-     * fallback instead of programming only MSI-X entry zero. */
+    /* RTL8126 V2 将 RX/链路事件映射到不同的 MSI-X 消息 ID。此驱动仅拥有一个 IRQ 槽位，因此使用文档规定的
+     * 单向量 MSI 回退，而不是只配置 MSI-X 消息 0。 */
     use_msix = false;
     table = paddr_make(0U);
     entries = 0U;
@@ -1366,21 +1425,21 @@ void rtl8126_unbind_interrupt_state(e1000_state_t *state) {
 }
 
 bool rtl8126_initialize_state(e1000_state_t *state, const pci_device_t *pci) {
-    if (state == 0 || pci == 0 || state->initialized) {
+    if (state == 0 || pci == 0 || state->initialized || state->rtl_dma_quarantined) {
         e1000_record_error(RTL8126_ERROR_BASE | 1U);
         return false;
     }
     e1000_state_prepare(state, pci, NET_BACKEND_RTL8126);
-    if (pci_enable_memory_busmaster((pci_device_t *)pci) != K_OK ||
+    if (!rtl8126_set_busmaster(state, false) ||
         !rtl8126_map_mmio(state) || !rtl8126_identify(state)) {
         e1000_record_error(RTL8126_ERROR_BASE | 2U);
         rtl8126_unmap_mmio(state);
         return false;
     }
-    rtl8126_hardware_initialize(state);
-    if (!rtl8126_reset_controller(state)) {
+    state->rtl_dma_quarantined = true;
+    if (!rtl8126_hardware_initialize(state) || !rtl8126_reset_controller(state)) {
         e1000_record_error(RTL8126_ERROR_BASE | 2U);
-        rtl8126_unmap_mmio(state);
+        (void)rtl8126_destroy_state(state);
         return false;
     }
     rtl8126_read_mac(state);
@@ -1388,8 +1447,7 @@ bool rtl8126_initialize_state(e1000_state_t *state, const pci_device_t *pci) {
         !rtl8126_alloc_dma(state) ||
         !rtl8126_start_controller(state)) {
         e1000_record_error(RTL8126_ERROR_BASE | 3U);
-        (void)rtl8126_free_dma(state);
-        rtl8126_unmap_mmio(state);
+        (void)rtl8126_destroy_state(state);
         return false;
     }
     e1000_configure_link_local(state);
@@ -1399,43 +1457,78 @@ bool rtl8126_initialize_state(e1000_state_t *state, const pci_device_t *pci) {
                       RTL8126_PHY_LINK) != 0U;
     state->device.link_up = state->link_up;
     state->initialized = true;
+    state->rtl_dma_quarantined = false;
     e1000_install_socket_outputs(state);
     return true;
 }
 
 bool rtl8126_destroy_state(e1000_state_t *state) {
-    bool success = true;
-    if (state == 0 || !state->initialized) return true;
+    if (state == 0 || (!state->initialized && !state->rtl_dma_quarantined)) return true;
     e1000_runtime_set_ready(false);
     e1000_remove_socket_outputs();
     rtl8126_unbind_interrupt_state(state);
-    rtl8126_clear_interrupts(state);
-    rtl8126_write8(state, RTL8126_REG_CHIP_CMD, 0U);
-    rtl8126_write8(state, RTL8126_REG_CFG9346, 0U);
-    if (!rtl8126_free_dma(state)) success = false;
-    rtl8126_unmap_mmio(state);
     state->initialized = false;
+    state->rtl_dma_quarantined = true;
+    if (!rtl8126_quiesce_dma(state)) return false;
+    rtl8126_write8(state, RTL8126_REG_CFG9346, 0U);
+    if (!rtl8126_free_dma(state)) return false;
+    rtl8126_unmap_mmio(state);
+    state->rtl_dma_quarantined = false;
     state->backend = NET_BACKEND_NONE;
-    return success;
+    return true;
 }
 
-bool rtl8126_transmit_state(e1000_state_t *state, const uint8_t *frame,
-                            size_t length) {
+/* 调用方持有 tx_lock。仅按环形顺序回收已提交描述符：未使用槽位和乱序清除的 OWN 位都不代表 TX 有进展。 */
+static uint16_t rtl8126_reclaim_tx_locked(e1000_state_t *state) {
+    uint16_t completed = 0U;
+    dma_sync_for_cpu(&state->rtl_tx_ring_dma);
+    while (state->rtl_tx_pending != 0U) {
+        if ((state->rtl_tx_ring[state->rtl_tx_clean].options1 &
+             RTL8126_DESC_OWN) != 0U) break;
+        state->rtl_tx_clean = (uint16_t)((state->rtl_tx_clean + 1U) %
+                                          RTL8126_RING_COUNT);
+        --state->rtl_tx_pending;
+        ++completed;
+    }
+    /* 完成进度更新和队列通知是一个整体操作。生产者也会回收描述符；若将通知延迟到工作线程，生产者先
+     * 消费进度时就会丢失通知。 */
+    if (completed != 0U && state->rtl_tx_pending != 0U) {
+        dma_wmb();
+        rtl8126_write16(state, RTL8126_REG_TX_POLL, 1U);
+    }
+    return completed;
+}
+
+kstatus_t rtl8126_transmit_status(e1000_state_t *state, const uint8_t *frame,
+                                  size_t length) {
     rtl8126_descriptor_t *descriptor;
     uint32_t options;
-    if (state == 0 || !state->initialized || state->rtl_tx_ring == 0 ||
-        frame == 0 || length == 0U || length > RTL8126_TX_BUFFER_SIZE) {
-        return false;
+    size_t wire_length;
+    if (state == 0 || frame == 0 || length == 0U ||
+        length > RTL8126_TX_BUFFER_SIZE) {
+        return K_EINVAL;
     }
-    if (!rtl8126_ensure_mac_enabled(state)) return false;
+    if (!state->initialized || state->rtl_tx_ring == 0 ||
+        state->rtl_tx_buffers == 0) return K_EIO;
+    (void)rtl8126_reclaim_tx_locked(state);
+    if (state->rtl_tx_pending == RTL8126_RING_COUNT) return K_EAGAIN;
     descriptor = &state->rtl_tx_ring[state->rtl_tx_next];
-    dma_sync_for_cpu(&state->rtl_tx_ring_dma);
-    if ((descriptor->options1 & RTL8126_DESC_OWN) != 0U) return false;
-    rtl8126_copy(state->rtl_tx_buffers +
+    if ((descriptor->options1 & RTL8126_DESC_OWN) != 0U) return K_EAGAIN;
+    if (!rtl8126_ensure_mac_enabled(state)) return K_EIO;
+    memcpy(state->rtl_tx_buffers +
                      (size_t)state->rtl_tx_next * RTL8126_TX_BUFFER_SIZE,
                  frame, length);
+    /* RTL8126 需要软件填充（与 r8169 的 ETH_ZLEN 特性相同）。发布实际 DMA 长度，并将填充区清零，
+     * 不得读取调用方报文末尾之外的数据，也不得泄露此前发送的负载。 */
+    wire_length = length < RTL8126_TX_MIN_FRAME_SIZE ?
+                  RTL8126_TX_MIN_FRAME_SIZE : length;
+    if (wire_length != length) {
+        memset(state->rtl_tx_buffers +
+                   (size_t)state->rtl_tx_next * RTL8126_TX_BUFFER_SIZE + length,
+               0, wire_length - length);
+    }
     descriptor->options2 = 0U;
-    options = (uint32_t)length | RTL8126_DESC_OWN | RTL8126_DESC_FS |
+    options = (uint32_t)wire_length | RTL8126_DESC_OWN | RTL8126_DESC_FS |
               RTL8126_DESC_LS;
     if (state->rtl_tx_next + 1U == RTL8126_RING_COUNT) options |= RTL8126_DESC_EOR;
     dma_sync_for_device(&state->rtl_tx_buffer_dma);
@@ -1445,9 +1538,10 @@ bool rtl8126_transmit_state(e1000_state_t *state, const uint8_t *frame,
     dma_wmb();
     state->rtl_tx_next = (uint16_t)((state->rtl_tx_next + 1U) %
                                     RTL8126_RING_COUNT);
+    ++state->rtl_tx_pending;
     rtl8126_write16(state, RTL8126_REG_TX_POLL, 1U);
     __atomic_add_fetch(&state->rtl_tx_count, 1U, __ATOMIC_RELAXED);
-    return true;
+    return K_OK;
 }
 
 bool rtl8126_link_up_state(e1000_state_t *state) {
@@ -1459,10 +1553,33 @@ bool rtl8126_link_up_state(e1000_state_t *state) {
     return state->link_up;
 }
 
+static void rtl8126_complete_tx(e1000_state_t *state) {
+    if (state == 0 || !state->initialized || state->rtl_tx_ring == 0) return;
+    sched_preempt_disable();
+    spinlock_lock(&state->tx_lock);
+    if (state->rtl_tx_pending != 0U)
+        (void)rtl8126_reclaim_tx_locked(state);
+    spinlock_unlock(&state->tx_lock);
+    sched_preempt_enable();
+}
+
+void rtl8126_rearm_interrupts(e1000_state_t *state) {
+    if (!state->rtl_irq_bound) return;
+    uint32_t status = rtl8126_read32(state, RTL8126_REG_INT_STATUS);
+    if (status == UINT32_MAX) return;
+    /* 仅 ISR 可以确认事件。在此处清除会丢弃工作线程获取快照后到达的 TX 或链路事件。 */
+    rtl8126_write32(state, RTL8126_REG_INT_MASK, RTL8126_INT_MASK_VALUE);
+    (void)rtl8126_read32(state, RTL8126_REG_INT_MASK);
+}
+
 bool rtl8126_poll_receive_state(e1000_state_t *state) {
     bool received = false;
     uint32_t processed = 0U;
     if (state == 0 || !state->initialized || state->rtl_rx_ring == 0) return false;
+    if (state->rtl_irq_bound) {
+        rtl8126_write32(state, RTL8126_REG_INT_MASK, 0U);
+        (void)rtl8126_read32(state, RTL8126_REG_INT_MASK);
+    }
     dma_sync_for_cpu(&state->rtl_rx_ring_dma);
     dma_sync_for_cpu(&state->rtl_rx_buffer_dma);
     while (processed < E1000_RX_BUDGET) {
@@ -1504,6 +1621,9 @@ bool rtl8126_poll_receive_state(e1000_state_t *state) {
     dma_wmb();
     bool dispatched = e1000_dispatch_software_queues(state);
     socket_tcp_poll(x86_read_tsc());
+    rtl8126_complete_tx(state);
+    /* 完成路径负责重新布置中断，并在释放排队标志后执行。若在此处提前启用，新 MSI 可能会合并到正在退出的
+     * 工作线程。 */
     return received || dispatched;
 }
 

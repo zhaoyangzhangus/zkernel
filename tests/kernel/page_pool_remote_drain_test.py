@@ -9,10 +9,10 @@ by_id = source[source.index('static page_pool_group_t *pool_group_by_id('):sourc
 push = source[source.index('static void pool_partial_push('):source.index('static uint32_t pool_partial_pop(')]
 notify = source[source.index('static void pool_remote_notify('):source.index('static void pool_drain_remote(')]
 drain = source[source.index('static void pool_drain_remote('):source.index('static PAGE_NOINLINE page_t *pool_alloc_slow(')]
-cpu_drain = source[source.index('void pool_drain_cpu('):source.index('void pool_init_cpu_state(')]
+cpu_drain = source[source.index('void pool_drain_cpu('):source.index('void pool_reclaim_all(')]
 previous = drain.replace('pool_drain_remote(', 'previous_drain(')
 previous = previous.replace('    uint64_t local_base_pfn = 0;\n    bool local_base_known = false;\n', '')
-start = previous.index('            /* The owner keeps base stable')
+start = previous.index('            if (pool->base != 0 && !local_base_known)')
 end = previous.index('                pool->free_mask |= bits;', start)
 previous = previous[:start] + '''            if (pool->base != 0 &&
                 (page_to_phys(pool->base).value >> PAGE_SHIFT) == group->base_pfn) {
@@ -35,6 +35,9 @@ paddr_t page_to_phys(const page_t *page) {
 ''' + by_id + push + notify + drain + previous + r'''
 static bool irq_enabled;
 static unsigned irq_saves,irq_restores,drain_routes;
+static bool pool_held;
+void pool_cpu_lock(uint32_t cpu){assert(!cpu&&!irq_enabled&&!pool_held);pool_held=true;}
+void pool_cpu_unlock(uint32_t cpu){assert(!cpu&&!irq_enabled&&pool_held);pool_held=false;}
 static uint64_t test_irq_save(void) {
     uint64_t flags=irq_enabled?1ULL<<9:0;
     ++irq_saves;irq_enabled=false;return flags;
@@ -43,7 +46,7 @@ static void test_irq_restore(uint64_t flags) {
     assert(!irq_enabled);++irq_restores;irq_enabled=(flags&(1ULL<<9))!=0;
 }
 static void pool_drain_one(uint32_t cpu,uint8_t zone,uint8_t order) {
-    assert(cpu==0&&!irq_enabled&&zone<PAGE_ZONE_COUNT&&order<=PAGE_POOL_SMALL_MAX_ORDER);
+    assert(cpu==0&&!irq_enabled&&pool_held&&zone<PAGE_ZONE_COUNT&&order<=PAGE_POOL_SMALL_MAX_ORDER);
     unsigned bit=zone*(PAGE_POOL_SMALL_MAX_ORDER+1)+order;
     assert(!(drain_routes&(1U<<bit)));drain_routes|=1U<<bit;
 }

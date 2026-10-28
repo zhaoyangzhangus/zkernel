@@ -2,12 +2,12 @@
 
 #include "abi.h"
 
-/* PIPE_CREATE flags are deliberately independent from libc's O_* values. */
+/* PIPE_CREATE 标志刻意与 libc 的 O_* 取值相互独立。 */
 #define OS_PIPE_FLAG_CLOEXEC  (1U << 0)
 #define OS_PIPE_FLAG_NONBLOCK (1U << 1)
 #define OS_PIPE_FLAG_MASK     (OS_PIPE_FLAG_CLOEXEC | OS_PIPE_FLAG_NONBLOCK)
 
-/* Writes no larger than this value are guaranteed to be committed atomically. */
+/* 不超过此大小的写入保证以原子方式提交。 */
 #define OS_PIPE_BUF            4096U
 #define OS_PIPE_DEFAULT_SIZE   65536U
 

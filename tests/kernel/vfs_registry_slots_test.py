@@ -21,7 +21,8 @@ publication = function('static void vfs_set_node_slot_locked(')
 # Audit every production registry mutation, not just an isolated hint fixture.
 writes = re.findall(r'g_vfs_nodes\[([^\]]+)\]\s*=(?!=)', source)
 assert writes == ['i', 'index'], writes
-assert source.count('vfs_set_node_slot_locked(') == 6
+# 定义、文件发布及各条删除路径，包括卸载时淘汰旧卷缓存。
+assert source.count('vfs_set_node_slot_locked(') == 9
 program = r'''
 #include <assert.h>
 #include <pthread.h>
@@ -36,6 +37,12 @@ typedef struct { unsigned id; } vnode_t;
 typedef struct { atomic_uint state; } spinlock_t;
 static vnode_t *g_vfs_initial_nodes[VFS_INITIAL_NODE_CAPACITY];
 static vnode_t **g_vfs_nodes=g_vfs_initial_nodes;
+static vnode_t *g_vfs_initial_buckets[VFS_INITIAL_NODE_CAPACITY];
+static vnode_t **g_vfs_buckets=g_vfs_initial_buckets;
+static uint32_t g_vfs_initial_fat_buckets[VFS_INITIAL_NODE_CAPACITY];
+static uint32_t g_vfs_initial_fat_next[VFS_INITIAL_NODE_CAPACITY];
+static uint32_t *g_vfs_fat_buckets=g_vfs_initial_fat_buckets;
+static uint32_t *g_vfs_fat_next=g_vfs_initial_fat_next;
 static uint32_t g_vfs_node_capacity=VFS_INITIAL_NODE_CAPACITY;
 static uint32_t g_vfs_next_free_node;
 static spinlock_t g_vfs_lock;
@@ -46,6 +53,8 @@ static unsigned visits,allocations,frees;
 static bool fail_alloc;
 static size_t allocation_length,copied_bytes;
 static unsigned copies;
+static void vfs_namespace_insert_locked(vnode_t *v,uint32_t slot){(void)v;(void)slot;}
+static void vfs_namespace_remove_locked(vnode_t *v){(void)v;}
 static bool counted_cas(atomic_uint *p,unsigned *expected,unsigned value,
                        memory_order success,memory_order failure) {
  atomic_fetch_add(&attempts,1);
@@ -62,7 +71,8 @@ static void kfree(void *p) { assert(p);++frees;free(p); }
 static void *tracked_copy(void *out,const void *in,size_t length){
  assert(in==g_vfs_nodes && out!=in);
  assert(length==(size_t)g_vfs_node_capacity*sizeof(*g_vfs_nodes));
- assert(length*2==allocation_length);
+ assert(allocation_length==2U*(size_t)g_vfs_node_capacity*
+        (2U*sizeof(vnode_t*)+2U*sizeof(uint32_t)));
  ++copies;copied_bytes+=length;return actual_memcpy(out,in,length);
 }
 ''' + initialize + slots + publication + r'''

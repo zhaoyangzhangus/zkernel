@@ -12,7 +12,7 @@ launch = source[source.index('static bool launch_program(const char *path,'):
 guard = source[source.index('static bool handle_key('):
                source.index('    if (g_output_scroll)', source.index('static bool handle_key('))]
 guard = guard.replace('static bool handle_key(', 'static bool accepts_key(')
-guard = guard.replace('    char character;', '').replace('    bool full_damage = false;', '')
+guard = guard.replace('    char character;', '')
 code = r'''
 #include <assert.h>
 #include <stdbool.h>
@@ -35,8 +35,10 @@ static char g_file_buffer[128];
 static int scenario,reads,waits,events,renders,closed,mirrored,failures,exit_status;
 static unsigned remaining,chunks_since_event,max_chunks;
 static uint64_t consumed;
-static void shell_damage_all(void){}
 static void render_window(void){++renders;}
+/* 前台输入检查不应触发剪贴板；误入这些分支时立即失败。 */
+static void shell_copy_selection(void){assert(0);}
+static void shell_paste_selection(void){assert(0);}
 static bool handle_event(const os_window_event_t *e){assert(g_foreground_wait);assert(e->type==OS_WINDOW_EVENT_RESIZE);++events;return true;}
 static void append_output(const char *s){(void)s;++failures;}
 static bool append_text_chunk(const char *b,uint64_t n,char *line,uint32_t *length){(void)b;(void)line;(void)length;consumed+=n;return scenario<6;}
@@ -90,7 +92,7 @@ static int64_t gshell_syscall_five(uint64_t call,uint64_t handle,uint64_t buffer
 }
 int main(void){
  for(scenario=0;scenario<=7;++scenario){
-  shell_launch_context_t context={.path="/sbin/chrome"};
+  shell_launch_context_t context={.path="/usr/apps/chrome/chrome"};
   reads=waits=events=renders=closed=mirrored=failures=exit_status=0;
   remaining=65;consumed=chunks_since_event=max_chunks=0;g_foreground_wait=false;
   bool success=launch_program_foreground(&context);
@@ -108,15 +110,15 @@ int main(void){
  char *arguments[]={"nasm","-v"};
  scenario=0;g_background_children=0;
  assert(!launch_program(0,arguments,2,false));
- assert(!launch_program("/sbin/nasm",arguments,0,false));
- for(unsigned i=0;i<100;++i)assert(launch_program("/sbin/nasm",arguments,2,true));
+ assert(!launch_program("/usr/apps/nasm/nasm",arguments,0,false));
+ for(unsigned i=0;i<100;++i)assert(launch_program("/usr/apps/nasm/nasm",arguments,2,true));
  assert(g_background_children==100);
  for(unsigned i=0;i<100;++i){
   waits=reads=0;remaining=0;g_foreground_wait=false;
-  assert(launch_program("/sbin/nasm",arguments,2,false));
+  assert(launch_program("/usr/apps/nasm/nasm",arguments,2,false));
   assert(g_background_children==100);
  }
- scenario=5;assert(!launch_program("/sbin/nasm",arguments,2,true));
+ scenario=5;assert(!launch_program("/usr/apps/nasm/nasm",arguments,2,true));
  assert(g_background_children==100);
  reap_ready=100;reap_calls=0;g_foreground_wait=true;
  reap_background_children();assert(!reap_calls&&g_background_children==100);
@@ -131,7 +133,7 @@ int main(void){
  reap_error=-11;reap_background_children();assert(reap_calls==102&&g_background_children==1);
  reap_error=-10;reap_background_children();assert(reap_calls==103&&g_background_children==0);
  reap_error=0;g_background_children=UINT32_MAX;
- assert(!launch_program("/sbin/nasm",arguments,2,true));
+ assert(!launch_program("/usr/apps/nasm/nasm",arguments,2,true));
  os_window_event_t e={.type=OS_WINDOW_EVENT_INPUT};
  e.input.type=OS_INPUT_EVENT_KEY;e.input.value=OS_INPUT_VALUE_PRESS;
  g_foreground_wait=true;g_ctrl=false;

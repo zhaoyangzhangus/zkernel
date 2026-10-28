@@ -22,10 +22,9 @@ typedef struct display_state {
     uint32_t masks[4];
 
     /*
-     * Optional native scanout backend.
+    * 可选的原生扫描输出后端。
      *
-     * current_scanout owns exactly one object reference and one pin while the
-     * display engine may still fetch from that allocation.
+    * 显示引擎仍可能从该分配读取数据期间，current_scanout 恰好拥有一个对象引用和一个固定引用。
      */
     display_scanout_backend_t scanout_backend;
     gpu_allocation_t *current_scanout;
@@ -71,9 +70,8 @@ static bool display_initialize(void) {
 }
 
 static void display_lock(void) {
-    /* The lock protects a long framebuffer copy.  If its owner is preempted
-     * on a single vCPU, a user syscall can spin here forever and prevent the
-     * owner from resuming.  Treat it as a scheduler lock. */
+    /* 此锁保护耗时的帧缓冲区复制。单 vCPU 环境下，如果持有者被抢占，用户系统调用可能在此永久自旋，
+     * 使持有者无法恢复运行。将其视为调度器锁。 */
     sched_preempt_disable();
     spinlock_lock(&g_display.lock);
 }
@@ -116,188 +114,37 @@ static uint32_t display_convert_pixel(uint32_t pixel, uint32_t format,
 
 
 /*
- * GOP WB -> WC publication primitive shared by every kernel display producer.
+ * 所有内核显示生产者共用的 GOP WB -> WC 发布原语。
  *
- * The compositor used to own a private copy of this code.  Keeping the actual
- * device-memory writer in display core has two advantages:
+ * 合成器过去曾维护此代码的私有副本。将实际设备内存写入逻辑保留在显示核心有两个优点：
  *
- *   1. window_server and DISPLAY_COMMIT use exactly the same tuned path;
- *   2. a future native scanout/page-flip backend has one display-layer point
- *      to replace instead of architecture-specific stores embedded in the
- *      compositor.
+ *   1. window_server 和 DISPLAY_COMMIT 使用完全相同的优化路径；
+ *   2. 将来替换原生扫描输出/翻页后端时，只需修改显示层一个位置，无需改动嵌入合成器中的架构专用存储操作。
  *
- * XRGB8888 source pixels are native when the GOP framebuffer format is 1.
- * Other GOP layouts preserve the existing conversion path.
+ * GOP 帧缓冲区格式为 1 时，XRGB8888 源像素无需转换。其他 GOP 布局仍沿用现有转换路径。
  */
-#ifndef DISPLAY_GOP_MOVDIR64B
-#define DISPLAY_GOP_MOVDIR64B 0U
-#endif
-
-/*
- * Keep the physical-GOP publication path conservative until a real atomic
- * scanout backend is available.  MOVNTI/MOVDIR64B are valid CPU operations,
- * but they expose individual write-combining transactions while the monitor
- * is scanning the same buffer.  Ordinary volatile stores are slower and can
- * still tear (GOP has no page flip), but they avoid relying on the
- * non-temporal store path for correctness on firmware-owned scanout memory.
- */
-#ifndef DISPLAY_GOP_NON_TEMPORAL
-#define DISPLAY_GOP_NON_TEMPORAL 0U
-#endif
-
-static inline void display_wc_store64(volatile uint64_t *destination,
-                                      uint64_t value) {
-    __asm__ volatile (
-        "movnti %1, %0"
-        : "=m"(*destination)
-        : "r"(value));
-}
-
-static inline uint64_t display_wb_load64(const uint32_t *source) {
-    uint64_t value;
-
-    __asm__ (
-        "movq %1, %0"
-        : "=r"(value)
-        : "m"(*(const uint64_t *)(const void *)source));
-
-    return value;
-}
-
-static inline void display_wc_store64b_direct(
-    volatile uint32_t *destination,
-    const uint32_t *source) {
-
-    /* GNU's MOVDIR64B syntax is memory, register: the memory operand is the
-     * 64-byte framebuffer destination and the register contains the WB source
-     * address. */
-    __asm__ volatile (
-        "movdir64b (%0), %1"
-        :
-        : "r"((uintptr_t)destination),
-          "r"(source)
-        : "memory");
-}
-
+/* GOP 路径通过 REP MOVSB 使用普通存储。缓存策略和帧边界栅栏由映射/发布层负责；此辅助函数既不选择
+ * 扫描输出后端，也不启用非临时事务。 */
 static void display_copy_native_xrgb8888_span(
     volatile uint32_t *__restrict destination,
     const uint32_t *__restrict source,
     uint32_t pixels) {
+    if (destination == 0 || source == 0 || pixels == 0U) return;
 
-    if (destination == 0 || source == 0 || pixels == 0U) {
-        return;
-    }
+    /* 按字节计数的字符串复制可处理任意扫描线对齐，且不会触及 SIMD 状态。与此前的 volatile 像素循环
+     * 一样，发布栅栏仍由调用方放在帧边界处。 */
+    size_t bytes = (size_t)pixels * sizeof(uint32_t);
+    __asm__ volatile ("cld; rep movsb"
+                      : "+D"(destination), "+S"(source), "+c"(bytes)
+                      :
+                      : "memory", "cc");
+}
 
-    if (DISPLAY_GOP_NON_TEMPORAL == 0U) {
-        for (uint32_t x = 0U; x < pixels; ++x) {
-            destination[x] = source[x];
-        }
-        return;
-    }
-
-    /*
-     * Reach qword alignment first.  Both buffers advance together.
-     */
-    if (((uintptr_t)destination & 7U) != 0U) {
-        *destination++ = *source++;
-        --pixels;
-    }
-
-    /*
-     * MOVDIR64B requires a 64-byte-aligned destination.  The short prefix is
-     * still non-temporal so the WC path does not mix cached stores into the
-     * bulk transaction.
-     */
-    while (pixels >= 2U &&
-           ((uintptr_t)destination & 63U) != 0U) {
-
-        uint64_t value = display_wb_load64(source);
-
-        display_wc_store64(
-            (volatile uint64_t *)(void *)destination,
-            value);
-
-        destination += 2U;
-        source += 2U;
-        pixels -= 2U;
-    }
-
-    if (DISPLAY_GOP_MOVDIR64B != 0U &&
-        x86_boot_cpu_features.movdir64b) {
-
-        while (pixels >= 16U) {
-            display_wc_store64b_direct(destination, source);
-
-            destination += 16U;
-            source += 16U;
-            pixels -= 16U;
-        }
-    }
-
-    /*
-     * Generic 64-byte fallback: 16 XRGB pixels = eight MOVNTI qwords.
-     */
-    while (pixels >= 16U) {
-        uint64_t v0 = display_wb_load64(source + 0U);
-        uint64_t v1 = display_wb_load64(source + 2U);
-        uint64_t v2 = display_wb_load64(source + 4U);
-        uint64_t v3 = display_wb_load64(source + 6U);
-        uint64_t v4 = display_wb_load64(source + 8U);
-        uint64_t v5 = display_wb_load64(source + 10U);
-        uint64_t v6 = display_wb_load64(source + 12U);
-        uint64_t v7 = display_wb_load64(source + 14U);
-
-        volatile uint64_t *out =
-            (volatile uint64_t *)(void *)destination;
-
-        display_wc_store64(out + 0U, v0);
-        display_wc_store64(out + 1U, v1);
-        display_wc_store64(out + 2U, v2);
-        display_wc_store64(out + 3U, v3);
-        display_wc_store64(out + 4U, v4);
-        display_wc_store64(out + 5U, v5);
-        display_wc_store64(out + 6U, v6);
-        display_wc_store64(out + 7U, v7);
-
-        destination += 16U;
-        source += 16U;
-        pixels -= 16U;
-    }
-
-    if (pixels >= 8U) {
-        uint64_t v0 = display_wb_load64(source + 0U);
-        uint64_t v1 = display_wb_load64(source + 2U);
-        uint64_t v2 = display_wb_load64(source + 4U);
-        uint64_t v3 = display_wb_load64(source + 6U);
-
-        volatile uint64_t *out =
-            (volatile uint64_t *)(void *)destination;
-
-        display_wc_store64(out + 0U, v0);
-        display_wc_store64(out + 1U, v1);
-        display_wc_store64(out + 2U, v2);
-        display_wc_store64(out + 3U, v3);
-
-        destination += 8U;
-        source += 8U;
-        pixels -= 8U;
-    }
-
-    while (pixels >= 2U) {
-        uint64_t value = display_wb_load64(source);
-
-        display_wc_store64(
-            (volatile uint64_t *)(void *)destination,
-            value);
-
-        destination += 2U;
-        source += 2U;
-        pixels -= 2U;
-    }
-
-    if (pixels != 0U) {
-        *destination = *source;
-    }
+/* 光标等即时输出直接写最终像素，不需要构造临时行缓冲；仍统一处理 GOP 色彩布局。 */
+void display_core_publish_xrgb8888_pixel(volatile uint32_t *destination, uint32_t pixel) {
+    if (destination == 0) return;
+    *destination = g_display.format == 1U ? pixel :
+        display_convert_pixel(pixel, g_display.format, g_display.masks);
 }
 
 void display_core_publish_xrgb8888_span(
@@ -310,9 +157,8 @@ void display_core_publish_xrgb8888_span(
     }
 
     /*
-     * The framebuffer geometry/format is immutable after display_core_init()
-     * in the current boot model.  No display lock is taken here: compositor
-     * copy workers deliberately publish disjoint spans in parallel.
+    * 当前启动模型中，display_core_init() 完成后帧缓冲区几何信息/格式保持不变。此处不获取显示锁：
+    * 合成器复制工作线程会并行发布互不重叠的跨度。
      */
     if (g_display.format == 1U) {
         display_copy_native_xrgb8888_span(
@@ -374,24 +220,22 @@ static void display_release_pending(display_pending_commit_t *pending) {
 
 
 /*
- * Native atomic scanout ownership
+ * 原生原子扫描输出所有权
  * -------------------------------
  *
- * pending->buffer owns one object reference and one pin from
- * display_commit_submit().
+ * 从 display_commit_submit() 开始，pending->buffer 持有一个对象引用和一个固定引用。
  *
- * GOP fallback:
- *     release them when the copy/fence completes.
+ * GOP 回退路径：
+ *     复制/栅栏完成时释放这两个引用。
  *
- * Native success:
- *     transfer that exact reference+pin into g_display.current_scanout.
- *     Only after flip-done/vblank releases the previous current_scanout.
+ * 原生路径成功：
+ *     将这组引用和固定状态转移到 g_display.current_scanout。
+ *     只有在翻页完成/垂直消隐后，才释放先前的 current_scanout。
  *
- * Native failure:
- *     keep the old current_scanout and release pending normally.
+ * 原生路径失败：
+ *     保留旧 current_scanout，并按常规流程释放 pending。
  *
- * This makes the release fence a real scanout-lifetime fence rather than a
- * "page-flip command queued" fence.
+ * 这样释放栅栏表示真正的扫描输出生命周期完成，而非仅表示“翻页命令已入队”。
  */
 static void display_release_scanout_buffer(gpu_allocation_t *buffer) {
     if (buffer == 0) return;
@@ -447,10 +291,9 @@ static void display_native_scanout_complete(
 
     if (status == K_OK) {
         /*
-         * K_OK means the new scanout is latched and the old one is no longer
-         * fetched by the display engine.
+         * K_OK 表示新的扫描输出已锁存，显示引擎不再读取旧缓冲区。
          *
-         * Move, do not duplicate, pending's reference+pin into current_scanout.
+         * 将 pending 的引用和固定状态转移到 current_scanout，而非复制。
          */
         display_lock();
 
@@ -478,8 +321,7 @@ static void display_native_scanout_complete(
             pending->start_tsc);
     } else {
         /*
-         * Failed atomic flip: keep the current scanout untouched.  The new
-         * buffer is still owned by pending and is released below.
+         * 原子翻页失败：保持当前扫描输出不变。新缓冲区仍由 pending 所有，并在下方释放。
          */
         display_clear_pending();
 
@@ -491,6 +333,14 @@ static void display_native_scanout_complete(
     display_release_pending(pending);
 }
 
+
+void display_core_poll_scanout(void) {
+    display_scanout_backend_t backend;
+    display_lock();
+    backend = g_display.scanout_backend;
+    display_unlock();
+    if (backend.poll != 0) backend.poll(backend.context);
+}
 
 static void display_submit_native_scanout(
     display_pending_commit_t *pending,
@@ -525,9 +375,8 @@ static void display_submit_native_scanout(
     request.format = 1U;
 
     /*
-     * Never hold display_lock across a GPU driver call.  A synchronous
-     * completion is legal and may already have freed pending before the call
-     * returns, so the K_OK path must not touch pending again.
+    * 调用 GPU 驱动期间绝不能持有 display_lock。允许同步完成，且回调可能在调用返回前已释放 pending；
+    * 因此 K_OK 路径不得再次访问 pending。
      */
     status =
         backend->atomic_commit(
@@ -541,8 +390,7 @@ static void display_submit_native_scanout(
     }
 
     /*
-     * Non-K_OK means the backend did not take asynchronous ownership and must
-     * not invoke the completion callback.
+    * 返回值不是 K_OK 表示后端没有接管异步所有权，也不得调用完成回调。
      */
     display_clear_pending();
 
@@ -581,9 +429,8 @@ static void display_complete_commit(void *argument) {
     }
 
     /*
-     * Acquire-fence completion is the common dispatch point.  Registration is
-     * one-shot and forbidden while a commit is pending, so a submission cannot
-     * change backend underneath this decision.
+    * 获取栅栏完成是统一的分发点。后端仅允许注册一次，且提交待处理期间禁止注册，因此提交过程中后端不会
+    * 在此决策下途切换。
      */
     {
         display_scanout_backend_t backend;
@@ -627,9 +474,8 @@ static void display_complete_commit(void *argument) {
         }
 
         /*
-         * A deferred continuation is allowed to run on another CPU.  MOVNTI /
-         * MOVDIR64B ordering is CPU-local, so finish this chunk's WC stores
-         * before dropping the display lock and scheduling the next chunk.
+         * 延迟续接任务可能在另一 CPU 上运行。MOVNTI/MOVDIR64B 的排序仅对本 CPU 有效，因此释放显示锁并
+         * 调度下一块前，必须完成当前块的 WC 存储。
          */
         __asm__ volatile ("sfence" : : : "memory");
 
@@ -655,9 +501,8 @@ static void display_complete_commit(void *argument) {
         }
         return;
     }
-    /* The GOP framebuffer is mapped WC.  Complete the write-combining
-     * transaction before signalling the fence; callers may immediately read
-     * the first pixel or the scanout may sample the frame. */
+    /* GOP 帧缓冲区采用 WC 映射。触发栅栏前必须完成写合并事务，因为调用方可能立即读取首像素，或扫描输出
+     * 可能开始读取此帧。 */
     __asm__ volatile ("sfence" : : : "memory");
     display_clear_pending();
     (void)gpu_fence_signal(pending->signal_fence, pending->signal_value);
@@ -688,9 +533,7 @@ kstatus_t display_core_register_scanout_backend(
         status = K_EEXIST;
     } else if (g_display.pending_commit) {
         /*
-         * Do not switch a commit from GOP copy to native scanout after it has
-         * already been accepted. Registration is normally a one-time GPU
-         * bring-up operation.
+         * 提交已被接受后，不得从 GOP 复制切换到原生扫描输出。通常 GPU 初始化时只注册一次后端。
          */
         status = K_EBUSY;
     } else {
@@ -778,7 +621,7 @@ bool display_core_native_self_test(void) {
         gpu_allocation_cpu_unmap(buffer, mapped, sizeof(uint32_t));
     }
 
-    /* This checkpoint is flushed before entering the native KAPI path. */
+    /* 进入原生 KAPI 路径前刷新此检查点。 */
     realtest_checkpoint("OS_NVKMS_NATIVE_COMMIT_BEGIN");
     status = display_commit_submit(
         0U, buffer, 0U, stride, width, height, 1U,
@@ -800,6 +643,7 @@ bool display_core_native_self_test(void) {
     __asm__ volatile ("pushfq; popq %0" : "=r"(flags) : : "memory");
 
     for (;;) {
+        display_core_poll_scanout();
         status = gpu_fence_wait(fence, 1U, 0U);
         if (status == K_OK) {
             success = true;
@@ -811,7 +655,7 @@ bool display_core_native_self_test(void) {
             break;
         }
 
-        /* Early boot has not started the persistent deferred worker yet. */
+        /* 启动早期尚未启动常驻延迟工作线程。 */
         (void)deferred_run(64U);
         __asm__ volatile ("sti; pause" : : : "memory");
     }
@@ -1026,7 +870,7 @@ bool display_core_self_test(void) {
                     break;
                 }
 
-                /* A full-frame GOP copy may span multiple deferred batches. */
+                /* 完整帧 GOP 复制可能跨越多个延迟工作批次。 */
                 (void)deferred_run(64U);
                 __asm__ volatile ("sti; pause" : : : "memory");
             }

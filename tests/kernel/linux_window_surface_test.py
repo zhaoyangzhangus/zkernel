@@ -45,7 +45,12 @@ int main(void){
  assert(linux_window_surface_ioctl(&p,&w,ptr)==K_EINVAL&&!begins);
  user.reserved=0;user.frame.token=9;
  assert(linux_window_surface_ioctl(&p,&w,ptr)==K_EINVAL&&!begins);
- user.frame.token=0;begin_error=-110;
+ user.frame.token=0;
+ int32_t *damage_signed[]={&user.frame.damage_x,&user.frame.damage_y};
+ for(unsigned i=0;i<2;++i){*damage_signed[i]=-1;assert(linux_window_surface_ioctl(&p,&w,ptr)==K_EINVAL&&!begins);*damage_signed[i]=0;}
+ uint32_t *damage_unsigned[]={&user.frame.damage_width,&user.frame.damage_height};
+ for(unsigned i=0;i<2;++i){*damage_unsigned[i]=1;assert(linux_window_surface_ioctl(&p,&w,ptr)==K_EINVAL&&!begins);*damage_unsigned[i]=0;}
+ begin_error=-110;
  assert(linux_window_surface_ioctl(&p,&w,ptr)==-110&&!writes&&!cancels);
  begin_error=0;write_error=LINUX_EFAULT;
  assert(linux_window_surface_ioctl(&p,&w,ptr)==LINUX_EFAULT&&cancels==1);

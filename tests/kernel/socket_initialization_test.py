@@ -5,7 +5,7 @@ import tempfile
 
 root = Path(__file__).resolve().parents[2]
 source = (root/'kernel/net/socket.c').read_text()
-globals_source = source[source.index('static socket_binding_t g_bindings['):
+globals_source = source[source.index('static socket_binding_t g_initial_bindings['):
                         source.index('static socket_tcp_ipv4_output_fn g_tcp_ipv4_output;')]
 functions = source[source.index('void socket_initialize_globals('):
                    source.index('void socket_set_tcp_ipv4_output(')]
@@ -30,6 +30,7 @@ static bool counted_cas(atomic_uint *p,unsigned *expected,unsigned value,
 static void *initializer(void *unused) {
  (void)unused;socket_initialize_globals();
  assert(atomic_load(&g_socket_init_state)==2 && !atomic_load(&g_binding_lock.state));
+ assert(g_tcp_lookup_hint==UINT32_MAX && g_tcp6_lookup_hint==UINT32_MAX);
  for(unsigned i=0;i<SOCKET_BINDING_COUNT;++i) {
   socket_binding_t binding={0};socket_tcp_connection_t tcp={0};socket_tcp6_connection_t tcp6={0};
   assert(!memcmp(socket_binding_at(i),&binding,sizeof(binding)));
@@ -44,7 +45,7 @@ static void *id_worker(void *opaque) {
  for(unsigned i=0;i<1000;++i)ids[index][i]=socket_next_async_request_id();return 0;
 }
 int main(void) {
- memset(g_bindings,0x75,sizeof(g_bindings));memset(g_tcp_connections,0x75,sizeof(g_tcp_connections));memset(g_tcp6_connections,0x75,sizeof(g_tcp6_connections));
+ memset(g_bindings,0x75,sizeof(g_initial_bindings));memset(g_tcp_connections,0x75,sizeof(g_initial_tcp_connections));memset(g_tcp6_connections,0x75,sizeof(g_initial_tcp6_connections));
  pthread_t threads[8];parallel=true;
  for(unsigned i=0;i<8;++i)assert(!pthread_create(&threads[i],0,initializer,0));
  for(unsigned i=0;i<8;++i)assert(!pthread_join(threads[i],0));

@@ -78,11 +78,11 @@
     .set WAIT_RACE_THREAD_HANDLE_ADDRESS,0x004023C0
     .set WAIT_RACE_THREAD_ARGS_ADDRESS,0x00402480
     .set WAIT_RACE_ACK_WORD_ADDRESS,0x004023B0
-    /* Keep the race test bounded without making TCG cross-CPU wakeups fail
-     * merely because the remote vCPU needs more than one host timeslice. */
+    /* 限制竞争测试的执行时间，同时避免仅因远端 vCPU 需要多个宿主时间片就导致 TCG 跨 CPU
+     * 唤醒测试失败。 */
     .set WAIT_RACE_TIMEOUT_NS, 10000000
     .set WAIT_RACE_ACK_TIMEOUT_NS, 100000000
-    /* Leave margin for the serial debug stream on a multi-vCPU emulator. */
+    /* 为多 vCPU 模拟器上的串口调试输出留出余量。 */
     .set THREAD_WAIT_TIMEOUT_NS, 5000000000
     .set EXEC_PIN_ACK_ADDRESS, 0x004021F7
     .set EXEC_PIN_EXEC_ACK_ADDRESS, 0x004021F8
@@ -336,15 +336,15 @@ user_runtime_blob_start:
 
     /* Futex 唤醒与线程发布 DEAD 可并发；WAIT_MANY(ANY) 统一收敛该竞态。 */
     movb $10, STAGE_MARK_ADDRESS
-    movq %r14, 48(%rbx)           /* os_handle_t handles[1] */
-    movl $48, 64(%rbx)            /* hdr.size */
-    movw $1, 68(%rbx)             /* hdr.version */
-    movw $0, 70(%rbx)             /* hdr.flags */
-    movl $1, 72(%rbx)             /* count */
-    movl $0, 76(%rbx)             /* wait_flags = ANY */
+    movq %r14, 48(%rbx)           /* os_handle_t 句柄数组[1] */
+    movl $48, 64(%rbx)            /* hdr.size：结构体大小 */
+    movw $1, 68(%rbx)             /* hdr.version：版本 */
+    movw $0, 70(%rbx)             /* hdr.flags：标志 */
+    movl $1, 72(%rbx)             /* count：数量 */
+    movl $0, 76(%rbx)             /* wait_flags = ANY：等待任意对象 */
     leaq 48(%rbx), %rax
-    movq %rax, 80(%rbx)           /* handles */
-    movq $1000000000, 88(%rbx)    /* timeout_ns */
+    movq %rax, 80(%rbx)           /* handles：句柄数组 */
+    movq $1000000000, 88(%rbx)    /* timeout_ns：超时纳秒数 */
     movl $0, 96(%rbx)
     movl $0, 100(%rbx)
     movq $0, 104(%rbx)
@@ -371,7 +371,7 @@ user_runtime_blob_start:
     movl $SYS_VM_PROTECT, %eax
     movq %rbx, %rdi
     movl $4096, %esi
-    movl $1, %edx                 /* OS_VM_READ */
+    movl $1, %edx                 /* OS_VM_READ：可读 */
     syscall
     testq %rax, %rax
     js .Lruntime_failure
@@ -385,7 +385,7 @@ user_runtime_blob_start:
 
     /* 主线程与 VM worker 并发操作同一地址空间的另一段固定映射。 */
     movb $0xA2, STAGE_MARK_ADDRESS
-    /* A2 progress: CHILD_MARK high bytes; low byte remains the 0xA5 ABI marker. */
+    /* A2 进度标记：高字节为 CHILD_MARK；低字节仍是 0xA5 ABI 标记。 */
     movb $0, CHILD_MARK_ADDRESS+1
     movb $0, CHILD_MARK_ADDRESS+2
     movb $0, CHILD_MARK_ADDRESS+3
@@ -588,8 +588,7 @@ user_runtime_blob_start:
     cmpq $-110, %rax
     jne .Lruntime_failure
 .Lwait_race_result_ok:
-    /* Wait for the worker's sequence publication instead of burning a
-     * host-dependent spin budget while the remote vCPU is runnable. */
+    /* 等待工作线程发布序号，而不是在远端 vCPU 已可运行时消耗依赖宿主速度的自旋预算。 */
     movl %r13d, %esi
     decl %esi
     movl $SYS_FUTEX_WAIT, %eax
@@ -652,8 +651,7 @@ user_runtime_blob_start:
     movq COW_THREAD_HANDLE_ADDRESS, %r14
     testq %r14, %r14
     jz .Lruntime_failure
-    /* Wait on the shared COW page so scheduling latency cannot make the
-     * parent abandon the handshake before the child gets its first slice. */
+    /* 在共享 COW 页面上等待，避免调度延迟导致父进程在子进程获得首个时间片前放弃握手。 */
     movl $SYS_FUTEX_WAIT, %eax
     movq $COW_SYNC_ADDRESS, %rdi
     movl $0x11, %esi
@@ -717,8 +715,8 @@ user_runtime_blob_start:
     jmp .Lruntime_skip_disk_files
     movl $SYS_FILE_OPEN, %eax
     movq $FILE_PATH_ADDRESS, %rdi
-    movl $1, %esi                 /* VFS_OPEN_READ */
-    xorl %edx, %edx               /* mode */
+    movl $1, %esi                 /* VFS_OPEN_READ：只读打开 */
+    xorl %edx, %edx               /* mode：模式 */
     movq $FILE_HANDLE_ADDRESS, %r10
     syscall
     testq %rax, %rax
@@ -753,8 +751,8 @@ user_runtime_blob_start:
     movq $4096, 16(%r12)
     movq $0, 24(%r12)
     movq %r14, 32(%r12)
-    movl $1, 40(%r12)             /* OS_VM_READ */
-    movl $5, 44(%r12)             /* OS_VM_PRIVATE | OS_VM_FIXED */
+    movl $1, 40(%r12)             /* OS_VM_READ：可读 */
+    movl $5, 44(%r12)             /* OS_VM_PRIVATE | OS_VM_FIXED：私有且固定映射 */
     movl $SYS_VM_MAP, %eax
     movq %r12, %rdi
     syscall
@@ -775,8 +773,8 @@ user_runtime_blob_start:
     movq $4096, 16(%r12)
     movq $0, 24(%r12)
     movq %r14, 32(%r12)
-    movl $3, 40(%r12)             /* OS_VM_READ | OS_VM_WRITE */
-    movl $5, 44(%r12)             /* OS_VM_PRIVATE | OS_VM_FIXED */
+    movl $3, 40(%r12)             /* OS_VM_READ | OS_VM_WRITE：可读写 */
+    movl $5, 44(%r12)             /* OS_VM_PRIVATE | OS_VM_FIXED：私有且固定映射 */
     movl $SYS_VM_MAP, %eax
     movq %r12, %rdi
     syscall
@@ -842,7 +840,7 @@ user_runtime_blob_start:
     movb $13, STAGE_MARK_ADDRESS
     movl $SYS_FILE_OPEN, %eax
     movq $FAT32_PATH_ADDRESS, %rdi
-    movl $1, %esi                 /* VFS_OPEN_READ */
+    movl $1, %esi                 /* VFS_OPEN_READ：只读打开 */
     xorl %edx, %edx
     movq $FILE_HANDLE_ADDRESS, %r10
     syscall
@@ -927,7 +925,7 @@ user_runtime_blob_start:
     testq %rax, %rax
     js .Lruntime_failure
 
-    /* UDP loopback begins. */
+    /* 开始 UDP 回环测试。 */
     movb $0x40, STAGE_MARK_ADDRESS
     movl $SYS_SOCKET_CREATE, %eax
     movl $2, %edi
@@ -1004,7 +1002,7 @@ user_runtime_blob_start:
     jne .Lruntime_failure
     cmpw $12000, SOCKET_SOURCE_PORT
     jne .Lruntime_failure
-    /* UDP loopback receive completed; the next block exercises TCP. */
+    /* UDP 回环接收完成；下一段测试 TCP。 */
     movb $0x4F, STAGE_MARK_ADDRESS
     movl $SYS_HANDLE_CLOSE, %eax
     movq SOCKET_A_HANDLE_ADDRESS, %rdi
@@ -1018,7 +1016,7 @@ user_runtime_blob_start:
     js .Lruntime_failure
 
     /* TCP stream ABI：监听、连接建立、accept、双向字节流和句柄关闭。 */
-    /* TCP listener/client setup begins. */
+    /* 开始设置 TCP 监听端和客户端。 */
     movb $0x50, STAGE_MARK_ADDRESS
     movq $0, RESULT_MARK_ADDRESS
     movl $SYS_SOCKET_CREATE, %eax
@@ -1334,10 +1332,10 @@ user_runtime_blob_start:
     cmpb $1, EXEC_PIN_EXEC_ACK_ADDRESS
     jne .Lexec_pin_exec_wait
     movl $SYS_PROCESS_EXEC, %eax
-    movq $0x00402110, %rdi       /* /sbin/libc-test */
-    movq $0x00402120, %rsi       /* { "/sbin/libc-test", NULL } */
-    xorl %edx, %edx              /* envp */
-    xorl %r10d, %r10d             /* no inherited libc descriptor map */
+    movq $0x004021A0, %rdi       /* /usr/apps/libc-test/libc-test：程序路径 */
+    movq $0x004021D0, %rsi       /* { "/usr/apps/libc-test/libc-test", NULL }：参数数组 */
+    xorl %edx, %edx              /* envp：环境变量 */
+    xorl %r10d, %r10d             /* 不继承 libc 描述符映射 */
     syscall
     testq %rax, %rax
     js .Lruntime_failure
@@ -1352,7 +1350,7 @@ user_runtime_blob_start:
     movq %rax, RESULT_MARK_ADDRESS
     movl $1, %edi
     xorl %eax, %eax
-    syscall                         /* THREAD_EXIT(1) */
+    syscall                         /* THREAD_EXIT(1)：线程退出 */
     ud2
 
 /* 子线程验证初始 RDI 参数，留下可由内核检查的标记后退出。 */
@@ -1496,11 +1494,11 @@ user_runtime_vm_worker:
     decl %r15d
     jnz .Lvm_worker_loop
 
-    /* A2 worker exit-path diagnostic:
-     * 1 = 64/64 loops finished
-     * 2 = VM_CONCURRENT_PASS written + mfence finished
-     * 3 = immediately before SYS_THREAD_EXIT
-     * 4 = SYS_THREAD_EXIT unexpectedly returned
+    /* A2 工作线程退出路径诊断：
+     * 1 = 64/64 次循环完成
+     * 2 = VM_CONCURRENT_PASS 已写入且 mfence 已完成
+     * 3 = 即将调用 SYS_THREAD_EXIT
+     * 4 = SYS_THREAD_EXIT 意外返回
      */
     movb $1, CHILD_MARK_ADDRESS+3
     movb $0xD2, VM_CONCURRENT_PASS_ADDRESS

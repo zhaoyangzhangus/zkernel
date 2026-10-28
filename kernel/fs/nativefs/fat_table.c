@@ -1,6 +1,6 @@
 #include "internal.h"
 
-/* REFACTOR_FS_FAT32_FAT_TABLE_OWNER: media I/O, FAT entries and cluster chains. */
+/* REFACTOR_FS_FAT32_FAT_TABLE_OWNER：介质 I/O、FAT 项和簇链。 */
 
 #define FAT_TABLE_EOC_MIN       0x0FFFFFF8U
 #define FAT_TABLE_BAD_CLUSTER   0x0FFFFFF7U
@@ -75,10 +75,10 @@ static BOOLEAN fat32_read_sector_cached(const OS_BLOCK_DEVICE *device,
         return 0;
     }
     /*
-    * The NVMe backend is asynchronous even for this synchronous FAT API.
-     * A completion can race the deferred queue consumer and transiently
-     * return an I/O error. Retry the same sector while the request is local.
-    */
+     * 即使此 FAT API 是同步接口，NVMe 后端仍采用异步执行。
+     * 完成事件可能与延迟队列消费者竞争，短暂返回 I/O 错误。
+     * 请求仍在本地处理时，重试读取同一扇区。
+     */
     for (UINT32 attempt = 0U; attempt < 3U; ++attempt) {
         BOOLEAN success = cache != 0 && cache->Initialized ?
             block_cache_read(cache,
@@ -167,12 +167,42 @@ BOOLEAN fat32_write_fat_entry(OS_FAT32 *filesystem, UINT32 fat_number,
     fat_start = filesystem->FatStartLba +
                 (UINT64)(fat_number - 1U) * filesystem->FatSectors;
     if (!fat32_read_sector(filesystem, fat_start + lba, sector)) return 0;
+    UINT32 old_value = filesystem->FatType == FAT_TABLE_TYPE_16 ?
+        fat32_read_u16(sector + offset) : fat32_read_u32(sector + offset) & 0x0FFFFFFFU;
+    value &= filesystem->FatType == FAT_TABLE_TYPE_16 ? 0xFFFFU : 0x0FFFFFFFU;
     if (filesystem->FatType == FAT_TABLE_TYPE_16) {
         fat32_write_u16(sector + offset, (UINT16)value);
     } else {
-        fat32_write_u32(sector + offset, value & 0x0FFFFFFFU);
+        fat32_write_u32(sector + offset, value);
     }
-    return fat32_write_sector(filesystem, fat_start + lba, sector);
+    if (!fat32_write_sector(filesystem, fat_start + lba, sector)) {
+        if (fat_number == 1U) {
+            filesystem->FreeClusterCountValid = 0;
+            filesystem->FreeClusterSearchStart = 2U;
+        }
+        return 0;
+    }
+    if (fat_number == 1U) {
+        /* 搜索下界不是未经验证的“下一个空闲簇”提示。释放和事务回滚必须重新暴露更早的空洞；
+         * 分配当前下界后只前进一簇，剩余占用区间仍由下一次搜索实际验证。 */
+        UINT32 floor = filesystem->FreeClusterSearchStart;
+        if (floor < 2U || (UINT64)floor > (UINT64)filesystem->ClusterCount + 2U)
+            floor = 2U;
+        if (value == 0U && cluster < floor) floor = cluster;
+        else if (value != 0U && cluster == floor) ++floor;
+        filesystem->FreeClusterSearchStart = floor;
+    }
+    if (fat_number == 1U && filesystem->FreeClusterCountValid) {
+        if (old_value == 0U && value != 0U) {
+            if (filesystem->FreeClusterCount == 0U) filesystem->FreeClusterCountValid = 0;
+            else --filesystem->FreeClusterCount;
+        } else if (old_value != 0U && value == 0U) {
+            if (filesystem->FreeClusterCount >= filesystem->ClusterCount)
+                filesystem->FreeClusterCountValid = 0;
+            else ++filesystem->FreeClusterCount;
+        }
+    }
+    return 1;
 }
 
 BOOLEAN fat32_write_file_fat_value(OS_FAT32 *filesystem, UINT32 cluster,
@@ -193,8 +223,12 @@ BOOLEAN fat32_find_free_cluster_from(OS_FAT32 *filesystem, UINT32 first,
     UINT32 entry_size;
     if (filesystem == 0 || cluster == 0 || first < 2U ||
         filesystem->FatCount == 0U ||
+        filesystem->ClusterCount > UINT32_MAX - 2U ||
         filesystem->BytesPerSector == 0U ||
         filesystem->BytesPerSector > sizeof(sector)) return 0;
+    UINT32 floor = filesystem->FreeClusterSearchStart;
+    if (floor < 2U || floor > filesystem->ClusterCount + 2U) floor = 2U;
+    if (first < floor) first = floor;
     entry_size = filesystem->FatType == FAT_TABLE_TYPE_16 ?
                  sizeof(UINT16) : sizeof(UINT32);
     for (UINT32 candidate = first;
@@ -203,8 +237,8 @@ BOOLEAN fat32_find_free_cluster_from(OS_FAT32 *filesystem, UINT32 first,
         UINT64 lba = byte_offset / filesystem->BytesPerSector;
         UINT32 offset = (UINT32)(byte_offset % filesystem->BytesPerSector);
         if (offset + entry_size > filesystem->BytesPerSector) return 0;
-        /* Allocation is serialized by the caller's mutation lock. Keep only
-         * this scan's sector snapshot; the next allocation reads fresh data. */
+        /* 分配由调用方的变更锁串行化。只保留本次扫描的扇区快照；
+         * 下一次分配会重新读取数据。 */
         if (!loaded || loaded_lba != lba) {
             if (!fat32_read_sector(filesystem,
                 filesystem->FatStartLba + lba, sector)) return 0;
@@ -215,10 +249,13 @@ BOOLEAN fat32_find_free_cluster_from(OS_FAT32 *filesystem, UINT32 first,
                        fat32_read_u16(sector + offset) :
                        fat32_read_u32(sector + offset) & 0x0FFFFFFFU;
         if (value == 0U) {
+            /* 只有从已知下界开始的完整扫描才能扩展下界。显式跳到较后位置不能跳过未检查区间。 */
+            if (first == floor) filesystem->FreeClusterSearchStart = candidate;
             *cluster = candidate;
             return 1;
         }
     }
+    if (first == floor) filesystem->FreeClusterSearchStart = filesystem->ClusterCount + 2U;
     return 0;
 }
 
@@ -245,18 +282,41 @@ BOOLEAN fat32_read_next_cluster(const OS_FAT32 *filesystem, UINT32 cluster,
     return 1;
 }
 
-UINT32 fat32_extent_length(const OS_FAT32 *filesystem, UINT32 cluster) {
+UINT32 fat32_extent_length(const OS_FAT32 *filesystem, UINT32 cluster,
+                           UINT32 maximum) {
     UINT32 length;
+    if (maximum == 0U) return 0U;
     if (!filesystem->Fat3Available) {
-        /* Standard FAT images have no third-table extent hints. Confirm a
-         * bounded prefix of the actual chain instead of treating every
-         * cluster as fragmented. Cursor caching reuses this verified run. */
+        /* 标准 FAT 映像没有第三张表中的 extent 提示。应验证实际簇链的有界前缀，
+         * 而不是把每个簇都视为碎片。游标缓存会复用这段已验证区间。 */
+        UINT8 sector[4096];
+        UINT64 loaded_lba = 0U;
+        BOOLEAN loaded = 0;
+        UINT32 entry_size = filesystem->FatType == FAT_TABLE_TYPE_16 ?
+                            sizeof(UINT16) : sizeof(UINT32);
+        if (filesystem->FatCount == 0U ||
+            filesystem->BytesPerSector == 0U ||
+            filesystem->BytesPerSector > sizeof(sector) ||
+            !fat32_cluster_valid(filesystem, cluster)) return 1U;
         length = 1U;
-        while (length < 16U &&
+        while (length < maximum &&
                fat32_cluster_valid(filesystem, cluster + length)) {
-            UINT32 next;
-            if (!fat32_read_next_cluster(filesystem, cluster + length - 1U,
-                                         &next) || next != cluster + length) break;
+            UINT64 byte_offset = (UINT64)(cluster + length - 1U) * entry_size;
+            UINT64 lba = byte_offset / filesystem->BytesPerSector;
+            UINT32 offset = (UINT32)(byte_offset % filesystem->BytesPerSector);
+            if (offset + entry_size > filesystem->BytesPerSector) break;
+            /* 同次探测中，相邻 FAT 项复用一个扇区快照，避免反复加锁和复制。
+             * 不跨调用保留快照；簇链变更仍由调用方的文件系统锁串行化。 */
+            if (!loaded || loaded_lba != lba) {
+                if (!fat32_read_sector(filesystem,
+                    filesystem->FatStartLba + lba, sector)) break;
+                loaded_lba = lba;
+                loaded = 1;
+            }
+            UINT32 next = filesystem->FatType == FAT_TABLE_TYPE_16 ?
+                          fat32_read_u16(sector + offset) :
+                          fat32_read_u32(sector + offset) & 0x0FFFFFFFU;
+            if (next != cluster + length) break;
             ++length;
         }
         return length;
@@ -266,5 +326,53 @@ UINT32 fat32_extent_length(const OS_FAT32 *filesystem, UINT32 cluster) {
         length == 0U || length > filesystem->ClusterCount + 2U - cluster) {
         return 1U;
     }
-    return length;
+    return length < maximum ? length : maximum;
+}
+
+/* 只扫描有效数据簇；镜像 FAT 和扩展表不参与计数。变更锁可睡眠，扫描时允许调度。 */
+BOOLEAN fat32_space(OS_FAT32 *filesystem, UINT64 *blocks,
+                    UINT64 *free_blocks, UINT64 *block_size) {
+    UINT8 sector[4096];
+    if (filesystem == 0 || blocks == 0 || free_blocks == 0 || block_size == 0 ||
+        !filesystem->Mounted || filesystem->BytesPerSector < 512U ||
+        filesystem->BytesPerSector > sizeof(sector) ||
+        (filesystem->BytesPerSector & (filesystem->BytesPerSector - 1U)) != 0U ||
+        filesystem->SectorsPerCluster == 0U || filesystem->FatCount == 0U ||
+        filesystem->ClusterCount == 0U || filesystem->ClusterCount > 0x0FFFFFF0U ||
+        (filesystem->FatType != 16U && filesystem->FatType != 32U)) return 0;
+    UINT32 entry_size = filesystem->FatType == 16U ? 2U : 4U;
+    if (((UINT64)filesystem->ClusterCount + 2U) * entry_size >
+        (UINT64)filesystem->FatSectors * filesystem->BytesPerSector) return 0;
+    fat32_mutation_lock(filesystem);
+    if (!filesystem->FreeClusterCountValid) {
+        UINT64 free_count = 0U, loaded = UINT64_MAX;
+        UINT32 first_free = filesystem->ClusterCount + 2U;
+        for (UINT32 cluster = 2U; cluster < filesystem->ClusterCount + 2U; ++cluster) {
+            UINT64 byte = (UINT64)cluster * entry_size;
+            UINT64 lba = byte / filesystem->BytesPerSector;
+            UINT32 offset = (UINT32)(byte % filesystem->BytesPerSector);
+            if (loaded != lba) {
+                if (!fat32_read_sector(filesystem, filesystem->FatStartLba + lba, sector)) {
+                    fat32_mutation_unlock(filesystem);
+                    return 0;
+                }
+                loaded = lba;
+            }
+            UINT32 value = entry_size == 2U ? fat32_read_u16(sector + offset) :
+                           fat32_read_u32(sector + offset) & 0x0FFFFFFFU;
+            if (value == 0U) {
+                ++free_count;
+                if (first_free == filesystem->ClusterCount + 2U) first_free = cluster;
+            }
+        }
+        filesystem->FreeClusterCount = free_count;
+        /* 空间查询已经完整验证主 FAT，分配器无需再扫描相同的已占用前缀。 */
+        filesystem->FreeClusterSearchStart = first_free;
+        filesystem->FreeClusterCountValid = 1;
+    }
+    *blocks = filesystem->ClusterCount;
+    *free_blocks = filesystem->FreeClusterCount;
+    *block_size = (UINT64)filesystem->BytesPerSector * filesystem->SectorsPerCluster;
+    fat32_mutation_unlock(filesystem);
+    return 1;
 }

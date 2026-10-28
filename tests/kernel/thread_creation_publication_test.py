@@ -43,7 +43,7 @@ typedef struct list_head { struct list_head *next,*prev; } list_head_t;
 #define list_entry(n,t,m) ((t *)((char *)(n)-offsetof(t,m)))
 typedef struct { unsigned refs; } vm_space_t;
 typedef struct { object_header_t object;atomic_uint state;uint32_t flags,thread_count;
- uint64_t linux_thread_group_leader_tid;list_head_t threads;vm_space_t *vm; } process_t;
+ uint64_t linux_thread_group_leader_tid;list_head_t threads,*enumeration_thread_cursor;vm_space_t *vm; } process_t;
 typedef struct { object_header_t object;process_t *process;arch_t arch;uint64_t tid;
  uint32_t flags;atomic_uint state;size_t kernel_stack_size;void *kernel_stack_base;
  vaddr_t kernel_stack_top;list_head_t process_node,owned_mutexes;void *pi_blocked_on;
@@ -52,7 +52,7 @@ static const unsigned g_thread_ops;
 static unsigned g_process_thread_create_stage;
 static unsigned held,allocation_calls,thread_frees,stack_allocations,stack_frees,fp_creates,fp_destroys,starts,reaps,resources;
 static unsigned fail_stage;
-static bool kill_at_unlock,valid_frame=true;
+static bool kill_at_unlock,valid_frame=true,start_fails;
 static uint64_t next_tid=100;
 static void list_init(list_head_t *h) { h->next=h->prev=h; }
 static void list_add_tail(list_head_t *h,list_head_t *n) { assert(held);n->prev=h->prev;n->next=h;h->prev->next=n;h->prev=n; }
@@ -86,7 +86,12 @@ static bool x86_is_canonical(uint64_t value) { return value<=X86_64_USER_TOP; }
 static unsigned x86_current_cpu_index(void) { return 2; }
 static void sched_initialize_new_thread(thread_t *t,unsigned cpu,bool pinned) { assert(cpu==2 && pinned==((t->process->flags&4)!=0));atomic_init(&t->state,0); }
 static void x86_user_thread_start(void) {}
-static int sched_start_thread(thread_t *t) { assert(!held && t->object.refs);++starts;if(atomic_load(&t->state)==3)return K_EBUSY;atomic_store(&t->state,1);return 0; }
+static int sched_start_thread(thread_t *t) { assert(!held && t->object.refs);++starts;if(start_fails||atomic_load(&t->state)==3)return K_EBUSY;atomic_store(&t->state,1);return 0; }
+static int thread_terminate(thread_t *t,int status) {
+ assert(!held&&status==K_EBUSY&&t->object.refs);
+ if(atomic_load(&t->state)!=3)terminate_published(t->process);
+ return K_OK;
+}
 static void debug_trace_stage(unsigned phase,unsigned step,unsigned tid) { assert(phase==1 && step==1 && tid); }
 static void vm_space_get(vm_space_t *v) { assert(held && v);++v->refs; }
 static void vm_space_put(vm_space_t *v) { assert(!held && v && v->refs);--v->refs; }
@@ -97,14 +102,22 @@ checks = r'''
 static void reset(process_t *p) {
  memset(p,0,sizeof(*p));p->object.refs=1;p->object.type=1;atomic_init(&p->state,PROCESS_RUNNING);list_init(&p->threads);
  held=allocation_calls=thread_frees=stack_allocations=stack_frees=fp_creates=fp_destroys=starts=reaps=resources=0;
- fail_stage=0;kill_at_unlock=false;valid_frame=true;
+ fail_stage=0;kill_at_unlock=false;valid_frame=true;start_fails=false;
 }
 int main(void) {
  arch_trap_frame_t frame={{0}};for(unsigned i=0;i<20;++i)frame.words[i]=i*17;
  process_t p;
  for(unsigned round=0;round<100;++round)for(unsigned start=0;start<2;++start)for(unsigned kill=0;kill<2;++kill) {
   reset(&p);p.flags=round%2?PROCESS_FLAG_INIT_CPU_PINNED:0;kill_at_unlock=kill;thread_t *t=NULL;
-  assert(thread_create_user_frame_internal(&p,&frame,0x8000,start,&t)==K_OK && t);
+  p.enumeration_thread_cursor=(list_head_t *)(uintptr_t)1;
+  int created=thread_create_user_frame_internal(&p,&frame,0x8000,start,&t);
+  assert(!p.enumeration_thread_cursor);
+  if(start&&kill) {
+   assert(created==K_EBUSY&&!t&&!p.thread_count&&p.object.refs==1);
+   assert(thread_frees==1&&stack_frees==1&&fp_destroys==1&&reaps==1);
+   continue;
+  }
+  assert(created==K_OK && t);
   assert(starts==start && !held && p.object.refs==2 && g_process_thread_create_stage==3);
   assert(!memcmp((void*)t->arch.switch_ctx.r12,&frame,sizeof(frame)) && t->arch.switch_ctx.r13==0x8000);
   if(kill) {
@@ -124,6 +137,11 @@ int main(void) {
   assert(thread_frees==(failure!=1) && fp_destroys==(failure>=3) && stack_frees==(failure==4));
  }
  reset(&p);thread_t *out=NULL;
+ start_fails=true;out=(void*)1;
+ assert(thread_create_user_frame_internal(&p,&frame,0x8000,true,&out)==K_EBUSY);
+ assert(out==(void*)1&&!p.thread_count&&p.object.refs==1&&starts==1&&reaps==1);
+ assert(thread_frees==1&&stack_frees==1&&fp_destroys==1);
+ reset(&p);out=NULL;
  assert(thread_create_user_frame_internal(NULL,&frame,0,false,&out)==K_EINVAL);
  assert(thread_create_user_frame_internal(&p,NULL,0,false,&out)==K_EINVAL);
  assert(thread_create_user_frame_internal(&p,&frame,0,false,NULL)==K_EINVAL);

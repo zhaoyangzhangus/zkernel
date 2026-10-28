@@ -5,7 +5,7 @@
 #include <kernel/base.h>
 #include <uapi/syscall.h>
 
-/* Private architecture contract shared by syscall entry and its callers. */
+/* 系统调用入口及其调用方共用的私有架构约定。 */
 typedef x86_cpu_local_t syscall_cpu_local_t;
 typedef arch_trap_frame_t syscall_frame_t;
 

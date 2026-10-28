@@ -17,12 +17,12 @@ iteration = '            if (remaining-- != 0U) continue;'
 assert functions.count(iteration) == 1
 functions = functions.replace(iteration, '            ++thread_visits;\n'+iteration)
 monitor = source[source.index('static process_t *process_monitor_find('):
-                 source.index('/* Caller holds thread_lock, including the VM lifetime guard. */')]
+                 source.index('static bool process_monitor_protected(')]
 monitor = monitor.replace('process_t *candidate = list_entry',
                           '++monitor_visits; process_t *candidate = list_entry')
 functions += monitor
 thread_monitor = source[source.index('static thread_t *process_monitor_thread_locked('):
-                        source.index('kstatus_t process_task_query(')]
+                        source.index('uint64_t linux_thread_visible_tid(')]
 thread_monitor = thread_monitor.replace('thread_t *thread = list_entry(node,',
                                         '++monitor_thread_visits; thread_t *thread = list_entry(node,')
 functions += thread_monitor
@@ -44,7 +44,8 @@ typedef struct list_head { struct list_head *next,*prev; } list_head_t;
 #define list_entry(n,t,m) ((t *)((char *)(n)-offsetof(t,m)))
 typedef struct process {
     list_head_t global_node,threads;
-    list_head_t *monitor_thread_cursor;
+    list_head_t *monitor_thread_cursor,*enumeration_thread_cursor;
+    uint32_t enumeration_thread_index;
     struct process *parent;
     uint64_t pid,create_time_ns;
     atomic_uint state;
@@ -71,6 +72,17 @@ static unsigned monitor_visits;
 static unsigned monitor_thread_visits;
 static bool registry,threads,parent_locked,info,detach_on_unlock;
 static unsigned preemption,name_updates;
+static bool kernel_workers;
+static kstatus_t sched_monitor_process(os_process_snapshot_t *s) {
+ assert(!registry&&!threads&&!preemption);
+ if(!kernel_workers)return K_ENOENT;
+ *s=(os_process_snapshot_t){0};s->pid=OS_KERNEL_WORKERS_PID;return K_OK;
+}
+static kstatus_t sched_monitor_thread(uint32_t index,os_thread_snapshot_t *s) {
+ assert(!registry&&!threads&&!preemption);
+ if(!kernel_workers||index!=0)return K_ENOENT;
+ *s=(os_thread_snapshot_t){0};s->tid=999;s->process_pid=OS_KERNEL_WORKERS_PID;return K_OK;
+}
 static void object_get(process_t *p) { assert(registry && (p==&process || p==&prefix)); ++p->refs; }
 static void object_put(process_t *p) {
     assert(!registry && !threads && !info && !parent_locked && p->refs);
@@ -107,6 +119,8 @@ static void process_set_name(process_t *destination,const char *name){
 static void setup(void) {
     g_process_enumeration_cursor=0;
     g_process_monitor_cursor=0;
+    process.enumeration_thread_cursor=0;
+    prefix.enumeration_thread_cursor=0;
     g_process_registry.next=&process.global_node;
     process.global_node.next=&g_process_registry;
     process.threads.next=&thread.process_node;
@@ -184,9 +198,11 @@ int main(void) {
     thread_visits=0;
     assert(process_enumerate_thread(128,&t)==K_OK && t.tid==21 && t.process_pid==20);
     assert(thread_visits==1); // no traversal of the 128 preceding threads
-    unsigned queries=0,visits=0,forward_visits=0;
+    unsigned queries=0,visits=0,nearest_end_visits=0;
     for(unsigned count=1;count<=128;++count) {
         prefix.thread_count=count;
+        /* 此夹具直接改链表，模拟真实增删时的缓存失效。 */
+        prefix.enumeration_thread_cursor=0;
         prefix.threads.prev=&prefix_threads[count-1].process_node;
         for(unsigned i=0;i<count;++i) {
             prefix_threads[i].process_node.next=i+1==count?&prefix.threads:&prefix_threads[i+1].process_node;
@@ -205,8 +221,11 @@ int main(void) {
             assert(process_monitor_thread_locked(&prefix,t.tid)==&prefix_threads[i]);
             process_thread_unlock(&prefix);
             assert(!monitor_thread_visits);
-            assert(thread_visits==(i<count-1-i?i:count-1-i)+1);
-            visits+=thread_visits;forward_visits+=i+1;++queries;
+            unsigned expected=(i<count-1-i?i:count-1-i)+1;
+            nearest_end_visits+=expected;
+            if(i && expected>2)expected=2; /* 连续查询仅移动一个节点。 */
+            assert(thread_visits==expected);
+            visits+=thread_visits;++queries;
         }
         thread_visits=0;
         assert(process_enumerate_thread(count,&t)==K_OK && t.tid==21 && thread_visits==1);
@@ -215,12 +234,32 @@ int main(void) {
         assert(owner==&process && !monitor_visits && process.refs==2);
         object_put(owner);
     }
-    printf("Thread enumeration: %u identities, %u list visits versus %u forward-only visits\n",queries,visits,forward_visits);
+    assert(visits*5U<nearest_end_visits);
+    printf("Thread enumeration: %u identities, %u list visits versus %u previous nearest-end visits\n",queries,visits,nearest_end_visits);
+    /* 任意顺序仍按原始索引返回；从首、尾、缓存三个位置选最短距离。 */
+    unsigned seed=19,previous=128;
+    prefix.enumeration_thread_cursor=0;
+    for(unsigned n=0;n<20000;++n) {
+        seed=seed*1664525U+1013904223U;unsigned index=(seed>>8)%128U;
+        unsigned distance=index<127U-index?index:127U-index;
+        if(previous<128U) {
+            unsigned cached=index>previous?index-previous:previous-index;
+            if(cached<distance)distance=cached;
+        }
+        thread_visits=0;
+        assert(process_enumerate_thread(index,&t)==K_OK && t.tid==1000+index);
+        assert(thread_visits==distance+1U);previous=index;
+    }
     thread_visits=0;
     assert(process_enumerate_thread(129,&t)==K_ENOENT);
     assert(process_enumerate_thread(UINT32_MAX,&t)==K_ENOENT);
     assert(thread_visits==0 && process.refs==1 && prefix.refs==1);
     assert(!registry && !threads && !info && !preemption);
+    kernel_workers=true;
+    assert(process_enumerate(3,&p)==K_OK&&p.pid==OS_KERNEL_WORKERS_PID);
+    assert(process_enumerate(4,&p)==K_ENOENT);
+    assert(process_enumerate_thread(129,&t)==K_OK&&t.tid==999&&t.process_pid==OS_KERNEL_WORKERS_PID);
+    assert(process_enumerate_thread(130,&t)==K_ENOENT);
 }
 '''
 with tempfile.TemporaryDirectory(prefix='liteos-enumeration-lock-') as directory:
@@ -230,14 +269,14 @@ with tempfile.TemporaryDirectory(prefix='liteos-enumeration-lock-') as directory
                     '-fsanitize=address,undefined', '-fno-pie', '-no-pie',
                     '-I'+str(root/'include'), str(path/'test.c'), '-o', str(path/'test')], check=True)
     subprocess.run([str(path/'test')], check=True)
-    condition = 'bool reverse = remaining > (process->thread_count - 1U) / 2U;'
-    remap = 'if (reverse) remaining = process->thread_count - 1U - remaining;'
+    condition = 'if (process->enumeration_thread_cursor != 0) {'
+    cache_index = 'process->enumeration_thread_index = target;'
     padding = 'if (capacity > copied) memset(name + copied, 0, capacity - copied);'
     assert padding in code
-    assert condition in code and remap in code
+    assert condition in code and cache_index in code
     for label, negative in (
-            ('forward-only walk', code.replace(condition, 'bool reverse = false;')),
-            ('unmapped reverse index', code.replace(remap, '')),
+            ('unused enumeration cursor', code.replace(condition, 'if (false && process->enumeration_thread_cursor != 0) {')),
+            ('wrong cursor index', code.replace(cache_index, 'process->enumeration_thread_index = 0;')),
             ('missing thread monitor hint', code.replace(
                 'g_process_monitor_cursor = &process->global_node;', '')),
             ('missing enumerated TID hint', code.replace(
@@ -253,4 +292,4 @@ with tempfile.TemporaryDirectory(prefix='liteos-enumeration-lock-') as directory
                                 preexec_fn=lambda: resource.setrlimit(resource.RLIMIT_CORE, (0, 0)))
         assert result.returncode != 0 and 'Assertion' in result.stderr, result.stderr
         print('Negative control rejected: '+label)
-print('Process enumeration: short registry locks, concurrent removal references, counted list skipping, nearest-end walks across 1..128 threads and empty/error cleanup passed')
+print('Process enumeration: short registry locks, concurrent removal references, counted list skipping, nearest cached/head/tail walks across 1..128 threads and empty/error cleanup passed')

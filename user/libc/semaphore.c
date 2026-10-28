@@ -16,8 +16,8 @@ static uint64_t semaphore_linux_timeout_pointer(uint64_t timeout_ns,
     return (uint64_t)(uintptr_t)timeout;
 }
 
-/* Keep the semaphore ABI deliberately small: semaphore.h exposes one
- * process-local counter, and System futexes provide the blocking primitive. */
+/* 有意保持信号量 ABI 精简：semaphore.h 只公开一个进程内计数器，
+ * 阻塞操作由 System futex 原语提供。 */
 static int semaphore_futex_wait(volatile uint32_t *address,
                                 uint32_t expected,
                                 uint64_t timeout_ns) {

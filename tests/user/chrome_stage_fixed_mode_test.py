@@ -5,7 +5,7 @@ import tempfile
 
 root=Path(__file__).resolve().parents[2]
 text=(root/'tools/stage-chrome.sh').read_text()
-helpers=text[text.index('declare -A stage_mode_cache=()'):text.index('\nmkdir -p "$esp_dir/etc/fonts"')]
+helpers=text[text.index('declare -A stage_mode_cache=()'):text.index('\nmkdir -p "$esp_dir/EFI/OS/fonts"')]
 with tempfile.TemporaryDirectory(prefix='chrome fixed mode ') as directory:
     base=Path(directory)
     (base/'source').write_bytes(b'original resource')

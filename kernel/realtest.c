@@ -37,8 +37,7 @@ static uint32_t g_realtest_flush_count;
 static atomic_flag g_realtest_lock = ATOMIC_FLAG_INIT;
 static char g_realtest_state[REALTEST_STATE_CAPACITY];
 static size_t g_realtest_state_length;
-/* Static-storage atomics are zero-initialized by the freestanding image; this
- * toolchain exposes ATOMIC_FLAG_INIT but not ATOMIC_VAR_INIT. */
+/* 独立运行映像会将静态原子变量初始化为零；此工具链提供 ATOMIC_FLAG_INIT，但不提供 ATOMIC_VAR_INIT。 */
 static atomic_bool g_realtest_timeout_active;
 static atomic_bool g_realtest_timeout_rebooting;
 static _Atomic uint64_t g_realtest_timeout_deadline_tsc;
@@ -117,10 +116,8 @@ void realtest_timeout_start(void) {
     uint64_t now_tsc;
     uint64_t timeout_tsc;
 
-    /* x86_timeout_ns_to_tsc() requires the CPU frequency to be initialized.
-     * CPU detection runs before the high-half runtime continuation, but keep
-     * this guard so an unusually early failure cannot turn the watchdog into
-     * a divide-by-zero fault. */
+    /* x86_timeout_ns_to_tsc() 要求 CPU 频率已初始化。CPU 检测先于高半区运行时续接执行，但仍保留此检查，
+     * 避免异常早期故障导致看门狗触发除零错误。 */
     if (x86_boot_cpu_features.tsc_hz == 0U) {
         atomic_store_explicit(&g_realtest_timeout_active, false,
                               memory_order_release);
@@ -164,10 +161,8 @@ bool realtest_timeout_poll(uint64_t now_tsc) {
 }
 
 __attribute__((noreturn)) void realtest_timeout_reboot(void) {
-    /* This function can run from the LAPIC hard IRQ.  Do not call
-     * kernel_serial_write_serial_only(): it captures into the FAT log and
-     * takes the real-test lock, which may be owned by the interrupted thread.
-     * The guarded primitive is the raw COM1 path when debug serial is built. */
+    /* 此函数可能从 LAPIC 硬中断调用。不要调用 kernel_serial_write_serial_only()：它会写入 FAT 日志，
+     * 并获取可能由被中断线程持有的 real-test 锁。启用串口调试时，应使用受保护的原始 COM1 路径。 */
     atomic_store_explicit(&g_realtest_timeout_active, false,
                           memory_order_release);
     kernel_serial_write_guarded(
@@ -224,10 +219,8 @@ void realtest_checkpoint(const char *state) {
 
 void realtest_checkpoint_deferred(const char *state) {
     if (state == 0) return;
-    /* RM/GSP initialization can run with device interrupts enabled and with
-     * vendor locks held.  Keep this path memory-only: UEFI SetVariable and
-     * FAT/VFS sync are performed later by the runtime checkpoint after the
-     * vendor call has returned. */
+    /* RM/GSP 初始化时可能开启设备中断，也可能持有厂商锁。此路径仅操作内存：UEFI SetVariable 和 FAT/VFS
+     * 同步会在厂商调用返回后，由运行时检查点执行。 */
     realtest_capture(state);
     realtest_capture("\r\n");
 }
@@ -289,11 +282,11 @@ void realtest_disable_runtime_services(void) {
 static bool raw_file_ready(OS_FAT32 *filesystem) {
     os_file_info_t info = {0};
     if (filesystem == 0 || g_realtest_file != 0 || g_realtest_raw_file != 0 ||
-        !fat32_stat_path(filesystem, "EFI/OS/realtest.log", &info) ||
+        !fat32_stat_path(filesystem, "log/realtest.log", &info) ||
         info.type != OS_FILE_TYPE_REGULAR) {
         return false;
     }
-    if (!fat32_open(filesystem, "EFI/OS/realtest.log",
+    if (!fat32_open(filesystem, "log/realtest.log",
                            &g_realtest_raw_file)) {
         return false;
     }
@@ -323,12 +316,10 @@ void realtest_capture(const char *text) {
 
 static bool open_realtest_file(void) {
     static const char *const paths[] = {
-        "/EFI/OS/realtest.log",
-        "/realtest.log",
+        "/log/realtest.log",
     };
-    /* The early FAT handle remains the least dependent logging path once
-     * scheduler and device workers are running.  Keep using it instead of
-     * replacing it with a VFS file that can share page-cache locks. */
+    /* 调度器和设备工作线程启动后，早期 FAT 句柄仍是依赖最少的日志路径。继续使用它，不要改用可能共享
+     * 页缓存锁的 VFS 文件。 */
     if (g_realtest_raw_filesystem != 0) return true;
     if (g_realtest_file != 0) return true;
     for (uint32_t index = 0U; index < sizeof(paths) / sizeof(paths[0]);
@@ -388,7 +379,7 @@ bool realtest_flush(void) {
         } else {
             uint32_t raw_written = 0U;
             write_ok = fat32_write_path(
-                g_realtest_raw_filesystem, "EFI/OS/realtest.log",
+                g_realtest_raw_filesystem, "log/realtest.log",
                 g_realtest_raw_file_offset + offset, g_realtest_chunk,
                 (uint32_t)count, &raw_written);
             written = raw_written;
@@ -434,11 +425,11 @@ static void seal_realtest_capture(void) {
 
 void realtest_fat_ready(struct OS_FAT32 *filesystem) {
     OS_FAT32 *fat = (OS_FAT32 *)filesystem;
-    /* The Windows test harness removes the previous log before copying the
-     * ESP.  Create the file while FAT is still the only storage owner so the
-     * runtime logger never falls back to the VFS/page-cache path. */
+    /* Windows 测试框架会在复制 ESP 前删除旧日志。趁 FAT 仍是唯一存储所有者时创建文件，避免运行时日志
+     * 写入器回退到 VFS/页缓存路径。 */
+    (void)fat32_create_path(fat, "log", 1);
     if (!raw_file_ready(fat)) {
-        if (!fat32_create_path(fat, "EFI/OS/realtest.log", 0) ||
+        if (!fat32_create_path(fat, "log/realtest.log", 0) ||
             !raw_file_ready(fat)) {
             realtest_mark("OS_REALTEST_FAT_LOG_CREATE_FAIL");
             return;
@@ -523,10 +514,8 @@ void realtest_record_exception(uint64_t vector, uint64_t error_code,
 }
 
 void realtest_finish_success(void) {
-    /* The real-hardware deployment is a boot-and-return probe.  Persist the
-     * terminal result before resetting so the host collector can prove both
-     * the hardware outcome and the return to Windows without entering the
-     * desktop. */
+    /* 真实硬件部署采用启动后返回的探测方式。复位前持久化最终结果，使主机收集器无需进入桌面即可同时确认
+     * 硬件结果和返回 Windows 的状态。 */
     realtest_timeout_stop();
     realtest_mark("OS_REALTEST_PASS");
     realtest_capture("OS_REALTEST_PASS\r\n");

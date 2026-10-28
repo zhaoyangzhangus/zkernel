@@ -3,7 +3,8 @@ param(
     [string]$PackageRoot = 'build/nvidia/official-595.84/extracted-gitbash',
     [string]$PackageRun = 'build/nvidia/official-595.84/NVIDIA-Linux-x86_64-595.84.run',
     [string]$GlibcRoot = 'build-phase7/host-deps/glibc',
-    [string]$Output = 'build/nvidia/phase9/compat/linux'
+    [string]$Output = 'build/nvidia/userspace',
+    [string]$Manifest = 'build/nvidia/userspace-595.84.json'
 )
 
 Set-StrictMode -Version Latest
@@ -141,7 +142,7 @@ Add-Alias 'lib/x86_64-linux-gnu/libnvidia-allocator.so.1' `
 Add-Alias 'lib/x86_64-linux-gnu/libnvidia-allocator.so' `
     'lib/x86_64-linux-gnu/libnvidia-allocator.so.1' $outputRoot $aliases
 
-$manifestPath = Join-Path (Split-Path -Parent $outputRoot) 'userspace-595.84.json'
+$manifestPath = Resolve-RepoPath $Manifest
 $manifest = [ordered]@{
     release = '595.84'
     package_run = $packageRunPath.Replace('\', '/')

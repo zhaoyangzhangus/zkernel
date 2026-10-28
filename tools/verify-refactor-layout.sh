@@ -37,8 +37,7 @@ forbidden_text() {
     fi
 }
 
-# Phase 1: BootInfo is a single loader/kernel ABI source. The old include is
-# allowed to remain only as a compatibility forwarding header.
+# 阶段 1：BootInfo 只有一个加载器/内核 ABI 来源。旧 include 仅可作为兼容转发头保留。
 require_file include/kernel/bootinfo.h
 require_text include/kernel/bootinfo.h 'typedef struct os_boot_info'
 require_file tools/verify-debug-locations.sh
@@ -287,8 +286,7 @@ if [[ -f compat/graphics/window_server.c ]]; then
     failures=1
 fi
 
-# Phase 4: the scheduler is the only owner of runnable-state publication and
-# the active context-switch self-test.
+# 阶段 4：调度器是可运行状态发布和活动上下文切换自测的唯一所有者。
 require_file include/arch/x86_64/syscall_internal.h
 require_text include/arch/x86_64/syscall_internal.h \
     'typedef x86_cpu_local_t syscall_cpu_local_t'
@@ -357,8 +355,7 @@ require_text kernel/sched/core.c 'sched_context_switch_self_test'
 require_text kernel/sched/core.c 'sched_publish_blocked'
 require_text kernel/sched/core.c 'sched_publish_dead'
 
-# Phase 5: process lifecycle is separate from thread execution and has no
-# graphics/display ownership in its canonical directory.
+# 阶段 5：进程生命周期与线程执行分离，其规范目录不拥有图形/显示功能。
 require_file include/kernel/console_backend.h
 require_file kernel/console.c
 require_text kernel/console.c 'BOOLEAN kernel_console_init'
@@ -495,9 +492,9 @@ require_text kernel/syscall/image.c 'REFACTOR_SYSCALL_IMAGE_OWNER'
 require_text makefile '$(BUILD)/esp/lib/ld-system.so.1'
 require_text makefile '$(BUILD)/esp/lib/libsystemc.so.1'
 require_text makefile '$(BUILD)/esp/lib/libgraphics.so.1'
-require_text makefile '$(BUILD)/esp/sbin/dyn-gfx'
-require_text makefile '$(BUILD)/esp/sbin/libc-test'
-require_text makefile '$(BUILD)/esp/sbin/imageview'
+require_text makefile '$(BUILD)/esp/usr/apps/dyn-gfx/dyn-gfx'
+require_text makefile '$(BUILD)/esp/usr/apps/libc-test/libc-test'
+require_text makefile '$(BUILD)/esp/usr/apps/imageview/imageview'
 require_file user/desktop/imageview/main.c
 require_text user/desktop/imageview/main.c 'OS_SYS_IMAGE_DECODE'
 require_text user/desktop/gshell/main.c '"imageview"'
@@ -525,8 +522,7 @@ forbidden_text 'scheduler_compat|process_scheduler|liteos_arch_context_switch|LI
 forbidden_text '#include <kernel/(window_server|display|gpu|input)\.h>|#include "(window_server|display|gpu|input)\.h"' \
     kernel/process
 
-# Phase 6: VM policy remains in kernel/mm while page-table, CR3 and TLB assembly
-# primitives remain below the architecture boundary.
+# 阶段 6：VM 策略保留在 kernel/mm；页表、CR3 和 TLB 汇编原语则位于架构边界以下。
 for path in \
     kernel/mm/phys/internal.h \
     kernel/mm/phys/page_db.c \
@@ -597,8 +593,7 @@ forbidden_text '^#if 0|x86_pte_cache_bits|x86_activate_root_table_pcid' \
 forbidden_text 'static bool canonical_page_fault|vm_handle_fault\(' \
     kernel/arch/x86_64/irq/exception.c
 
-# Process owns exit status publication; the scheduler only publishes the
-# terminal runnable-state transition.
+# 进程模块负责发布退出状态；调度器只发布可运行状态的终止转换。
 require_text kernel/process/exit.c 'bool process_publish_thread_exit'
 forbidden_text 'thread->exit_code' kernel/sched/core.c
 forbidden_text 'sched_dead_prepare_fn|sched_publish_dead\([^)]*,' \
@@ -611,8 +606,8 @@ require_text kernel/sched/runqueue.c 'void sched_initialize_test_thread'
 forbidden_text 'thread->[[:space:]]*(state|sched_class|rt_priority|base_sched_class|base_rt_priority|current_cpu|affinity|sched\.[[:alnum:]_]+)[[:space:]]*=[^=]' \
     kernel/process/thread.c kernel/sync/mutex.c
 
-# Phase 7A: scene/input/damage geometry has explicit units.  The compositor
-# implementation remains the single hot-loop owner until a measured 7B split.
+# 阶段 7A：场景/输入/损坏区域几何量均有明确单位。在经过测量的 7B 拆分完成前，
+# 合成器实现仍是热循环的单一所有者。
 require_file include/kernel/rect.h
 require_text include/kernel/rect.h 'typedef struct Rect'
 forbidden_text 'window_damage_rect_t|WindowRect|RegionRect|(^|[.>-])(left|top|right|bottom)\b' \
@@ -643,7 +638,6 @@ for path in \
     kernel/graphics/cursor_occlusion.c \
     kernel/graphics/raster.c \
     kernel/graphics/tile_metadata.c \
-    kernel/graphics/occlusion_cache.c \
     kernel/graphics/render_plan.c \
     kernel/graphics/damage_plan.c \
     kernel/graphics/shell.c \
@@ -724,8 +718,6 @@ done
 require_text kernel/graphics/display.c 'window_display_prepare'
 require_text kernel/graphics/buffer.c 'window_buffer_prepare'
 require_text kernel/graphics/display.c 'void window_display_reset_locked'
-require_text kernel/graphics/display.c \
-    'void window_display_set_scanout_locked'
 require_text kernel/graphics/buffer.c 'void window_buffer_reset_locked'
 require_text kernel/graphics/buffer.c \
     'void window_buffer_set_target_locked'
@@ -879,31 +871,7 @@ for path in kernel/graphics/*.c; do
             ;;
     esac
 done
-require_text kernel/graphics/present.c 'OS_QEMU_INCREMENTAL_REPAIR_V1'
-require_text kernel/graphics/present.c 'compositor_commit_qemu_stdvga'
-require_text kernel/graphics/present.c 'g_compositor_scanout_flipped'
-require_text kernel/graphics/present.c \
-    'void compositor_present_reset_scanout_state(void)'
-require_text kernel/graphics/present.c \
-    'void compositor_present_mark_scanout_flipped(void)'
-require_text kernel/graphics/present.c \
-    'bool compositor_present_scanout_flipped(void)'
-require_text kernel/graphics/present.c 'void compositor_present_init'
-require_text kernel/graphics/present.c 'compositor_present_start_copy_workers'
 require_text kernel/graphics/present.c 'void compositor_copy_wc_scanline'
-require_text kernel/graphics/present.c 'bool compositor_copy_rect_parallel_buffers'
-forbidden_text 'compositor_qemu_repair_|g_compositor_qemu_repair|compositor_qemu_copy_repair_set' \
-    compat/graphics/window_server.c
-for path in kernel/graphics/*.c; do
-    case "$path" in
-        kernel/graphics/present.c) ;;
-        *)
-            forbidden_text \
-                'g_compositor_scanout_flipped[[:space:]]*=[[:space:]]*($|[^=])' \
-                "$path"
-            ;;
-    esac
-done
 require_text kernel/graphics/damage.c 'window_mark_rect_locked'
 require_text kernel/graphics/damage.c 'void window_damage_reset_locked'
 require_text kernel/graphics/damage.c \
@@ -922,9 +890,6 @@ done
 require_text kernel/graphics/damage_plan.c 'REFACTOR_P7I_SNAPSHOT_DAMAGE_OWNER'
 require_text kernel/graphics/damage_plan.c 'compositor_snapshot_tiles_to_rects'
 require_text kernel/graphics/damage_plan.c 'compositor_snapshot_damage_bounds'
-require_text kernel/graphics/occlusion_cache.c 'REFACTOR_P7G_OCCLUSION_CACHE_OWNER'
-require_text kernel/graphics/occlusion_cache.c 'compositor_build_occlusion_floor_cache'
-require_text kernel/graphics/occlusion_cache.c 'compositor_occlusion_floor_for_damage'
 require_text kernel/graphics/render_plan.c 'REFACTOR_P7H_RENDER_PLAN_OWNER'
 require_text kernel/graphics/render_plan.c 'compositor_build_render_plan'
 require_text kernel/graphics/render_plan.c 'void compositor_render_plan_reset(void)'
@@ -994,10 +959,11 @@ forbidden_text '^[[:space:]]*void compositor_cursor_locked|^[[:space:]]*uint32_t
 forbidden_text '^[[:space:]]*void compositor_fill_span_wb|^[[:space:]]*void compositor_fill_locked|^[[:space:]]*void compositor_fill_rounded_locked' \
     kernel/graphics/compositor.c
 require_text kernel/graphics/tile_metadata.c 'touch_mask'
-require_text kernel/graphics/tile_metadata.c 'full_mask'
+forbidden_text 'full_mask' kernel/graphics/internal.h kernel/graphics/tile_metadata.c
 require_text kernel/graphics/tile_metadata.c 'opaque_mask'
+require_text kernel/graphics/tile_metadata.c 'compositor_tile_occlusion_floor'
+require_text kernel/graphics/tile_metadata.c 'compositor_occlusion_floor_for_damage'
 require_text kernel/graphics/render_plan.c 'g_compositor_render_plan'
-require_text kernel/graphics/occlusion_cache.c 'g_compositor_occlusion_floor'
 require_text kernel/graphics/compose_cpu.c 'compositor_copy_wb_pixels'
 require_text kernel/graphics/compose_cpu.c 'bool compositor_copy_self_test'
 require_text kernel/graphics/compose_cpu.c 'compositor_surface_cache_get'

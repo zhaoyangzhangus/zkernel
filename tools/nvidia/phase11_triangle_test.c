@@ -1,3 +1,6 @@
+#ifndef P11_APP_ROOT
+#define P11_APP_ROOT "/usr/apps/p11-triangle"
+#endif
 /* Phase 11: render a real OpenGL triangle and validate CPU readback. */
 #include <stdint.h>
 #include <errno.h>
@@ -572,11 +575,11 @@ int main(void)
     p11_emit("OS_P12_EGL_PROBE_BEGIN\n");
 #endif
     if (setenv("__EGL_VENDOR_LIBRARY_FILENAMES",
-               "/usr/share/glvnd/egl_vendor.d/10_nvidia.json", 1) != 0) {
+               P11_APP_ROOT "/egl/10_nvidia.json", 1) != 0) {
         failure_marker = "OS_P11_GLVND_ENV_FAIL\n";
         goto cleanup;
     }
-    egl_handle = dlopen("/compat/linux/lib/x86_64-linux-gnu/libEGL.so.1",
+    egl_handle = dlopen(P11_APP_ROOT "/lib/libEGL.so.1",
                         P11_RTLD_NOW | P11_RTLD_GLOBAL);
     if (egl_handle == 0) {
         failure_marker = "OS_P11_LIBEGL_FAIL\n";

@@ -1,6 +1,6 @@
 #pragma once
 
-/* REFACTOR_P5_LIBC_OWNER: the freestanding C ABI and public libc surface. */
+/* REFACTOR_P5_LIBC_OWNER：freestanding C ABI 和 libc 公共接口。 */
 
 #include <stddef.h>
 #include <stdarg.h>
@@ -50,10 +50,9 @@ typedef struct libc_file {
 #define STDOUT_FILENO 1
 #define STDERR_FILENO 2
 
-/* Keep the public stdio/POSIX constants as integer macros.  The kernel ABI
- * uses an enum for the same values; exporting that enum here makes otherwise
- * valid comparisons (for example Chromium's File::Whence static_assert)
- * trigger Clang's deprecated-enum-compare diagnostic. */
+/* 将 stdio/POSIX 公共常量定义为整数宏。内核 ABI 使用 enum 表示相同取值；
+ * 若在此导出该 enum，一些本来合法的比较（例如 Chromium 的
+ * File::Whence static_assert）会触发 Clang 的 deprecated-enum-compare 诊断。 */
 #define SEEK_SET 0
 #define SEEK_CUR 1
 #define SEEK_END 2
@@ -74,8 +73,8 @@ typedef struct libc_file {
 extern "C" {
 #endif
 
-/* The full definitions live in sys/stat.h and time.h.  Forward declarations
- * keep this umbrella header self-contained without creating an include cycle. */
+/* 完整定义位于 sys/stat.h 和 time.h。前置声明使此总头文件保持自包含，
+ * 同时避免产生循环包含。 */
 struct stat;
 struct timespec;
 
@@ -85,23 +84,22 @@ int64_t __libc_native_syscall6(uint64_t number, uint64_t argument0,
                         uint64_t argument5);
 struct os_memory_info;
 int __libc_query_memory_info(struct os_memory_info *info);
-/* Linux ABI entry point.  Unlike __libc_native_syscall6(), this leaves RAX
- * unmodified and is used for Linux syscall() and personality probes. */
+/* Linux ABI 入口。与 __libc_native_syscall6() 不同，此入口不修改 RAX，
+ * 用于 Linux syscall() 和兼容模式探测。 */
 int64_t __libc_linux_syscall6(uint64_t number, uint64_t argument0,
                               uint64_t argument1, uint64_t argument2,
                               uint64_t argument3, uint64_t argument4,
                               uint64_t argument5);
 bool __libc_linux_personality(void);
 
-/* Internal descriptor hooks shared by the socket and file front ends. */
+/* socket 和文件前端共用的内部描述符钩子。 */
 int __libc_install_handle(os_handle_t handle, uint32_t open_flags,
                           bool socket_handle, uint32_t socket_family);
 int __libc_install_pipe_handle(os_handle_t handle, uint32_t open_flags,
                                bool read_end);
-/* Linux-personality descriptors share the POSIX integer namespace with native
- * System descriptors.  These hooks adopt raw Linux descriptors into a slot
- * that is free in the libc table and keep the Linux handle equal to that slot,
- * so both libc wrappers and direct Linux syscalls see the same number. */
+/* Linux 兼容模式的描述符与 System 原生描述符共用 POSIX 整数命名空间。
+ * 这些钩子将原始 Linux 描述符接管到 libc 表中的空闲槽位，并让 Linux 句柄与槽位相同，
+ * 使 libc 封装和直接 Linux 系统调用看到相同的编号。 */
 int __libc_adopt_linux_fd(int linux_descriptor, int open_flags);
 void __libc_fd_table_fork_prepare(void);
 void __libc_fd_table_fork_parent(void);
@@ -125,7 +123,7 @@ int __libc_thread_init(void);
 void __libc_reap_detached_threads(void);
 void __libc_close_temporary_files(void);
 
-/* ISO C memory and string functions. */
+/* ISO C 内存和字符串函数。 */
 void *memcpy(void *destination, const void *source, size_t length);
 void *memmove(void *destination, const void *source, size_t length);
 void *memset(void *destination, int value, size_t length);
@@ -167,7 +165,7 @@ char *strndup(const char *text, size_t length);
 char *strerror(int error_number);
 int strerror_r(int error_number, char *buffer, size_t length);
 
-/* C character classification. */
+/* C 字符分类函数。 */
 int isalnum(int value);
 int isalpha(int value);
 int isblank(int value);
@@ -184,7 +182,7 @@ int isxdigit(int value);
 int tolower(int value);
 int toupper(int value);
 
-/* Allocation and general utilities. */
+/* 内存分配和通用工具函数。 */
 void *malloc(size_t size) __THROW;
 void *calloc(size_t count, size_t size) __THROW;
 void *realloc(void *pointer, size_t size) __THROW;
@@ -242,7 +240,7 @@ char *mktemp(char *template_name);
 char *realpath(const char *path, char *resolved);
 int getsubopt(char **optionp, char *const *tokens, char **valuep);
 
-/* File descriptors and stdio. */
+/* 文件描述符与标准 I/O。 */
 int open(const char *path, int flags, ...);
 int open64(const char *path, int flags, ...);
 int openat(int directory_descriptor, const char *path, int flags, ...);
@@ -429,7 +427,7 @@ extern char **environ;
 }
 #endif
 
-/* Process startup and termination hooks used by the freestanding CRT. */
+/* 独立运行 CRT 使用的进程启动与终止钩子。 */
 int __libc_start_main(int argc, char **argv, char **envp);
 void __libc_init_environment(char **envp);
 void __libc_run_exit_handlers(void);

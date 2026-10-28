@@ -97,7 +97,9 @@ int main(int argc, char **argv) {
         log_output = 1;
     }
     fprintf(stderr, "VULKAN_START\n");
-    if (setenv("VK_DRIVER_FILES", "/usr/share/vulkan/icd.d/nvidia_icd.json", 0) != 0) {
+    if (setenv("__EGL_VENDOR_LIBRARY_FILENAMES",
+               "/usr/apps/vulkan-probe/egl/10_nvidia.json", 1) != 0) return 1;
+    if (setenv("VK_DRIVER_FILES", "/usr/apps/vulkan-probe/vulkan/nvidia_icd.json", 0) != 0) {
         perror("VULKAN_FAIL setenv");
         return 1;
     }

@@ -7,8 +7,8 @@
 #define FIRMWARE_PACKAGE_ID_SIZE 16U
 
 /*
- * Firmware Manager does not own filesystem or bus access.
- * Drivers submit logical names; the provider resolves firmware data.
+ * 固件管理器不负责文件系统或总线访问。
+ * 驱动提交逻辑名称，由提供方解析固件数据。
  */
 typedef struct firmware_blob {
     const void *data;
@@ -26,7 +26,7 @@ typedef void (*firmware_release_fn)(firmware_blob_t *blob, void *context);
 
 typedef struct firmware_manager {
     atomic_uint init_state;
-    /* Immutable after init_state is release-published as ready (2). */
+    /* init_state 以 release 语义发布为就绪状态（2）后，此字段不可变。 */
     firmware_resolve_fn resolve;
     firmware_release_fn release;
     void *context;

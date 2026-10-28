@@ -23,7 +23,9 @@ with tempfile.TemporaryDirectory(prefix='vulkan-stage-') as directory:
     assert stage.closure(catalog, [root.name]) == catalog
     # dlopen modules must be included even though neither root references them.
     runtime_catalog = dict(catalog, **{'libvulkan.so.1': root,
-                                     'libGLX_nvidia.so.0': root})
+                                     'libGLX_nvidia.so.0': root,
+                                     'libEGL.so.1': root,
+                                     'libEGL_nvidia.so.0': root})
     try:
         stage.vulkan_closure(runtime_catalog, base)
         raise AssertionError('accepted missing NVIDIA dlopen module')
@@ -35,6 +37,15 @@ with tempfile.TemporaryDirectory(prefix='vulkan-stage-') as directory:
     for name in stage.NVIDIA_VULKAN_MODULES:
         assert selected[name] == base/name
     assert selected[leaf.name] == leaf
+    for name in ('libEGL.so.1', 'libEGL_nvidia.so.0'):
+        assert name in selected
+        incomplete = dict(runtime_catalog)
+        del incomplete[name]
+        try:
+            stage.vulkan_closure(incomplete, base)
+            raise AssertionError('accepted missing EGL dynamic dependency')
+        except RuntimeError as error:
+            assert name in str(error)
     assert stage.closure(catalog, [root.name, root.name]) == catalog
     try:
         stage.closure({root.name: root}, [root.name])

@@ -2,7 +2,7 @@
 .globl libc_crt_entry
 .extern __libc_start_main
 
-/* The kernel supplies a SysV-style initial stack: argc, argv[], envp[]. */
+/* 内核提供 SysV 风格初始栈：argc、argv[]、envp[]。 */
 libc_crt_entry:
     movq (%rsp), %rdi
     leaq 8(%rsp), %rsi

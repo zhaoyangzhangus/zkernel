@@ -3,7 +3,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-/* Half-open rectangle: [x0, x1) x [y0, y1). */
+/* 半开矩形：[x0, x1) x [y0, y1)。 */
 typedef struct Rect {
     int32_t x0;
     int32_t y0;
@@ -20,8 +20,8 @@ static inline bool rect_intersects(Rect a, Rect b) {
            a.y0 < b.y1 && b.y0 < a.y1;
 }
 
-/* Clip wide coordinates before narrowing to Rect. Failure leaves output
- * unchanged; display extents must fit Rect's signed coordinate domain. */
+/* 将宽坐标收窄至 Rect 前先执行裁剪。失败时输出保持不变；显示范围必须落在 Rect
+ * 的有符号坐标范围内。 */
 static inline bool rect_clip_to_extent(int64_t left, int64_t top,
     int64_t right, int64_t bottom, uint32_t width, uint32_t height, Rect *out) {
     if (!out || width > INT32_MAX || height > INT32_MAX) return false;

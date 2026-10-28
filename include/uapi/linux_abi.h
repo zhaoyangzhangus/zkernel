@@ -4,13 +4,12 @@
 #include "window_surface.h"
 
 /*
- * Linux x86-64 compatibility ABI constants.  These definitions are kept
- * separate from include/uapi/syscall.h: the native System syscall numbers
- * are intentionally not Linux syscall numbers.
+ * Linux x86-64 兼容 ABI 常量。这些定义与 include/uapi/syscall.h 分开：
+ * System 原生系统调用号刻意不采用 Linux 系统调用号。
  */
 
-/* Initial user stack mapped by the ELF loader; stack base is inclusive and
- * stack top is exclusive, matching pthread_attr_getstack(). */
+/* ELF 加载器映射的初始用户栈；栈底包含在映射范围内，栈顶不包含，
+ * 与 pthread_attr_getstack() 的约定一致。 */
 #define OS_LINUX_USER_STACK_TOP  0x00007FFFFFF00000ULL
 #define OS_LINUX_USER_STACK_SIZE (8ULL * 1024ULL * 1024ULL)
 #define OS_LINUX_USER_STACK_BASE \
@@ -20,6 +19,7 @@
 #define LINUX_SYS_WRITE            1U
 #define LINUX_SYS_OPEN             2U
 #define LINUX_SYS_CLOSE            3U
+#define LINUX_SYS_CREAT           85U
 #define LINUX_SYS_STAT             4U
 #define LINUX_SYS_FSTAT            5U
 #define LINUX_SYS_LSTAT            6U
@@ -89,6 +89,8 @@
 #define LINUX_SYS_GETEGID          108U
 #define LINUX_SYS_GETRESUID        118U
 #define LINUX_SYS_GETRESGID        120U
+#define LINUX_SYS_STATFS           137U
+#define LINUX_SYS_FSTATFS          138U
 #define LINUX_SYS_PRCTL            157U
 #define LINUX_SYS_SCHED_GETPARAM   143U
 #define LINUX_SYS_SCHED_GETSCHEDULER 145U
@@ -97,6 +99,7 @@
 #define LINUX_SYS_FUTEX            202U
 #define LINUX_SYS_SCHED_GETAFFINITY 204U
 #define LINUX_SYS_CLOCK_GETTIME   228U
+#define LINUX_SYS_CLOCK_NANOSLEEP 230U
 #define LINUX_SYS_EXIT_GROUP      231U
 #define LINUX_SYS_OPENAT          257U
 #define LINUX_SYS_MKDIRAT         258U
@@ -142,6 +145,7 @@
 #define LINUX_O_APPEND       00002000U
 #define LINUX_O_NONBLOCK     00004000U
 #define LINUX_O_DIRECTORY    00200000U
+#define LINUX_O_NOFOLLOW     00400000U
 #define LINUX_O_CLOEXEC      02000000U
 
 #define LINUX_AF_UNIX        1U
@@ -371,6 +375,17 @@ typedef struct linux_sysinfo {
     uint64_t totalhigh, freehigh;
     uint32_t mem_unit, reserved;
 } linux_sysinfo_t;
+
+/* x86-64 statfs, also used by glibc's statfs64/statvfs64 wrappers. */
+typedef struct linux_statfs {
+    int64_t type, block_size;
+    uint64_t blocks, blocks_free, blocks_available, files, files_free;
+    int32_t filesystem_id[2];
+    int64_t name_max, fragment_size, flags, spare[4];
+} linux_statfs_t;
+_Static_assert(sizeof(linux_statfs_t) == 120U, "Linux statfs size changed");
+_Static_assert(__builtin_offsetof(linux_statfs_t, name_max) == 64U,
+               "Linux statfs name_max offset changed");
 _Static_assert(sizeof(linux_sysinfo_t) == 112U, "Linux x86-64 sysinfo size changed");
 _Static_assert(__builtin_offsetof(linux_sysinfo_t, mem_unit) == 104U,
                "Linux sysinfo memory unit offset changed");

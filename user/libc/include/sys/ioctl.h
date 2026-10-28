@@ -2,9 +2,8 @@
 
 #include <libc/libc.h>
 
-/* Linux-compatible ioctl request encoding.  System currently exposes only
- * the generic descriptor query used by Chromium's file watchers; device
- * specific ioctl requests remain unsupported by the native kernel ABI. */
+/* Linux 兼容的 ioctl 请求编码。System 当前仅提供 Chromium 文件监视器使用的
+ * 通用描述符查询；原生内核 ABI 尚不支持设备专用 ioctl 请求。 */
 #ifndef _IOC_NRBITS
 #define _IOC_NRBITS 8
 #define _IOC_TYPEBITS 8
@@ -33,10 +32,9 @@
 #define FIONREAD 0x541BUL
 #endif
 
-/* Linux-compatible network interface query used by Chromium's POSIX
- * interface-name helper.  System may return ENOTTY until the corresponding
- * driver ioctl is implemented, but the public request number must exist for
- * source-compatible consumers. */
+/* Chromium POSIX 接口名称辅助函数使用的 Linux 兼容网络接口查询。
+ * 对应驱动 ioctl 实现前，System 可能返回 ENOTTY；但为保持源代码兼容，
+ * 必须提供此公共请求编号。 */
 #ifndef SIOCGIFNAME
 #define SIOCGIFNAME 0x8910UL
 #endif

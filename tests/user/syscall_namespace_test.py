@@ -7,7 +7,7 @@ import tempfile
 ROOT=Path(__file__).resolve().parents[2]
 source=(ROOT/'user/libc/syscall.c').read_text()
 start=source.index('static int64_t libc_raw_syscall6(')
-end=source.index('/* Linux-compatible varargs entry point.',start)
+end=source.index('static size_t linux_syscall_argument_count(',start)
 entry=source[start:end]
 wrappers=entry[entry.index('int64_t __libc_linux_syscall6('):]
 legacy=entry

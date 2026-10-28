@@ -5,7 +5,7 @@ import tempfile
 
 ROOT=Path(__file__).resolve().parents[2]
 source=(ROOT/'user/desktop/imageview/main.c').read_text()
-loader=source[source.index('static bool load_image_file('):source.index('static void fill_rect(')]
+loader=source[source.index('static bool load_image_file('):source.index('static void clamp_pan(')]
 assert 'imageview_cleanup(' not in loader
 program=r'''
 #include <assert.h>

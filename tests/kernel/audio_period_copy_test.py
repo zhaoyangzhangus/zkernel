@@ -7,8 +7,8 @@ root = Path(__file__).resolve().parents[2]
 source = (root/'kernel/drivers/audio/core.c').read_text()
 helper = source[source.index('static void audio_copy_bytes('):
                 source.index('static uint32_t audio_sample_bytes(')]
-period = source[source.index('static kstatus_t audio_stream_period_copy('):
-                source.index('void audio_stream_get_stats(')]
+period = source[source.index('static kstatus_t audio_stream_period_copy_locked('):
+                source.index('/* 在同一临界区检查、复制并发布')]
 code = r'''
 #include <assert.h>
 #include <stdio.h>
@@ -19,9 +19,11 @@ static unsigned copies,locked,locks,unlocks;
 static void *counted_copy(void *out,const void *in,size_t n) {
     ++copies;return liteos_memcpy(out,in,n);
 }
-typedef struct {page_t **pages;uint32_t page_count;} audio_period_t;
+#define AUDIO_PERIOD_FREE 0U
+typedef struct {page_t **pages;uint32_t page_count;uint32_t state;} audio_period_t;
 struct audio_stream {
     audio_stream_state_t state;
+    audio_direction_t direction;
     audio_format_t format;
     uint64_t period_bytes;
     audio_period_t periods[2];

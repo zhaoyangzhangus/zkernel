@@ -21,6 +21,7 @@ code = r'''
 #include <stddef.h>
 #include <stdio.h>
 #include <string.h>
+#include <uapi/utf8.h>
 static unsigned font_width=8,font_height=20,caption=40,status=32;
 #define OS_TEXT_WIDTH font_width
 #define OS_TEXT_HEIGHT font_height
@@ -32,9 +33,10 @@ static char g_text[8192];
 static size_t g_cursor,g_text_length;
 static uint32_t g_scroll_line;
 static bool g_follow_cursor;
-''' + '\n'.join(extract(signature) for signature in (
+static unsigned layout_advances;
+''' + '\n'.join((extract(signature).replace('{','{++layout_advances;',1) if signature=='static void advance_position(' else extract(signature)) for signature in (
     'static uint32_t editor_columns(', 'static uint32_t editor_visible_lines(',
-    'static void advance_position(', 'static void cursor_position(',
+    'static void prepare_position(', 'static void advance_position(', 'static void cursor_position(',
     'static size_t offset_at_position(', 'static void ensure_cursor_visible(',
     'static void move_vertical_by(', 'static void scroll_editor(',
     'static void page_editor(', 'static size_t editor_mouse_offset(')) + r'''
@@ -104,7 +106,42 @@ int main(void){
   g_window.height=caption+status+font_height*4;g_scroll_line=0;
   scroll_editor(INT32_MAX);assert(!g_follow_cursor);
   scroll_editor(INT32_MIN);assert(g_scroll_line==0);
+  unsigned full_line=0,full_column=0;
+  for(size_t i=0;i<g_text_length;++i)oracle_advance(g_text[i],columns,&full_line,&full_column);
+  unsigned maximum=full_line+1>4?full_line+1-4:0;
+  const int32_t deltas[]={0,1,-1,INT32_MIN,INT32_MAX};
+  for(unsigned d=0;d<5;++d){
+   g_scroll_line=round&1?UINT32_MAX:random_value()%32;g_follow_cursor=true;
+   uint32_t previous=g_scroll_line;int64_t target=(int64_t)previous+deltas[d];
+   if(target<0)target=0;if(target>UINT32_MAX)target=UINT32_MAX;
+   uint32_t expected_scroll=deltas[d]?(target>maximum?maximum:(uint32_t)target):previous;
+   scroll_editor(deltas[d]);assert(g_scroll_line==expected_scroll);
+   assert(g_follow_cursor==(deltas[d]==0));
+  }
+
  }
+ /* 中文、四字节字符和制表符的前缀换行，与完整 UTF-8 扫描的结果一致。 */
+ strcpy(g_text,"a中😀b\t\n中a😀\n\t尾");g_text_length=strlen(g_text);font_width=8;font_height=20;
+ for(unsigned columns=1;columns<=12;++columns)for(unsigned rows=1;rows<=4;++rows){
+  g_window.width=20+columns*8;g_window.height=rows*20;
+  unsigned full_line=0,full_column=0;
+  for(size_t i=0;i<g_text_length;){size_t used;uint32_t ch=os_utf8_next(g_text+i,g_text_length-i,&used);
+   advance_position(ch,columns,&full_line,&full_column);i+=used?used:1;}
+  uint32_t maximum=full_line+1>rows?full_line+1-rows:0;
+  const int32_t deltas[]={0,1,-1,INT32_MIN,INT32_MAX};
+  for(unsigned top=0;top<8;++top)for(unsigned d=0;d<5;++d){
+   g_scroll_line=top;int64_t target=(int64_t)top+deltas[d];
+   if(target<0)target=0;if(target>UINT32_MAX)target=UINT32_MAX;
+   scroll_editor(deltas[d]);assert(g_scroll_line==(deltas[d]?(target>maximum?maximum:(uint32_t)target):top));
+  }
+ }
+ /* 大文档靠前滚动只需证实目标视口；返回顶部无需读取正文。 */
+ memset(g_text,'\n',8000);g_text_length=8000;font_width=8;font_height=20;
+ g_window.width=100;g_window.height=40;g_scroll_line=0;layout_advances=0;
+ scroll_editor(1);assert(g_scroll_line==1&&layout_advances==2);
+ layout_advances=0;scroll_editor(-1);assert(!g_scroll_line&&!layout_advances);
+ layout_advances=0;scroll_editor(INT32_MAX);assert(g_scroll_line==7999&&layout_advances==8000);
+ puts("Scroll prefix: 50000 ASCII and 1920 UTF-8 full-scan oracle comparisons; 8000-character near-top scan=2, return-top scan=0, end clamp scan=8000 PASS");
  puts("Editor layout: 393216 column cases, 69984 overflow-safe viewport cases and 10000 navigation/zero-row scrolling cases passed");
 }
 '''
@@ -112,5 +149,5 @@ with tempfile.TemporaryDirectory(prefix='system-editor-layout-') as directory:
     binary = str(Path(directory) / 'test')
     subprocess.run(['cc', '-O2', '-std=c11', '-Wall', '-Wextra', '-Werror',
                     '-fsanitize=address,undefined', '-fno-pie', '-no-pie',
-                    '-x', 'c', '-', '-o', binary], input=code, text=True, check=True)
+                    '-I'+str(ROOT/'include'), '-x', 'c', '-', '-o', binary], input=code, text=True, check=True)
     subprocess.run([binary], check=True)

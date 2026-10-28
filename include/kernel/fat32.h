@@ -3,6 +3,7 @@
 #include "base.h"
 #include "block_device.h"
 #include "block_cache.h"
+#include "io_mutex.h"
 #include <uapi/file.h>
 
 /* FAT32 owns its path and open-file boundary; VFS consumes these APIs. */
@@ -53,7 +54,13 @@ struct OS_FAT32 {
     OS_BLOCK_CACHE Cache;
     UINT32 OpenFileLock;
     UINT32 MutationLock;
+    io_mutex_t MutationMutex;
     OS_FAT32_FILE OpenFiles[OS_FAT32_MAX_OPEN_FILES];
+    /* 由变更锁保护。首次查询扫描主 FAT，后续分配/释放同步维护。 */
+    UINT64 FreeClusterCount;
+    /* 变更锁保护：此位置之前的有效簇均已确认占用，释放簇时向前修正。 */
+    UINT32 FreeClusterSearchStart;
+    BOOLEAN FreeClusterCountValid;
     BOOLEAN Mounted;
 };
 
@@ -99,3 +106,7 @@ BOOLEAN fat32_remove_path_typed(OS_FAT32 *filesystem, const CHAR8 *path,
 BOOLEAN fat32_rename_path(OS_FAT32 *filesystem, const CHAR8 *old_path,
                                   const CHAR8 *new_path);
 BOOLEAN fat32_sync(OS_FAT32 *filesystem);
+
+/* 返回数据区的簇数、空闲簇数和簇大小；失败时不发布部分结果。 */
+BOOLEAN fat32_space(OS_FAT32 *filesystem, UINT64 *blocks,
+                    UINT64 *free_blocks, UINT64 *block_size);

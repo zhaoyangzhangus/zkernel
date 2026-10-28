@@ -6,8 +6,8 @@ import tempfile
 
 root = Path(__file__).resolve().parents[2]
 source = (root / 'kernel/syscall/linux.c').read_text()
-body = source[source.index('static int64_t linux_prlimit64('):
-              source.index('static int64_t linux_sched_getaffinity(')]
+start = source.index('static int64_t linux_prlimit64(')
+body = source[start:source.index('\n}', start) + 2]
 limit = int(re.search(r'#define OS_LINUX_FD_LIMIT (\d+)U',
                      (root / 'include/kernel/linux_abi.h').read_text())[1])
 fixture = r'''

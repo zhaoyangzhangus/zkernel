@@ -14,7 +14,7 @@ script = (root / 'tools/chromium/trace-first-new-tab.gdb').read_text()
 expected = re.search(r"expected = '(Build ID: [0-9a-f]+)'", script).group(1)
 chromium = chromium_source()
 binary = chromium / 'out/liteos-debian/chrome'
-for artifact in (binary, root / 'build/esp/sbin/chrome'):
+for artifact in (binary, root / 'build/esp/usr/apps/chrome/chrome'):
     assert expected in subprocess.check_output(['readelf', '-n', artifact], text=True)
 stages = ast.literal_eval(re.search(r'stages = (\{.*?\n\})', script, re.S).group(1))
 symbols = {

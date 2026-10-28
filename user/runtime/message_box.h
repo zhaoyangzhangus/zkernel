@@ -2,14 +2,14 @@
 #define OS_MESSAGE_BOX_H
 
 #include <uapi/window.h>
-#include "../client_chrome.h"
+#include <uapi/window_theme.h>
+#include <uapi/utf8.h>
+#include "text.h"
 
-/* Non-blocking, application-modal dialog on the owner's surface. The owner
- * draws this last, routes input here first and invalidates its whole surface
- * on show/dismiss. No second event loop, window mapping or font lifetime. */
+/* 消息框只提交标题、正文与操作描述；公共模态层阻止底层输入但保留原色。 */
 enum ui_message_buttons {
     OS_MESSAGE_OK, OS_MESSAGE_OK_CANCEL,
-    OS_MESSAGE_YES_NO, OS_MESSAGE_SAVE_DISCARD_CANCEL
+    OS_MESSAGE_YES_NO, OS_MESSAGE_SAVE_DISCARD_CANCEL, OS_MESSAGE_DELETE_CANCEL
 };
 enum ui_message_result {
     OS_MESSAGE_NONE, OS_MESSAGE_ACCEPT, OS_MESSAGE_CANCEL,
@@ -19,20 +19,25 @@ enum ui_message_result {
 typedef struct ui_message_box {
     bool active;
     enum ui_message_buttons buttons;
-    uint32_t focus;
-    int32_t pressed;
+    uint32_t generation;
     char title[64];
     char message[512];
 } ui_message_box_t;
-typedef struct ui_message_layout {
-    uint32_t x, y, width, height, button_y, button_width, button_height;
-    uint32_t count, gap, inset;
-} ui_message_layout_t;
 
 static inline void ui_message_copy(char *out, uint32_t capacity,
                                        const char *text) {
+    if (!out || !capacity) return;
     uint32_t i = 0U;
-    if (text) while (i + 1U < capacity && text[i]) { out[i] = text[i]; ++i; }
+    /* 按完整字符截断，损坏输入统一替换，不能留下半个中文或表情序列。 */
+    while (text && *text && i+1U<capacity) {
+        size_t available=0,used=0;
+        while (available<4U && text[available]) ++available;
+        uint32_t code=os_utf8_next(text,available,&used);
+        char encoded[4];size_t bytes=os_utf8_encode(code,encoded);
+        if (!used || bytes>capacity-i-1U) break;
+        for (size_t j=0;j<bytes;++j) out[i++]=encoded[j];
+        text+=used;
+    }
     out[i] = '\0';
 }
 static inline uint32_t ui_message_count(enum ui_message_buttons buttons) {
@@ -42,10 +47,10 @@ static inline uint32_t ui_message_count(enum ui_message_buttons buttons) {
 static inline void ui_message_show(ui_message_box_t *box,
     const char *title, const char *message, enum ui_message_buttons buttons) {
     if (!box) return;
-    if ((uint32_t)buttons > OS_MESSAGE_SAVE_DISCARD_CANCEL) buttons = OS_MESSAGE_OK;
+    if ((uint32_t)buttons > OS_MESSAGE_DELETE_CANCEL) buttons = OS_MESSAGE_OK;
     box->buttons = buttons;
-    box->focus = ui_message_count(buttons) - 1U;
-    box->pressed = -1;
+    box->generation = (box->generation + 1U) & 0x000fffffU;
+    if (!box->generation) box->generation = 1U;
     ui_message_copy(box->title, sizeof(box->title), title);
     ui_message_copy(box->message, sizeof(box->message), message);
     box->active = true;
@@ -53,9 +58,10 @@ static inline void ui_message_show(ui_message_box_t *box,
 static inline const char *ui_message_label(enum ui_message_buttons b,
                                                uint32_t i) {
     if (b == OS_MESSAGE_SAVE_DISCARD_CANCEL)
-        return i == 0U ? "Save" : i == 1U ? "Discard" : "Cancel";
-    if (b == OS_MESSAGE_YES_NO) return i == 0U ? "Yes" : "No";
-    return i == 0U ? "OK" : "Cancel";
+        return i == 0U ? "保存" : i == 1U ? "不保存" : "取消";
+    if (b == OS_MESSAGE_YES_NO) return i == 0U ? "是" : "否";
+    if (b == OS_MESSAGE_DELETE_CANCEL) return i == 0U ? "删除" : "取消";
+    return i == 0U ? "确定" : "取消";
 }
 static inline enum ui_message_result ui_message_choice(
     enum ui_message_buttons b, uint32_t i) {
@@ -64,136 +70,139 @@ static inline enum ui_message_result ui_message_choice(
     if (b == OS_MESSAGE_YES_NO) return i == 0U ? OS_MESSAGE_YES : OS_MESSAGE_NO;
     return i == 0U ? OS_MESSAGE_ACCEPT : OS_MESSAGE_CANCEL;
 }
-static inline ui_message_layout_t ui_message_layout(
-    const ui_message_box_t *box, uint32_t width, uint32_t height) {
-    ui_message_layout_t r = {0};
-    uint32_t line = ui_text_line_height();
-    r.count = ui_message_count(box->buttons);
-    r.width = 540U + (line > 24U ? (line - 24U) * 10U : 0U);
-    if (r.width > width) r.width = width;
-    r.height = line * 8U + 56U;
-    if (r.height > height) r.height = height;
-    r.x = (width - r.width) / 2U; r.y = (height - r.height) / 2U;
-    r.inset = r.width >= 96U ? 16U : 0U;
-    r.gap = r.width >= 96U ? 8U : 0U;
-    r.button_width = (r.width - 2U * r.inset - (r.count - 1U) * r.gap) / r.count;
-    r.button_height = line + 16U;
-    if (r.button_height > r.height) r.button_height = r.height;
-    uint32_t margin = r.height - r.button_height >= 16U ? 16U : 0U;
-    r.button_y = r.y + r.height - r.button_height - margin;
-    return r;
-}
-static inline int32_t ui_message_hit(ui_message_layout_t r,
-                                        int32_t x, int32_t y) {
-    if (x < 0 || y < 0 || (uint32_t)y < r.button_y ||
-        (uint32_t)y - r.button_y >= r.button_height) return -1;
-    for (uint32_t i = 0U; i < r.count; ++i) {
-        uint32_t left = r.x + r.inset + i * (r.button_width + r.gap);
-        if ((uint32_t)x >= left && (uint32_t)x - left < r.button_width) return (int32_t)i;
-    }
-    return -1;
-}
-static inline enum ui_message_result ui_message_event(
-    ui_message_box_t *box, uint32_t width, uint32_t height,
-    const os_window_event_t *event) {
-    if (!box || !box->active || !event) return OS_MESSAGE_NONE;
-    enum ui_message_result result = OS_MESSAGE_NONE;
-    if (event->type == OS_WINDOW_EVENT_CLOSE_REQUEST) result = OS_MESSAGE_CANCEL;
-    if (event->type == OS_WINDOW_EVENT_INPUT) {
-        const os_input_event_t *input = &event->input;
-        if (input->type == OS_INPUT_EVENT_KEY && input->value == OS_INPUT_VALUE_PRESS) {
-            uint32_t count = ui_message_count(box->buttons);
-            if (input->code == 0x29U) result = OS_MESSAGE_CANCEL;
-            else if (input->code == 0x28U || input->code == 0x58U || input->code == 0x2CU)
-                result = ui_message_choice(box->buttons, box->focus);
-            else if (input->code == 0x2BU || input->code == 0x4FU)
-                box->focus = (box->focus + 1U) % count;
-            else if (input->code == 0x50U) box->focus = (box->focus + count - 1U) % count;
-        } else if (input->type == OS_INPUT_EVENT_BUTTON && input->code == OS_INPUT_BUTTON_LEFT) {
-            ui_message_layout_t layout = ui_message_layout(box, width, height);
-            int32_t hit = ui_message_hit(layout,
-                                            event->pointer_x, event->pointer_y);
-            if (layout.width >= 64U && layout.height >= 48U &&
-                event->pointer_x >= (int32_t)(layout.x + layout.width - 40U) &&
-                event->pointer_x < (int32_t)(layout.x + layout.width - 8U) &&
-                event->pointer_y >= (int32_t)(layout.y + 8U) &&
-                event->pointer_y < (int32_t)(layout.y + 40U)) hit = -2;
-            if (input->value == OS_INPUT_VALUE_PRESS) {
-                box->pressed = hit;
-                if (hit >= 0) box->focus = (uint32_t)hit;
-            } else if (input->value == OS_INPUT_VALUE_RELEASE) {
-                if (hit == -2 && box->pressed == -2) result = OS_MESSAGE_CANCEL;
-                else if (hit >= 0 && hit == box->pressed) result = ui_message_choice(box->buttons, (uint32_t)hit);
-                box->pressed = -1;
-            }
-        }
-    }
-    if (result != OS_MESSAGE_NONE) { box->active = false; box->pressed = -1; }
-    return result;
+#define OS_MESSAGE_NODE_CAPACITY 32U
+#define OS_MESSAGE_TEXT_CAPACITY 1024U
+typedef struct ui_message_document {
+    os_window_control_tree_t request;
+    os_control_node_t nodes[OS_MESSAGE_NODE_CAPACITY];
+    char text[OS_MESSAGE_TEXT_CAPACITY];
+} ui_message_document_t;
+
+static inline uint32_t ui_message_target(const ui_message_box_t *box, uint32_t index) {
+    /* 标题、面板等非交互节点也归属本会话，避免与宿主应用的低编号或文件卡片冲突。 */
+    return 0x50000000U | ((box->generation & 0x000fffffU) << 8U) | index;
 }
 
-static inline void ui_message_draw(const ui_message_box_t *box,
-    uint32_t *pixels, uint32_t stride, uint32_t width, uint32_t height) {
-    if (!box || !box->active || !pixels || stride < width) return;
-    ui_message_layout_t r = ui_message_layout(box, width, height);
-    uint32_t line = ui_text_line_height();
-    /* Redraw the owner first; never blend the dim layer onto a prior dialog. */
-    for (uint32_t y = 0U; y < height; ++y)
-        for (uint32_t x = 0U; x < width; ++x)
-            pixels[(uint64_t)y * stride + x] = user_client_chrome_blend_xrgb8888(
-                pixels[(uint64_t)y * stride + x], 0U, 60U);
-    user_client_chrome_fill_rect(pixels, stride, width, height, r.x, r.y,
-                                 r.width, r.height, OS_THEME_BORDER);
-    if (r.width > 2U && r.height > 2U)
-        user_client_chrome_fill_rect(pixels, stride, width, height, r.x + 1U, r.y + 1U,
-                                     r.width - 2U, r.height - 2U, OS_THEME_SURFACE);
-    uint32_t left = r.x + r.inset, right = r.x + r.width - r.inset;
-    uint32_t top = r.y + 16U;
-    ui_text_draw_rect(pixels, stride, width, height, (int32_t)left, (int32_t)top,
-                          left, r.y, right > left + 32U ? right - 32U : left,
-                          r.button_y, box->title, OS_THEME_TEXT);
-    if (r.width >= 64U && r.height >= 48U)
-        for (uint32_t y = 0U; y < 16U; ++y)
-            for (uint32_t x = 0U; x < 16U; ++x)
-                user_client_chrome_pixel(pixels, stride, width, height,
-                    r.x + r.width - 32U + x, r.y + 16U + y, OS_THEME_MUTED,
-                    (uint8_t)(user_client_chrome_nibble(user_client_close_alpha[y][x]) * 17U));
-    top += line + 16U;
-    const char *text = box->message;
-    /* Wrap at spaces/newlines, with UTF-8-safe hard wrapping for long words. */
-    while (*text && line && top < r.button_y && r.button_y - top >= line) {
-        size_t n = 0U, word = 0U;
-        while (text[n] && text[n] != '\n') {
-            size_t next = n + 1U;
-            while (((unsigned char)text[next] & 0xC0U) == 0x80U) ++next;
-            if (ui_text_measure_range(text, next) > right - left) break;
-            if (text[n] == ' ') word = n;
-            n = next;
+static inline bool ui_message_append(ui_message_document_t *document,
+    os_control_node_t node, const char *text, uint32_t length) {
+    if (document->request.count == OS_MESSAGE_NODE_CAPACITY ||
+        length > OS_MESSAGE_TEXT_CAPACITY - document->request.text_size) return false;
+    node.text_offset = document->request.text_size;
+    node.text_length = length;
+    for (uint32_t i=0U; i<length; ++i) document->text[document->request.text_size++]=text[i];
+    document->nodes[document->request.count++]=node;
+    return true;
+}
+
+/* 正文按公共文字单元拆成行描述；面板、按钮和关闭控件的几何全部由合成器决定。 */
+static inline bool ui_message_build(const ui_message_box_t *box, uint32_t identifier,
+    uint32_t width, uint32_t height, ui_message_document_t *document) {
+    if (!box || !box->active || !document || !identifier || !width || !height ||
+        width > INT32_MAX || height > INT32_MAX) return false;
+    *document=(ui_message_document_t){0};
+    uint32_t font=ui_text_size();
+    if (!font || font>96U) return false;
+    os_control_node_t root={.identifier=ui_message_target(box,0),.parent=OS_CONTROL_NO_PARENT,
+        .kind=OS_CONTROL_CONTAINER,
+        .flags=OS_CONTROL_CLIP_CHILDREN|OS_CONTROL_MANAGED_FOCUS|OS_CONTROL_FOCUS_ARROWS,
+        .background=OS_THEME_SURFACE,.foreground=OS_THEME_TEXT,.font_size=font};
+    if (!ui_message_append(document,root,0,0)) return false;
+    os_control_node_t surface={.identifier=ui_message_target(box,5),.parent=0,.kind=OS_CONTROL_SURFACE,
+        .flags=OS_CONTROL_DISABLED,.width=OS_CONTROL_FILL,.height=OS_CONTROL_FILL,.surface=1};
+    if (!ui_message_append(document,surface,0,0)) return false;
+    os_control_node_t shade={.identifier=ui_message_target(box,6),.parent=0,.kind=OS_CONTROL_CONTAINER,
+        .flags=OS_CONTROL_BACKGROUND_ALPHA|OS_CONTROL_CLIP_CHILDREN|OS_CONTROL_INHERIT_TEXT,
+        .width=OS_CONTROL_FILL,.height=OS_CONTROL_FILL,.background=OS_THEME_SCRIM};
+    if (!ui_message_append(document,shade,0,0)) return false;
+    os_control_node_t panel={.identifier=ui_message_target(box,7),.parent=2,.kind=OS_CONTROL_CONTAINER,
+        .flags=OS_CONTROL_DIALOG_PANEL|OS_CONTROL_CLIP_CHILDREN|OS_CONTROL_INHERIT_TEXT};
+    if (!ui_message_append(document,panel,0,0)) return false;
+    uint32_t n=0;while(n<sizeof(box->title) && box->title[n])++n;
+    if (n==sizeof(box->title)) return false;
+    os_control_node_t label={.identifier=ui_message_target(box,8),.parent=3,.kind=OS_CONTROL_TEXT,
+        .flags=OS_CONTROL_POINTER_PASSTHROUGH|OS_CONTROL_INHERIT_TEXT};
+    if (!ui_message_append(document,label,box->title,n)) return false;
+    uint32_t content_width=os_control_dialog_width(font);
+    if (content_width>width) content_width=width;
+    uint32_t inset=font;
+    if (inset>content_width/2U) inset=content_width/2U;
+    if (inset>height/2U) inset=height/2U;
+    content_width-=2U*inset;
+    const char *text=box->message;
+    size_t remaining=0;
+    while (remaining<sizeof(box->message) && text[remaining]) ++remaining;
+    if (remaining==sizeof(box->message)) return false;
+    uint32_t button_count=ui_message_count(box->buttons);
+    while (*text && content_width && document->request.count+button_count+2U<OS_MESSAGE_NODE_CAPACITY) {
+        size_t count=0,word=0;uint32_t used=0;
+        while(count<remaining && text[count]!='\n') {
+            /* 长度只扫描一次，逐字符推进，避免每个字符重新扫描整段后缀。 */
+            size_t bytes=0;
+            uint32_t code=os_utf8_next(text+count,remaining-count,&bytes);
+            if (!bytes) break;
+            uint32_t cell=os_control_text_cell_width(code,font);
+            if (used+cell>content_width && count) break;
+            if(text[count]==' ')word=count;
+            used+=cell;count+=bytes;
+            if (used>=content_width) break;
         }
-        if (text[n] && text[n] != '\n' && word) n = word;
-        if (!n && *text != '\n') break;
-        char row[512];
-        for (size_t i = 0U; i < n; ++i) row[i] = text[i];
-        row[n] = '\0';
-        ui_text_draw_rect(pixels, stride, width, height, (int32_t)left, (int32_t)top,
-                              left, r.y, right, r.button_y, row, OS_THEME_TEXT);
-        text += n;
-        if (*text == '\n') ++text;
-        while (*text == ' ') ++text;
-        top += line;
+        if(text[count]&&text[count]!='\n'&&word)count=word;
+        if(!count&&*text!='\n')break;
+        label.identifier=ui_message_target(box,16U+document->request.count);
+        if(!ui_message_append(document,label,text,(uint32_t)count))return false;
+        text+=count;remaining-=count;
+        if(remaining && *text=='\n'){++text;--remaining;}
+        while(remaining && *text==' '){++text;--remaining;}
     }
-    for (uint32_t i = 0U; i < r.count; ++i) {
-        uint32_t x = left + i * (r.button_width + r.gap);
-        uint32_t color = i == box->focus ? OS_THEME_ACCENT : OS_THEME_FIELD;
-        user_client_chrome_fill_rect(pixels, stride, width, height, x, r.button_y,
-                                     r.button_width, r.button_height, color);
-        const char *label = ui_message_label(box->buttons, i);
-        uint32_t size = ui_text_measure(label);
-        uint32_t tx = x + (r.button_width > size ? (r.button_width - size) / 2U : 0U);
-        uint32_t ty = r.button_y + (r.button_height > line ? (r.button_height - line) / 2U : 0U);
-        ui_text_draw_rect(pixels, stride, width, height, (int32_t)tx, (int32_t)ty,
-            x, r.button_y, x + r.button_width, r.button_y + r.button_height,
-            label, i == box->focus ? 0xFFFFFFFFU : OS_THEME_TEXT);
+    /* 只定义按钮条的约束，具体宽度、间隔和余数分配由合成器统一计算。 */
+    uint32_t button_parent=document->request.count;
+    os_control_node_t buttons={.identifier=ui_message_target(box,9),.parent=3,.kind=OS_CONTROL_CONTAINER,
+        .flags=OS_CONTROL_DIALOG_ACTIONS|OS_CONTROL_CLIP_CHILDREN|OS_CONTROL_INHERIT_TEXT,
+        .layout=OS_CONTROL_ROW};
+    if(!ui_message_append(document,buttons,0,0))return false;
+    for(uint32_t i=0;i<button_count;++i) {
+        const char *caption=ui_message_label(box->buttons,i);
+        n=0;while(caption[n])++n;
+        os_control_node_t button={.identifier=ui_message_target(box,2U+i),.parent=button_parent,
+            .kind=OS_CONTROL_BUTTON,.flags=OS_CONTROL_INHERIT_FONT|OS_CONTROL_FLEX_GROW |
+                (i+1U==button_count?OS_CONTROL_DEFAULT_FOCUS:0U),
+            .background=box->buttons==OS_MESSAGE_DELETE_CANCEL && !i ? OS_THEME_DANGER :
+                i+1U==button_count?OS_THEME_ACCENT:OS_THEME_FIELD,
+            .foreground=(box->buttons==OS_MESSAGE_DELETE_CANCEL && !i) || i+1U==button_count?
+                OS_THEME_ON_ACCENT:OS_THEME_TEXT};
+        if(!ui_message_append(document,button,caption,n))return false;
     }
+    {
+        os_control_node_t close={.identifier=ui_message_target(box,1),.parent=3,
+            .kind=OS_CONTROL_BUTTON,.flags=OS_CONTROL_DIALOG_CLOSE|OS_CONTROL_SYMBOL|
+                OS_CONTROL_SKIP_TAB|OS_CONTROL_INHERIT_FONT,
+            .value=OS_CONTROL_SYMBOL_CLOSE,.foreground=OS_THEME_MUTED};
+        if(!ui_message_append(document,close,0,0))return false;
+    }
+    document->request.hdr=(os_versioned_header_t){.size=sizeof(document->request),.version=1};
+    document->request.identifier=identifier;
+    document->request.nodes=(uintptr_t)document->nodes;
+    document->request.text=(uintptr_t)document->text;
+    return true;
+}
+
+static inline enum ui_message_result ui_message_event(
+    ui_message_box_t *box, const os_window_event_t *event) {
+    if(!box||!box->active||!event)return OS_MESSAGE_NONE;
+    enum ui_message_result result=OS_MESSAGE_NONE;
+    if(event->type==OS_WINDOW_EVENT_CLOSE_REQUEST)result=OS_MESSAGE_CANCEL;
+    if(event->type==OS_WINDOW_EVENT_CONTROL&&event->control.action==OS_CONTROL_CLICK) {
+        if(event->control.target==ui_message_target(box,1))result=OS_MESSAGE_CANCEL;
+        for(uint32_t i=0;i<ui_message_count(box->buttons);++i)
+            if(event->control.target==ui_message_target(box,2U+i))result=ui_message_choice(box->buttons,i);
+    }
+    /* 按钮切换和激活由服务器处理；仅保留本对话框自身的取消语义，拒绝旧代按键。 */
+    if(event->type==OS_WINDOW_EVENT_CONTROL&&event->control.action==OS_CONTROL_KEY&&
+        event->control.value==OS_INPUT_VALUE_PRESS&&event->control.code==0x29U&&
+        (event->control.target&~0xffU)==ui_message_target(box,0)&&
+        (event->control.target&0xffU)<=ui_message_count(box->buttons)+1U)
+        result=OS_MESSAGE_CANCEL;
+    if(result!=OS_MESSAGE_NONE)box->active=false;
+    return result;
 }
 #endif

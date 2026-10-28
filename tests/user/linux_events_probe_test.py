@@ -20,7 +20,7 @@ assert sum(path.endswith('XXXXXX') for path in paths) == 4
 assert 'char *digits = path + sizeof(path) - 5U;' in source
 
 helpers = source[source.index('static void emit('):
-                 source.index('/* Optional QEMU/host-proxy integration probe.')]
+                 source.index('static int test_tcp_proxy_connect(')]
 program = '''
 #include <assert.h>
 #include <string.h>

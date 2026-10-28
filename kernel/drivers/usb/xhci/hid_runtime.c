@@ -9,8 +9,8 @@
 #define OS_REALTEST 0
 #endif
 
-/* REFACTOR_P8_XHCI_HID_RUNTIME_OWNER: HID report state transfer, interrupt
- * queueing, and stopped-endpoint recovery share one direct Owner. */
+/* REFACTOR_P8_XHCI_HID_RUNTIME_OWNER：HID 报告状态传递、中断排队和
+ * 停止端点恢复由同一个直接所有者负责。 */
 
 #define XHCI_RING_TRB_COUNT 256U
 #define XHCI_LINK_TRB_TYPE 6U
@@ -19,7 +19,7 @@
 #define XHCI_TRB_CHAIN (1U << 4)
 #define XHCI_TRB_INTERRUPT_ON_COMPLETION (1U << 5)
 #define XHCI_TRB_LINK_TOGGLE_CYCLE (1U << 1)
-/* Short Packet is a successful completion for interrupt-IN reports. */
+/* 对 interrupt-IN 报告而言，Short Packet 属于成功完成。 */
 #define XHCI_COMPLETION_SHORT_PACKET 13U
 
 static volatile uint32_t g_xhci_hid_recovery_attempts;
@@ -216,12 +216,10 @@ bool xhci_queue_hid_report_secondary(xhci_state_t *state,
     return true;
 }
 
-/* A topology transition (or a controller-side endpoint stop) can complete an
- * interrupt-IN TRB with "Stopped".  Clearing hid_transfer_pending alone is
- * not enough: the endpoint remains stopped and every later doorbell is
- * ignored, leaving the user input waiter asleep forever.  Reset the endpoint
- * before arming the next report.  This is deliberately event-driven; no
- * polling loop is added to the HID path. */
+/* 拓扑转换（或控制器侧端点停止）可能使 interrupt-IN TRB 以 "Stopped" 完成。仅清除
+ * hid_transfer_pending 不够：端点仍处于停止状态，后续 doorbell 都会被忽略，用户输入
+ * 等待者可能永远无法唤醒。重新启用下一份报告前先复位端点。此处理由事件驱动；
+ * 不在 HID 路径中加入轮询循环。 */
 bool xhci_restart_hid_endpoint(xhci_state_t *state,
                                       xhci_device_context_t *device) {
     uint32_t endpoint_id;
@@ -236,11 +234,9 @@ bool xhci_restart_hid_endpoint(xhci_state_t *state,
         g_xhci_hid_recovery_stage = 2U;
         return false;
     }
-    /* A transfer event with completion code Stopped leaves the endpoint in
-     * the Stopped state.  Reset Endpoint is invalid in that state (QEMU
-     * returns Context State Error); Set TR Dequeue Pointer is the prescribed
-     * recovery.  Reinitialize the producer ring and point the controller at
-     * its first TRB with DCS=1, then ring the endpoint doorbell below. */
+    /* 完成码为 Stopped 的传输事件会使端点保持停止状态。此时 Reset Endpoint 无效
+     *（QEMU 返回 Context State Error）；规定的恢复方式是 Set TR Dequeue Pointer。
+     * 重新初始化生产者环，将控制器指向 DCS=1 的首个 TRB，然后在下方敲响端点 doorbell。 */
     ring = (xhci_trb_t *)device->hid_ring.cpu;
     for (uint32_t i = 0U; i < XHCI_RING_TRB_COUNT - 1U; ++i) {
         ring[i].parameter = 0U;
@@ -260,11 +256,9 @@ bool xhci_restart_hid_endpoint(xhci_state_t *state,
                                 xhci_dma_address(&device->hid_ring.mapping) | 1ULL,
                                 0)) {
         g_xhci_hid_recovery_command_error = xhci_last_error();
-        /* QEMU can report Stopped for a transfer that has already resumed by
-         * the time the deferred worker observes it.  In that transient case
-         * Set TR Dequeue Pointer correctly returns Context State Error; the
-         * endpoint is still usable, so retry the producer without issuing a
-         * second state-changing command. */
+        /* 延迟工作线程观察事件时，QEMU 可能已恢复该传输却仍报告 Stopped。
+         * 此暂态下 Set TR Dequeue Pointer 会正确返回 Context State Error；端点仍可用，
+         * 因此只重试生产者，不再发出第二个状态变更命令。 */
         g_xhci_hid_recovery_stage = 3U;
         device->hid_transfer_pending = false;
         if (!xhci_queue_hid_report(state, device)) {
@@ -461,6 +455,29 @@ bool xhci_handle_hid_transfer_event(xhci_state_t *state,
         }
     }
     return true;
+}
+
+/* 同步读盘者已持有事件环锁；正常 HID 报告必须立即消费并重新投递，不能等整次
+ * 存储会话结束。异常完成仍留给延迟工作，避免端点恢复的命令等待嵌套消费存储完成。 */
+bool xhci_handle_hid_io_event(xhci_state_t *state, const xhci_trb_t *event) {
+    if (state == 0 || event == 0 || !xhci_runtime_ready() ||
+        ((event->control >> XHCI_TRB_TYPE_SHIFT) & 0x3fU) !=
+            XHCI_TRANSFER_EVENT_TYPE) return false;
+    uint32_t completion = event->status >> XHCI_COMPLETION_SHIFT;
+    if (completion != XHCI_COMPLETION_SUCCESS &&
+        completion != XHCI_COMPLETION_SHORT_PACKET) return false;
+    uint8_t slot = (uint8_t)(event->control >> XHCI_TRB_SLOT_SHIFT);
+    uint32_t endpoint = (event->control >> XHCI_TRB_ENDPOINT_SHIFT) & 0x1fU;
+    xhci_device_context_t *device = xhci_find_hid_context(state, slot, endpoint);
+    if (device == 0) return false;
+    bool secondary = device->hid_secondary.endpoint != 0U &&
+        endpoint == (uint32_t)device->hid_secondary.endpoint * 2U + 1U;
+    if (!secondary && (device->hid_endpoint == 0U ||
+        endpoint != (uint32_t)device->hid_endpoint * 2U + 1U)) return false;
+    uint16_t maximum = secondary ? device->hid_secondary.max_packet :
+                                  device->hid_max_packet;
+    if ((event->status & 0x00ffffffU) > maximum) return false;
+    return xhci_handle_hid_transfer_event(state, event);
 }
 
 void xhci_report_hid_completion_milestones(void) {

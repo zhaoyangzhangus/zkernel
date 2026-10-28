@@ -41,8 +41,8 @@ def open_segment():
         output.close()
     sequence += 1
     output = (directory / f'{stem}-{sequence:05d}.jsonl').open('ab', buffering=0)
-    # Limit this boot's streams to eight 32MiB segments per scope. Other boot
-    # directories are retained for postmortem inspection, never deleted here.
+    # 每个作用域中，本次启动的日志流最多保留八个 32 MiB 分段。此处不删除其他启动目录，
+    # 以便事后检查。
     segments = sorted(directory.glob(prefix + '-*.jsonl'))
     for old in segments[:-8]:
         old.unlink()
@@ -69,8 +69,7 @@ try:
             chunk = os.read(child.stdout.fileno(), 65536)
             if not chunk:
                 raise RuntimeError(f'journalctl ended: {child.wait()}')
-            # Rotate only at a record boundary so individual JSON lines remain
-            # intact even when reads split an unusually large journal record.
+            # 仅在记录边界轮转，确保单条 JSON 行完整，即使读取将异常大的日志记录拆成多段也不例外。
             for piece in chunk.splitlines(keepends=True):
                 output.write(piece)
                 if piece.endswith(b'\n') and output.tell() >= 32 * 1024 * 1024:

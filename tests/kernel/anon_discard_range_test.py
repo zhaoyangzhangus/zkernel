@@ -12,7 +12,7 @@ types = header[header.index('typedef struct anon_page_node'):]
 types = types[:types.index('} anon_store_t;')+len('} anon_store_t;')]
 index = source[source.index('static anon_page_node_t *anon_page_index_find('):
                source.index('kstatus_t anon_page_get(')]
-discard = source[source.index('kstatus_t anon_page_discard_range('):
+discard = source[source.index('kstatus_t anon_page_retire_range('):
                  source.index('/* 将文件页复制', source.index('kstatus_t anon_page_discard_range('))]
 # Count real traversal steps, including the old full ownership-list scan.
 discard = discard.replace('while (*link != 0) {', 'while (*link != 0) { ++visits;')
@@ -162,6 +162,33 @@ int main(void) {
     anon_page_node_t *boundary=store.pages;
     store.pages=0;store.page_index.root=0;object.populated_pages=0;
     page_reference_put(boundary->page);kfree(boundary);
+    /* Multiple detached ranges remain alive without their old store. The
+     * later physical release must not touch a newly populated same index. */
+    page_t deferred_pages[8];
+    for(unsigned i=0;i<8;++i) {
+        deferred_pages[i].refs=2;
+        anon_page_node_t *node=calloc(1,sizeof(*node));assert(node);
+        node->index=i;node->page=&deferred_pages[i];
+        assert(anon_page_index_insert(&store,node)==node);++object.populated_pages;
+    }
+    anon_page_node_t *retired=0;
+    unsigned before_released=released,before_freed=freed;
+    assert(anon_page_retire_range(&object,2,4,&retired)==K_OK);
+    anon_page_node_t *saved=retired;
+    assert(anon_page_retire_range(&object,9,8,&retired)==K_EINVAL && retired==saved);
+    assert(anon_page_retire_range(&object,0,2,&retired)==K_OK);
+    assert(anon_page_retire_range(&object,0,8,&retired)==K_OK);
+    assert(validate(&object)==0 && released==before_released && freed==before_freed);
+    for(unsigned i=0;i<8;++i)assert(deferred_pages[i].refs==2);
+    page_t fresh={.refs=2};
+    anon_page_node_t *fresh_node=calloc(1,sizeof(*fresh_node));assert(fresh_node);
+    fresh_node->index=3;fresh_node->page=&fresh;
+    assert(anon_page_index_insert(&store,fresh_node)==fresh_node);++object.populated_pages;
+    anon_page_release_retired(retired);
+    assert(released==before_released+8 && freed==before_freed+8);
+    for(unsigned i=0;i<8;++i)assert(deferred_pages[i].refs==1);
+    assert(validate(&object)==1 && fresh.refs==2);
+    assert(anon_page_discard_range(&object,3,4)==K_OK && fresh.refs==1);
 }
 '''
 # Old production nodes have no backlink yet; the operation-count assertion

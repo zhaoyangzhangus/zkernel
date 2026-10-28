@@ -1,0 +1,23 @@
+<!-- 文件只定义结构、布局与继承样式，行为由应用按 id 绑定。 -->
+<container id="root" layout="column" padding="24" gap="16" flags="managed-focus"
+           background="surface" foreground="text" font-size="20">
+  <text id="heading" height="36" font-size="24" text="从文件加载的控件界面"/>
+  <container id="choices" layout="row" height="36" gap="20">
+    <checkbox id="check" width="160" height="36" text="复选框"/>
+    <radio id="radio" width="160" height="36" text="单选框"/>
+    <switch id="switch" width="180" height="36" text="开关"/>
+  </container>
+  <progress id="progress" height="24" value="5000"/>
+  <slider id="level" height="24" value="5000"/>
+  <scrollbar id="scroll" height="24" value="5000"/>
+  <container id="selection" layout="row" height="36" gap="16">
+    <list-item id="item" width="200" height="36" padding="8" text="可选择的列表项"/>
+    <tab id="tab" width="140" height="36" text="标签页"/>
+  </container>
+  <separator id="divider" height="2"/>
+  <container id="actions" layout="row" height="44" gap="16" flags="justify-end">
+    <button id="apply" width="140" height="44" radius="8" background="accent"
+            foreground="on-accent" text="应用"/>
+    <button id="close" width="140" height="44" radius="8" background="field" text="关闭"/>
+  </container>
+</container>

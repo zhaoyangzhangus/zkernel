@@ -5,7 +5,7 @@
 
 #include <uapi/window_theme.h>
 #include "../../runtime/caption.h"
-#include "../../runtime/paint.h"
+#include "../../runtime/caption_tree.h"
 #include "../../runtime/text.h"
 
 #define TASKMGR_MAP_BASE       0x0E000000ULL
@@ -13,18 +13,14 @@
 #define TASKMGR_MAX_PROCESSES   256U
 #define TASKMGR_MAX_THREADS     512U
 #define TASKMGR_MAX_ENTRIES     (TASKMGR_MAX_PROCESSES + TASKMGR_MAX_THREADS)
-#define TASKMGR_ROW_HEIGHT      (ui_text_line_height() + 14U)
-#define TASKMGR_BUTTON_HEIGHT   (ui_text_line_height() + 12U)
+#define TASKMGR_ROW_HEIGHT      (ui_text_line_height() + taskmgr_scale(14U))
 #define TASKMGR_TABLE_TOP       TASKMGR_ROW_HEIGHT
-#define TASKMGR_STATUS_HEIGHT   (ui_text_line_height() + 16U)
 #define TASKMGR_STATUS_CAP      96U
 
 #define TASKMGR_BACKGROUND      OS_THEME_SURFACE
-#define TASKMGR_HEADER          OS_THEME_HEADER
 #define TASKMGR_TABLE_HEADER    OS_THEME_TOOLBAR
 #define TASKMGR_TEXT            OS_THEME_TEXT
 #define TASKMGR_MUTED           OS_THEME_MUTED
-#define TASKMGR_ACCENT          OS_THEME_ACCENT
 #define TASKMGR_SELECTED        OS_THEME_SELECTED
 
 typedef struct taskmgr_window {
@@ -53,26 +49,50 @@ static taskmgr_window_t g_window = {
 };
 static taskmgr_entry_t g_entries[TASKMGR_MAX_ENTRIES];
 static uint32_t g_entry_count;
+static uint32_t g_visible_entries[TASKMGR_MAX_ENTRIES];
+static uint32_t g_entry_rows[TASKMGR_MAX_ENTRIES];
+static uint32_t g_visible_count;
+static bool g_visible_dirty = true;
 static uint32_t g_first_row;
 static uint32_t g_selected_entry;
 static bool g_selection_valid;
 static bool g_entries_truncated;
 static bool g_ctrl;
-static taskmgr_entry_t g_previous[TASKMGR_MAX_ENTRIES];
+/* 上轮只保留匹配身份、累计 CPU 时间和展开状态，不复制名称及整份资源统计。 */
+typedef struct taskmgr_previous {
+    uint64_t id,parent_id,created,runtime;
+    bool thread,expanded;
+} taskmgr_previous_t;
+static taskmgr_previous_t g_previous[TASKMGR_MAX_ENTRIES];
+static uint16_t g_previous_index[1024];
 static uint32_t g_previous_count;
 static uint64_t g_sample_time;
 static uint64_t g_next_refresh;
+static os_cpu_usage_t g_usage_previous;
+static os_memory_info_t g_memory;
+static uint32_t g_total_cpu;
+static bool g_usage_baseline,g_usage_valid,g_total_cpu_valid,g_memory_valid;
 static uint64_t g_confirm_pid;
 static uint64_t g_confirm_created;
 static uint64_t g_confirm_tid;
 static bool g_menu_open;
 static uint32_t g_menu_x, g_menu_y;
-static int32_t g_menu_hover = -1;
+static uint32_t g_menu_generation;
+static bool g_menu_published;
+static os_control_node_t g_nodes[OS_CONTROL_TREE_MAX_NODES];
+static char g_tree_text[OS_CONTROL_TREE_MAX_TEXT];
+static os_window_control_tree_t g_tree;
+static uint32_t g_caption_height;
 static void dismiss_menu(void);
 static char g_status[TASKMGR_STATUS_CAP] =
     "R REFRESH  CTRL +/- FONT  ESC CLOSE";
 
 void __main(void) {
+}
+
+static uint32_t taskmgr_scale(uint32_t value) {
+    return (value * ui_text_size() + OS_TEXT_DEFAULT_SIZE / 2U) /
+           OS_TEXT_DEFAULT_SIZE;
 }
 
 static int64_t taskmgr_syscall6(uint64_t number, uint64_t arg0,
@@ -133,16 +153,15 @@ static void append_text(char *destination, uint32_t capacity,
 }
 
 static void append_u64(char *destination, uint32_t capacity, uint64_t value) {
-    char digits[20];
-    uint32_t count = 0U;
+    char digits[21];
+    uint32_t begin = sizeof(digits) - 1U;
+    digits[begin] = '\0';
+    /* 从末尾生成完整数字，只定位一次目标末尾，避免每输出一位都重新扫描。 */
     do {
-        digits[count++] = (char)('0' + value % 10U);
+        digits[--begin] = (char)('0' + value % 10U);
         value /= 10U;
-    } while (value != 0U && count < sizeof(digits));
-    while (count != 0U) {
-        char text[2] = {digits[--count], '\0'};
-        append_text(destination, capacity, text);
-    }
+    } while (value != 0U);
+    append_text(destination, capacity, digits + begin);
 }
 
 static void set_status(const char *text) {
@@ -156,6 +175,93 @@ static uint64_t monotonic_ns(void) {
     return (uint64_t)time.seconds * 1000000000ULL + (uint64_t)time.nanoseconds;
 }
 
+/* 正常的一秒采样走一次乘除；极大计数使用有界长除法避免溢出。 */
+static uint32_t taskmgr_cpu_percent(uint64_t busy,uint64_t total) {
+    if (!total) return 0U;
+    if (busy>=total) return 100000U;
+    if (busy<=UINT64_MAX/100000U) return (uint32_t)(busy*100000U/total);
+    uint64_t remainder=0;uint32_t result=0;
+    for (uint32_t bit=1U<<16;bit;bit>>=1U) {
+        result*=2U;
+        if (remainder>=total-remainder) {remainder-=total-remainder;++result;}
+        else remainder*=2U;
+        if (100000U&bit) {
+            if (remainder>=total-busy) {remainder-=total-busy;++result;}
+            else remainder+=busy;
+        }
+    }
+    return result;
+}
+
+static void taskmgr_system_sample(void) {
+    g_memory=(os_memory_info_t){.hdr={sizeof(g_memory),OS_SYSCALL_ABI_VERSION}};
+    g_memory_valid=taskmgr_syscall_one(OS_SYS_MEMORY_INFO,(uintptr_t)&g_memory)==0 &&
+        g_memory.page_size && g_memory.free_pages<=g_memory.total_pages &&
+        g_memory.total_pages<=UINT64_MAX/g_memory.page_size;
+    os_cpu_usage_t usage={.hdr={sizeof(usage),OS_SYSCALL_ABI_VERSION}};
+    g_usage_valid=taskmgr_syscall_one(OS_SYS_CPU_GET_USAGE,(uintptr_t)&usage)==0 && usage.cpu_count;
+    g_total_cpu_valid=false;
+    if (g_usage_valid && g_usage_baseline && usage.cpu_count==g_usage_previous.cpu_count &&
+        usage.busy_ns>=g_usage_previous.busy_ns && usage.idle_ns>=g_usage_previous.idle_ns) {
+        uint64_t busy=usage.busy_ns-g_usage_previous.busy_ns,idle=usage.idle_ns-g_usage_previous.idle_ns;
+        if (busy<=UINT64_MAX-idle && busy+idle) {
+            g_total_cpu=taskmgr_cpu_percent(busy,busy+idle);g_total_cpu_valid=true;
+        }
+    }
+    g_usage_baseline=g_usage_valid;g_usage_previous=usage;
+}
+
+static void taskmgr_summary(char *text,uint32_t capacity) {
+    text[0]=0;append_text(text,capacity,"CPU 总占用：");
+    if (g_total_cpu_valid) {
+        append_u64(text,capacity,g_total_cpu/1000U);append_text(text,capacity,".");
+        char fraction[5]={(char)('0'+g_total_cpu/100U%10U),(char)('0'+g_total_cpu/10U%10U),
+            (char)('0'+g_total_cpu%10U),'%',0};append_text(text,capacity,fraction);
+    } else append_text(text,capacity,g_usage_valid?"采样中":"不可用");
+    append_text(text,capacity,"    空闲内存：");
+    if (g_memory_valid) {
+        append_u64(text,capacity,g_memory.free_pages*g_memory.page_size/(1024U*1024U));
+        append_text(text,capacity," MiB    已使用内存：");
+        append_u64(text,capacity,(g_memory.total_pages-g_memory.free_pages)*g_memory.page_size/(1024U*1024U));
+        append_text(text,capacity," MiB");
+    } else append_text(text,capacity,"不可用    已使用内存：不可用");
+}
+
+static uint32_t previous_hash(uint64_t id,uint64_t parent,uint64_t created,bool thread) {
+    uint64_t hash=id^(parent*0x9e3779b97f4a7c15ULL)^created^(uint64_t)thread;
+    hash=(hash^(hash>>30U))*0xbf58476d1ce4e5b9ULL;
+    hash=(hash^(hash>>27U))*0x94d049bb133111ebULL;
+    return (uint32_t)(hash^(hash>>31U))&1023U;
+}
+
+static void previous_snapshot(void) {
+    _Static_assert(TASKMGR_MAX_ENTRIES<1024U,"采样索引必须保留空槽");
+    for (uint32_t i=0;i<1024U;++i) g_previous_index[i]=0U;
+    g_previous_count=g_entry_count;
+    for (uint32_t i=0;i<g_previous_count;++i) {
+        const taskmgr_entry_t *entry=g_entries+i;
+        taskmgr_previous_t *old=g_previous+i;
+        *old=(taskmgr_previous_t){.id=entry->id,.parent_id=entry->parent_id,
+            .created=entry->resources.create_time_ns,.runtime=entry->resources.runtime_ns,
+            .thread=entry->thread,.expanded=entry->expanded};
+        uint32_t slot=previous_hash(old->id,old->parent_id,old->created,old->thread);
+        while (g_previous_index[slot]) slot=(slot+1U)&1023U;
+        g_previous_index[slot]=(uint16_t)(i+1U);
+    }
+}
+
+static const taskmgr_previous_t *previous_find(const taskmgr_entry_t *entry) {
+    uint64_t created=entry->resources.create_time_ns;
+    uint32_t slot=previous_hash(entry->id,entry->parent_id,created,entry->thread);
+    while (g_previous_index[slot]) {
+        const taskmgr_previous_t *old=g_previous+g_previous_index[slot]-1U;
+        if (old->id==entry->id && old->parent_id==entry->parent_id &&
+            old->created==created && old->thread==entry->thread) return old;
+        slot=(slot+1U)&1023U;
+    }
+    return 0;
+}
+
 static void sample_resources(taskmgr_entry_t *entry, uint64_t now) {
     entry->resources = (os_task_info_t){0};
     entry->resources.hdr.size = sizeof(entry->resources);
@@ -164,64 +270,87 @@ static void sample_resources(taskmgr_entry_t *entry, uint64_t now) {
     entry->resources.tid = entry->thread ? entry->id : 0U;
     entry->cpu = 0U;
     entry->cpu_sample_valid = false;
-    entry->expanded = false;
+    entry->expanded = !entry->thread && entry->id == OS_KERNEL_WORKERS_PID;
     if (taskmgr_syscall_one(OS_SYS_TASK_QUERY,
             (uint64_t)(uintptr_t)&entry->resources) < 0) {
         entry->resources.flags = OS_TASK_PROTECTED;
         return;
     }
-    for (uint32_t i = 0; i < g_previous_count; ++i) {
-        const taskmgr_entry_t *old = &g_previous[i];
-        if (old->id != entry->id || old->thread != entry->thread ||
-            old->parent_id != entry->parent_id ||
-            old->resources.create_time_ns != entry->resources.create_time_ns) continue;
+    const taskmgr_previous_t *old=previous_find(entry);
+    if (old) {
         entry->expanded = old->expanded;
-        if (now > g_sample_time && entry->resources.runtime_ns >= old->resources.runtime_ns) {
+        if (now > g_sample_time && entry->resources.runtime_ns >= old->runtime) {
             uint64_t elapsed = now - g_sample_time;
             uint32_t cpus = entry->resources.cpu_count;
             if (!cpus) cpus = 1U;
-            uint64_t delta = entry->resources.runtime_ns - old->resources.runtime_ns;
-            /* Three fractional digits keep low but real CPU usage visible. */
+            uint64_t delta = entry->resources.runtime_ns - old->runtime;
+            /* 保留三位小数，使较低但实际存在的 CPU 使用率仍可见。 */
             uint64_t thousandths = delta <= UINT64_MAX / 100000U ?
                 delta * 100000U / elapsed / cpus : delta / elapsed * 100000U / cpus;
             entry->cpu = thousandths > 100000U ? 100000U : (uint32_t)thousandths;
             entry->cpu_sample_valid = true;
         }
-        break;
     }
+}
+
+static void visible_index_rebuild(void) {
+    if (!g_visible_dirty) return;
+    g_visible_count = 0U;
+    for (uint32_t i = 0U; i < g_entry_count; ++i) g_entry_rows[i] = UINT32_MAX;
+    /* 父进程只建一次索引，倒序串起子线程，输出仍保留原枚举顺序。
+     * 使用下标加一表示链表，零表示空，不分配内存或搬动统计快照。 */
+    _Static_assert(TASKMGR_MAX_ENTRIES<1024U,"父进程索引必须保留空槽并容纳所有条目下标");
+    uint16_t parents[1024]={0},heads[TASKMGR_MAX_ENTRIES]={0};
+    uint16_t next[TASKMGR_MAX_ENTRIES];
+    for (uint32_t i=0U;i<g_entry_count;++i) {
+        if (g_entries[i].thread || !g_entries[i].expanded) continue;
+        uint64_t id=g_entries[i].id;
+        uint32_t slot=(uint32_t)((id^(id>>32U))*2654435761U)&1023U;
+        while (parents[slot] && g_entries[parents[slot]-1U].id!=id) slot=(slot+1U)&1023U;
+        if (!parents[slot]) parents[slot]=(uint16_t)(i+1U);
+    }
+    for (uint32_t i=g_entry_count;i>0U;--i) {
+        uint32_t child=i-1U;
+        if (!g_entries[child].thread) continue;
+        uint64_t id=g_entries[child].parent_id;
+        uint32_t slot=(uint32_t)((id^(id>>32U))*2654435761U)&1023U;
+        while (parents[slot] && g_entries[parents[slot]-1U].id!=id) slot=(slot+1U)&1023U;
+        if (!parents[slot]) continue;
+        uint32_t parent=parents[slot]-1U;
+        next[child]=heads[parent];heads[parent]=(uint16_t)i;
+    }
+    for (uint32_t i=0U;i<g_entry_count;++i) {
+        if (g_entries[i].thread) continue;
+        g_entry_rows[i]=g_visible_count;
+        g_visible_entries[g_visible_count++]=i;
+        for (uint16_t child=heads[i];child;child=next[child-1U]) {
+            uint32_t index=child-1U;
+            g_entry_rows[index]=g_visible_count;
+            g_visible_entries[g_visible_count++]=index;
+        }
+    }
+    g_visible_dirty = false;
 }
 
 static bool entry_visible(uint32_t index) {
-    if (!g_entries[index].thread) return true;
-    for (uint32_t i = 0; i < g_entry_count; ++i)
-        if (!g_entries[i].thread && g_entries[i].id == g_entries[index].parent_id)
-            return g_entries[i].expanded;
-    return false;
+    visible_index_rebuild();
+    return index < g_entry_count && g_entry_rows[index] != UINT32_MAX;
 }
 
 static uint32_t visible_entry(uint32_t row) {
-    /* Process enumeration order is stable; threads live directly under their process. */
-    for (uint32_t i = 0; i < g_entry_count; ++i) {
-        if (g_entries[i].thread) continue;
-        if (row-- == 0U) return i;
-        if (!g_entries[i].expanded) continue;
-        for (uint32_t j = 0; j < g_entry_count; ++j)
-            if (g_entries[j].thread && g_entries[j].parent_id == g_entries[i].id)
-                if (row-- == 0U) return j;
-    }
-    return g_entry_count;
+    visible_index_rebuild();
+    return row < g_visible_count ? g_visible_entries[row] : g_entry_count;
 }
 
 static uint32_t entry_row(uint32_t index) {
-    for (uint32_t row = 0; row < g_entry_count; ++row)
-        if (visible_entry(row) == index) return row;
-    return 0U;
+    visible_index_rebuild();
+    return index < g_entry_count && g_entry_rows[index] != UINT32_MAX ?
+        g_entry_rows[index] : 0U;
 }
 
 static uint32_t visible_count(void) {
-    uint32_t count = 0;
-    for (uint32_t i = 0; i < g_entry_count; ++i) if (entry_visible(i)) ++count;
-    return count;
+    visible_index_rebuild();
+    return g_visible_count;
 }
 
 static const char *process_state_text(uint32_t state) {
@@ -243,14 +372,15 @@ static const char *thread_state_text(uint32_t state) {
 }
 
 static void refresh_processes(void) {
+    taskmgr_system_sample();
+    g_visible_dirty = true;
     bool selected_thread = g_selection_valid &&
         g_selected_entry < g_entry_count && g_entries[g_selected_entry].thread;
     uint64_t selected_id = g_selection_valid && g_selected_entry < g_entry_count ?
                            g_entries[g_selected_entry].id : 0U;
     uint64_t selected_created = g_selection_valid && g_selected_entry < g_entry_count ?
         g_entries[g_selected_entry].resources.create_time_ns : 0U;
-    g_previous_count = g_entry_count;
-    for (uint32_t i = 0; i < g_entry_count; ++i) g_previous[i] = g_entries[i];
+    previous_snapshot();
     uint64_t now = monotonic_ns();
     g_next_refresh = now + TASKMGR_REFRESH_NS;
     g_entry_count = 0U;
@@ -337,36 +467,8 @@ static void refresh_processes(void) {
         "AUTO REFRESH 1s  |  CPU: MACHINE %  |  MEMORY: RESIDENT MiB");
 }
 
-static void fill_rect(uint32_t x, uint32_t y, uint32_t width,
-                      uint32_t height, uint32_t color) {
-    if (g_window.pixels == 0 || x >= g_window.width || y >= g_window.height) return;
-    if (width > g_window.width - x) width = g_window.width - x;
-    if (height > g_window.height - y) height = g_window.height - y;
-    for (uint32_t row = 0U; row < height; ++row) {
-        uint32_t *line = g_window.pixels +
-            (uint64_t)(y + row) * g_window.width + x;
-        for (uint32_t column = 0U; column < width; ++column) line[column] = color;
-    }
-}
-
-static void draw_text(uint32_t x, uint32_t y, const char *text, uint32_t color) {
-    uint32_t right = g_window.width > 12U ? g_window.width - 12U : 0U;
-    if (x == g_window.width * 36U / 100U) right = g_window.width * 48U / 100U - 12U;
-    else if (x == g_window.width * 48U / 100U) right = g_window.width * 67U / 100U - 12U;
-    else if (x == g_window.width * 67U / 100U) right = g_window.width * 81U / 100U - 12U;
-    ui_text_draw_clipped(g_window.pixels, g_window.width,
-                     g_window.width, g_window.height,
-                     (int32_t)x, (int32_t)y, right, text, color);
-}
-
-static void draw_number(uint32_t x, uint32_t y, uint64_t value, uint32_t color) {
-    char text[24] = {0};
-    append_u64(text, sizeof(text), value);
-    draw_text(x, y, text, color);
-}
-
 static uint32_t menu_width(void) {
-    uint32_t width = ui_text_measure("Confirm end process") + 32U;
+    uint32_t width = ui_text_measure("确认结束进程") + 32U;
     return width < g_window.width ? width : g_window.width;
 }
 
@@ -374,47 +476,23 @@ static uint32_t menu_rows(void) {
     return g_selected_entry < g_entry_count && g_entries[g_selected_entry].thread ? 2U : 1U;
 }
 
-static int32_t menu_hit(int32_t x, int32_t y) {
-    if (!g_menu_open || x < (int32_t)g_menu_x || y < (int32_t)g_menu_y ||
-        (uint32_t)x - g_menu_x >= menu_width() ||
-        (uint32_t)y - g_menu_y >= menu_rows() * TASKMGR_ROW_HEIGHT) return -1;
-    return ((uint32_t)y - g_menu_y) / TASKMGR_ROW_HEIGHT;
+static void menu_next_generation(void) {
+    g_menu_generation = (g_menu_generation + 1U) & 0xfffffU;
+    if (!g_menu_generation) g_menu_generation = 1U;
+}
+
+static uint32_t menu_target(uint32_t index) {
+    return 0x60000000U | (g_menu_generation << 4U) | index;
 }
 
 static void dismiss_menu(void) {
     g_menu_open = false;
-    g_menu_hover = -1;
     g_confirm_pid = 0U;
     g_confirm_tid = 0U;
 }
 
-static void draw_context_menu(void) {
-    if (!g_menu_open || g_selected_entry >= g_entry_count) return;
-    uint32_t width = menu_width();
-    uint32_t height = menu_rows() * TASKMGR_ROW_HEIGHT;
-    if (g_menu_x > g_window.width - width) g_menu_x = g_window.width - width;
-    if (height > g_window.height) height = g_window.height;
-    if (g_menu_y > g_window.height - height) g_menu_y = g_window.height - height;
-    user_paint_round_rect(g_window.pixels, g_window.width,
-        g_window.width, g_window.height, g_menu_x, g_menu_y, width, height, OS_THEME_BORDER);
-    for (uint32_t row = 0; row < menu_rows(); ++row) {
-        bool thread_only = g_entries[g_selected_entry].thread && row == 0U;
-        bool confirm = g_confirm_pid != 0U && ((g_confirm_tid != 0U) == thread_only);
-        uint32_t y = g_menu_y + row * TASKMGR_ROW_HEIGHT;
-        fill_rect(g_menu_x + 1U, y + 1U, width - 2U, TASKMGR_ROW_HEIGHT - 2U,
-            g_menu_hover == (int32_t)row ? OS_THEME_SELECTED : OS_THEME_SURFACE);
-        ui_text_draw_clipped(g_window.pixels, g_window.width, g_window.width,
-            g_window.height, (int32_t)g_menu_x + 12, (int32_t)y + 6,
-            g_menu_x + width - 12U,
-            thread_only ? (confirm ? "Confirm end thread" : "End thread") :
-                (confirm ? "Confirm end process" : "End process"),
-            g_entries[g_selected_entry].resources.flags & OS_TASK_PROTECTED ? TASKMGR_MUTED : 0x00B3261EU);
-    }
-}
-
 static uint32_t visible_rows(void) {
-    uint32_t bottom = g_window.height > TASKMGR_STATUS_HEIGHT ?
-                      g_window.height - TASKMGR_STATUS_HEIGHT : 0U;
+    uint32_t bottom = g_window.height;
     return bottom > TASKMGR_TABLE_TOP ?
         (bottom - TASKMGR_TABLE_TOP) / TASKMGR_ROW_HEIGHT : 0U;
 }
@@ -447,79 +525,156 @@ static void select_delta(int32_t delta) {
     ensure_selection_visible();
 }
 
-static void draw_row(uint32_t row, uint32_t y) {
-    const taskmgr_entry_t *entry = &g_entries[row];
-    bool running = entry->thread ? entry->state == OS_THREAD_RUNNING :
-                                   entry->state == OS_PROCESS_RUNNING;
-    uint32_t color = row == g_selected_entry && g_selection_valid ?
-                     TASKMGR_SELECTED : (entry_row(row) & 1U ? TASKMGR_BACKGROUND : 0x00FFFFFFU);
-    fill_rect(0U, y, g_window.width, TASKMGR_ROW_HEIGHT, color);
-    draw_text(16U, y + 6U, entry->thread ? "" : (entry->expanded ? "v" : ">"), TASKMGR_MUTED);
-    ui_text_draw_rect(g_window.pixels, g_window.width, g_window.width, g_window.height,
-        entry->thread ? 64 : 44, (int32_t)y + 6, 0, y,
-        g_window.width * 36U / 100U - 12U, y + TASKMGR_ROW_HEIGHT,
-        entry->name, TASKMGR_TEXT);
-    draw_number(g_window.width * 36U / 100U, y + 6U, entry->id, TASKMGR_MUTED);
-    draw_text(g_window.width * 48U / 100U, y + 6U,
-               entry->thread ? thread_state_text(entry->state) :
-                                process_state_text(entry->state),
-               running ? 0x002A7A43U : TASKMGR_MUTED);
-    char value[32] = {0};
-    append_u64(value, sizeof(value), entry->cpu / 1000U);
-    append_text(value, sizeof(value), ".");
-    uint32_t fractional = entry->cpu % 1000U;
-    if (fractional < 100U) append_text(value, sizeof(value), "0");
-    if (fractional < 10U) append_text(value, sizeof(value), "0");
-    append_u64(value, sizeof(value), fractional);
-    append_text(value, sizeof(value), "%");
-    draw_text(g_window.width * 67U / 100U, y + 6U,
-        entry->cpu_sample_valid ? value : "-", TASKMGR_TEXT);
-    if (entry->thread) draw_text(g_window.width * 81U / 100U, y + 6U, "-", TASKMGR_MUTED);
-    else {
-        value[0] = '\0';
-        uint64_t kib = entry->resources.rss_bytes / 1024U;
-        append_u64(value, sizeof(value), kib / 1024U);
-        append_text(value, sizeof(value), ".");
-        append_u64(value, sizeof(value), (kib % 1024U) * 10U / 1024U);
-        draw_text(g_window.width * 81U / 100U, y + 6U, value, TASKMGR_TEXT);
+/* 表格只提交可见行；文字、裁剪、选中态和悬停全部由公共控件绘制。 */
+static bool tree_text(os_control_node_t *node, uint32_t *used, const char *text) {
+    uint32_t length=text_length(text);
+    if (length>OS_CONTROL_TREE_MAX_TEXT-*used) return false;
+    node->text_offset=*used;node->text_length=length;
+    for (uint32_t i=0;i<length;++i) g_tree_text[(*used)++]=text[i];
+    return true;
+}
+
+static bool table_label(uint32_t *count, uint32_t *used, uint32_t parent,
+    uint32_t id, uint32_t x, uint32_t y, uint32_t width, uint32_t color, const char *text) {
+    if (*count==OS_CONTROL_TREE_MAX_NODES) return false;
+    os_control_node_t *node=g_nodes+(*count)++;
+    *node=(os_control_node_t){.identifier=id,.parent=parent,.kind=OS_CONTROL_TEXT,
+        .flags=OS_CONTROL_POINTER_PASSTHROUGH|OS_CONTROL_BACKGROUND_ALPHA|OS_CONTROL_INHERIT_FONT,
+        .x=(int32_t)x,.y=(int32_t)y,.width=(int32_t)width,.height=(int32_t)ui_text_size(),
+        .foreground=color};
+    return tree_text(node,used,text);
+}
+
+static bool build_table(uint32_t *count, uint32_t *used) {
+    uint32_t row_height=TASKMGR_ROW_HEIGHT;
+    uint32_t bottom=g_window.height;
+    uint32_t margin=taskmgr_scale(12U), text_y=(row_height-ui_text_size())/2U;
+    uint32_t right_margin=taskmgr_scale(16U);
+    uint32_t columns[]={taskmgr_scale(44U),g_window.width*36U/100U,g_window.width*48U/100U,
+        g_window.width*67U/100U,g_window.width*81U/100U,
+        g_window.width>right_margin?g_window.width-right_margin:0U};
+    g_nodes[0]=(os_control_node_t){.identifier=1,.parent=OS_CONTROL_NO_PARENT,.kind=OS_CONTROL_CONTAINER,
+        .flags=g_menu_open?OS_CONTROL_MANAGED_FOCUS:0,.background=TASKMGR_BACKGROUND,
+        .foreground=TASKMGR_TEXT,.font_size=ui_text_size()};
+    g_nodes[1]=(os_control_node_t){.identifier=2,.parent=0,.kind=OS_CONTROL_CONTAINER,
+        .flags=OS_CONTROL_CLIP_CHILDREN|OS_CONTROL_INHERIT_FONT,.width=OS_CONTROL_FILL,.height=(int32_t)row_height,
+        .background=TASKMGR_TABLE_HEADER};
+    *count=2;
+    const char *headers[]={"名称","ID","状态","CPU","MiB"};
+    for (uint32_t c=0;c<5;++c) {
+        uint32_t right=columns[c+1]>margin?columns[c+1]-margin:0U;
+        if (!table_label(count,used,1,10U+c,columns[c],text_y,
+            right>columns[c]?right-columns[c]:0U,TASKMGR_MUTED,headers[c])) return false;
     }
+    uint32_t table=(*count)++;
+    g_nodes[table]=(os_control_node_t){.identifier=3,.parent=0,.kind=OS_CONTROL_CONTAINER,
+        .flags=OS_CONTROL_CLIP_CHILDREN|OS_CONTROL_INHERIT_FONT|
+            (g_menu_open?OS_CONTROL_INERT:0),.y=(int32_t)TASKMGR_TABLE_TOP,
+        .width=OS_CONTROL_FILL,.height=bottom>TASKMGR_TABLE_TOP?(int32_t)(bottom-TASKMGR_TABLE_TOP):0,
+        .background=TASKMGR_BACKGROUND};
+    for (uint32_t visible=0;visible<visible_rows();++visible) {
+        uint32_t row=visible_entry(g_first_row+visible);
+        if (row>=g_entry_count) break;
+        if (*count+7U+8U>OS_CONTROL_TREE_MAX_NODES) return false;
+        const taskmgr_entry_t *entry=g_entries+row;
+        uint32_t id=0x10000U+row*8U,y=visible*row_height;
+        bool selected=g_selection_valid&&row==g_selected_entry;
+        g_nodes[(*count)++]=(os_control_node_t){.identifier=id,.parent=table,.kind=OS_CONTROL_LIST_ITEM,
+            .flags=selected?OS_CONTROL_CHECKED:0,.user_data=row,
+            .y=(int32_t)y,.width=OS_CONTROL_FILL,.height=(int32_t)row_height,
+            .background=TASKMGR_BACKGROUND};
+        /* 展开按钮和文字是同一行的兄弟控件，命中信息直接携带条目索引。 */
+        g_nodes[(*count)++]=(os_control_node_t){.identifier=id+1U,.parent=table,.kind=OS_CONTROL_BUTTON,
+            .flags=OS_CONTROL_BACKGROUND_ALPHA|OS_CONTROL_INHERIT_FONT|
+                (entry->thread?OS_CONTROL_HIDDEN:0),.user_data=row,
+            .x=(int32_t)taskmgr_scale(4U),.y=(int32_t)y,.width=(int32_t)taskmgr_scale(36U),
+            .height=(int32_t)row_height,.foreground=TASKMGR_MUTED};
+        if (!tree_text(g_nodes+*count-1U,used,entry->expanded?"v":">")) return false;
+        char numbers[3][32]={{0}};
+        if (entry->resources.flags&OS_TASK_KERNEL) copy_text(numbers[0],32,"-");
+        else append_u64(numbers[0],32,entry->id);
+        if (entry->cpu_sample_valid) {
+            append_u64(numbers[1],32,entry->cpu/1000U);append_text(numbers[1],32,".");
+            uint32_t fraction=entry->cpu%1000U;
+            if (fraction<100U) append_text(numbers[1],32,"0");
+            if (fraction<10U) append_text(numbers[1],32,"0");
+            append_u64(numbers[1],32,fraction);append_text(numbers[1],32,"%");
+        } else copy_text(numbers[1],32,"-");
+        if (entry->thread||(entry->resources.flags&OS_TASK_KERNEL)) copy_text(numbers[2],32,"-");
+        else {
+            uint64_t kib=entry->resources.rss_bytes/1024U;
+            append_u64(numbers[2],32,kib/1024U);append_text(numbers[2],32,".");
+            append_u64(numbers[2],32,(kib%1024U)*10U/1024U);
+        }
+        bool running=entry->thread?entry->state==OS_THREAD_RUNNING:entry->state==OS_PROCESS_RUNNING;
+        const char *values[]={entry->name,numbers[0],entry->thread?thread_state_text(entry->state):
+            process_state_text(entry->state),numbers[1],numbers[2]};
+        for (uint32_t c=0;c<5;++c) {
+            uint32_t x=c==0&&entry->thread?taskmgr_scale(64U):columns[c];
+            uint32_t right=columns[c+1]>margin?columns[c+1]-margin:0U;
+            if (!table_label(count,used,table,id+2U+c,x,y+text_y,right>x?right-x:0U,
+                c==2?(running?0x002A7A43U:TASKMGR_MUTED):c==1?TASKMGR_MUTED:TASKMGR_TEXT,values[c])) return false;
+        }
+    }
+    return true;
 }
 
 static void render(void) {
-    uint32_t rows = visible_rows();
-    fill_rect(0U, 0U, g_window.width, g_window.height, TASKMGR_BACKGROUND);
-
-    uint32_t header_y = TASKMGR_TABLE_TOP - TASKMGR_ROW_HEIGHT;
-    fill_rect(0U, header_y, g_window.width, TASKMGR_ROW_HEIGHT, TASKMGR_TABLE_HEADER);
-    draw_text(44U, header_y + 6U, "Name", TASKMGR_MUTED);
-    draw_text(g_window.width * 36U / 100U, header_y + 6U, "ID", TASKMGR_MUTED);
-    draw_text(g_window.width * 48U / 100U, header_y + 6U, "State", TASKMGR_MUTED);
-    draw_text(g_window.width * 67U / 100U, header_y + 6U, "CPU", TASKMGR_MUTED);
-    draw_text(g_window.width * 81U / 100U, header_y + 6U, "MiB", TASKMGR_MUTED);
-
-    for (uint32_t visible = 0U; visible < rows; ++visible) {
-        uint32_t row = visible_entry(g_first_row + visible);
-        if (row >= g_entry_count) break;
-        draw_row(row, TASKMGR_TABLE_TOP + visible * TASKMGR_ROW_HEIGHT);
+    uint32_t count=0,used=0;
+    uint32_t caption=user_caption_height();
+    if (caption!=g_caption_height) {
+        os_window_update_t update={.hdr={sizeof(update),OS_SYSCALL_ABI_VERSION},
+            .identifier=g_window.identifier,.flags=OS_WINDOW_CAPTION_HEIGHT(caption),
+            .width=g_window.width,.height=g_window.height};
+        if (taskmgr_syscall_one(OS_SYS_WINDOW_UPDATE,(uintptr_t)&update)==0) g_caption_height=caption;
     }
-    uint32_t status_top = g_window.height > TASKMGR_STATUS_HEIGHT ?
-        g_window.height - TASKMGR_STATUS_HEIGHT : 0U;
-    fill_rect(0U, status_top,
-              g_window.width, TASKMGR_STATUS_HEIGHT, TASKMGR_TABLE_HEADER);
-    ui_text_draw_clipped(g_window.pixels, g_window.width, g_window.width,
-        g_window.height, 16, (int32_t)status_top + 8,
-        g_window.width > 16U ? g_window.width - 16U : 0U, g_status, TASKMGR_MUTED);
-    draw_context_menu();
-
-    os_window_update_t update = {0};
-    update.hdr.size = sizeof(update);
-    update.hdr.version = OS_SYSCALL_ABI_VERSION;
-    update.identifier = g_window.identifier;
-    update.flags = OS_WINDOW_CAPTION_HEIGHT(user_caption_height());
-    update.width = g_window.width;
-    update.height = g_window.height;
-    (void)taskmgr_syscall_one(OS_SYS_WINDOW_UPDATE,
-                              (uint64_t)(uintptr_t)&update);
+    if (g_selected_entry>=g_entry_count) dismiss_menu();
+    if (!build_table(&count,&used)) {set_status("Cannot build interface");return;}
+    if (g_menu_open) {
+        /* 菜单行高、内边距和边缘约束统一交给合成器，避免缩放后两套尺寸不一致。 */
+        uint32_t width=menu_width();
+        g_nodes[count++]=(os_control_node_t){.identifier=menu_target(0),.parent=0,.kind=OS_CONTROL_CONTAINER,
+            .flags=OS_CONTROL_BACKGROUND_ALPHA,.width=OS_CONTROL_FILL,.height=OS_CONTROL_FILL};
+        uint32_t panel=count++;
+        g_nodes[panel]=(os_control_node_t){.identifier=menu_target(1),.parent=0,.kind=OS_CONTROL_CONTAINER,
+            .x=(int32_t)g_menu_x,.y=(int32_t)g_menu_y,.width=(int32_t)width,.height=0,
+            .flags=OS_CONTROL_MENU_PANEL|OS_CONTROL_CLIP_CHILDREN|OS_CONTROL_INHERIT_TEXT};
+        for (uint32_t row=0;row<menu_rows();++row) {
+            bool thread_only=g_entries[g_selected_entry].thread&&row==0;
+            bool confirm=g_confirm_pid&&((g_confirm_tid!=0)==thread_only);
+            bool protected=(g_entries[g_selected_entry].resources.flags&OS_TASK_PROTECTED)!=0;
+            const char *label=thread_only?(confirm?"确认结束线程":"结束线程"):
+                (confirm?"确认结束进程":"结束进程");
+            g_nodes[count]=(os_control_node_t){.identifier=menu_target(2+row),.parent=panel,.kind=OS_CONTROL_BUTTON,
+                .width=OS_CONTROL_FILL,
+                .flags=OS_CONTROL_INHERIT_FONT|(protected?OS_CONTROL_DISABLED:
+                    ((g_confirm_pid?confirm:row==0)?OS_CONTROL_DEFAULT_FOCUS:0)),
+                .background=OS_THEME_SURFACE,.foreground=protected?TASKMGR_MUTED:OS_THEME_DANGER};
+            if (!tree_text(g_nodes+count++,&used,label)) return;
+        }
+    }
+    if (!user_caption_tree(g_nodes,&count,OS_CONTROL_TREE_MAX_NODES,g_tree_text,&used,sizeof(g_tree_text),
+            (user_caption_layout_t){.title="任务管理器",.width=g_window.width,
+                .height=caption,.font=ui_text_size(),.title_width=5U*ui_text_size()})) return;
+    /* 汇总作为标题栏控件，缩放与窗口按钮采用同一套布局。 */
+    uint32_t summary_x=28U+5U*ui_text_size();
+    uint32_t button_width=os_window_caption_button_width(OS_WINDOW_CAPTION_HEIGHT(caption));
+    if (button_width>g_window.width/3U) button_width=g_window.width/3U;
+    uint32_t summary_right=g_window.width-3U*button_width;
+    if (summary_right>summary_x+12U) {
+        char summary[160];taskmgr_summary(summary,sizeof(summary));
+        if (!table_label(&count,&used,0,6,summary_x,(caption-ui_text_size())/2U,
+                summary_right-summary_x-12U,TASKMGR_TEXT,summary)) return;
+    }
+    os_window_control_tree_t request={.hdr={sizeof(request),OS_SYSCALL_ABI_VERSION},
+        .identifier=g_window.identifier,.count=count,.nodes=(uintptr_t)g_nodes,
+        .text=(uintptr_t)g_tree_text,.text_size=used};
+    if (taskmgr_syscall_one(OS_SYS_WINDOW_CONTROL_TREE,(uintptr_t)&request)==0) {
+        g_tree=request;g_menu_published=g_menu_open;
+    } else {
+        /* 提交失败后不再根据未发布的节点解释事件，下一次刷新会重试完整文档。 */
+        g_tree.count=0;g_menu_published=false;dismiss_menu();set_status("Cannot update interface");
+    }
 }
 
 static bool create_window(void) {
@@ -545,12 +700,9 @@ static bool create_window(void) {
     request.width = width;
     request.height = height;
     request.flags = OS_WINDOW_VISIBLE | OS_WINDOW_RESIZABLE |
-                    OS_WINDOW_STANDARD_CAPTION_CONTROLS;
+                    OS_WINDOW_STANDARD_CAPTION_CONTROLS | OS_WINDOW_CAPTION_HEIGHT(user_caption_height());
     request.background = TASKMGR_BACKGROUND;
-    request.title[0] = 'T'; request.title[1] = 'A'; request.title[2] = 'S';
-    request.title[3] = 'K'; request.title[4] = ' '; request.title[5] = 'M';
-    request.title[6] = 'A'; request.title[7] = 'N'; request.title[8] = 'A';
-    request.title[9] = 'G'; request.title[10] = 'E'; request.title[11] = 'R';
+    user_caption_format_title(request.title, "任务管理器", false);
     request.address = TASKMGR_MAP_BASE;
     if (taskmgr_syscall_one(OS_SYS_WINDOW_CREATE,
                             (uint64_t)(uintptr_t)&request) < 0 ||
@@ -603,8 +755,41 @@ static void end_selected_process(bool thread_only) {
     set_status(status == 0 ? "Termination requested" : "Cannot end this process");
 }
 
+static bool handle_menu_event(const os_window_event_t *event) {
+    if(event->type!=OS_WINDOW_EVENT_CONTROL || !g_menu_open)return false;
+    if (!os_control_event_node(&g_tree,g_nodes,&event->control)) {
+        /* 自动刷新或菜单重建不能丢掉已经排队的 Ctrl 释放。 */
+        if (g_tree.count && event->control.tree_revision &&
+            event->control.tree_revision<=g_tree.revision &&
+            event->control.action==OS_CONTROL_KEY &&
+            (event->control.code==0xe0U || event->control.code==0xe4U) &&
+            event->control.value==OS_INPUT_VALUE_RELEASE) g_ctrl=false;
+        return true;
+    }
+    /* 旧树排队的事件不能越过确认步骤，也不能作用于之后新打开的菜单。 */
+    if (!g_menu_published) return true;
+    if (event->control.action==OS_CONTROL_KEY && event->control.code==0x29U &&
+        event->control.value!=OS_INPUT_VALUE_RELEASE) {dismiss_menu();render();return true;}
+    if ((event->control.target & ~15U)!=menu_target(0)) return true;
+    uint32_t target=event->control.target&15U;
+    if(event->control.action==OS_CONTROL_CLICK && target>=2 && target<2+menu_rows()) {
+        end_selected_process(g_entries[g_selected_entry].thread && target==2);
+        if(g_menu_open)menu_next_generation();
+        render();
+    } else if((event->control.action==OS_CONTROL_DOWN && target==0) ||
+        (event->control.action==OS_CONTROL_KEY && event->control.code==0x29U &&
+         event->control.value!=OS_INPUT_VALUE_RELEASE)) {
+        dismiss_menu();render();
+    } else if(event->control.action==OS_CONTROL_KEY &&
+        (event->control.code==0xe0U || event->control.code==0xe4U)) {
+        g_ctrl=event->control.value!=OS_INPUT_VALUE_RELEASE;
+    }
+    return true;
+}
+
 static void handle_event(const os_window_event_t *event) {
     const os_input_event_t *input;
+    os_input_event_t translated={0};
     if (event == 0) return;
     if (event->type == OS_WINDOW_EVENT_CLOSE_REQUEST) taskmgr_exit(0U);
     if (event->type == OS_WINDOW_EVENT_RESIZE) {
@@ -618,56 +803,55 @@ static void handle_event(const os_window_event_t *event) {
         render();
         return;
     }
-    if (event->type != OS_WINDOW_EVENT_INPUT) return;
-    input = &event->input;
+    if (handle_menu_event(event)) return;
+    if (event->type==OS_WINDOW_EVENT_INPUT) {
+        /* 普通窗口的键盘事件直接交给应用；菜单接管焦点时才走控件事件。 */
+        input=&event->input;
+    } else if (event->type==OS_WINDOW_EVENT_CONTROL) {
+        const os_control_node_t *node=os_control_event_node(&g_tree,g_nodes,&event->control);
+        /* 自动刷新会替换控件树，但根节点和修饰键的身份不随条目变化。 */
+        bool modifier=event->control.action==OS_CONTROL_KEY &&
+            (event->control.code==0xE0U || event->control.code==0xE4U);
+        bool root_key=event->control.action==OS_CONTROL_KEY && event->control.target==1U &&
+            event->control.node_index==0U && event->control.node_kind==OS_CONTROL_CONTAINER &&
+            event->control.user_data==0U;
+        if (!node && (modifier || root_key) && g_tree.count && event->control.tree_revision &&
+            event->control.tree_revision<=g_tree.revision) node=g_nodes;
+        if (!node) return;
+        if (event->control.action==OS_CONTROL_DOWN || event->control.action==OS_CONTROL_CLICK) {
+            uint32_t row=(uint32_t)node->user_data;
+            bool disclosure=node->identifier==0x10001U+row*8U;
+            bool entry=node->identifier==0x10000U+row*8U;
+            if (row>=g_entry_count || (!entry&&!disclosure)) return;
+            bool right=event->control.action==OS_CONTROL_DOWN&&event->control.code==OS_INPUT_BUTTON_RIGHT;
+            bool choose=event->control.action==OS_CONTROL_DOWN&&event->control.code==OS_INPUT_BUTTON_LEFT&&entry;
+            bool expand=event->control.action==OS_CONTROL_CLICK&&disclosure&&!g_entries[row].thread;
+            if (!right&&!choose&&!expand) return;
+            g_selected_entry=row;g_selection_valid=true;dismiss_menu();
+            if (right) {
+                g_menu_open=true;menu_next_generation();
+                g_menu_x=event->pointer_x>0?(uint32_t)event->pointer_x:0U;
+                g_menu_y=event->pointer_y>0?(uint32_t)event->pointer_y:0U;
+            } else if (expand) {
+                g_entries[row].expanded=!g_entries[row].expanded;g_visible_dirty=true;
+            }
+            render();return;
+        }
+        if (event->control.action==OS_CONTROL_KEY) translated.type=OS_INPUT_EVENT_KEY;
+        else if (event->control.action==OS_CONTROL_WHEEL) translated.type=OS_INPUT_EVENT_RELATIVE;
+        else return;
+        translated.code=event->control.code;translated.value=event->control.value;input=&translated;
+    } else return;
     if (input->type == OS_INPUT_EVENT_KEY &&
         (input->code == 0xE0U || input->code == 0xE4U)) {
         g_ctrl = input->value != OS_INPUT_VALUE_RELEASE;
         return;
     }
     if (input->type == OS_INPUT_EVENT_RELATIVE &&
-        (input->code == OS_INPUT_REL_X || input->code == OS_INPUT_REL_Y) && g_menu_open) {
-        int32_t hover = menu_hit(event->pointer_x, event->pointer_y);
-        if (hover != g_menu_hover) { g_menu_hover = hover; render(); }
-        return;
-    }
-    if (input->type == OS_INPUT_EVENT_BUTTON &&
-        (input->code == OS_INPUT_BUTTON_LEFT || input->code == OS_INPUT_BUTTON_RIGHT) &&
-        input->value == OS_INPUT_VALUE_PRESS) {
-        if (g_menu_open && input->code == OS_INPUT_BUTTON_LEFT) {
-            int32_t row = menu_hit(event->pointer_x, event->pointer_y);
-            if (row >= 0) {
-                end_selected_process(g_entries[g_selected_entry].thread && row == 0);
-                render();
-                return;
-            }
-            dismiss_menu();
-            render();
-        }
-        uint32_t rows = visible_rows();
-        if (event->pointer_y >= (int32_t)TASKMGR_TABLE_TOP &&
-            event->pointer_y < (int32_t)(TASKMGR_TABLE_TOP + rows * TASKMGR_ROW_HEIGHT)) {
-            uint32_t row = visible_entry(g_first_row +
-                ((uint32_t)event->pointer_y - TASKMGR_TABLE_TOP) / TASKMGR_ROW_HEIGHT);
-            if (row < g_entry_count) {
-                g_selected_entry = row;
-                g_selection_valid = true;
-                dismiss_menu();
-                if (input->code == OS_INPUT_BUTTON_RIGHT) {
-                    g_menu_open = true;
-                    g_menu_x = event->pointer_x > 0 ? (uint32_t)event->pointer_x : 0U;
-                    g_menu_y = event->pointer_y > 0 ? (uint32_t)event->pointer_y : 0U;
-                } else if (!g_entries[row].thread && event->pointer_x >= 0 && event->pointer_x < 44)
-                    g_entries[row].expanded = !g_entries[row].expanded;
-                render();
-            }
-        }
-        return;
-    }
-    if (input->type == OS_INPUT_EVENT_RELATIVE &&
         input->code == OS_INPUT_REL_WHEEL && input->value != 0) {
         if (g_ctrl) {
             (void)ui_text_adjust(input->value > 0 ? 1 : -1);
+            ensure_selection_visible();
             render();
             return;
         }
@@ -680,10 +864,10 @@ static void handle_event(const os_window_event_t *event) {
     if (key_is(input, 0x29U, 27) || key_is(input, 0x14U, 'q')) taskmgr_exit(0U);
     if (g_ctrl && input->code == 0x2EU) {
         (void)ui_text_adjust(1);
+        ensure_selection_visible();
     } else if (g_ctrl && input->code == 0x2DU) {
         (void)ui_text_adjust(-1);
-    } else if (key_is(input, 0x15U, 'r') || input->code == 0x3EU) {
-        refresh_processes();
+        ensure_selection_visible();
     } else if (input->code == 0x52U) {
         select_delta(-1);
     } else if (input->code == 0x51U) {

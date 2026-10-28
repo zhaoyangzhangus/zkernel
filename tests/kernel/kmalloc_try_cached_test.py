@@ -11,7 +11,7 @@ class_helpers = source[source.index('static uint16_t class_index_for_size('):
 partial_head = source[source.index('static slab_page_t *cache_partial_head('):
                       source.index('static void cache_partial_insert(')]
 remove_head = source[source.index('static void cache_partial_remove_head('):
-                     source.index('/* All slots being globally free')]
+                     source.index('static void cache_release_empty(')]
 allocate = source[source.index('void *kmalloc_try_cached('):source.index('void *kzalloc(')]
 code = r'''
 #include <assert.h>

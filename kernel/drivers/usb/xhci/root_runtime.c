@@ -4,8 +4,8 @@
 #include <kernel/realtest.h>
 #include <kernel/xhci.h>
 
-/* REFACTOR_P8_XHCI_ROOT_RUNTIME_OWNER: root-port reset, Slot subtree
- * lifetime, runtime attach/remove, and the self-test re-enumeration flow. */
+/* REFACTOR_P8_XHCI_ROOT_RUNTIME_OWNER：根端口复位、Slot 子树生命周期、
+ * 运行时连接/移除及自测重新枚举流程。 */
 
 #define XHCI_PORT_REGISTER_BASE   0x400U
 #define XHCI_PORT_REGISTER_STRIDE 0x10U
@@ -25,9 +25,8 @@
                                    XHCI_PORTSC_PP | \
                                    (3U << 14) | (7U << 25) | (1U << 30))
 
-/* A noisy physical port can report the same link-state change repeatedly
- * while it settles.  Keep the realtest state useful for later boot stages by
- * recording each distinct PortSC value only once per controller/port. */
+/* 物理端口稳定期间可能重复报告相同链路状态变化。每个控制器/端口只记录一次不同的
+ * PortSC 值，使 realtest 状态在后续启动阶段仍有参考价值。 */
 static uint32_t g_xhci_last_ack_state[2][256];
 static bool g_xhci_ack_state_valid[2][256];
 
@@ -94,17 +93,15 @@ static bool xhci_prepare_connected_port(xhci_state_t *state,
                           state->pci->vendor_id == 0x1022U &&
                           state->pci->device_id == 0x43FCU;
     reset_bit = use_warm_reset ? XHCI_PORTSC_WPR : XHCI_PORTSC_PR;
-    /* A warm reset also raises the ordinary reset-change bit on hardware
-     * that implements both USB2 and USB3 protocol views. Clear both before
-     * enumeration so the pending port event cannot mask the first transfer. */
+    /* 同时实现 USB2 和 USB3 协议视图的硬件在 warm reset 时也会置位普通 reset-change 位。
+     * 枚举前清除两者，避免待处理端口事件掩盖首次传输。 */
     reset_change = use_warm_reset ?
                    (XHCI_PORTSC_WRC | XHCI_PORTSC_PRC) : XHCI_PORTSC_PRC;
     realtest_mark(use_warm_reset ?
                          "XHCI_PORT_RESET_WARM" :
                          "XHCI_PORT_RESET_COLD");
 
-    /* WRC is a write-one-to-clear completion bit. Remove a stale change
-     * indication before starting a new warm reset. */
+    /* WRC 是写 1 清除的完成位。开始新的 warm reset 前先清除过期的变化标记。 */
     if (use_warm_reset &&
         (portsc & (XHCI_PORTSC_WRC | XHCI_PORTSC_PRC)) != 0U) {
         (void)xhci_controller_write32(
@@ -114,8 +111,7 @@ static bool xhci_prepare_connected_port(xhci_state_t *state,
         portsc = xhci_controller_read32(state, offset);
     }
 
-    /* Reset every newly attached root-port device; PED may reflect firmware
-     * state rather than the USB device's Default state. */
+    /* 重置每个新连接到根端口的设备；PED 可能反映固件状态，而非 USB 设备的 Default 状态。 */
     reset_value = xhci_port_state_to_neutral(portsc) |
                   reset_bit;
     if (!xhci_controller_write32(state, offset, reset_value)) {
@@ -142,9 +138,8 @@ static bool xhci_prepare_connected_port(xhci_state_t *state,
             __asm__ volatile ("pause");
         }
     } else if (auxiliary_hid) {
-        /* USB2 reset completion is not bounded by a small number of CPU
-         * spins.  Real AMD root ports can take several milliseconds while
-         * firmware-owned devices leave the old controller state. */
+        /* USB2 复位完成时间不能用很少的 CPU 自旋次数限定。固件接管过的设备退出旧控制器
+         * 状态时，真实 AMD 根端口可能需要数毫秒。 */
         uint64_t reset_deadline =
             xhci_controller_timeout_deadline(1000000000ULL);
         uint32_t reset_spins = 0U;
@@ -162,9 +157,8 @@ static bool xhci_prepare_connected_port(xhci_state_t *state,
             __asm__ volatile ("pause");
         }
     } else {
-        /* Port reset completion is a hardware event, not a CPU-spin count.
-         * A USB2 hub commonly needs several milliseconds to leave Polling;
-         * the old short loop expired before the xHC could report PED. */
+        /* 端口复位完成由硬件事件决定，不应按 CPU 自旋次数估算。
+         * USB2 Hub 通常需要数毫秒才能离开 Polling；旧的短循环会在 xHC 报告 PED 前超时。 */
         uint64_t reset_deadline =
             xhci_controller_timeout_deadline(1000000000ULL);
         uint32_t reset_spins = 0U;
@@ -317,11 +311,8 @@ bool xhci_handle_root_port_event(xhci_state_t *state, uint8_t port,
         return false;
     }
 
-    /* Root ports were fully inventoried before startup events are drained.
-     * Those reset-change notifications describe that inventory, not a new
-     * hotplug device.  Re-enumerating them here can turn an optional device
-     * failure into a boot failure.  Runtime events use the normal attach
-     * path after xHCI has been made ready. */
+    /* 启动事件排空前已完整枚举根端口。这些复位变化通知描述的是已有清单，而不是新插入的设备。在此处
+     * 重新枚举可能会将可选设备故障升级为启动失败。xHCI 就绪后，运行时事件走常规连接路径。 */
     if (!xhci_runtime_ready()) {
         return xhci_ack_root_port_changes(state, port);
     }
@@ -387,8 +378,7 @@ bool xhci_reenumerate_self_test(xhci_state_t *state,
         return false;
     }
     if (!xhci_hub_runtime_probe_downstream(state, &g_xhci_hub_runtime_ops)) {
-        /* The root storage device is already usable.  A disconnected or
-         * unsupported optional downstream port must not discard it. */
+        /* 根端口存储设备已可用。断开的或不受支持的可选下游端口不得导致其被丢弃。 */
         if (xhci_usb_mass_storage_configured()) {
             realtest_mark("XHCI_HUB_OPTIONAL_FAIL_WITH_MSC");
         } else {
@@ -428,11 +418,9 @@ bool xhci_probe_connected_ports(xhci_state_t *state, uint8_t *selected_slot) {
                                   (uint8_t)port, 0U, 0U, 0U) &&
             xhci_context_kind(&state->device) != 0U &&
             xhci_publish_working_device(state)) {
-            /* Inventory every connected root port.  USB2 and SuperSpeed
-             * companion hubs commonly occupy different root ports; stopping
-             * after the first Hub can hide all low/full-speed devices behind
-             * the USB2 companion.  Per-port failures remain optional and the
-             * scan continues below. */
+            /* 枚举每个已连接根端口。USB2 和 SuperSpeed 配套 Hub 通常占用不同根端口；若遇到第一个 Hub 后
+             * 停止扫描，可能会漏掉 USB2 配套 Hub 下的所有低速/全速设备。单端口失败仍视为可选故障，后续
+             * 扫描继续进行。 */
             continue;
         }
 
@@ -453,9 +441,8 @@ bool xhci_probe_connected_ports(xhci_state_t *state, uint8_t *selected_slot) {
             "ERROR=%u\r\n",
             port, slot, xhci_controller_read32(state, offset), speed,
             xhci_last_error());
-        /* A single optional keyboard, hub, or audio device must not discard
-         * a storage device already published on this controller. Continue
-         * scanning and let the topology selector choose a usable slot. */
+        /* 单个可选键盘、Hub 或音频设备故障不得导致此控制器上已发布的存储设备被丢弃。继续扫描，并由拓扑
+         * 选择器选取可用 Slot。 */
         continue;
     }
 
@@ -487,9 +474,8 @@ bool xhci_probe_connected_ports(xhci_state_t *state, uint8_t *selected_slot) {
     return false;
 }
 
-/* Probe a controller whose device is not part of the primary USB topology.
- * This path is intentionally limited to a direct root-port HID device: its
- * Slot and DMA context stay private to the auxiliary controller. */
+/* 探测不属于主 USB 拓扑的控制器设备。此路径有意仅支持直连根端口的 HID 设备：其 Slot 和 DMA 上下文
+ * 保持为辅助控制器私有。 */
 bool xhci_probe_hid_controller(xhci_state_t *state) {
     if (state == 0 || !state->initialized || state->device.device_slot != 0U) {
         return false;

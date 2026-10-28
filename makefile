@@ -37,7 +37,9 @@ OS_PHASE10 ?= 0
 OS_PHASE13 ?= 0
 OS_XHCI_DIAGNOSTIC_BOT ?= 0
 OS_AUTOSTART_CHROME ?= 0
-OS_INTERACTIVE_DESKTOP ?= 0
+# Match run-qemu.sh: plain incremental builds must retain the normal desktop.
+# Headless/self-test consumers can still opt out explicitly with =0.
+OS_INTERACTIVE_DESKTOP ?= 1
 OS_NVIDIA ?= $(if $(wildcard $(BUILD)/nvidia/driver/driver.o),1,0)
 KERNEL_EXTRA_CFLAGS ?=
 VM_FAULT_AROUND_PAGES ?= 16
@@ -136,7 +138,7 @@ DYNAMIC_CHROME_START_ELF = $(ELF_RUNTIME_DIR)/chrome-start.elf
 DYNAMIC_NOTEPAD_ELF = $(ELF_RUNTIME_DIR)/notepad.elf
 DYNAMIC_FILEMAN_ELF = $(ELF_RUNTIME_DIR)/fileman.elf
 DYNAMIC_TASKMGR_ELF = $(ELF_RUNTIME_DIR)/taskmgr.elf
-DYNAMIC_NETMGR_ELF = $(ELF_RUNTIME_DIR)/netmgr.elf
+DYNAMIC_SETTINGS_ELF = $(ELF_RUNTIME_DIR)/settings.elf
 LOADER_LDFLAGS = -nostdlib -Wl,--entry,efi_main -Wl,--subsystem,10 \
                  -Wl,--image-base,0x400000 -Wl,--section-alignment,0x1000 \
                  -Wl,--file-alignment,0x1000 -Wl,--disable-auto-import
@@ -259,7 +261,7 @@ OPENSSL_CFLAGS = -O2 -ffreestanding -fno-builtin \
                  -I$(OPENSSL_DIR)/providers/implementations/include \
                  -I$(OPENSSL_DIR)/providers/fips/include -Iinclude \
                  -Iuser/libc/include \
-                 -DOPENSSLDIR=\"/etc/ssl\" \
+                 -DOPENSSLDIR=\"/EFI/OS/ssl\" \
                  -DENGINESDIR=\"/lib/engines-3\" \
                  -DMODULESDIR=\"/lib/ossl-modules\" \
                  -DNDEBUG -MMD -MP
@@ -411,24 +413,29 @@ refactor-layout:
 
 $(BUILD)/loader $(BUILD)/kernel $(BUILD)/user $(BUILD)/openssl $(BUILD)/blend2d $(BUILD)/nasm $(ELF_RUNTIME_DIR) \
 $(BUILD)/esp $(BUILD)/esp/EFI/BOOT $(BUILD)/esp/EFI/OS \
-$(BUILD)/esp/etc/fonts:
+$(BUILD)/esp/EFI/OS/fonts:
 	mkdir -p $@
 
-$(BUILD)/esp/boot $(BUILD)/esp/lib $(BUILD)/esp/sbin $(BUILD)/esp/tmp:
+$(BUILD)/esp/boot $(BUILD)/esp/lib $(BUILD)/esp/sbin $(BUILD)/esp/tmp $(BUILD)/esp/log:
 	mkdir -p $@
 
-# Desktop artwork is kept at its original resolution on the boot volume.
-# The compositor can load these files after the root filesystem is mounted;
-# no scaled or pixel-expanded copy is embedded in the kernel image.
-DESKTOP_ASSET_DIR = $(BUILD)/esp/etc/desktop
-FONT_ASSET = $(BUILD)/esp/etc/fonts/default.ttf
-VFS_SELF_TEST_SEED = $(BUILD)/esp/etc/vfsmap.tst
+# 桌面专属壁纸与界面放在桌面应用目录，公共字体仍保留在系统字体目录。
+DESKTOP_ASSET_DIR = $(BUILD)/esp/usr/apps/desktop
+FONT_ASSET = $(BUILD)/esp/EFI/OS/fonts/default.ttf
+VFS_SELF_TEST_SEED = $(BUILD)/esp/EFI/OS/vfsmap.tst
 DESKTOP_ASSETS = $(DESKTOP_ASSET_DIR)/wall.png \
-	$(DESKTOP_ASSET_DIR)/icons.png \
-	$(DESKTOP_ASSET_DIR)/fm.png \
-	$(FONT_ASSET)
+	$(BUILD)/esp/usr/apps/desktop/desktop.ui \
+	$(BUILD)/esp/usr/apps/fileman/icon.png \
+	$(foreach app,gshell notepad settings taskmgr chrome imageview,$(BUILD)/esp/usr/apps/$(app)/icon.png) \
+	$(FONT_ASSET) $(BUILD)/esp/EFI/OS/fonts/cjk.ttf $(BUILD)/esp/EFI/OS/fonts/title-cjk-LICENSE
 
-$(FONT_ASSET): assets/fonts/default.ttf | $(BUILD)/esp/etc/fonts
+$(FONT_ASSET): assets/fonts/default.ttf | $(BUILD)/esp/EFI/OS/fonts
+	cp $< $@
+
+$(BUILD)/esp/EFI/OS/fonts/cjk.ttf: assets/fonts/title-cjk.ttf | $(BUILD)/esp/EFI/OS/fonts
+	cp $< $@
+
+$(BUILD)/esp/EFI/OS/fonts/title-cjk-LICENSE: assets/fonts/title-cjk-LICENSE | $(BUILD)/esp/EFI/OS/fonts
 	cp $< $@
 
 $(DESKTOP_ASSET_DIR):
@@ -437,13 +444,27 @@ $(DESKTOP_ASSET_DIR):
 $(DESKTOP_ASSET_DIR)/wall.png: assets/desktop/wallpaper.png | $(DESKTOP_ASSET_DIR)
 	cp $< $@
 
-$(DESKTOP_ASSET_DIR)/icons.png: assets/desktop/whitesur-icons.png | $(DESKTOP_ASSET_DIR)
+$(BUILD)/esp/usr/apps/desktop/desktop.ui: user/ui/desktop.ui
+	mkdir -p $(@D)
 	cp $< $@
 
-$(DESKTOP_ASSET_DIR)/fm.png: assets/desktop/file-manager-icon.png | $(DESKTOP_ASSET_DIR)
+$(BUILD)/esp/usr/apps/fileman/icon.png: assets/desktop/file-manager-icon.png
+	mkdir -p $(@D)
 	cp $< $@
 
-$(VFS_SELF_TEST_SEED): assets/desktop/vfsmap.tst | $(DESKTOP_ASSET_DIR)
+# 图标和可执行文件属于同一个应用包，不再共享带位置编号的图集。
+define APP_ICON_RULE
+$(BUILD)/esp/usr/apps/$(1)/icon.png: assets/desktop/whitesur/$(2).svg tools/render-app-icon.py
+	python3 tools/render-app-icon.py $$< $$@
+endef
+$(eval $(call APP_ICON_RULE,gshell,terminal))
+$(eval $(call APP_ICON_RULE,notepad,accessories-text-editor))
+$(eval $(call APP_ICON_RULE,settings,preferences-system))
+$(eval $(call APP_ICON_RULE,imageview,image-viewer))
+$(eval $(call APP_ICON_RULE,taskmgr,utilities-system-monitor))
+$(eval $(call APP_ICON_RULE,chrome,google-chrome))
+
+$(VFS_SELF_TEST_SEED): assets/desktop/vfsmap.tst | $(BUILD)/esp/EFI/OS
 	cp $< $@
 	truncate -s 5 $@
 
@@ -523,11 +544,18 @@ $(DYNAMIC_LINUX_EVENTS_TEST_ELF): makefile $(ELF_RUNTIME_DIR)/libc-crt-start.o \
 		--no-as-needed $(filter %.o %.so.1,$^) -o $@
 
 $(ELF_RUNTIME_DIR)/text.o: user/runtime/text.c \
-		user/runtime/text.h | $(ELF_RUNTIME_DIR)
+		user/runtime/text.h user/runtime/text_metrics.h | $(ELF_RUNTIME_DIR)
+	$(ELFCC) $(ELF_APP_CFLAGS) -c $< -o $@
+
+$(ELF_RUNTIME_DIR)/text-layout.o: user/runtime/text_layout.c \
+		user/runtime/text.h user/runtime/text_metrics.h \
+		include/uapi/control_tree.h include/uapi/utf8.h | $(ELF_RUNTIME_DIR)
 	$(ELFCC) $(ELF_APP_CFLAGS) -c $< -o $@
 
 $(ELF_RUNTIME_DIR)/imageview.o: user/desktop/imageview/main.c \
-		user/runtime/text.h user/runtime/caption.h include/uapi/window_theme.h include/uapi/image.h | \
+		user/runtime/file_picker.h user/runtime/message_box.h user/runtime/modal_tree.h \
+		user/runtime/text.h user/runtime/caption.h include/uapi/control_tree.h \
+		include/uapi/window_theme.h include/uapi/image.h | \
 		$(ELF_RUNTIME_DIR)
 	$(ELFCC) $(ELF_APP_CFLAGS) -c $< -o $@
 
@@ -553,21 +581,19 @@ $(DYNAMIC_NDISASM_ELF): makefile $(ELF_RUNTIME_DIR)/libc-crt-start.o \
 
 $(DYNAMIC_IMAGEVIEW_ELF): makefile $(ELF_RUNTIME_DIR)/libc-crt-start.o \
 		$(ELF_RUNTIME_DIR)/libc-startup.o $(ELF_RUNTIME_DIR)/imageview.o \
-		$(ELF_RUNTIME_DIR)/text.o $(DYNAMIC_LIBC_ELF) \
-		$(DYNAMIC_GFX_LIBRARY_ELF) | $(ELF_RUNTIME_DIR)
+		$(ELF_RUNTIME_DIR)/text-layout.o $(DYNAMIC_LIBC_ELF) | $(ELF_RUNTIME_DIR)
 	$(ELFLD) $(ELF_LINK_FLAGS) -pie -e libc_crt_entry \
 		-dynamic-linker /lib/ld-system.so.1 --hash-style=sysv \
 		--no-as-needed $(filter %.o %.so.1,$^) -o $@
 
 define DYNAMIC_TEXT_APP_RULE
-$(ELF_RUNTIME_DIR)/$(1).o: $(2) user/runtime/text.h user/runtime/caption.h user/runtime/paint.h user/client_chrome.h include/uapi/window_theme.h | $(ELF_RUNTIME_DIR)
+$(ELF_RUNTIME_DIR)/$(1).o: $(2) user/runtime/text.h user/runtime/caption.h user/runtime/paint.h user/client_chrome.h include/uapi/window_theme.h include/uapi/window.h include/uapi/control_tree.h include/uapi/utf8.h | $(ELF_RUNTIME_DIR)
 	$$(ELFCC) $$(ELF_APP_CFLAGS) -c $$< -o $$@
 
 
 $(ELF_RUNTIME_DIR)/$(1).elf: makefile $(ELF_RUNTIME_DIR)/libc-crt-start.o \
 		$$(ELF_RUNTIME_DIR)/libc-startup.o $(ELF_RUNTIME_DIR)/$(1).o \
-		$$(ELF_RUNTIME_DIR)/text.o $$(DYNAMIC_LIBC_ELF) \
-		$$(DYNAMIC_GFX_LIBRARY_ELF) | $$(ELF_RUNTIME_DIR)
+		$$(ELF_RUNTIME_DIR)/text-layout.o $$(DYNAMIC_LIBC_ELF) | $$(ELF_RUNTIME_DIR)
 	$$(ELFLD) $$(ELF_LINK_FLAGS) -pie -e libc_crt_entry \
 		-dynamic-linker $(if $(filter chrome-start,$(1)),/lib/ld-linux-system.so.1,/lib/ld-system.so.1) --hash-style=sysv \
 		--no-as-needed $$(filter %.o %.so.1,$$^) -o $$@
@@ -587,9 +613,35 @@ $(DYNAMIC_CHROME_START_ELF): makefile $(ELF_RUNTIME_DIR)/libc-crt-start.o \
 		--no-as-needed $(filter %.o %.so.1,$^) -o $@
 $(eval $(call DYNAMIC_TEXT_APP_RULE,notepad,user/desktop/notepad/main.c))
 $(ELF_RUNTIME_DIR)/notepad.o: user/runtime/message_box.h
+$(ELF_RUNTIME_DIR)/notepad.o: include/uapi/control_tree.h
 $(eval $(call DYNAMIC_TEXT_APP_RULE,fileman,user/desktop/fileman/main.c))
+$(ELF_RUNTIME_DIR)/fileman.o: user/desktop/fileman/content_tree.h
+$(ELF_RUNTIME_DIR)/fileman.o: user/desktop/fileman/file_copy.h
 $(eval $(call DYNAMIC_TEXT_APP_RULE,taskmgr,user/desktop/taskmgr/main.c))
-$(eval $(call DYNAMIC_TEXT_APP_RULE,netmgr,user/services/networkd/manager.c))
+$(ELF_RUNTIME_DIR)/taskmgr.o: include/uapi/control_tree.h
+$(eval $(call DYNAMIC_TEXT_APP_RULE,settings,user/desktop/settings/main.c))
+$(ELF_RUNTIME_DIR)/settings.o: user/desktop/settings/network_tree.h user/desktop/settings/system_info.h user/desktop/settings/sound.h user/desktop/settings/appearance.h user/desktop/settings/adapters.h
+
+$(ELF_RUNTIME_DIR)/control-file.o: user/runtime/control_file.c user/runtime/control_file.h \
+        include/uapi/control_tree.h include/uapi/control_validation.h include/uapi/window_theme.h | $(ELF_RUNTIME_DIR)
+	$(ELFCC) $(ELF_APP_CFLAGS) -c $< -o $@
+
+$(ELF_RUNTIME_DIR)/ui-file-demo.o: user/runtime/ui_file_demo.c user/runtime/control_file.h \
+        include/uapi/control_tree.h include/uapi/window.h | $(ELF_RUNTIME_DIR)
+	$(ELFCC) $(ELF_APP_CFLAGS) -c $< -o $@
+
+$(ELF_RUNTIME_DIR)/ui-file-demo.elf: $(ELF_RUNTIME_DIR)/ui-file-demo.o $(ELF_RUNTIME_DIR)/control-file.o \
+        $(ELF_RUNTIME_DIR)/libc-crt-start.o $(ELF_RUNTIME_DIR)/libc-startup.o $(DYNAMIC_LIBC_ELF)
+	$(ELFLD) $(ELF_LINK_FLAGS) -pie -e libc_crt_entry -dynamic-linker /lib/ld-system.so.1 \
+		--hash-style=sysv --no-as-needed $(filter %.o %.so.1,$^) -o $@
+
+$(BUILD)/esp/usr/apps/ui-file-demo/ui-file-demo: $(ELF_RUNTIME_DIR)/ui-file-demo.elf | $(BUILD)/esp/sbin
+	mkdir -p $(@D)
+	cp $< $@
+
+$(BUILD)/esp/usr/apps/ui-file-demo/controls.ui: user/ui/controls.ui
+	mkdir -p $(@D)
+	cp $< $@
 
 $(ELF_RUNTIME_DIR)/graphics.o: user/runtime/graphics.c \
 		user/runtime/graphics.h $(BLEND2D_DIR)/blend2d/blend2d.h | $(ELF_RUNTIME_DIR)
@@ -609,7 +661,7 @@ $(DYNAMIC_FSYNC_PROBE_ELF): makefile $(ELF_RUNTIME_DIR)/libc-crt-start.o \
 		--no-as-needed $(filter %.o %.so.1,$^) -o $@
 
 .PHONY: fat-fsync-probe
-fat-fsync-probe: $(BUILD)/esp/sbin/fat-fsync-probe
+fat-fsync-probe: $(BUILD)/esp/usr/apps/fat-fsync-probe/fat-fsync-probe
 
 $(BLEND2D_CXX_RUNTIME_OBJECT): $(BLEND2D_DIR)/platform/cxx_runtime.cpp | $(ELF_RUNTIME_DIR)
 	$(ELFCXX) $(BLEND2D_CXXFLAGS) -c $< -o $@
@@ -1064,6 +1116,9 @@ $(BUILD)/kernel/sched-clock.o: kernel/sched/clock.c \
 		kernel/sched/internal.h | $(BUILD)/kernel
 	$(CC) $(KERNEL_CFLAGS) -c $< -o $@
 
+$(BUILD)/kernel/sched-monitor.o: kernel/sched/monitor.c kernel/sched/internal.h | $(BUILD)/kernel
+	$(CC) $(KERNEL_CFLAGS) -c $< -o $@
+
 $(BUILD)/kernel/sched-runqueue.o: kernel/sched/runqueue.c \
 		kernel/sched/internal.h | $(BUILD)/kernel
 	$(CC) $(KERNEL_CFLAGS) -c $< -o $@
@@ -1129,6 +1184,9 @@ $(BUILD)/kernel/futex.o: kernel/sync/futex.c | $(BUILD)/kernel
 $(BUILD)/kernel/mutex.o: kernel/sync/mutex.c | $(BUILD)/kernel
 	$(CC) $(KERNEL_CFLAGS) -c $< -o $@
 
+$(BUILD)/kernel/io-mutex.o: kernel/sync/io_mutex.c | $(BUILD)/kernel
+	$(CC) $(KERNEL_CFLAGS) -c $< -o $@
+
 $(BUILD)/kernel/canonical-io.o: kernel/io/request.c | $(BUILD)/kernel
 	$(CC) $(KERNEL_CFLAGS) -c $< -o $@
 
@@ -1146,6 +1204,9 @@ $(BUILD)/kernel/timer-core.o: kernel/time/hrtimer.c | $(BUILD)/kernel
 	$(CC) $(KERNEL_CFLAGS) -c $< -o $@
 
 $(BUILD)/kernel/deferred.o: kernel/irq/deferred.c | $(BUILD)/kernel
+	$(CC) $(KERNEL_CFLAGS) -c $< -o $@
+
+$(BUILD)/kernel/background.o: kernel/irq/background.c | $(BUILD)/kernel
 	$(CC) $(KERNEL_CFLAGS) -c $< -o $@
 
 $(BUILD)/kernel/service.o: kernel/service.c | $(BUILD)/kernel
@@ -1303,9 +1364,6 @@ $(BUILD)/kernel/e1000-recovery.o: kernel/drivers/net/recovery.c \
 $(BUILD)/kernel/rtl8126.o: kernel/drivers/net/rtl8126.c \
 		kernel/drivers/net/internal.h kernel/drivers/net/core_internal.h \
 		include/kernel/rtl8126.h | $(BUILD)/kernel
-	$(CC) $(KERNEL_CFLAGS) -c $< -o $@
-
-$(BUILD)/kernel/qemu-stdvga.o: kernel/drivers/display/qemu_stdvga.c | $(BUILD)/kernel
 	$(CC) $(KERNEL_CFLAGS) -c $< -o $@
 
 $(BUILD)/kernel/xhci.o: kernel/drivers/usb/xhci/core.c \
@@ -1564,9 +1622,22 @@ $(BUILD)/kernel/graphics-shell.o: kernel/graphics/shell.c \
 		kernel/graphics/internal.h | $(BUILD)/kernel
 	$(CC) $(KERNEL_CFLAGS) -c $< -o $@
 
+$(BUILD)/kernel/graphics-desktop-interaction.o: kernel/graphics/desktop_interaction.c \
+        kernel/graphics/internal.h include/kernel/desktop_interaction.h | $(BUILD)/kernel
+	$(CC) $(KERNEL_CFLAGS) -c $< -o $@
+
+$(BUILD)/kernel/graphics-animation.o: kernel/graphics/animation.c \
+        kernel/graphics/internal.h include/kernel/control_raster.h | $(BUILD)/kernel
+	$(CC) $(KERNEL_CFLAGS) -c $< -o $@
+
 $(BUILD)/kernel/graphics-assets.o: kernel/graphics/assets.c \
 		kernel/graphics/internal.h | $(BUILD)/kernel
 	$(CC) $(KERNEL_CFLAGS) -c $< -o $@
+
+# 桌面和应用共享同一个界面解析器，内核版本仅替换分配器并排除用户文件接口。
+$(BUILD)/kernel/graphics-ui-file.o: user/runtime/control_file.c user/runtime/control_file.h \
+        include/uapi/control_tree.h include/uapi/control_validation.h include/uapi/window_theme.h | $(BUILD)/kernel
+	$(CC) $(KERNEL_CFLAGS) -DUI_FILE_KERNEL -c $< -o $@
 
 $(BUILD)/kernel/graphics-png.o: kernel/graphics/png.c \
 		kernel/graphics/internal.h kernel/graphics/png.h \
@@ -1597,6 +1668,17 @@ $(BUILD)/kernel/graphics-render.o: kernel/graphics/render.c \
 		kernel/graphics/internal.h | $(BUILD)/kernel
 	$(CC) $(KERNEL_CFLAGS) -c $< -o $@
 
+$(BUILD)/kernel/graphics-control-tree.o: kernel/graphics/control_tree.c \
+        include/kernel/control_tree.h include/uapi/control_tree.h include/uapi/window_theme.h include/kernel/rect.h | $(BUILD)/kernel
+	$(CC) $(KERNEL_CFLAGS) -c $< -o $@
+
+$(BUILD)/kernel/graphics-control-document.o: kernel/graphics/control_document.c \
+        kernel/graphics/internal.h include/kernel/control_tree.h include/uapi/control_tree.h include/uapi/window_theme.h | $(BUILD)/kernel
+	$(CC) $(KERNEL_CFLAGS) -c $< -o $@
+
+$(BUILD)/kernel/graphics-caption-text.o: kernel/graphics/caption_text.c include/kernel/caption_text.h include/ascii_font.h | $(BUILD)/kernel
+	$(CC) $(KERNEL_CFLAGS) -c $< -o $@
+
 $(BUILD)/kernel/graphics-decorations.o: kernel/graphics/decorations.c \
 		kernel/graphics/internal.h | $(BUILD)/kernel
 	$(CC) $(KERNEL_CFLAGS) -c $< -o $@
@@ -1610,10 +1692,6 @@ $(BUILD)/kernel/graphics-raster.o: kernel/graphics/raster.c \
 	$(CC) $(KERNEL_CFLAGS) -c $< -o $@
 
 $(BUILD)/kernel/graphics-tile-metadata.o: kernel/graphics/tile_metadata.c \
-		kernel/graphics/internal.h | $(BUILD)/kernel
-	$(CC) $(KERNEL_CFLAGS) -c $< -o $@
-
-$(BUILD)/kernel/graphics-occlusion-cache.o: kernel/graphics/occlusion_cache.c \
 		kernel/graphics/internal.h | $(BUILD)/kernel
 	$(CC) $(KERNEL_CFLAGS) -c $< -o $@
 
@@ -1725,6 +1803,7 @@ $(KERNEL_PE): $(BUILD)/kernel/entry.o $(BUILD)/kernel/runtime-init.o \
                                     $(BUILD)/kernel/syscall-graphics.o \
                                     $(BUILD)/kernel/syscall-font.o \
                                     $(BUILD)/kernel/syscall-image.o \
+                                    $(BUILD)/kernel/syscall-clipboard.o \
                                     $(BUILD)/kernel/syscall-filesystem.o \
                                     $(BUILD)/kernel/syscall-pipe.o \
                                     $(BUILD)/kernel/syscall-audio.o \
@@ -1747,6 +1826,7 @@ $(KERNEL_PE): $(BUILD)/kernel/entry.o $(BUILD)/kernel/runtime-init.o \
                                     $(BUILD)/kernel/reboot.o \
                                      $(BUILD)/kernel/sched-core.o \
                                     $(BUILD)/kernel/sched-clock.o \
+                                    $(BUILD)/kernel/sched-monitor.o \
                                     $(BUILD)/kernel/sched-runqueue.o \
                                     $(BUILD)/kernel/sched-balance.o \
                                     $(BUILD)/kernel/process-core.o \
@@ -1760,12 +1840,13 @@ $(KERNEL_PE): $(BUILD)/kernel/entry.o $(BUILD)/kernel/runtime-init.o \
                                     $(BUILD)/kernel/object-core.o $(BUILD)/kernel/handle.o \
                                     $(BUILD)/kernel/wait.o $(BUILD)/kernel/futex.o \
                                     $(BUILD)/kernel/mutex.o \
+                                    $(BUILD)/kernel/io-mutex.o \
                                      $(BUILD)/kernel/canonical-io.o \
                                     $(BUILD)/kernel/completion-port.o \
                                     $(BUILD)/kernel/message-port.o \
                                     $(BUILD)/kernel/pipe.o \
                                     $(BUILD)/kernel/timer-core.o \
-                                    $(BUILD)/kernel/deferred.o $(BUILD)/kernel/service.o \
+                                    $(BUILD)/kernel/deferred.o $(BUILD)/kernel/background.o $(BUILD)/kernel/service.o \
                                     $(BUILD)/kernel/watchdog.o \
                                     $(BUILD)/kernel/power.o \
                                     $(BUILD)/kernel/crash-dump.o \
@@ -1802,7 +1883,6 @@ $(KERNEL_PE): $(BUILD)/kernel/entry.o $(BUILD)/kernel/runtime-init.o \
                                     $(BUILD)/kernel/e1000-queue.o \
                                     $(BUILD)/kernel/e1000-recovery.o \
                                     $(BUILD)/kernel/rtl8126.o \
-                                    $(BUILD)/kernel/qemu-stdvga.o \
                                      $(BUILD)/kernel/usb-core.o $(BUILD)/kernel/usb-hub.o $(BUILD)/kernel/xhci-hub-runtime.o $(BUILD)/kernel/xhci-hub-transfer.o $(BUILD)/kernel/usb-storage.o \
                                      $(BUILD)/kernel/xhci.o $(BUILD)/kernel/xhci-interrupt.o $(BUILD)/kernel/xhci-runtime.o $(BUILD)/kernel/xhci-status.o $(BUILD)/kernel/xhci-self-test.o \
                                      $(BUILD)/kernel/xhci-lifecycle.o \
@@ -1854,7 +1934,10 @@ $(KERNEL_PE): $(BUILD)/kernel/entry.o $(BUILD)/kernel/runtime-init.o \
                                     $(BUILD)/kernel/graphics-present.o \
                                     $(BUILD)/kernel/graphics-present-cursor.o \
                                     $(BUILD)/kernel/graphics-shell.o \
+                                    $(BUILD)/kernel/graphics-desktop-interaction.o \
+                                    $(BUILD)/kernel/graphics-animation.o \
                                     $(BUILD)/kernel/graphics-assets.o \
+                                    $(BUILD)/kernel/graphics-ui-file.o \
                                     $(BUILD)/kernel/graphics-png.o \
                                     $(BUILD)/kernel/graphics-png-chunks.o \
                                     $(BUILD)/kernel/graphics-launcher.o \
@@ -1862,11 +1945,13 @@ $(KERNEL_PE): $(BUILD)/kernel/entry.o $(BUILD)/kernel/runtime-init.o \
                                     $(BUILD)/kernel/graphics-publication-policy.o \
                                     $(BUILD)/kernel/graphics-compositor-drag.o \
                                     $(BUILD)/kernel/graphics-render.o \
+                                    $(BUILD)/kernel/graphics-control-tree.o \
+                                    $(BUILD)/kernel/graphics-control-document.o \
+                                    $(BUILD)/kernel/graphics-caption-text.o \
                                     $(BUILD)/kernel/graphics-decorations.o \
                                     $(BUILD)/kernel/graphics-cursor-occlusion.o \
                                     $(BUILD)/kernel/graphics-raster.o \
                                     $(BUILD)/kernel/graphics-tile-metadata.o \
-                                    $(BUILD)/kernel/graphics-occlusion-cache.o \
                                     $(BUILD)/kernel/graphics-render-plan.o \
                                     $(BUILD)/kernel/graphics-damage-plan.o \
                                      $(BUILD)/kernel/graphics-compose-cpu.o \
@@ -1913,19 +1998,19 @@ $(BUILD)/esp/EFI/OS/loader.conf: makefile $(DEBUG_SERIAL_STAMP) | $(BUILD)/esp/E
 INIT_SERVICE_OFFSET = $(shell $(OBJDUMP) -t $(BUILD)/kernel/user-init-blob.o 2>/dev/null | \
 	awk '$$NF == "user_init_service" { for (i=1;i<=NF;i++) if ($$i == ".rdata") { print "0x" $$1; exit } print $$9; exit }')
 
-$(BUILD)/esp/init: $(BUILD)/kernel/user-init-blob.bin $(BUILD)/make-init-image.exe | $(BUILD)/esp
+$(BUILD)/esp/EFI/OS/init: $(BUILD)/kernel/user-init-blob.bin $(BUILD)/make-init-image.exe | $(BUILD)/esp/EFI/OS
 	$(BUILD)/make-init-image.exe $< $@ 0 $(INIT_SERVICE_OFFSET)
 
-$(BUILD)/esp/init-runtime: $(BUILD)/kernel/user-init-blob.bin $(BUILD)/make-init-image.exe | $(BUILD)/esp
+$(BUILD)/esp/EFI/OS/init-runtime: $(BUILD)/kernel/user-init-blob.bin $(BUILD)/make-init-image.exe | $(BUILD)/esp/EFI/OS
 	$(BUILD)/make-init-image.exe $< $@ 1 $(INIT_SERVICE_OFFSET)
 
-$(BUILD)/esp/sbin/deviced: $(BUILD)/esp/init | $(BUILD)/esp/sbin
+$(BUILD)/esp/sbin/deviced: $(BUILD)/esp/EFI/OS/init | $(BUILD)/esp/sbin
 	cp $< $@
 
-$(BUILD)/esp/sbin/logd: $(BUILD)/esp/init | $(BUILD)/esp/sbin
+$(BUILD)/esp/sbin/logd: $(BUILD)/esp/EFI/OS/init | $(BUILD)/esp/sbin
 	cp $< $@
 
-$(BUILD)/esp/sbin/crashd: $(BUILD)/esp/init | $(BUILD)/esp/sbin
+$(BUILD)/esp/sbin/crashd: $(BUILD)/esp/EFI/OS/init | $(BUILD)/esp/sbin
 	cp $< $@
 
 $(BUILD)/esp/lib/ld-system.so.1: $(DYNAMIC_LOADER_ELF) | $(BUILD)/esp/lib
@@ -1940,99 +2025,144 @@ $(BUILD)/esp/lib/libgraphics.so.1: $(DYNAMIC_GFX_LIBRARY_ELF) | $(BUILD)/esp/lib
 $(BUILD)/esp/lib/libsystemc.so.1: $(DYNAMIC_LIBC_ELF) | $(BUILD)/esp/lib
 	cp $< $@
 
-$(BUILD)/esp/sbin/dyn-gfx: $(DYNAMIC_GFX_TEST_ELF) | $(BUILD)/esp/sbin
+$(BUILD)/esp/usr/apps/dyn-gfx/dyn-gfx: $(DYNAMIC_GFX_TEST_ELF) | $(BUILD)/esp/sbin
+	mkdir -p $(@D)
 	cp $< $@
 
-$(BUILD)/esp/sbin/libc-test: $(DYNAMIC_LIBC_TEST_ELF) | $(BUILD)/esp/sbin
+$(BUILD)/esp/usr/apps/libc-test/libc-test: $(DYNAMIC_LIBC_TEST_ELF) | $(BUILD)/esp
+	mkdir -p $(@D)
 	cp $< $@
 
-$(BUILD)/esp/sbin/linux-events-test: $(DYNAMIC_LINUX_EVENTS_TEST_ELF) | $(BUILD)/esp/sbin
+$(BUILD)/esp/usr/apps/linux-events-test/linux-events-test: $(DYNAMIC_LINUX_EVENTS_TEST_ELF) | $(BUILD)/esp
+	mkdir -p $(@D)
 	cp $< $@
 
-$(BUILD)/esp/sbin/fat-fsync-probe: $(DYNAMIC_FSYNC_PROBE_ELF) | $(BUILD)/esp/sbin
+$(BUILD)/esp/usr/apps/fat-fsync-probe/fat-fsync-probe: $(DYNAMIC_FSYNC_PROBE_ELF) | $(BUILD)/esp
+	mkdir -p $(@D)
 	cp $< $@
 
-$(BUILD)/esp/sbin/imageview: $(DYNAMIC_IMAGEVIEW_ELF) | $(BUILD)/esp/sbin
+$(BUILD)/esp/usr/apps/imageview/imageview: $(DYNAMIC_IMAGEVIEW_ELF) | $(BUILD)/esp/sbin
+	mkdir -p $(@D)
 	cp $< $@
 
-$(BUILD)/esp/sbin/nasm: $(DYNAMIC_NASM_ELF) | $(BUILD)/esp/sbin
+$(BUILD)/esp/usr/apps/nasm/nasm: $(DYNAMIC_NASM_ELF) | $(BUILD)/esp
+	mkdir -p $(@D)
 	cp $< $@
 
-$(BUILD)/esp/sbin/ndisasm: $(DYNAMIC_NDISASM_ELF) | $(BUILD)/esp/sbin
+$(BUILD)/esp/usr/apps/ndisasm/ndisasm: $(DYNAMIC_NDISASM_ELF) | $(BUILD)/esp
+	mkdir -p $(@D)
 	cp $< $@
 
-$(BUILD)/esp/sbin/gshell: $(DYNAMIC_GSHELL_ELF) | $(BUILD)/esp/sbin
+$(BUILD)/esp/usr/apps/gshell/gshell: $(DYNAMIC_GSHELL_ELF) | $(BUILD)/esp/sbin
+	mkdir -p $(@D)
 	cp $< $@
 
-$(BUILD)/esp/sbin/chrome-start: $(DYNAMIC_CHROME_START_ELF) | $(BUILD)/esp/sbin
+$(BUILD)/esp/usr/apps/chrome/chrome-start: $(DYNAMIC_CHROME_START_ELF) | $(BUILD)/esp/sbin
+	mkdir -p $(@D)
 	cp $< $@
 
-$(BUILD)/esp/sbin/notepad: $(DYNAMIC_NOTEPAD_ELF) | $(BUILD)/esp/sbin
+$(BUILD)/esp/usr/apps/notepad/notepad: $(DYNAMIC_NOTEPAD_ELF) | $(BUILD)/esp/sbin
+	mkdir -p $(@D)
 	cp $< $@
 
-$(BUILD)/esp/sbin/fileman: $(DYNAMIC_FILEMAN_ELF) | $(BUILD)/esp/sbin
+$(BUILD)/esp/usr/apps/fileman/fileman: $(DYNAMIC_FILEMAN_ELF) | $(BUILD)/esp/sbin
+	mkdir -p $(@D)
 	cp $< $@
 
-$(BUILD)/esp/sbin/fm: $(DYNAMIC_FILEMAN_ELF) | $(BUILD)/esp/sbin
-	cp $< $@
-
-$(BUILD)/esp/sbin/window-frame-probe: tests/user/window_frame_probe.c \
+$(BUILD)/esp/usr/apps/window-frame-probe/window-frame-probe: tests/user/window_frame_probe.c \
         include/uapi/linux_abi.h include/uapi/window.h include/uapi/window_state.h | $(BUILD)/esp/sbin
+	mkdir -p $(@D)
 	$(ELFCC) $(ELF_APP_CFLAGS) -fPIC -nostdlib -pie -Wl,-e,_start \
 		-Wl,--hash-style=sysv -Wl,--dynamic-linker,/lib/ld-linux-system.so.1 $< -o $@
 
-$(BUILD)/esp/sbin/taskmgr: $(DYNAMIC_TASKMGR_ELF) | $(BUILD)/esp/sbin
+$(BUILD)/esp/usr/apps/control-tree-demo/control-tree-demo: tests/user/control_tree_demo.c \
+        include/uapi/linux_abi.h include/uapi/window.h include/uapi/window_state.h include/uapi/control_tree.h include/uapi/window_theme.h include/uapi/syscall.h | $(BUILD)/esp/sbin
+	mkdir -p $(@D)
+	$(ELFCC) $(ELF_APP_CFLAGS) -fPIC -nostdlib -pie -Wl,-e,_start \
+		-Wl,--hash-style=sysv -Wl,--dynamic-linker,/lib/ld-linux-system.so.1 $< -o $@
+
+$(BUILD)/esp/usr/apps/taskmgr/taskmgr: $(DYNAMIC_TASKMGR_ELF) | $(BUILD)/esp/sbin
+	mkdir -p $(@D)
 	cp $< $@
 
 $(BUILD)/esp/sbin/audiod: $(USER_AUDIOD_ELF) | $(BUILD)/esp/sbin
 	cp $< $@
 
-$(BUILD)/esp/sbin/netmgr: $(DYNAMIC_NETMGR_ELF) | $(BUILD)/esp/sbin
+$(BUILD)/esp/usr/apps/settings/settings: $(DYNAMIC_SETTINGS_ELF) | $(BUILD)/esp/sbin
+	mkdir -p $(@D)
 	cp $< $@
 
 
-# QEMU 10's vvfat backend asserts when a ninth root entry is added to the
-# synthetic ESP directory.  /sbin is already on System's command search path,
-# so keep wget there instead of creating a new root-level /bin directory.
-$(BUILD)/esp/sbin/wget: $(USER_WGET_ELF) | $(BUILD)/esp/sbin
+# 命令行应用也使用自己的应用包目录，由终端按应用名查找。
+$(BUILD)/esp/usr/apps/wget/wget: $(USER_WGET_ELF) | $(BUILD)/esp
+	mkdir -p $(@D)
 	cp $< $@
 
 $(BUILD)/esp/sbin/netd: $(USER_NETD_ELF) | $(BUILD)/esp/sbin
 	cp $< $@
 
 ifeq ($(OS_PHASE13),1)
-PHASE13_TEST_IMAGE = $(BUILD)/esp/sbin/linux-events-test
+PHASE13_TEST_IMAGE = $(BUILD)/esp/usr/apps/linux-events-test/linux-events-test
 endif
 
 # Refresh diagnostic images already installed by an explicit test build;
 # fresh desktop images do not acquire extra test applications.
-EXISTING_DIAGNOSTIC_IMAGES = $(wildcard $(BUILD)/esp/sbin/fat-fsync-probe \
-                                      $(BUILD)/esp/sbin/linux-events-test)
+# 兼容旧诊断副本：先在新归属重建，清理脚本随后才允许删除旧文件。
+EXISTING_DIAGNOSTIC_IMAGES = $(foreach app,fat-fsync-probe linux-events-test,\
+    $(if $(wildcard $(BUILD)/esp/sbin/$(app) $(BUILD)/esp/usr/apps/$(app)/$(app)),\
+    $(BUILD)/esp/usr/apps/$(app)/$(app)))
 
 .PHONY: rtl8126-payload
 rtl8126-payload:
 	python3 tools/stage-rtl8126-firmware.py --build "$(BUILD)"
 
-esp: rtl8126-payload $(BUILD)/esp/EFI/BOOT/BOOTX64.EFI $(KERNEL_ELF) \
+# 仅迁移历史手工部署的诊断程序；已经由新暂存流程发布的程序绝不覆盖。
+LEGACY_DIAGNOSTIC_NAMES = taskmgr-cpu-probe tcp-wake-probe chrome-glibc-probe vulkan-probe vulkan-video
+LEGACY_DIAGNOSTIC_SOURCES = $(foreach app,$(LEGACY_DIAGNOSTIC_NAMES),$(wildcard $(BUILD)/esp/sbin/$(app)))
+.PHONY: legacy-diagnostic-apps
+legacy-diagnostic-apps:
+	@set -e; $(foreach source,$(LEGACY_DIAGNOSTIC_SOURCES),\
+	    target="$(BUILD)/esp/usr/apps/$(notdir $(source))/$(notdir $(source))"; \
+	    if [ ! -e "$$target" ] && [ ! -L "$$target" ]; then \
+	        mkdir -p "$$(dirname "$$target")"; cp "$(source)" "$$target"; \
+	    fi;) :
+
+# 供协作暂存单独调用，只准备应用负载，不触发完整 ESP、镜像或虚拟机。
+BUILTIN_APP_NAMES = gshell notepad fileman settings taskmgr imageview dyn-gfx \
+    nasm ndisasm wget libc-test linux-events-test fat-fsync-probe ui-file-demo \
+    control-tree-demo window-frame-probe audio-test
+.PHONY: builtin-apps clean-runtime-aliases
+builtin-apps: $(foreach app,$(BUILTIN_APP_NAMES),$(BUILD)/esp/usr/apps/$(app)/$(app)) \
+    $(DESKTOP_ASSETS) $(VFS_SELF_TEST_SEED) legacy-diagnostic-apps \
+    $(BUILD)/esp/usr/apps/settings/wallpaper $(BUILD)/esp/usr/apps/settings/file-picker \
+    $(BUILD)/esp/usr/apps/ui-file-demo/controls.ui
+
+# 新应用和 Chrome 暂存完成后再调用；内部仍逐文件验证新归属。
+clean-runtime-aliases:
+	python3 tools/clean-runtime-aliases.py "$(BUILD)/esp"
+
+esp: rtl8126-payload legacy-diagnostic-apps $(BUILD)/esp/EFI/BOOT/BOOTX64.EFI $(KERNEL_ELF) \
      $(BUILD)/esp/EFI/OS/loader.conf $(KERNEL_BUILD_ID) $(KERNEL_SYMBOLS) \
-     $(BUILD)/esp/tmp \
+     $(BUILD)/esp/tmp $(BUILD)/esp/log \
      $(DESKTOP_ASSETS) \
      $(VFS_SELF_TEST_SEED) \
-     $(BUILD)/esp/init $(BUILD)/esp/init-runtime \
+     $(BUILD)/esp/EFI/OS/init $(BUILD)/esp/EFI/OS/init-runtime \
      $(BUILD)/esp/lib/ld-system.so.1 $(BUILD)/esp/lib/ld-linux-system.so.1 \
      $(BUILD)/esp/lib/libsystemc.so.1 \
      $(BUILD)/esp/lib/libgraphics.so.1 \
-     $(BUILD)/esp/sbin/dyn-gfx $(BUILD)/esp/sbin/libc-test \
-     $(BUILD)/esp/sbin/imageview $(BUILD)/esp/sbin/nasm \
-     $(BUILD)/esp/sbin/ndisasm \
+     $(BUILD)/esp/usr/apps/dyn-gfx/dyn-gfx $(BUILD)/esp/usr/apps/libc-test/libc-test \
+     $(BUILD)/esp/usr/apps/imageview/imageview $(BUILD)/esp/usr/apps/nasm/nasm \
+     $(BUILD)/esp/usr/apps/ndisasm/ndisasm \
      $(BUILD)/esp/sbin/deviced $(BUILD)/esp/sbin/logd \
-     $(BUILD)/esp/sbin/crashd $(BUILD)/esp/sbin/gshell \
-     $(BUILD)/esp/sbin/chrome-start \
-     $(BUILD)/esp/sbin/notepad $(BUILD)/esp/sbin/fileman \
-     $(BUILD)/esp/sbin/fm $(BUILD)/esp/sbin/taskmgr \
+     $(BUILD)/esp/sbin/crashd $(BUILD)/esp/usr/apps/gshell/gshell \
+     $(BUILD)/esp/usr/apps/chrome/chrome-start \
+     $(BUILD)/esp/usr/apps/notepad/notepad $(BUILD)/esp/usr/apps/fileman/fileman \
+     $(BUILD)/esp/usr/apps/ui-file-demo/ui-file-demo $(BUILD)/esp/usr/apps/ui-file-demo/controls.ui \
+     $(BUILD)/esp/usr/apps/taskmgr/taskmgr \
      $(BUILD)/esp/sbin/audiod \
-     $(BUILD)/esp/sbin/netmgr $(BUILD)/esp/sbin/netd \
-     $(BUILD)/esp/sbin/wget $(PHASE13_TEST_IMAGE) $(EXISTING_DIAGNOSTIC_IMAGES)
+     $(BUILD)/esp/usr/apps/settings/settings $(BUILD)/esp/sbin/netd \
+     $(BUILD)/esp/usr/apps/wget/wget $(PHASE13_TEST_IMAGE) $(EXISTING_DIAGNOSTIC_IMAGES)
+	@python3 tools/migrate-system-layout.py "$(BUILD)/esp"
 	@python3 tools/clean-runtime-aliases.py "$(BUILD)/esp"
 	@echo ESP image prepared at $(BUILD)/esp
 
@@ -2085,3 +2215,38 @@ $(wildcard $(ELF_RUNTIME_DIR)/*.o): user/runtime/elf_abi.h
          $(wildcard $(BUILD)/user/*.d) $(wildcard $(BUILD)/elf/*.d) \
          $(wildcard $(BUILD)/nasm/*.d) $(NASM_DEPENDENCY_FILES) \
          $(OPENSSL_DEPENDENCY_FILES) $(BLEND2D_DEPENDENCY_FILES)
+
+$(BUILD)/kernel/syscall-clipboard.o: kernel/syscall/clipboard.c include/uapi/clipboard.h include/kernel/clipboard.h kernel/syscall/internal.h | $(BUILD)/kernel
+	$(CC) $(KERNEL_CFLAGS) -c $< -o $@
+
+$(ELF_RUNTIME_DIR)/notepad.o $(ELF_RUNTIME_DIR)/gshell.o: user/runtime/clipboard.h include/uapi/clipboard.h
+
+$(ELF_RUNTIME_DIR)/settings.o $(ELF_RUNTIME_DIR)/gshell.o $(ELF_RUNTIME_DIR)/notepad.o $(ELF_RUNTIME_DIR)/fileman.o $(ELF_RUNTIME_DIR)/taskmgr.o $(ELF_RUNTIME_DIR)/imageview.o: user/runtime/caption_tree.h
+
+$(eval $(call DYNAMIC_TEXT_APP_RULE,wallpaper,user/desktop/wallpaper/main.c))
+$(ELF_RUNTIME_DIR)/wallpaper.o: user/runtime/file_picker.h user/runtime/modal_tree.h user/runtime/caption_tree.h include/uapi/desktop.h
+$(BUILD)/esp/usr/apps/settings/wallpaper: $(ELF_RUNTIME_DIR)/wallpaper.elf | $(BUILD)/esp/sbin
+	mkdir -p $(@D)
+	cp $< $@
+esp: $(BUILD)/esp/usr/apps/settings/wallpaper
+
+# 浏览器复用系统文件选择框；两个入口共享同一份实现。
+$(BUILD)/esp/usr/apps/settings/file-picker: $(ELF_RUNTIME_DIR)/wallpaper.elf | $(BUILD)/esp/sbin
+	mkdir -p $(@D)
+	cp $< $@
+$(BUILD)/esp/Downloads:
+	mkdir -p $@
+esp: $(BUILD)/esp/usr/apps/settings/file-picker $(BUILD)/esp/Downloads
+
+$(BUILD)/esp/usr/apps/chrome/download-test.html: tests/browser/download.html
+	mkdir -p $(@D)
+	cp $< $@
+esp: $(BUILD)/esp/usr/apps/chrome/download-test.html
+
+# 两种物理音频后端共用同一播放验证程序。
+$(eval $(call DYNAMIC_TEXT_APP_RULE,audio-test,user/diagnostics/audio-test/main.c))
+$(ELF_RUNTIME_DIR)/audio-test.o: include/uapi/audio.h
+$(BUILD)/esp/usr/apps/audio-test/audio-test: $(ELF_RUNTIME_DIR)/audio-test.elf
+	mkdir -p $(@D)
+	cp $< $@
+esp: $(BUILD)/esp/usr/apps/audio-test/audio-test

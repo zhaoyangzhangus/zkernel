@@ -8,7 +8,7 @@ import resource
 
 
 def memory_bytes(value):
-    # QEMU's unsuffixed -m value is MiB, not bytes.
+    # QEMU 的 -m 参数不带单位时以 MiB 表示，而不是字节。
     match = re.fullmatch(r'([1-9][0-9]*)([KMGTPE]?)', value, re.I)
     if not match:
         raise ValueError('无法预检 QEMU 内存大小：' + value)

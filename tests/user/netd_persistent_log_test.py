@@ -21,7 +21,7 @@ static unsigned mode,opens,writes,syncs,total;
 static char bytes[16384];
 static int64_t netd_syscall_four(uint64_t n,uint64_t a,uint64_t b,uint64_t c,uint64_t d){
  if(n==OS_SYS_FILE_OPEN){
-  ++opens;assert(!strcmp((char*)(uintptr_t)a,"/netd.log") && b==7 && c==0644);
+  ++opens;assert(!strcmp((char*)(uintptr_t)a,"/log/netd.log") && b==7 && c==0644);
   if(mode==1)return -5;*(os_handle_t*)(uintptr_t)d=9;return 0;
  }
  assert(n==OS_SYS_FILE_WRITE && a==9 && c && c<=240);++writes;

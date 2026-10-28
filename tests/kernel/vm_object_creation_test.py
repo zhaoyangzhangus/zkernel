@@ -5,10 +5,13 @@ import tempfile
 
 root = Path(__file__).resolve().parents[2]
 code = r'''
+#define _GNU_SOURCE
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
+#include <unistd.h>
 #include "internal.h"
 static unsigned attempts, fail_at, live, releases;
 void *kmalloc(size_t size, uint32_t flags) {
@@ -103,6 +106,36 @@ int main(void) {
  assert(vm_object_create_page_array(pages,UINT64_MAX/PAGE_SIZE+1,0,0,0,&out)==K_EINVAL);
  assert(vm_object_create_page_array(pages,1,0,0,0,0)==K_EINVAL);
  assert(!attempts && !live && out==(void*)1);
+ /* Constructor failures precede reading the physical-address input. Use a
+  * real inaccessible page so an eager validation/copy cannot pass unnoticed. */
+ assert(sysconf(_SC_PAGESIZE)==PAGE_SIZE);
+ unsigned char *guard=mmap(0,2*PAGE_SIZE,PROT_READ|PROT_WRITE,
+                           MAP_PRIVATE|MAP_ANONYMOUS,-1,0);
+ assert(guard!=MAP_FAILED && !mprotect(guard+PAGE_SIZE,PAGE_SIZE,PROT_NONE));
+ for(unsigned c=0;c<4;++c)for(unsigned failure=1;failure<=2;++failure){
+  begin(failure);out=(void*)1;unsigned before=releases;
+  assert(vm_object_create_page_array((const uint64_t*)(guard+PAGE_SIZE),counts[c],
+          0,&releases,release_private,&out)==K_ENOMEM);
+  assert(attempts==failure && !live && out==(void*)1 && releases==before);
+ }
+ /* End the source exactly at a protected page: no speculative extra input
+  * element, copied-storage alias or malformed-tail ownership transfer. */
+ const unsigned edge_counts[]={1,17,PAGE_SIZE/sizeof(uint64_t)};
+ for(unsigned c=0;c<3;++c){
+  unsigned count=edge_counts[c];
+  uint64_t *edge=(uint64_t*)(guard+PAGE_SIZE)-count;
+  for(unsigned i=0;i<count;++i)edge[i]=(uint64_t)(i+1)*PAGE_SIZE;
+  begin(0);out=(void*)1;unsigned before=releases;
+  assert(vm_object_create_page_array(edge,count,7,&releases,release_private,&out)==K_OK);
+  assert(attempts==2 && live==2 && out->u.page_array.pages!=edge);
+  assert(!memcmp(out->u.page_array.pages,edge,count*sizeof(*edge)));
+  vm_object_put(out);assert(!live && releases==before+1);
+  ++edge[count-1];begin(0);out=(void*)1;before=releases;
+  assert(vm_object_create_page_array(edge,count,7,&releases,release_private,&out)==K_EINVAL);
+  assert(attempts==2 && !live && out==(void*)1 && releases==before);
+ }
+ assert(!munmap(guard,2*PAGE_SIZE));
+ puts("VM page arrays: eight OOM/protected-input cases and six exact-boundary/invalid-tail cases preserve output and ownership");
  const vm_file_ops_t ops={.retain=retain_mapping,.release=release_mapping,.page_get=get_file_page};
  for(unsigned failure=0;failure<2;++failure) {
   begin(failure);out=(void*)1;unsigned before=mapping_retains;

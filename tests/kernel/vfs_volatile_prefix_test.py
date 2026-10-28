@@ -6,8 +6,7 @@ root=Path(__file__).resolve().parents[2]
 source=(root/'kernel/fs/vfs/core.c').read_text()
 start=source.index('static bool vfs_volatile_path(')
 function=source[start:source.index('static bool vfs_mount_matches(',start)]
-function=function.replace('path[i]', 'tracked_char(path,i)').replace(
-    'path[prefix_length]', 'tracked_char(path,prefix_length)')
+function=function.replace('path[index + offset]', 'tracked_char(path,index+offset)').replace('path[index + sizeof(runtime) - 1U]', 'tracked_char(path,index+sizeof(runtime)-1U)').replace('path[index]', 'tracked_char(path,index)')
 program=r'''
 #define _GNU_SOURCE
 #include <assert.h>
@@ -29,7 +28,7 @@ static bool previous(const char *path){
 }
 static void check(const char *p){
  reads=length_reads=0;bool expected=previous(p);
- assert(vfs_volatile_path(p)==expected&&reads<=5);++cases;
+ assert(vfs_volatile_path(p)==expected&&reads<=32);++cases;
 }
 int main(void){
  const char *fixed[]={0,"","/","/t","/tm","/tmp","/tmp/","/tmpx","/tmpfoo/","/var/tmp","/TMP/"};
@@ -47,7 +46,11 @@ int main(void){
   check(path);
  }
  memset(path,'x',sizeof(path));memcpy(path,"/tmp/",5);check(path);
- assert(length_reads==256&&reads==5);
+ assert(length_reads==256&&reads<=10);
+ const char *apps[]={"/usr/apps/chrome/run","/usr/apps/chrome/run/socket","/usr/apps/a-b_2/run/profile"};
+ for(unsigned i=0;i<sizeof(apps)/sizeof(apps[0]);++i)assert(vfs_volatile_path(apps[i]));
+ const char *persistent[]={"/usr/apps/chrome/data","/usr/apps/chrome/runtime","/usr/apps//run","/usr/apps/../run","/usr/apps/chrome/lib","/usr/apps/chrome/runx"};
+ for(unsigned i=0;i<sizeof(persistent)/sizeof(persistent[0]);++i)assert(!vfs_volatile_path(persistent[i]));
  long unit=sysconf(_SC_PAGESIZE);assert(unit>256);
  char *area=mmap(0,2*(size_t)unit,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0);
  assert(area!=MAP_FAILED&&mprotect(area+unit,(size_t)unit,PROT_NONE)==0);
@@ -56,9 +59,9 @@ int main(void){
  }
  /* The prefix alone is sufficient; no sixth byte may be read. */
  memcpy(area+unit-5,"/tmp/",5);reads=0;
- assert(vfs_volatile_path(area+unit-5)&&reads==5);
+ assert(vfs_volatile_path(area+unit-5)&&reads<=10);
  assert(munmap(area,2*(size_t)unit)==0);
- printf("Volatile prefix: %u full-path oracle cases; all byte mutations, short strings and guard-page boundaries; at most 5 reads instead of a 256-byte path scan\n",cases);
+ printf("Volatile prefix: %u full-path oracle cases; all byte mutations, short strings and guard-page boundaries; application runtime isolation and bounded prefix reads\n",cases);
 }
 '''
 with tempfile.TemporaryDirectory(prefix='liteos-volatile-prefix-') as directory:

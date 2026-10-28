@@ -25,10 +25,9 @@ typedef enum {
 
 #define ATOMIC_VAR_INIT(value) (value)
 
-/* The _n builtins reject pointers to C11 _Atomic-qualified objects with
- * Clang.  Use the generic builtins and preserve the C11 expression semantics
- * so both integer and pointer atomics work.  These are the same GNU C
- * extensions used by GCC's freestanding stdatomic.h. */
+/* Clang 的 _n 内建函数不接受指向 C11 _Atomic 限定对象的指针。使用通用内建函数，
+ * 并保留 C11 表达式语义，使整数和指针原子操作都能工作。这些也是 GCC freestanding
+ * stdatomic.h 使用的 GNU C 扩展。 */
 #define atomic_init(object, value)                                              \
     __extension__                                                               \
     ({                                                                           \
@@ -142,10 +141,8 @@ typedef _Atomic(unsigned long long) atomic_ullong;
 typedef _Atomic(intptr_t) atomic_intptr_t;
 typedef _Atomic(uintptr_t) atomic_uintptr_t;
 typedef _Atomic(size_t) atomic_size_t;
-/* C11's least/fast-width aliases are distinct typedef names even when they
- * resolve to the same underlying integer type on this target.  A number of
- * portable C libraries (including pthreadpool) use these aliases instead of
- * the exact-width forms. */
+/* 即使在当前目标上解析为相同的底层整数类型，C11 的 least/fast-width 别名仍是不同的
+ * typedef 名称。许多可移植 C 库（包括 pthreadpool）使用这些别名，而不是精确宽度类型。 */
 typedef _Atomic(int8_t) atomic_int_least8_t;
 typedef _Atomic(uint8_t) atomic_uint_least8_t;
 typedef _Atomic(int16_t) atomic_int_least16_t;

@@ -152,9 +152,8 @@ if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $imagePath)) {
 
 $storageArguments = @()
 if ($Uas) {
-    # EDK2 in this environment does not boot from usb-uas.  Use a BOT disk
-    # only for firmware loading, then remove it at the kernel entry marker so
-    # the kernel exercises a single USB device: the UAS device under test.
+    # 此环境中的 EDK2 无法从 usb-uas 启动。仅在加载固件时使用 BOT 磁盘，随后在内核入口标记处移除它，
+    # 使内核只测试一个 USB 设备：UAS 被测设备。
     Copy-Item -LiteralPath $imagePath -Destination $legacyBootImagePath -Force
     $storageArguments += @(
         '-device', 'usb-uas,id=vm-usb-uas,bus=vm-xhci.0,port=1',
@@ -171,9 +170,8 @@ if ($Uas) {
 
 $inputArguments = if ($InputTest -or $FileManagerTest) {
     @(
-        # Keep an empty Hub before the populated Hub.  This reproduces the
-        # physical USB3/USB2 companion layout where stopping after the first
-        # root Hub hides the keyboard.
+        # 在有设备的 Hub 前保留一个空 Hub。这模拟实体 USB3/USB2 companion 布局；若只处理第一个根 Hub，
+        # 键盘就会被隐藏。
         '-device', 'usb-hub,id=vm-empty-hub,bus=vm-xhci.0,port=2,port-power=on',
         '-device', 'usb-hub,id=vm-input-hub,bus=vm-xhci.0,port=3,port-power=on',
         '-device', 'usb-kbd,id=vm-input-kbd,bus=vm-xhci.0,port=3.1',
@@ -295,7 +293,7 @@ try {
             (Test-Path -LiteralPath $imagePath)) {
             try {
                 & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $extractScript `
-                    -Image $imagePath -Path 'EFI/OS/realtest.log' `
+                    -Image $imagePath -Path 'log/realtest.log' `
                     -Output $liveExtractedLog 2>$null | Out-Null
             }
             catch { }
@@ -396,14 +394,14 @@ finally {
 
 $logImagePath = $imagePath
 & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $extractScript `
-    -Image $logImagePath -Path 'EFI/OS/realtest.log' -Output $extractedLog
+    -Image $logImagePath -Path 'log/realtest.log' -Output $extractedLog
 if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $extractedLog)) {
-    throw 'The QEMU FAT image did not contain EFI/OS/realtest.log.'
+    throw 'The QEMU FAT image did not contain log/realtest.log.'
 }
 $realtestLog = Get-Content -LiteralPath $extractedLog -Raw
 if ($Uas) {
     & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $extractScript `
-        -Image $legacyBootImagePath -Path 'EFI/OS/realtest.log' `
+        -Image $legacyBootImagePath -Path 'log/realtest.log' `
         -Output $loaderExtractedLog
     if ($LASTEXITCODE -ne 0 -or
         -not (Test-Path -LiteralPath $loaderExtractedLog)) {

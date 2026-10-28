@@ -3,6 +3,7 @@
 #include <kernel/console.h>
 #include <kernel/net_core.h>
 #include <kernel/socket.h>
+#include <kernel/string.h>
 
 #include "core_internal.h"
 
@@ -15,16 +16,10 @@
 static uint32_t g_debug_tcp_output_logs;
 #endif
 
-static void e1000_protocol_copy(void *destination, const void *source, size_t size) {
-    uint8_t *out = (uint8_t *)destination;
-    const uint8_t *in = (const uint8_t *)source;
-    while (size-- != 0) *out++ = *in++;
-}
-
 kstatus_t e1000_device_transmit(void *context, const void *frame,
                                        size_t length) {
-    return e1000_transmit((e1000_state_t *)context, (const uint8_t *)frame,
-                          length) ? K_OK : K_EIO;
+    return e1000_transmit_status((e1000_state_t *)context,
+                                 (const uint8_t *)frame, length);
 }
 
 static uint32_t e1000_ipv4_mask(uint8_t prefix_length) {
@@ -51,8 +46,11 @@ static kstatus_t e1000_send_tcp_ipv4_segments(
     const void *payload, size_t payload_length) {
     const uint8_t *bytes = (const uint8_t *)payload;
     uint8_t frame[NET_ETHERNET_HEADER_SIZE + NET_IPV4_HEADER_SIZE +
-                  NET_TCP_HEADER_SIZE + E1000_IPV4_TCP_MSS];
+                  NET_TCP_HEADER_SIZE + 8U + E1000_IPV4_TCP_MSS];
     size_t offset = 0U;
+    int scale = (flags & NET_TCP_FLAG_SYN) != 0U ?
+        socket_tcp_syn_scale_ipv4(source_address, source_port, destination_address,
+            destination_port, sequence, acknowledgement) : -1;
     do {
         size_t remaining = payload_length - offset;
         uint16_t chunk = (uint16_t)(remaining > E1000_IPV4_TCP_MSS ?
@@ -62,11 +60,11 @@ static kstatus_t e1000_send_tcp_ipv4_segments(
         if (offset + chunk < payload_length) {
             segment_flags &= (uint8_t)~(NET_TCP_FLAG_FIN | NET_TCP_FLAG_PSH);
         }
-        if (net_tcp_build_ipv4(
+        if (net_tcp_build_ipv4_scaled(
                 frame, sizeof(frame), state->mac, destination_mac,
                 source_address, destination_address, source_port,
                 destination_port, sequence + (uint32_t)offset,
-                acknowledgement, segment_flags, window,
+                acknowledgement, segment_flags, window, scale,
                 bytes == 0 ? 0 : bytes + offset, chunk, &frame_length) != K_OK) {
             return K_EINVAL;
         }
@@ -85,8 +83,11 @@ static kstatus_t e1000_send_tcp_ipv6_segments(
     const void *payload, size_t payload_length) {
     const uint8_t *bytes = (const uint8_t *)payload;
     uint8_t frame[NET_ETHERNET_HEADER_SIZE + NET_IPV6_HEADER_SIZE +
-                  NET_TCP_HEADER_SIZE + E1000_IPV6_TCP_MSS];
+                  NET_TCP_HEADER_SIZE + 8U + E1000_IPV6_TCP_MSS];
     size_t offset = 0U;
+    int scale = (flags & NET_TCP_FLAG_SYN) != 0U ?
+        socket_tcp_syn_scale_ipv6(source_address, source_port, destination_address,
+            destination_port, sequence, acknowledgement) : -1;
     do {
         size_t remaining = payload_length - offset;
         uint16_t chunk = (uint16_t)(remaining > E1000_IPV6_TCP_MSS ?
@@ -96,11 +97,11 @@ static kstatus_t e1000_send_tcp_ipv6_segments(
         if (offset + chunk < payload_length) {
             segment_flags &= (uint8_t)~(NET_TCP_FLAG_FIN | NET_TCP_FLAG_PSH);
         }
-        if (net_tcp_build_ipv6(
+        if (net_tcp_build_ipv6_scaled(
                 frame, sizeof(frame), state->mac, destination_mac,
                 source_address, destination_address, source_port,
                 destination_port, sequence + (uint32_t)offset,
-                acknowledgement, segment_flags, window,
+                acknowledgement, segment_flags, window, scale,
                 bytes == 0 ? 0 : bytes + offset, chunk, &frame_length) != K_OK) {
             return K_EINVAL;
         }
@@ -109,6 +110,21 @@ static kstatus_t e1000_send_tcp_ipv6_segments(
         offset += chunk;
     } while (offset < payload_length);
     return K_OK;
+}
+
+/* A successfully submitted query still leaves the caller waiting for its
+ * reply. Ring backpressure is equally retryable; never turn it into EIO. */
+static kstatus_t e1000_request_arp(e1000_state_t *state,
+                                   uint32_t source, uint32_t neighbor) {
+    uint8_t frame[NET_ARP_FRAME_SIZE];
+    size_t length = 0U;
+    const uint8_t broadcast[6] = {0xFFU, 0xFFU, 0xFFU, 0xFFU, 0xFFU, 0xFFU};
+    kstatus_t status = net_arp_build_ipv4(
+        frame, sizeof(frame), state->mac, broadcast, NET_ARP_OPERATION_REQUEST,
+        source, state->mac, neighbor, (const uint8_t[6]){0}, &length);
+    if (status != K_OK) return status;
+    status = net_device_send(&state->device, frame, length);
+    return status == K_OK ? K_EAGAIN : status;
 }
 
 kstatus_t e1000_tcp_ipv4_output(
@@ -128,20 +144,11 @@ kstatus_t e1000_tcp_ipv4_output(
     neighbor_address = e1000_ipv4_next_hop(state, destination_address);
     if (destination_address == source_address ||
         (state->ipv4_address != 0U && destination_address == state->ipv4_address)) {
-        e1000_protocol_copy(destination_mac, state->mac, sizeof(destination_mac));
+        memcpy(destination_mac, state->mac, sizeof(destination_mac));
     } else if (!net_arp_cache_lookup(&state->arp_cache, neighbor_address,
                                      destination_mac)) {
-        uint8_t arp_frame[NET_ARP_FRAME_SIZE];
-        size_t arp_length = 0U;
-        const uint8_t broadcast[6] = {0xFFU, 0xFFU, 0xFFU, 0xFFU, 0xFFU, 0xFFU};
-        if (source_address == 0U ||
-            net_arp_build_ipv4(arp_frame, sizeof(arp_frame), state->mac, broadcast,
-                               NET_ARP_OPERATION_REQUEST, source_address, state->mac,
-                               neighbor_address, (const uint8_t[6]){0},
-                               &arp_length) != K_OK ||
-            net_device_send(&state->device, arp_frame, arp_length) != K_OK) {
-            return K_EIO;
-        }
+        kstatus_t status = e1000_request_arp(state, source_address, neighbor_address);
+        if (status != K_EAGAIN) return status;
 #if OS_DEBUG_SERIAL
         if (g_debug_tcp_output_logs < 32U) {
             kernel_serial_printf_serial_only(
@@ -194,20 +201,10 @@ kstatus_t e1000_udp_ipv4_output(
         for (uint32_t index = 0U; index < 6U; ++index) destination_mac[index] = 0xFFU;
     } else if (destination_address == source_address ||
         (state->ipv4_address != 0U && destination_address == state->ipv4_address)) {
-        e1000_protocol_copy(destination_mac, state->mac, sizeof(destination_mac));
+        memcpy(destination_mac, state->mac, sizeof(destination_mac));
     } else if (!net_arp_cache_lookup(&state->arp_cache, neighbor_address,
                                      destination_mac)) {
-        uint8_t arp_frame[NET_ARP_FRAME_SIZE];
-        size_t arp_length = 0U;
-        const uint8_t broadcast_mac[6] = {0xFFU, 0xFFU, 0xFFU, 0xFFU, 0xFFU, 0xFFU};
-        if (net_arp_build_ipv4(arp_frame, sizeof(arp_frame), state->mac, broadcast_mac,
-                               NET_ARP_OPERATION_REQUEST, source_address, state->mac,
-                               neighbor_address, (const uint8_t[6]){0},
-                               &arp_length) != K_OK ||
-            net_device_send(&state->device, arp_frame, arp_length) != K_OK) {
-            return K_EIO;
-        }
-        return K_EAGAIN;
+        return e1000_request_arp(state, source_address, neighbor_address);
     }
     if (net_udp_build_ipv4(frame, sizeof(frame), state->mac, destination_mac,
                            source_address, destination_address, source_port,
@@ -229,7 +226,7 @@ bool e1000_address6_zero(const uint8_t address[16]) {
     return value == 0U;
 }
 
-static bool e1000_send_neighbor_solicitation(e1000_state_t *state,
+static kstatus_t e1000_send_neighbor_solicitation(e1000_state_t *state,
                                               const uint8_t source_address[16],
                                               const uint8_t target_address[16]) {
     uint8_t destination_address[16];
@@ -237,14 +234,16 @@ static bool e1000_send_neighbor_solicitation(e1000_state_t *state,
     uint8_t frame[NET_NDP_FRAME_SIZE];
     size_t frame_length = 0U;
     if (state == 0 || source_address == 0 || target_address == 0 ||
-        e1000_address6_zero(target_address)) return false;
+        e1000_address6_zero(target_address)) return K_EINVAL;
     net_ndp_solicited_node_address(target_address, destination_address);
     net_ndp_multicast_mac(destination_address, destination_mac);
-    return net_ndp_build_neighbor_solicitation(
+    kstatus_t status = net_ndp_build_neighbor_solicitation(
                frame, sizeof(frame), state->mac, destination_mac,
                source_address, destination_address, target_address,
-               &frame_length) == K_OK &&
-           net_device_send(&state->device, frame, frame_length) == K_OK;
+               &frame_length);
+    if (status != K_OK) return status;
+    status = net_device_send(&state->device, frame, frame_length);
+    return status == K_OK ? K_EAGAIN : status;
 }
 
 bool e1000_send_neighbor_advertisement(e1000_state_t *state,
@@ -261,11 +260,11 @@ bool e1000_send_neighbor_advertisement(e1000_state_t *state,
     if (state == 0 || request == 0 || !state->ipv6_address_configured ||
         !e1000_address6_equal(request->target_address, state->ipv6_address)) return false;
     if (e1000_address6_zero(request->source_address)) {
-        e1000_protocol_copy(destination_address, all_nodes_address, sizeof(destination_address));
-        e1000_protocol_copy(destination_mac, all_nodes_mac, sizeof(destination_mac));
+        memcpy(destination_address, all_nodes_address, sizeof(destination_address));
+        memcpy(destination_mac, all_nodes_mac, sizeof(destination_mac));
     } else {
-        e1000_protocol_copy(destination_address, request->source_address, sizeof(destination_address));
-        e1000_protocol_copy(destination_mac, request->source_mac, sizeof(destination_mac));
+        memcpy(destination_address, request->source_address, sizeof(destination_address));
+        memcpy(destination_mac, request->source_mac, sizeof(destination_mac));
         flags |= NET_NDP_FLAG_SOLICITED;
     }
     return net_ndp_build_neighbor_advertisement(
@@ -291,13 +290,10 @@ kstatus_t e1000_tcp_ipv6_output(
     if (e1000_address6_equal(destination_address, source_address) ||
         (state->ipv6_address_configured &&
          e1000_address6_equal(destination_address, state->ipv6_address))) {
-        e1000_protocol_copy(destination_mac, state->mac, sizeof(destination_mac));
+        memcpy(destination_mac, state->mac, sizeof(destination_mac));
     } else if (!net_ipv6_neighbor_cache_lookup(&state->ndp_cache, destination_address,
                                                destination_mac)) {
-        if (!e1000_send_neighbor_solicitation(state, source_address, destination_address)) {
-            return K_EIO;
-        }
-        return K_EAGAIN;
+        return e1000_send_neighbor_solicitation(state, source_address, destination_address);
     }
     return e1000_send_tcp_ipv6_segments(
         state, destination_mac, source_address, destination_address,
@@ -325,13 +321,10 @@ kstatus_t e1000_udp_ipv6_output(
     if (e1000_address6_equal(destination_address, source_address) ||
         (state->ipv6_address_configured &&
          e1000_address6_equal(destination_address, state->ipv6_address))) {
-        e1000_protocol_copy(destination_mac, state->mac, sizeof(destination_mac));
+        memcpy(destination_mac, state->mac, sizeof(destination_mac));
     } else if (!net_ipv6_neighbor_cache_lookup(&state->ndp_cache, destination_address,
                                                destination_mac)) {
-        if (!e1000_send_neighbor_solicitation(state, source_address, destination_address)) {
-            return K_EIO;
-        }
-        return K_EAGAIN;
+        return e1000_send_neighbor_solicitation(state, source_address, destination_address);
     }
     if (net_udp_build_ipv6(frame, sizeof(frame), state->mac, destination_mac,
                            source_address, destination_address, source_port,

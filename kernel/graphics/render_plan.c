@@ -1,6 +1,6 @@
 #include "internal.h"
 
-/* REFACTOR_P7H_RENDER_PLAN_OWNER: immutable spatial plan compilation. */
+/* REFACTOR_P7H_RENDER_PLAN_OWNER：不可变空间计划编译。 */
 
 compositor_render_span_t
     g_compositor_render_plan[WINDOW_RENDER_PLAN_MAX_SPANS];
@@ -12,75 +12,54 @@ void compositor_render_plan_reset(void) {
     g_compositor_render_plan_valid = false;
 }
 
+/* 精确遮挡查询和指令编译共用候选集，空瓦片无需遍历窗口。 */
+static uint64_t compositor_render_rect_candidates(
+    const compositor_snapshot_t *snapshot, const Rect *rect) {
+    if (snapshot == 0 || rect == 0 || snapshot->window_count == 0U ||
+        snapshot->window_count > 64U || rect_is_empty(*rect)) {
+        return 0U;
+    }
+    uint64_t candidates = UINT64_MAX >> (64U - snapshot->window_count);
+    if (rect->x0 < 0 || rect->y0 < 0) return candidates;
+    uint32_t first_x = (uint32_t)rect->x0 / WINDOW_DAMAGE_TILE_SIZE;
+    uint32_t first_y = (uint32_t)rect->y0 / WINDOW_DAMAGE_TILE_SIZE;
+    uint32_t last_x = (uint32_t)(rect->x1 - 1) / WINDOW_DAMAGE_TILE_SIZE;
+    uint32_t last_y = (uint32_t)(rect->y1 - 1) / WINDOW_DAMAGE_TILE_SIZE;
+    /* 查询瓦片数不超过逐窗扫描次数，大范围绘制仍使用直接几何回退。 */
+    uint64_t tiles = (uint64_t)(last_x - first_x + 1U) * (last_y - first_y + 1U);
+    if (tiles > snapshot->window_count) return candidates;
+    uint64_t touched = 0U;
+    for (uint32_t y = first_y; y <= last_y; ++y) {
+        for (uint32_t x = first_x; x <= last_x; ++x) {
+            const compositor_tile_meta_t *metadata = compositor_tile_metadata_at(x, y);
+            /* 任一瓦片不可用便放弃筛选，不能使用不完整并集漏掉窗口。 */
+            if (metadata == 0) return candidates;
+            touched |= metadata->touch_mask & candidates;
+            if (touched == candidates) return candidates;
+        }
+    }
+    return touched;
+}
+
 bool compositor_view_fully_covers_snapshot_bounds(
     const compositor_window_view_t *window,
     const Rect *bounds) {
 
-    int64_t frame_left;
-    int64_t frame_top;
-    int64_t frame_right;
-    int64_t frame_bottom;
-
-    int64_t opaque_left;
-    int64_t opaque_top;
-    int64_t opaque_right;
-    int64_t opaque_bottom;
-
-    uint64_t frame_width;
-    uint64_t frame_height;
-
-    if (window == 0 || bounds == 0 ||
-        (window->flags & OS_WINDOW_PREMULTIPLIED_ALPHA) != 0U) {
-        return false;
-    }
-
-    frame_width =
-        (uint64_t)window_outer_width(
-            window->width,
-            window->flags);
-
-    frame_height =
-        (uint64_t)window_outer_height(
-            window->height,
-            window->flags);
-
-    if (frame_width <= WINDOW_CORNER_RADIUS * 2U ||
-        frame_height <= WINDOW_CORNER_RADIUS * 2U) {
-        return false;
-    }
-
-    frame_left = window->x;
-    frame_top = window->y;
-    frame_right = frame_left + (int64_t)frame_width;
-    frame_bottom = frame_top + (int64_t)frame_height;
-
-    opaque_left = frame_left + WINDOW_CORNER_RADIUS;
-    opaque_top = frame_top + WINDOW_CORNER_RADIUS;
-    opaque_right = frame_right - WINDOW_CORNER_RADIUS;
-    opaque_bottom = frame_bottom - WINDOW_CORNER_RADIUS;
-
-    return
-        (int64_t)bounds->x0 >= opaque_left &&
-        (int64_t)bounds->y0 >= opaque_top &&
-        (int64_t)bounds->x1 <= opaque_right &&
-        (int64_t)bounds->y1 <= opaque_bottom;
+    int64_t left, top, right, bottom;
+    return bounds != 0 &&
+        compositor_view_opaque_bounds(window, &left, &top, &right, &bottom) &&
+        (int64_t)bounds->x0 >= left && (int64_t)bounds->y0 >= top &&
+        (int64_t)bounds->x1 <= right && (int64_t)bounds->y1 <= bottom;
 }
 
 static uint32_t compositor_render_plan_exact_floor(
     const compositor_snapshot_t *snapshot,
     const Rect *rect) {
 
-    if (snapshot == 0 || rect == 0 ||
-        rect->x0 >= rect->x1 ||
-        rect->y0 >= rect->y1) {
-        return UINT32_MAX;
-    }
-
-    for (uint32_t count = snapshot->window_count;
-         count != 0U;
-         --count) {
-
-        uint32_t index = count - 1U;
+    uint64_t candidates = compositor_render_rect_candidates(snapshot, rect);
+    while (candidates != 0U) {
+        uint32_t index = 63U - (uint32_t)__builtin_clzll(candidates);
+        candidates &= ~(1ULL << index);
 
         if (compositor_view_fully_covers_snapshot_bounds(
                 &snapshot->windows[index],
@@ -97,55 +76,9 @@ static uint32_t compositor_render_plan_tile_floor(
     uint32_t tile_x,
     uint32_t tile_y) {
 
-    uint32_t columns;
-    uint32_t rows;
-    uint32_t value;
+    return snapshot == 0 ? UINT32_MAX :
+        compositor_tile_occlusion_floor(tile_x, tile_y, snapshot->window_count);
 
-    if (snapshot == 0) {
-        return UINT32_MAX;
-    }
-
-    /* P7B TileMeta is the canonical blocker source. */
-    const compositor_tile_meta_t *metadata =
-        compositor_tile_metadata_at(tile_x, tile_y);
-
-    if (metadata != 0) {
-        uint64_t blockers =
-            metadata->full_mask & metadata->opaque_mask;
-
-        if (blockers == 0U) return UINT32_MAX;
-
-        value =
-            63U -
-            (uint32_t)__builtin_clzll(blockers);
-
-        return value < snapshot->window_count ?
-            value :
-            UINT32_MAX;
-    }
-
-    if (!g_compositor_occlusion_floor_valid) {
-        return UINT32_MAX;
-    }
-
-    columns = window_damage_tile_columns_locked();
-    rows = window_damage_tile_rows_locked();
-
-    if (tile_x >= columns || tile_y >= rows) {
-        return UINT32_MAX;
-    }
-
-    value =
-        g_compositor_occlusion_floor[
-            tile_y * WINDOW_DAMAGE_MAX_TILES_X +
-            tile_x];
-
-    if (value == WINDOW_OCCLUSION_NO_FLOOR ||
-        value >= snapshot->window_count) {
-        return UINT32_MAX;
-    }
-
-    return value;
 }
 
 typedef struct compositor_render_active_span {
@@ -154,12 +87,6 @@ typedef struct compositor_render_active_span {
     uint32_t first_window;
     uint32_t plan_index;
 } compositor_render_active_span_t;
-
-typedef struct compositor_render_row_span {
-    uint32_t x0;
-    uint32_t x1;
-    uint32_t first_window;
-} compositor_render_row_span_t;
 
 static bool compositor_view_intersects_render_rect(
     const compositor_window_view_t *window,
@@ -219,69 +146,15 @@ static uint64_t compositor_compile_render_span_mask(
         return 0U;
     }
 
-    /* Single-tile/single-window spans avoid the full immutable-view scan. */
-    if (span->rect.x0 >= 0 && span->rect.y0 >= 0 &&
-        span->rect.x0 < span->rect.x1 &&
-        span->rect.y0 < span->rect.y1) {
-
-        uint32_t first_tile_x =
-            (uint32_t)span->rect.x0 /
-            WINDOW_DAMAGE_TILE_SIZE;
-        uint32_t last_tile_x =
-            (uint32_t)(span->rect.x1 - 1) /
-            WINDOW_DAMAGE_TILE_SIZE;
-        uint32_t first_tile_y =
-            (uint32_t)span->rect.y0 /
-            WINDOW_DAMAGE_TILE_SIZE;
-        uint32_t last_tile_y =
-            (uint32_t)(span->rect.y1 - 1) /
-            WINDOW_DAMAGE_TILE_SIZE;
-
-        if (first_tile_x == last_tile_x &&
-            first_tile_y == last_tile_y) {
-
-            const compositor_tile_meta_t *metadata =
-                compositor_tile_metadata_at(
-                    first_tile_x,
-                    first_tile_y);
-
-            if (metadata != 0 &&
-                metadata->touch_mask == 0U) {
-                return 0U;
-            }
-
-            if (metadata != 0 &&
-                (metadata->touch_mask &
-                 (metadata->touch_mask - 1U)) == 0U) {
-
-                uint32_t index =
-                    (uint32_t)__builtin_ctzll(
-                        metadata->touch_mask);
-
-                if (index < first ||
-                    index >= snapshot->window_count ||
-                    !compositor_view_intersects_render_rect(
-                        &snapshot->windows[index],
-                        &span->rect)) {
-                    return 0U;
-                }
-
-                return 1ULL << index;
-            }
+    uint64_t candidates = compositor_render_rect_candidates(snapshot, &span->rect);
+    candidates &= UINT64_MAX << first;
+    while (candidates != 0U) {
+        uint32_t index = (uint32_t)__builtin_ctzll(candidates);
+        candidates &= candidates - 1U;
+        if (compositor_view_intersects_render_rect(
+                &snapshot->windows[index], &span->rect)) {
+            mask |= 1ULL << index;
         }
-    }
-
-    for (uint32_t index = first;
-         index < snapshot->window_count;
-         ++index) {
-
-        if (!compositor_view_intersects_render_rect(
-                &snapshot->windows[index],
-                &span->rect)) {
-            continue;
-        }
-
-        mask |= 1ULL << index;
     }
 
     return mask;
@@ -302,9 +175,6 @@ static void compositor_compile_render_plan_commands(
         compositor_render_span_t *span =
             &g_compositor_render_plan[index];
 
-        span->desktop_required =
-            span->first_window == UINT32_MAX;
-
         span->window_mask =
             compositor_compile_render_span_mask(
                 snapshot,
@@ -315,14 +185,9 @@ static void compositor_compile_render_plan_commands(
 bool compositor_build_render_plan(
     const compositor_snapshot_t *snapshot) {
 
-    compositor_render_active_span_t
-        previous[WINDOW_DAMAGE_MAX_TILES_X];
-
-    compositor_render_active_span_t
-        current[WINDOW_DAMAGE_MAX_TILES_X];
-
-    compositor_render_row_span_t
-        row_spans[WINDOW_DAMAGE_MAX_TILES_X];
+    compositor_render_active_span_t active_rows[2][WINDOW_DAMAGE_MAX_TILES_X];
+    compositor_render_active_span_t *previous = active_rows[0];
+    compositor_render_active_span_t *current = active_rows[1];
 
     uint32_t columns;
     uint32_t rows;
@@ -330,10 +195,9 @@ bool compositor_build_render_plan(
     g_compositor_render_plan_count = 0U;
     g_compositor_render_plan_valid = false;
 
-    /* Keep the old simple path when tile setup cannot amortize its cost. */
+    /* 瓦片数据不可用时由调用方执行精确回退绘制。 */
     if (snapshot == 0 || snapshot->damage_count == 0U ||
-        (!g_compositor_occlusion_floor_valid &&
-         !compositor_tile_metadata_valid())) {
+        !compositor_tile_metadata_valid()) {
         return false;
     }
 
@@ -348,20 +212,22 @@ bool compositor_build_render_plan(
          damage_index < snapshot->damage_count;
          ++damage_index) {
 
-        const Rect *damage =
-            &snapshot->damage_rects[damage_index];
-
+        Rect clipped_damage;
+        const Rect *damage = &snapshot->damage_rects[damage_index];
         uint32_t first_tile_x;
         uint32_t last_tile_x;
         uint32_t first_tile_y;
         uint32_t last_tile_y;
-
         uint32_t previous_count = 0U;
 
-        if (damage->x0 >= damage->x1 ||
-            damage->y0 >= damage->y1) {
+        /* 有符号裁剪必须先于瓦片索引转换，屏外部分不生成绘制指令。 */
+        if (!rect_clip_to_extent(damage->x0, damage->y0,
+                damage->x1, damage->y1,
+                g_window_server.display_width, g_window_server.display_height,
+                &clipped_damage)) {
             continue;
         }
+        damage = &clipped_damage;
 
         first_tile_x =
             damage->x0 /
@@ -395,7 +261,6 @@ bool compositor_build_render_plan(
              ++tile_y) {
 
             uint32_t row_count = 0U;
-            uint32_t current_count = 0U;
             uint32_t previous_cursor = 0U;
 
             uint32_t tile_x = first_tile_x;
@@ -459,18 +324,18 @@ bool compositor_build_render_plan(
                     }
 
                     if (row_count != 0U &&
-                        row_spans[row_count - 1U].x1 == left &&
-                        row_spans[row_count - 1U].first_window == floor) {
+                        current[row_count - 1U].x1 == left &&
+                        current[row_count - 1U].first_window == floor) {
 
-                        row_spans[row_count - 1U].x1 = right;
+                        current[row_count - 1U].x1 = right;
                     } else {
                         if (row_count >= WINDOW_DAMAGE_MAX_TILES_X) {
                             g_compositor_render_plan_count = 0U;
                             return false;
                         }
 
-                        row_spans[row_count++] =
-                            (compositor_render_row_span_t){
+                        current[row_count++] =
+                            (compositor_render_active_span_t){
                                 .x0 = left,
                                 .x1 = right,
                                 .first_window = floor,
@@ -485,8 +350,7 @@ bool compositor_build_render_plan(
                  row_index < row_count;
                  ++row_index) {
 
-                compositor_render_row_span_t *row =
-                    &row_spans[row_index];
+                compositor_render_active_span_t *row = &current[row_index];
 
                 uint32_t plan_index = UINT32_MAX;
 
@@ -536,27 +400,15 @@ bool compositor_build_render_plan(
                         };
                 }
 
-                if (current_count >= WINDOW_DAMAGE_MAX_TILES_X) {
-                    g_compositor_render_plan_count = 0U;
-                    return false;
-                }
-
-                current[current_count++] =
-                    (compositor_render_active_span_t){
-                        .x0 = row->x0,
-                        .x1 = row->x1,
-                        .first_window = row->first_window,
-                        .plan_index = plan_index,
-                    };
+                /* 行区间直接补齐计划索引，不再复制到另一份中间数组。 */
+                row->plan_index = plan_index;
             }
 
-            previous_count = current_count;
-
-            for (uint32_t index = 0U;
-                 index < current_count;
-                 ++index) {
-                previous[index] = current[index];
-            }
+            previous_count = row_count;
+            /* 交换行缓冲区，下一行直接读取本行结果，避免逐项复制。 */
+            compositor_render_active_span_t *finished = previous;
+            previous = current;
+            current = finished;
         }
     }
 

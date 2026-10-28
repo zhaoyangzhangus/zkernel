@@ -174,12 +174,9 @@ static kstatus_t journal_block_submit(journal_block_backend_t *backend,
     if (bio_op != BIO_OP_FLUSH) {
         if (buffer == 0) return K_EINVAL;
         /*
-         * Journal I/O is exactly one 512-byte sector.  A write maps a
-         * complete page for device reads, so retain a zeroed tail after
-         * copying the sector.  A read grants the device write access only
-         * (or issues a one-sector NVMe read without an IOMMU), so zeroing
-         * before the device overwrites the sector is unnecessary.  The
-         * completion-length check below prevents exposing a short read.
+         * 日志 I/O 恰好为一个 512 字节扇区。写入会映射完整页面供设备读取，因此复制扇区后
+         * 要保留清零的尾部。读取只授予设备写权限（或在没有 IOMMU 时发起单扇区 NVMe 读取），
+         * 设备覆盖扇区前无需清零。下方完成长度检查会阻止暴露短读结果。
          */
         page = page_alloc(0, opcode == IO_WRITE ?
                           PAGE_ALLOC_ZERO | PAGE_ALLOC_DMA32 : PAGE_ALLOC_DMA32);

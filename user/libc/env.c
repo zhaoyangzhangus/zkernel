@@ -64,9 +64,8 @@ static bool environment_executable_address(const Elf64_Phdr *program_headers,
         program_header_count, load_bias, address, 1U, PF_X);
 }
 
-/* envp is part of the kernel-built initial stack: argc, argv[], NULL,
- * envp[]. Walk backwards to recover the saved argc and argv for the legacy
- * one-argument Chrome CRT hook. */
+/* envp 位于内核构造的初始栈中，布局为 argc、argv[]、NULL、envp[]。
+ * 向后遍历可恢复旧版单参数 Chrome CRT 钩子所需的 argc 和 argv。 */
 static int environment_recover_startup_arguments(char **environment,
                                                 int *argc_out,
                                                 char ***argv_out) {

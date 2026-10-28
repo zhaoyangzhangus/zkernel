@@ -23,7 +23,7 @@ static char output[1024];
 static size_t length;
 static unsigned flags, writes, syncs, closes, mode;
 static int vfs_open_kernel(const char *path,unsigned f,unsigned perm,file_t **out) {
-    assert(!strcmp(path,"/rtl8126.log") && perm==0644U);flags=f;
+    assert(!strcmp(path,"/log/rtl8126.log") && perm==0644U);flags=f;
     if(mode==1)return -1;
     *out=&handle;return K_OK;
 }

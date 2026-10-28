@@ -17,8 +17,7 @@
 #include <unistd.h>
 #include "video_pacing.h"
 
-/* Strict hardware decode. The initial presentation path downloads NV12 and
- * converts to BGRA on CPU; it must not be described as zero-copy playback. */
+/* 严格使用硬件解码。初始呈现路径会下载 NV12 并在 CPU 上转换为 BGRA；不能将其描述为零拷贝播放。 */
 static enum AVPixelFormat hardware_format(AVCodecContext *ctx,const enum AVPixelFormat *formats) {
     (void)ctx;
     for(;*formats!=AV_PIX_FMT_NONE;++formats)if(*formats==AV_PIX_FMT_VULKAN)return *formats;
@@ -27,9 +26,8 @@ static enum AVPixelFormat hardware_format(AVCodecContext *ctx,const enum AVPixel
 }
 int video_device_create(AVBufferRef **);
 static int download_frame(AVFrame *cpu, const AVFrame *frame) {
-    /* av_hwframe_transfer_data allocates only when dst->buf[0] is empty.
-     * The player rejects resolution changes, and no consumer retains cpu,
-     * so reuse its writable storage throughout playback and seek loops. */
+    /* 仅当 dst->buf[0] 为空时，av_hwframe_transfer_data 才会分配内存。
+     * 播放器拒绝分辨率变化，且没有消费者保留 cpu 指针，因此可在播放和 seek 循环中复用可写存储。 */
     if (cpu->buf[0] != NULL &&
         (cpu->width != frame->width || cpu->height != frame->height))
         return AVERROR(EINVAL);
@@ -69,7 +67,7 @@ static int wait_next_frame(int fd,video_pacing_t *pacing) {
         if(!timeout)return 0;
         int closed=window_closed(fd,timeout);
         if(closed)return closed;
-        /* Mouse/key events and EINTR do not move the presentation deadline. */
+        /* 鼠标/键盘事件和 EINTR 不会改变呈现截止时间。 */
     }
 }
 static linux_window_create_t *video_window;
@@ -82,7 +80,8 @@ int main(int argc,char **argv) {
     if(dup2(log,1)<0||dup2(log,2)<0){close(log);return 2;}
     if(log>2)close(log);
     setvbuf(stdout,NULL,_IONBF,0);setvbuf(stderr,NULL,_IONBF,0);
-    if(setenv("VK_DRIVER_FILES","/usr/share/vulkan/icd.d/nvidia_icd.json",1))return 1;
+    if(setenv("VK_DRIVER_FILES","/usr/apps/vulkan-video/vulkan/nvidia_icd.json",1))return 1;
+    if(setenv("__EGL_VENDOR_LIBRARY_FILENAMES","/usr/apps/vulkan-video/egl/10_nvidia.json",1))return 1;
     puts("VIDEO_START backend=Vulkan no_software_fallback=1");
     AVFormatContext *input=NULL;
     AVCodecContext *decoder=NULL;
@@ -97,7 +96,7 @@ int main(int argc,char **argv) {
     uint8_t *download_storage=NULL;
     linux_window_create_t w={.x=160,.y=140,.width=256,.height=256,
         .flags=OS_WINDOW_RESIZABLE|OS_WINDOW_STANDARD_CAPTION_CONTROLS,
-        .address=UINT64_C(0x08000000),.title="Vulkan Video - RTX 5070"};
+        .address=UINT64_C(0x08000000),.title="视频播放 - Vulkan"};
     if(!frame||!cpu||!packet)goto cleanup;
     if((err=avformat_open_input(&input,argv[1],NULL,NULL))<0)goto cleanup;
     if((err=avformat_find_stream_info(input,NULL))<0)goto cleanup;

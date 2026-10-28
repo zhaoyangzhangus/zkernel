@@ -1,9 +1,9 @@
 #pragma once
 
-/* System uses the stable negative-kernel-status values as errno values. */
+/* System 将稳定的负内核状态码用作 errno 值。 */
 
-/* errno is per-thread.  The main thread uses the libc-owned fallback slot;
- * pthread-created threads use the slot behind their existing FS base. */
+/* errno 按线程保存。主线程使用 libc 管理的后备槽位；pthread 创建的线程使用
+ * 现有 FS 基址后方的槽位。 */
 #ifdef __cplusplus
 extern "C" {
 #endif

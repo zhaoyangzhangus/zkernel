@@ -89,10 +89,13 @@ with tempfile.TemporaryDirectory(prefix='chromium-source-config-') as directory:
         try: run_test(TESTS[0],root)
         except RuntimeError as error: assert 'still live' in str(error)
         else: raise AssertionError('unterminated test treated as stopped')
-assert len(TESTS)==len(set(TESTS))==38
+# Keep the current coverage floor while allowing new regressions to be added.
+assert len(TESTS)==len(set(TESTS))>=40
 assert 'user/chrome_server_frame_test.py' in TESTS
+assert 'user/chrome_guest_library_policy_test.py' in TESTS
+assert 'user/chromium_toolchain_root_test.py' in TESTS
 for name in TESTS:
     source=(TEST_ROOT/name).read_text()
     assert 'from chromium_source import chromium_source' in source,name
     assert "'/home/" not in source and '"/home/' not in source,name
-print('Chromium source configuration: no legacy fallback, missing/invalid/file roots, spaces, symlinks, relative paths, direct entry errors and 38-test registry passed')
+print(f'Chromium source configuration: no legacy fallback, missing/invalid/file roots, spaces, symlinks, relative paths, direct entry errors and {len(TESTS)}-test registry passed')

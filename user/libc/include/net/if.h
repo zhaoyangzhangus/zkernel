@@ -1,11 +1,10 @@
 #pragma once
 
 /*
- * Network-interface definitions used by portable POSIX code.
+ * 可移植 POSIX 代码使用的网络接口定义。
  *
- * System does not use the host glibc headers, but Chromium/WebRTC still
- * expects the Linux net/if.h names when it is built against the System ABI.
- * Keep this header ABI-shaped and independent of glibc feature-test macros.
+ * System 不使用宿主 glibc 头文件，但 Chromium/WebRTC 针对 System ABI 构建时，
+ * 仍需要 Linux net/if.h 中的名称。此头文件保持 ABI 兼容，并独立于 glibc 功能测试宏。
  */
 
 #include <sys/socket.h>
@@ -15,7 +14,7 @@
 #define IFNAMSIZ IF_NAMESIZE
 #define IFHWADDRLEN 6
 
-/* Linux interface flags. */
+/* Linux 网络接口标志。 */
 #define IFF_UP          0x0001
 #define IFF_BROADCAST   0x0002
 #define IFF_DEBUG       0x0004
@@ -33,7 +32,7 @@
 #define IFF_AUTOMEDIA   0x4000
 #define IFF_DYNAMIC     0x8000
 
-/* TUN/TAP flags used by optional QUIC qbone code. */
+/* 可选 QUIC qbone 代码使用的 TUN/TAP 标志。 */
 #define IFF_NO_PI       0x1000
 #define IFF_ONE_QUEUE   0x2000
 #define IFF_TUN         0x0001

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Only features with no extended register state beyond FXSAVE64 are allowed.
-# KVM exposes the intersection across all host CPUs; TCG retains the baseline.
+# 仅允许使用 FXSAVE64 之外不引入额外扩展寄存器状态的特性。
+# KVM 暴露所有宿主 CPU 的特性交集；TCG 保持基线配置。
 qemu_select_cpu_model() {
     local cpu_info="$1" accelerated="$2" chrome="$3"
     local model='qemu64,rdrand=on,xsave=off,avx=off,avx2=off'

@@ -6,6 +6,7 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'app-layout.ps1')
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 
 function Resolve-RepoPath([string]$Path) {
@@ -42,9 +43,11 @@ function Copy-FileIfChanged([string]$Source, [string]$Target) {
 }
 
 function Copy-DirectoryContents([string]$SourceRoot, [string]$TargetRoot) {
+    Assert-AppGuestLayout $TargetRoot
     Require-Directory $SourceRoot 'Phase 10 source ESP'
     foreach ($source in @(Get-ChildItem -LiteralPath $SourceRoot -Recurse -File)) {
         $relative = $source.FullName.Substring($SourceRoot.Length).TrimStart('\', '/')
+        if (Test-LegacyGuestPath $relative) { continue }
         Copy-FileIfChanged $source.FullName (Join-Path $TargetRoot $relative)
     }
 }
@@ -54,9 +57,8 @@ $phase10Esp = Join-Path $repoRoot 'build\nvidia\phase10\esp'
 $phase11Kernel = Join-Path $buildRoot 'kernel.elf'
 $testBinaryPath = Resolve-RepoPath $TestBinary
 $espRoot = Join-Path $buildRoot 'esp'
-$phase10Glvnd = Join-Path $phase10Esp 'usr\share\glvnd\egl_vendor.d'
-$absoluteGlvnd = Join-Path $espRoot 'usr\share\glvnd\egl_vendor.d'
-$phase11NvidiaManifest = Join-Path $repoRoot 'tools\nvidia\phase10_glvnd_10_nvidia.json'
+Assert-AppGuestLayout $espRoot
+Assert-AppInterpreter $testBinaryPath 'p11-triangle'
 
 Require-Directory $phase10Esp 'Phase 10 source ESP'
 Require-File $phase11Kernel 'Phase 11 kernel image'
@@ -71,13 +73,8 @@ Copy-DirectoryContents $phase10Esp $espRoot
 Copy-FileIfChanged $testBinaryPath (Join-Path $espRoot 'tests\p11-triangle')
 Copy-FileIfChanged $phase11Kernel (Join-Path $espRoot 'EFI\OS\kernel.elf')
 
-# Keep the absolute GLVND manifests required by the official libEGL loader.
-Require-Directory $phase10Glvnd '595.84 GLVND vendor manifest directory'
-foreach ($manifest in @(Get-ChildItem -LiteralPath $phase10Glvnd -File)) {
-    Copy-FileIfChanged $manifest.FullName (Join-Path $absoluteGlvnd $manifest.Name)
-}
-Require-File $phase11NvidiaManifest 'System GLVND NVIDIA manifest'
-Copy-FileIfChanged $phase11NvidiaManifest (Join-Path $absoluteGlvnd '10_nvidia.json')
+Install-NvidiaApp (Join-Path $repoRoot 'build\nvidia\userspace') $espRoot 'p11-triangle'
+Copy-FileIfChanged $testBinaryPath (Join-Path $espRoot 'usr\apps\p11-triangle\p11-triangle')
 
 Write-Output ('P11_STAGE_COPIED={0}' -f $script:stageCopied)
 Write-Output ('P11_STAGE_SKIPPED={0}' -f $script:stageSkipped)

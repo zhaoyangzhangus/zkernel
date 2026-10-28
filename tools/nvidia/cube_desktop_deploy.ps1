@@ -11,6 +11,7 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'app-layout.ps1')
 $projectRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $letter = $DriveLetter.TrimEnd(':').ToUpperInvariant()
 
@@ -60,11 +61,13 @@ function Copy-FileIfChanged([string]$SourceFile, [string]$TargetFile) {
 
 function Copy-DirectoryContents([string]$SourceDirectory,
                                 [string]$TargetDirectory) {
+    Assert-AppGuestLayout $TargetDirectory
     if (-not (Test-Path -LiteralPath $TargetDirectory -PathType Container)) {
         New-Item -ItemType Directory -Force -Path $TargetDirectory | Out-Null
     }
     foreach ($source in @(Get-ChildItem -LiteralPath $SourceDirectory -Recurse -File)) {
         $relative = $source.FullName.Substring($SourceDirectory.Length).TrimStart('\', '/')
+        if (Test-LegacyGuestPath $relative) { continue }
         Copy-FileIfChanged $source.FullName (Join-Path $TargetDirectory $relative)
     }
 }
@@ -75,13 +78,17 @@ $buildRoot = if ([IO.Path]::IsPathRooted($Build)) {
     [IO.Path]::GetFullPath((Join-Path $projectRoot $Build))
 }
 $espRoot = Join-Path $buildRoot 'esp'
+Assert-AppGuestLayout $espRoot
+Assert-AppInterpreter (Join-Path $espRoot 'usr\apps\cube\cube') 'cube'
+& (Join-Path $PSScriptRoot 'check_userspace_59584.ps1') -AppRoot (Join-Path $espRoot 'usr\apps\cube')
+if (-not $?) { throw 'cube private userspace check failed' }
 foreach ($required in @(
         (Join-Path $espRoot 'EFI\BOOT\BOOTX64.EFI'),
         (Join-Path $espRoot 'EFI\OS\kernel.elf'),
         (Join-Path $espRoot 'EFI\OS\loader.conf'),
         (Join-Path $espRoot 'EFI\OS\firmware\gsp_ga10x.bin'),
-        (Join-Path $espRoot 'sbin\gshell'),
-        (Join-Path $espRoot 'sbin\cube'))) {
+        (Join-Path $espRoot 'usr\apps\gshell\gshell'),
+        (Join-Path $espRoot 'usr\apps\cube\cube'))) {
     Require-File $required 'normal desktop source asset'
 }
 $loaderText = [IO.File]::ReadAllText((Join-Path $espRoot 'EFI\OS\loader.conf'))

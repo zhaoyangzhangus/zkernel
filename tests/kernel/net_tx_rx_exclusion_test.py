@@ -9,7 +9,7 @@ header = (root/'kernel/drivers/net/core_internal.h').read_text()
 assert 'poll_lock' not in source and 'poll_lock' not in header
 def region(start, end):
     return source[source.index(start):source.index(end,source.index(start))]
-wrappers = region('static bool e1000_lifecycle_try_lock(void)', 'static void e1000_zero(')
+wrappers = region('static bool e1000_lifecycle_try_lock(void)', 'void e1000_configure_link_local(')
 send = region('kstatus_t e1000_send_frame(', 'kstatus_t e1000_get_mac_address(')
 poll = region('bool e1000_poll(void)', 'bool e1000_interrupt_ready(')
 code = r'''

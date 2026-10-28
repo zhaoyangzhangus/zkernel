@@ -4,12 +4,20 @@ import subprocess
 import tempfile
 root = Path(__file__).resolve().parents[2]
 source = (root / 'kernel/syscall/graphics.c').read_text()
-create = source[source.index('int64_t syscall_window_create('):
-                source.index('/* WINDOW_UPDATE')]
+def extract(text, signature):
+    start=text.index(signature)
+    end=text.index('{',start)+1
+    depth=1
+    while depth:
+        depth+=(text[end]=='{')-(text[end]=='}')
+        end+=1
+    return text[start:end]
+create = extract(source, 'int64_t syscall_window_create(')
 mapping = source[source.index('int64_t syscall_window_map('):
                  source.index('int64_t syscall_window_set(')]
 internal = (root / 'kernel/process/internal.h').read_text()
-helper = internal[internal.index('static inline vm_space_t *process_vm_reference('):]
+helper = extract(internal, 'static inline vm_space_t *process_vm_reference(')
+caption = extract((root/'include/uapi/window.h').read_text(), 'static inline bool os_window_caption_create_valid(')
 fixture = r'''
 #include <assert.h>
 #include <stdbool.h>
@@ -28,6 +36,9 @@ fixture = r'''
 #define OS_WINDOW_CLIENT_DECORATIONS 4
 #define OS_WINDOW_PREMULTIPLIED_ALPHA 8
 #define OS_WINDOW_STANDARD_CAPTION_CONTROLS 16
+#define OS_WINDOW_DARK_CAPTION 128
+#define OS_WINDOW_CAPTION_HEIGHT_MASK (255U<<16U)
+@CAPTION@
 typedef int kstatus_t;
 typedef unsigned handle_t;
 typedef struct {unsigned refs;} vm_space_t;
@@ -63,7 +74,7 @@ static int window_server_close_owned(process_t *v,window_server_window_t *w){ass
 static int handle_close(unsigned *table,handle_t h){assert(table==&p.handles && h==7 && handle_owned);handle_owned=false;window_server_close_owned(&p,active);object_put(active);return 0;}
 static int handle_create(unsigned *table,window_server_window_t *w,unsigned rights,handle_t *h){assert(table==&p.handles && w==active && rights==3);if(failure==2)return -24;++w->refs;handle_owned=true;*h=7;return 0;}
 static int window_server_create(process_t *v,int x,int y,unsigned w,unsigned h,unsigned f,unsigned bg,const char *title,window_server_window_t **out){
- assert(v==&p && x==10 && y==20 && w==640 && h==480 && f==1 && bg==0 && title);
+ assert(v==&p && x==10 && y==20 && w==640 && h==480 && f==create_args.flags && bg==0 && title);
  if(failure==1)return -12;
  active=calloc(1,sizeof(*active));assert(active);active->refs=2;scene=true;*out=active;return 0;
 }
@@ -112,6 +123,23 @@ int main(void){
   if(!f){assert(active->refs==2 && scene && handle_owned && create_args.buffer_size==8192 && create_args.address==0x20000);handle_close(&p.handles,7);}
   assert(window_destroyed==(f!=1) && !scene && !handle_owned);++cases;
  }
+ for(unsigned caption_height=1;caption_height<256;++caption_height){
+  setup(0,0,3);
+  create_args.flags=1|OS_WINDOW_CLIENT_DECORATIONS|OS_WINDOW_STANDARD_CAPTION_CONTROLS|
+   OS_WINDOW_DARK_CAPTION|(caption_height<<16U);
+  bool valid=caption_height>=40&&caption_height<=128;
+  assert(syscall_window_create((uint64_t)(uintptr_t)&create_args,0,0,0,0,0)==(valid?0:K_EINVAL));
+  if(valid){assert(active&&scene&&handle_owned);handle_close(&p.handles,7);}
+  else assert(!active&&!gets&&!scene&&!handle_owned);
+  cleanup_vm(false,0);
+ }
+ for(unsigned invalid=0;invalid<3;++invalid){
+  setup(0,0,3);create_args.flags=1|(46U<<16U);
+  if(invalid==1){create_args.flags|=OS_WINDOW_STANDARD_CAPTION_CONTROLS;create_args.height=45;}
+  if(invalid==2)create_args.flags|=OS_WINDOW_STANDARD_CAPTION_CONTROLS|0x80000000U;
+  assert(syscall_window_create((uint64_t)(uintptr_t)&create_args,0,0,0,0,0)==K_EINVAL&&!active&&!gets);
+  cleanup_vm(false,0);
+ }
  mapping_call=true;
  const unsigned failures[]={0,3,6};
  for(unsigned a=0;a<3;++a)for(unsigned m=0;m<3;++m)for(unsigned s=3;s<=6;++s){
@@ -140,7 +168,7 @@ with tempfile.TemporaryDirectory() as directory:
     directory = Path(directory)
     def run(name, creator=create, mapper=mapping, pin=helper, harness=fixture, trace=0):
         path = directory / (name + '.c')
-        path.write_text(harness.replace('@HELPER@', pin).replace('@CREATE@', creator).replace('@MAP@', mapper))
+        path.write_text(harness.replace('@HELPER@', pin).replace('@CREATE@', creator).replace('@MAP@', mapper).replace('@CAPTION@', caption))
         binary = directory / name
         subprocess.run(['cc', '-std=c11', '-fsanitize=address,undefined', '-fno-pie',
                         '-no-pie', f'-DOS_ENABLE_FRAME_TRACE={trace}', str(path), '-o', str(binary)], check=True)
@@ -156,4 +184,12 @@ with tempfile.TemporaryDirectory() as directory:
     assert result.returncode != 0, result.stderr
     result = run('unregistered_leak', creator=create.replace('(void)window_server_close_owned(process, window);', ''))
     assert result.returncode != 0, result.stderr
-print('Native window cleanup: 120 create/map failure-stage/exit/exec cases per trace mode, exact rollback and balanced VM/window/handle ownership passed; omitted rollback, wrong VM and failed-handle registry leak negatives rejected')
+    no_metric_check = create.replace('!os_window_caption_create_valid(arguments.flags, arguments.height) ||', '')
+    assert no_metric_check != create
+    result = run('unvalidated_metric', creator=no_metric_check)
+    assert result.returncode != 0, result.stderr
+    no_metric_mask = create.replace('OS_WINDOW_CAPTION_HEIGHT_MASK', '0U')
+    assert no_metric_mask != create
+    result = run('metric_rejected', creator=no_metric_mask)
+    assert result.returncode != 0, result.stderr
+print('Native window cleanup: 120 rollback and 258 real create-metric cases per trace mode passed; rollback/ownership and missing/rejecting metric validation negatives rejected')

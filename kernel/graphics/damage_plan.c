@@ -1,47 +1,18 @@
 #include "internal.h"
 
-/* REFACTOR_P7I_SNAPSHOT_DAMAGE_OWNER: immutable damage and tile conversion. */
+/* REFACTOR_P7I_SNAPSHOT_DAMAGE_OWNER：不可变损坏区域及 tile 转换。 */
 
-/* A drag is one visible transaction. */
+/* 一次拖动对应一个可见事务。 */
 void compositor_collapse_drag_damage(compositor_snapshot_t *snapshot) {
-    uint32_t left;
-    uint32_t top;
-    uint32_t right;
-    uint32_t bottom;
-
+    Rect bounds;
     if (snapshot == 0 || snapshot->dragging_identifier == 0U ||
-        snapshot->damage_count <= 1U) {
-        return;
+        snapshot->damage_count <= 1U) return;
+
+    /* 规划与发布共用有符号包围盒，忽略空矩形，避免拖动越过屏幕边缘时漏绘。 */
+    if (compositor_snapshot_damage_bounds(snapshot, &bounds)) {
+        snapshot->damage_rects[0] = bounds;
+        snapshot->damage_count = 1U;
     }
-
-    left = (uint32_t)snapshot->damage_rects[0].x0;
-    top = (uint32_t)snapshot->damage_rects[0].y0;
-    right = (uint32_t)snapshot->damage_rects[0].x1;
-    bottom = (uint32_t)snapshot->damage_rects[0].y1;
-
-    for (uint32_t index = 1U;
-         index < snapshot->damage_count;
-         ++index) {
-        const Rect *rect =
-            &snapshot->damage_rects[index];
-
-        if ((uint32_t)rect->x0 < left)
-            left = (uint32_t)rect->x0;
-        if ((uint32_t)rect->y0 < top)
-            top = (uint32_t)rect->y0;
-        if ((uint32_t)rect->x1 > right)
-            right = (uint32_t)rect->x1;
-        if ((uint32_t)rect->y1 > bottom)
-            bottom = (uint32_t)rect->y1;
-    }
-
-    snapshot->damage_rects[0] = (Rect){
-        .x0 = left,
-        .y0 = top,
-        .x1 = right,
-        .y1 = bottom,
-    };
-    snapshot->damage_count = 1U;
 }
 
 bool compositor_view_intersects_snapshot_damage(
@@ -189,55 +160,53 @@ uint32_t compositor_snapshot_occlusion_floor(
     return floor;
 }
 
-bool compositor_registry_window_intersects_damage_bounds_locked(
-    const window_server_window_t *window) {
-
-    int64_t left;
-    int64_t top;
-    int64_t right;
-    int64_t bottom;
-
-    if (window == 0) {
-        return false;
+/* 在窗口锁内只计算一次快照捕获范围，瓦片模式需覆盖向外扩展后的像素。 */
+Rect compositor_registry_damage_bounds_locked(void) {
+    Rect bounds = g_window_server.damage_bounds;
+    if (g_window_server.damage_tiles_active) {
+        bounds.x0 = (bounds.x0 / WINDOW_DAMAGE_TILE_SIZE) * WINDOW_DAMAGE_TILE_SIZE;
+        bounds.y0 = (bounds.y0 / WINDOW_DAMAGE_TILE_SIZE) * WINDOW_DAMAGE_TILE_SIZE;
+        bounds.x1 = ((bounds.x1 + WINDOW_DAMAGE_TILE_SIZE - 1U) /
+                     WINDOW_DAMAGE_TILE_SIZE) * WINDOW_DAMAGE_TILE_SIZE;
+        bounds.y1 = ((bounds.y1 + WINDOW_DAMAGE_TILE_SIZE - 1U) /
+                     WINDOW_DAMAGE_TILE_SIZE) * WINDOW_DAMAGE_TILE_SIZE;
+        if (bounds.x1 > (int32_t)g_window_server.display_width)
+            bounds.x1 = (int32_t)g_window_server.display_width;
+        if (bounds.y1 > (int32_t)g_window_server.display_height)
+            bounds.y1 = (int32_t)g_window_server.display_height;
     }
-
-    left = window->x;
-    top = window->y;
-
-    right =
-        left +
-        (int64_t)window_outer_width(
-            window->width,
-            window->flags);
-
-    bottom =
-        top +
-        (int64_t)window_outer_height(
-            window->height,
-            window->flags);
-
-    return
-        left < (int64_t)g_window_server.damage_bounds.x1 &&
-        right > (int64_t)g_window_server.damage_bounds.x0 &&
-        top < (int64_t)g_window_server.damage_bounds.y1 &&
-        bottom > (int64_t)g_window_server.damage_bounds.y0;
+    return bounds;
 }
 
-bool compositor_snapshot_damage_tile_is_set(
-    const compositor_snapshot_t *snapshot,
-    uint32_t tile_x,
-    uint32_t tile_y) {
-    uint32_t index;
+bool compositor_registry_window_intersects_damage_bounds_locked(
+    const window_server_window_t *window, const Rect *bounds) {
+    if (window == 0 || bounds == 0) return false;
 
-    if (snapshot == 0 ||
-        tile_x >= WINDOW_DAMAGE_MAX_TILES_X ||
-        tile_y >= WINDOW_DAMAGE_MAX_TILES_Y) {
-        return false;
+    int64_t left = window->x;
+    int64_t top = window->y;
+    int64_t right = left + (int64_t)window_outer_width(window->width, window->flags);
+    int64_t bottom = top + (int64_t)window_outer_height(window->height, window->flags);
+
+    return left < (int64_t)bounds->x1 && right > (int64_t)bounds->x0 &&
+           top < (int64_t)bounds->y1 && bottom > (int64_t)bounds->y0;
+}
+
+/* 在有效行范围内按位图字查找下一次状态，尾字不读取相邻行的位。 */
+static uint32_t compositor_snapshot_find_damage_bit(
+    const compositor_snapshot_t *snapshot, uint32_t tile_y,
+    uint32_t start, uint32_t limit, bool dirty) {
+    while (start < limit) {
+        uint32_t index = tile_y * WINDOW_DAMAGE_MAX_TILES_X + start;
+        uint32_t offset = index & 63U;
+        uint32_t count = 64U - offset;
+        if (count > limit - start) count = limit - start;
+        uint64_t bits = snapshot->damage_tiles[index >> 6];
+        if (!dirty) bits = ~bits;
+        bits = (bits >> offset) & (UINT64_MAX >> (64U - count));
+        if (bits != 0U) return start + (uint32_t)__builtin_ctzll(bits);
+        start += count;
     }
-
-    index = tile_y * WINDOW_DAMAGE_MAX_TILES_X + tile_x;
-    return (snapshot->damage_tiles[index >> 6] &
-            (1ULL << (index & 63U))) != 0U;
+    return limit;
 }
 
 uint32_t compositor_snapshot_tiles_to_rects(
@@ -250,10 +219,9 @@ uint32_t compositor_snapshot_tiles_to_rects(
         uint32_t rect_index;
     } active_span_t;
 
-    active_span_t previous[
-        (WINDOW_DAMAGE_MAX_TILES_X + 1U) / 2U];
-    active_span_t current[
-        (WINDOW_DAMAGE_MAX_TILES_X + 1U) / 2U];
+    active_span_t active_rows[2][(WINDOW_DAMAGE_MAX_TILES_X + 1U) / 2U];
+    active_span_t *previous = active_rows[0];
+    active_span_t *current = active_rows[1];
 
     uint32_t columns;
     uint32_t rows;
@@ -278,27 +246,12 @@ uint32_t compositor_snapshot_tiles_to_rects(
             uint32_t end_x;
             uint32_t rect_index = UINT32_MAX;
 
-            while (tile_x < columns &&
-                   !compositor_snapshot_damage_tile_is_set(
-                       snapshot,
-                       tile_x,
-                       tile_y)) {
-                ++tile_x;
-            }
-
-            if (tile_x >= columns) break;
-
-            start_x = tile_x;
-
-            while (tile_x < columns &&
-                   compositor_snapshot_damage_tile_is_set(
-                       snapshot,
-                       tile_x,
-                       tile_y)) {
-                ++tile_x;
-            }
-
-            end_x = tile_x;
+            start_x = compositor_snapshot_find_damage_bit(
+                snapshot, tile_y, tile_x, columns, true);
+            if (start_x >= columns) break;
+            end_x = compositor_snapshot_find_damage_bit(
+                snapshot, tile_y, start_x, columns, false);
+            tile_x = end_x;
 
             while (previous_cursor < previous_count &&
                    previous[previous_cursor].start_x < start_x) {
@@ -353,7 +306,7 @@ uint32_t compositor_snapshot_tiles_to_rects(
                     rect_index = count;
                     snapshot->damage_rects[count++] = candidate;
                 } else {
-                    /* Keep the bounded fallback conservative on overflow. */
+                    /* 溢出时保持有界回退路径的保守性。 */
                     Rect *tail =
                         &snapshot->damage_rects[capacity - 1U];
 
@@ -380,12 +333,10 @@ uint32_t compositor_snapshot_tiles_to_rects(
         }
 
         previous_count = current_count;
-
-        for (uint32_t index = 0U;
-             index < current_count;
-             ++index) {
-            previous[index] = current[index];
-        }
+        /* 下一行直接读取本行结果，不再逐项复制活动区间。 */
+        active_span_t *finished = previous;
+        previous = current;
+        current = finished;
     }
 
     return count;

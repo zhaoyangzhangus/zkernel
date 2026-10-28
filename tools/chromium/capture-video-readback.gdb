@@ -24,7 +24,7 @@ if capture_mapped:
     if not packet_count:
         raise gdb.GdbError('Mapped capture requires the packet locator')
     for name in ('build/nvidia/vulkan/libos-vulkan-video.so.1',
-                 'build/esp/compat/linux/lib/x86_64-linux-gnu/libos-vulkan-video.so.1'):
+                 'build/esp/usr/apps/chrome/lib/libos-vulkan-video.so.1'):
         if _chrome_build_id(Path(name))!='Build ID: 92ef122fa8ec44beedd1866b47c1bd2180669d26':
             raise gdb.GdbError('Stale mapped-buffer probe offsets')
 if (not 1<=capture_count<=128 or not 0<=packet_count<=256 or

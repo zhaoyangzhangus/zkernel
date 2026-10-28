@@ -18,10 +18,8 @@
 #define ELF_PF_WRITE          2U
 #define ELF_PF_READ           4U
 #define ELF_MAX_PROGRAMS      128U
-/* Chrome's text segment is larger than the original 256 MiB loader guard.
- * The VFS exec path now streams file data in bounded chunks, so this limit
- * applies to one mapped PT_LOAD rather than requiring a same-sized contiguous
- * kernel allocation. */
+/* Chrome 的文本段大于原有 256 MiB 加载器限制。VFS exec 路径现在以有界分块方式读取文件，因此该限制
+ * 作用于单个已映射 PT_LOAD，而不再要求分配同等大小的连续内核内存。 */
 #define ELF_MAX_SEGMENT_SIZE  (1ULL * 1024ULL * 1024ULL * 1024ULL)
 #define ELF_PIE_BIAS          0x0000000040000000ULL
 #define ELF_INTERP_BIAS       0x0000000020000000ULL
@@ -66,7 +64,7 @@ typedef struct elf_validation {
     bool has_interpreter;
 } elf_validation_t;
 
-/* Failure-only PROCESS_EXEC progress snapshot used by the runtime test. */
+/* 运行时测试使用的 PROCESS_EXEC 失败进度快照。 */
 uint32_t process_exec_debug_stage(void);
 uint32_t process_exec_debug_status(void);
 void process_exec_debug_reset(void);

@@ -3,12 +3,17 @@ from pathlib import Path
 import subprocess
 import tempfile
 import re
+import resource
+
+resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
 
 root = Path(__file__).resolve().parents[2]
 source = (root/'kernel/syscall/linux.c').read_text()
 body = source[source.index('static uint64_t linux_poll_timeout_ns('):
               source.index('static int64_t linux_read(process_t *process, int64_t descriptor,\n',
                            source.index('static uint64_t linux_poll_timeout_ns('))]
+wait_type = source[source.index('typedef struct linux_poll_wait_set {'):
+                   source.index('static void linux_poll_wait_set_release(')]
 fixture = r'''
 #include <assert.h>
 #include <stdbool.h>
@@ -37,16 +42,19 @@ typedef struct { spinlock_t lock; linux_fd_entry_t entries[256]; } linux_fd_tabl
 typedef struct { linux_fd_table_t linux_fds; } process_t;
 typedef struct { int32_t descriptor; int16_t events, revents; } linux_pollfd_t;
 typedef struct { const linux_pollfd_t *fds; const linux_fd_entry_t *entries; uint64_t count; } linux_poll_wait_context_t;
-typedef struct { void *objects[1]; unsigned count; } linux_poll_wait_set_t;
+POLL_WAIT_SET_TYPE
 static spinlock_t g_linux_poll_waitq;
 static process_t process;
 static object_t objects[256], replacement;
 static unsigned locks, pins, releases, waits, mode, captures, set_releases;
 static uint64_t now;
+static uint64_t previous_timeout;
 static bool input_fail, output_fail;
 static unsigned allocation_calls, allocation_fail, allocations_live;
+static size_t allocation_sizes[4];
 static void *kmalloc(size_t size, unsigned flags) {
-    assert(flags == 0U);
+    assert(flags == 0U && !process.linux_fds.lock.held);
+    if (allocation_calls<4) allocation_sizes[allocation_calls]=size;
     if (++allocation_calls == allocation_fail) return NULL;
     void *p = malloc(size);
     if (p) ++allocations_live;
@@ -89,6 +97,7 @@ static uint32_t nv_frontend_poll_state(void *p,bool consume) {
 static int linux_poll_capture_wait_set(const linux_pollfd_t *fds, const linux_fd_entry_t *entries,
                                         uint64_t count, linux_poll_wait_set_t *set) {
     (void)fds; (void)entries; assert(!process.linux_fds.lock.held); ++captures;
+    assert(set->capacity>=count*3 && set->objects && set->owned);
     set->count=count ? 1 : 0; set->objects[0]=&process;
     return mode == 4 ? K_ENOSPC : K_OK;
 }
@@ -97,6 +106,7 @@ static void linux_poll_wait_set_release(linux_poll_wait_set_t *set) {
 }
 static int perform_wait(void) {
     assert(!process.linux_fds.lock.held); ++waits;
+    if(mode == 6) { now+=1000000; if(waits<3) return K_OK; }
     if(mode == 3) return -4;
     if(mode == 5) { now=1000000; return K_ETIMEDOUT; }
     if(mode == 2) {
@@ -109,6 +119,7 @@ static int perform_wait(void) {
 static int object_wait_on_signals(void **objects_arg, unsigned count, bool (*predicate)(void *),
                                  void *context, uint64_t timeout) {
     assert(objects_arg && count == 1 && predicate && context && timeout);
+    assert(timeout<=previous_timeout); previous_timeout=timeout;
     return perform_wait();
 }
 static bool linux_poll_wait_ready(void *p) { return p != NULL; }
@@ -125,6 +136,7 @@ static void reset(unsigned chosen) {
     }
     replacement=(object_t){0};
     mode=chosen; locks=pins=releases=waits=captures=set_releases=0; now=0;
+    previous_timeout=UINT64_MAX;
     input_fail=output_fail=false;
     allocation_calls=allocation_fail=0;
 }
@@ -133,7 +145,7 @@ static void balanced(void) {
     for(unsigned i=0;i<256;++i) assert(objects[i].refs == (mode==2 && i==1 && waits ? 0U : 1U));
     if(mode==2 && waits) assert(replacement.refs==1);
 }
-'''
+'''.replace('POLL_WAIT_SET_TYPE', wait_type)
 checks = r'''
 int main(void) {
     for(unsigned count=0;count<=256;++count) for(unsigned pattern=0;pattern<3;++pattern) {
@@ -159,6 +171,7 @@ int main(void) {
         assert(result == (chosen<=2 ? 2 : chosen==3 ? -4 : chosen==4 ? K_ENOSPC : 0));
         assert(locks == (chosen==3 || chosen==4 ? 1U : 2U));
         assert(waits == (chosen==4 ? 0U : 1U)); balanced();
+        assert(!allocation_calls && !allocations_live);
     }
     reset(5); assert(linux_poll(&process,0,0,1)==0 && !locks && waits==1); balanced();
     for(unsigned fail=0;fail<2;++fail) {
@@ -188,8 +201,23 @@ int main(void) {
         assert(!allocation_calls && !allocations_live);balanced();
     }
     reset(1);allocation_fail=1;linux_pollfd_t small={1,1,0};
-    assert(linux_poll(&process,(uintptr_t)&small,1,1)==K_ENOMEM);
-    assert(allocation_calls==1 && !allocations_live && !waits);balanced();
+    assert(linux_poll(&process,(uintptr_t)&small,1,1)==1);
+    assert(!allocation_calls && !allocations_live && waits==1);balanced();
+    reset(6);
+    assert(linux_poll(&process,(uintptr_t)allocation_fds,9,10)==9);
+    assert(waits==3 && allocation_calls==3 && !allocations_live);
+    assert(allocation_sizes[2]==9U*3U*(sizeof(void *)+sizeof(uint8_t)));
+    balanced();
+    /* All legal blocking set sizes use exact capacity and release storage. */
+    for (unsigned count=9;count<=256;++count) {
+        linux_pollfd_t fds[256];
+        for (unsigned i=0;i<count;++i) fds[i]=(linux_pollfd_t){1,1,0};
+        reset(1);
+        assert(linux_poll(&process,(uintptr_t)fds,count,1)==count);
+        assert(allocation_calls==3 && !allocations_live);
+        assert(allocation_sizes[2]==count*3U*(sizeof(void *)+sizeof(uint8_t)));
+        balanced();
+    }
     allocation_fail=0;
     puts("771 poll layouts, duplicate pins, ignored/invalid fds, ready retry, fd reuse, timeout and error cleanup passed");
 }
@@ -209,6 +237,10 @@ with tempfile.TemporaryDirectory(prefix='liteos-poll-snapshot-') as directory:
                           'if (false) linux_fd_entry_get(&entries[index]);')
     assert run(negative).returncode != 0, 'Missing snapshot reference accepted'
     print('Negative control rejected: copied descriptors without owned references')
+    negative=body.replace('(size_t)count * 3U',
+                          '(size_t)LINUX_MAX_POLL_FDS * 3U')
+    assert negative!=body and run(negative).returncode!=0
+    print('Negative control rejected: full-limit scratch allocation for small waits')
     actual_limit = int(re.search(r'#define OS_LINUX_FD_LIMIT (\d+)U',
         (root/'include/kernel/linux_abi.h').read_text())[1])
     fixture = re.sub(r'\b256\b', str(actual_limit), fixture)

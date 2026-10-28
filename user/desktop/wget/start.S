@@ -4,13 +4,12 @@
 .extern __libc_thread_init
 
 /*
- * System exec supplies a SysV-style initial process stack:
+ * System exec 提供 SysV 风格的初始进程栈：
  *   [rsp+0] = argc
  *   [rsp+8] = argv[0]
  *
- * User C is compiled with -mabi=sysv, so translate the initial stack to the
- * SysV arguments RDI/RSI. The initial stack is already 16-byte aligned; the
- * call instruction supplies the return slot required by the ABI.
+ * 用户态 C 使用 -mabi=sysv 编译，因此将初始栈转换为 SysV 参数 RDI/RSI。
+ * 初始栈已按 16 字节对齐；call 指令会提供 ABI 所需的返回地址槽。
  */
 wget_entry:
     call __libc_thread_init
@@ -20,7 +19,7 @@ wget_entry:
     leaq 8(%rsp), %rsi
     call wget_main
 
-    /* OS_SYS_THREAD_EXIT = 0x0000, status in the syscall ABI RDI. */
+    /* OS_SYS_THREAD_EXIT = 0x0000，状态码通过系统调用 ABI 的 RDI 传递。 */
     movq %rax, %rdi
     xorl %eax, %eax
     syscall

@@ -170,22 +170,19 @@ static void io_finalize_owned(io_request_t *req, kstatus_t status,
                                        req->request_id, req->submit_tsc);
         req->submit_tsc = 0U;
     }
-    /* QUEUED is already cancellable while device_io_begin may still own
-     * the device lock. End must synchronize with that registration rather
-     * than reading device_ref_held before taking the same lock. */
+    /* QUEUED 状态已允许取消，而 device_io_begin 仍可能持有设备锁。
+     * 结束阶段必须与该注册同步，而不是在拿同一把锁之前读取 device_ref_held。 */
     if (execution_ref && device_io_end(req->device, req)) {
         object_put(req->device);
     }
-    /* Finalize user-visible results before publication. Private staging
-     * memory follows the request references, not its terminal state. */
+    /* 在发布前先完成对用户可见的结果。私有 staging 内存跟随请求引用，而不是终态。 */
     if (complete != 0) complete(req);
     io_request_unregister_user(req);
     io_publish_completion(req);
     /*
-     * Publish the terminal state only after every owner-visible link has
-     * been removed.  Synchronous callers reuse stack requests as soon as
-     * they observe COMPLETED; publishing earlier lets that reuse reset
-     * device_node while the completion thread still owns the device list.
+     * 只有在所有 owner 可见的链接都已移除后，才发布终态。
+     * 同步调用方一旦观察到 COMPLETED 就会立即重用栈上请求；过早发布会让它重置
+     * device_node，而此时 completion 线程仍持有设备列表。
      */
     if (execution_ref && !dynamic) object_put(req);
     atomic_store_explicit(&req->state, terminal_state, memory_order_release);
@@ -212,8 +209,8 @@ void io_complete(io_request_t *req, kstatus_t status, uint64_t bytes_done) {
 kstatus_t io_submit(io_request_t *req) {
     if (req == 0 || req->object.type != IO_REQUEST_OBJECT_TYPE ||
         req->device == 0 || !io_vectors_valid(req)) return K_EINVAL;
-    /* A QUEUED request is cancellable, and its finalizer releases the
-     * execution reference. Establish that reference before publishing QUEUED. */
+    /* QUEUED 请求是可取消的，其 finalizer 会释放执行引用。
+     * 因此必须在发布 QUEUED 前先建立该引用。 */
     object_get(req);
     unsigned expected = IOREQ_NEW;
     if (!atomic_compare_exchange_strong_explicit(&req->state, &expected,

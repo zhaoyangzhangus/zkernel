@@ -7,6 +7,7 @@
 #include "spinlock.h"
 #include "fat32.h"
 #include "wait.h"
+#include "io_mutex.h"
 
 struct page;
 struct vm_file_ops;
@@ -25,7 +26,7 @@ typedef struct vnode {
     const vnode_ops_t *ops;
     void *fs_private;
 
-    rwlock_t lock;
+    io_mutex_t lock;
     void *page_cache;
     wait_queue_t record_lock_waitq;
     atomic_uint record_lock_sequence;
@@ -39,13 +40,27 @@ typedef struct file {
     uint32_t flags;
     uint32_t rights;
     void *private_data;
+    /* 同一打开实例共享的偏移须跨读、写、定位和目录遍历串行更新。 */
+    io_mutex_t position_lock;
 } file_t;
+
+static inline void vfs_file_position_init(file_t *file) {
+    io_mutex_init(&file->position_lock, true);
+}
+
+static inline kstatus_t vfs_file_position_lock(file_t *file) {
+    return io_mutex_lock(&file->position_lock);
+}
+
+static inline void vfs_file_position_unlock(file_t *file) {
+    io_mutex_unlock_required(&file->position_lock);
+}
 
 kstatus_t vfs_open(const char __user *path, uint32_t flags, uint32_t mode, file_t **out);
 kstatus_t vfs_read(file_t *file, void __user *buf, size_t len, uint64_t *bytes);
 kstatus_t vfs_write(file_t *file, const void __user *buf, size_t len, uint64_t *bytes);
 kstatus_t vfs_fsync(file_t *file);
-/* Flush cached file data and all mounted FAT volumes before power control. */
+/* 执行电源控制前，刷新缓存文件数据和所有已挂载的 FAT 卷。 */
 kstatus_t vfs_sync_all(void);
 void vfs_close(file_t *file);
 #include <uapi/file.h>
@@ -91,24 +106,48 @@ kstatus_t vfs_mount_fat32(const char *prefix, OS_FAT32 *filesystem);
 kstatus_t vfs_unmount_fat32(void);
 kstatus_t vfs_create_kernel(const char *path, uint32_t mode, bool directory);
 kstatus_t vfs_mkdir_kernel(const char *path, uint32_t mode);
+/* 当前进程的工作目录使用同一命名空间及用户路径解析规则。 */
+kstatus_t vfs_change_directory(const char __user *path);
 kstatus_t vfs_symlink_kernel(const char *target, const char *path);
 kstatus_t vfs_readlink_kernel(const char *path, char *buffer, size_t capacity,
                              size_t *bytes);
 kstatus_t vfs_resolve_path_kernel(const char *path, bool follow_final,
                                 bool allow_missing_leaf, char output[256]);
+/* FAT 不含链接；内存命名空间和特殊分量需逐段解析。 */
+bool vfs_path_needs_resolution(const char *path);
+/* 为需要保留实际路径的调用者解析用户路径，包括进程当前目录。 */
+kstatus_t vfs_resolve_user_path(const char __user *path, bool follow_final,
+                                bool allow_missing_leaf, char output[256]);
 kstatus_t vfs_remove_kernel(const char *path);
 kstatus_t vfs_remove_typed_kernel(const char *path, int directory);
 kstatus_t vfs_directory_path_kernel(file_t *file, char *path, size_t capacity);
+/* 引用由调用方持有；仅复制命名空间元数据，不执行后备 I/O。 */
+kstatus_t vfs_vnode_path_kernel(vnode_t *vnode, char *path, size_t capacity,
+                                bool *deleted);
 kstatus_t vfs_open_kernel(const char *path, uint32_t flags, uint32_t mode,
                           file_t **out);
 kstatus_t vfs_enumerate_file(file_t *file, uint32_t index,
                              os_file_info_t *out);
-/* Copies a bounded batch from one namespace enumeration. Count is zero on
- * failure; returned records are private copies, not registry pointers. */
+kstatus_t vfs_enumerate_kernel_batch(const char *path, uint32_t index,
+                                     os_file_info_t *out, uint32_t capacity,
+                                     uint32_t *count);
+kstatus_t vfs_enumerate_batch(const char __user *path, uint32_t index,
+                              os_file_info_t *out, uint32_t capacity,
+                              uint32_t *count);
+/* 从一次命名空间枚举中复制一批有界记录。失败时 count 为零；返回记录为私有副本，
+ * 而非注册表指针。 */
 kstatus_t vfs_enumerate_file_batch(file_t *file, uint32_t index,
                                    os_file_info_t *out, uint32_t capacity,
                                    uint32_t *count);
 kstatus_t vfs_stat_kernel(const char *path, os_file_info_t *out);
+/* 查询实际后备文件系统；空闲空间并不代表已预留。 */
+typedef struct vfs_space_info {
+    uint64_t block_size, blocks, blocks_free;
+    uint64_t type, filesystem_id;
+    uint64_t name_max;
+} vfs_space_info_t;
+kstatus_t vfs_space_kernel(const char *path, vfs_space_info_t *out);
+kstatus_t vfs_file_space(file_t *file, vfs_space_info_t *out);
 kstatus_t vfs_file_stat(file_t *file, os_file_info_t *out);
 kstatus_t vfs_rename_kernel(const char *old_path, const char *new_path);
 kstatus_t vfs_enumerate_kernel(const char *path, uint32_t index,
@@ -125,7 +164,11 @@ kstatus_t vfs_page_cache_sync(vnode_t *vnode, uint64_t first_page,
                               uint64_t page_count);
 const struct vm_file_ops *vfs_vm_file_ops(void);
 kstatus_t vfs_read_kernel(file_t *file, void *buf, size_t len, uint64_t *bytes);
-/* Executable loading shares the coherent file pages used by mmap. */
+/* 有界整文件读取；成功后调用者用 kfree 释放缓冲区，失败时输出为空。
+ * 读取打开后观察到的长度，不保证与并发文件写入之间的原子快照。 */
+kstatus_t vfs_load_file_kernel(const char *path, size_t minimum, size_t maximum,
+                               void **buffer, size_t *length);
+/* 可执行文件加载与 mmap 共用一致的文件页。 */
 kstatus_t vfs_read_cached_kernel(file_t *file, void *buf, size_t len,
                                  uint64_t *bytes);
 kstatus_t vfs_write_kernel(file_t *file, const void *buf, size_t len,

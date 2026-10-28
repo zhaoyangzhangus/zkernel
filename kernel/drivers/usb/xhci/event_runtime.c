@@ -1,7 +1,7 @@
 #include "internal.h"
 
-/* REFACTOR_P8_XHCI_EVENT_RUNTIME_OWNER: Event Ring consumption, deferred
- * event handoff, and interrupter completion are one low-level Owner. */
+/* REFACTOR_P8_XHCI_EVENT_RUNTIME_OWNER：Event Ring 消费、延迟事件交接和
+ * 中断器完成处理由同一个底层所有者负责。 */
 
 #define XHCI_RING_TRB_COUNT 256U
 #define XHCI_TRB_CYCLE (1U << 0)
@@ -28,9 +28,8 @@ void xhci_event_handler_complete(xhci_state_t *state) {
     if (state == 0 || !state->initialized) return;
     dequeue = xhci_dma_address(&state->event_ring.mapping) +
               (uint64_t)state->event_index * sizeof(xhci_trb_t);
-    /* EHB is RW1C: software must write one to clear the controller's event
-     * handler busy state after consuming a batch.  Writing ERDP without EHB
-     * leaves the bit set on QEMU and suppresses all later HID interrupts. */
+    /* EHB 为 RW1C：软件消费一批事件后必须写 1 清除控制器的事件处理忙状态。
+     * 在 QEMU 上只写 ERDP 而不写 EHB 会使该位保持置位，并屏蔽后续 HID 中断。 */
     (void)xhci_controller_write64(state, state->runtime_offset + XHCI_RUNTIME_INTR0 +
                        XHCI_RUNTIME_ERDP, dequeue | XHCI_ERDP_EHB);
     (void)xhci_controller_write32(state, state->runtime_offset + XHCI_RUNTIME_INTR0,
@@ -44,17 +43,15 @@ bool xhci_next_ring_event(xhci_state_t *state, xhci_trb_t *event) {
     uint32_t control;
     if (state == 0 || event == 0) return false;
     /*
-     * The xHCI event ring is controller-owned.  Software consumes it solely
-     * by advancing ERDP; it must never clear or otherwise rewrite an Event
-     * TRB.  Clearing the cycle bit makes an empty, stale entry look valid
-     * when the consumer cycle state wraps, after which HID completions are
-     * permanently missed.
+    * xHCI 事件环归控制器所有。软件只能通过推进 ERDP 消费事件，绝不能清除或改写
+    * Event TRB。清除 cycle 位会在消费者周期状态回绕时让空的旧条目看起来有效，
+    * 此后 HID 完成事件将永久丢失。
      */
     event_ring = (const volatile xhci_trb_t *)state->event_ring.cpu;
     dma_sync_for_cpu(&state->event_ring.mapping);
     control = event_ring[state->event_index].control;
     if ((control & XHCI_TRB_CYCLE) != state->event_cycle) {
-        /* An empty Event Ring is the normal result of a coalesced wakeup. */
+        /* 合并唤醒后事件环为空是正常情况。 */
         return false;
     }
     event->parameter = event_ring[state->event_index].parameter;
@@ -66,17 +63,15 @@ bool xhci_next_ring_event(xhci_state_t *state, xhci_trb_t *event) {
                              (uint64_t)state->event_index * sizeof(xhci_trb_t);
 
     /*
-     * Advance ERDP for ring-space accounting, but do NOT clear EHB for every
-     * individual Event TRB.
+    * 推进 ERDP 以记账环空间，但不要为每个 Event TRB 单独清除 EHB。
      *
-     * EHB belongs to the whole event-processing batch.  Clearing it here can
-     * let the controller generate another MSI-X while the current deferred
-     * worker is still draining the same Event Ring.
+    * EHB 属于整个事件处理批次。在此清除可能导致控制器在当前延迟工作线程仍在排空
+    * 同一事件环时再次生成 MSI-X。
      *
-     * xhci_event_handler_complete() clears EHB exactly once after the batch.
+    * xhci_event_handler_complete() 会在批次结束后恰好清除一次 EHB。
      */
     (void)xhci_controller_write64(state, state->runtime_offset + XHCI_RUNTIME_INTR0 +
-                       XHCI_RUNTIME_ERDP, event_dequeue | XHCI_ERDP_EHB);
+                       XHCI_RUNTIME_ERDP, event_dequeue);
     return true;
 }
 
@@ -91,7 +86,7 @@ bool xhci_defer_event(xhci_state_t *state, const xhci_trb_t *event) {
     return true;
 }
 
-/* 缁熶竴浜嬩欢娑堣垂鑰呬紭鍏堝鐞嗗悓姝ョ瓑寰呴樁娈垫殏瀛樼殑浜嬩欢锛屽啀璇诲彇纭欢浜嬩欢鐜€?*/
+/* 统一事件消费者优先处理同步等待阶段暂存的事件，再读取硬件事件环。 */
 bool xhci_next_event(xhci_state_t *state, xhci_trb_t *event) {
     if (state == 0 || event == 0) return false;
     if (xhci_event_queue_pop(state->deferred_events,

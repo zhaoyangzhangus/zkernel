@@ -8,6 +8,13 @@ typedef struct kernel_init_userspace_hooks {
     void (*halt)(void);
 } kernel_init_userspace_hooks_t;
 
+/* Start after exclusive boot fixtures; GOP desktop never joins the GPU. */
+BOOLEAN userspace_start_device_init(void);
+BOOLEAN userspace_finish_device_init(void);
+BOOLEAN userspace_device_init_done(void);
+BOOLEAN userspace_wait_device_init(void);
+void userspace_poll_device_init(void);
+
 /* Publish the initial user services, IPC, window server, and runtime workers. */
 BOOLEAN kernel_init_userspace(const kernel_init_userspace_hooks_t *hooks);
 

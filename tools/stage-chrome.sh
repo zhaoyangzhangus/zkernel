@@ -1,10 +1,8 @@
 #!/usr/bin/env bash
-# Stage a Debian-built Chromium target into the system ESP image.
+# 将 Debian 构建的 Chromium 目标暂存到 System ESP 映像。
 #
-# The Chromium target is linked against the system dynamic loader/libc, while
-# its data files are still resolved relative to the executable directory. Put
-# the complete browser payload in /sbin so the existing shell and
-# process launcher can execute /sbin/chrome without a host-side filesystem.
+# Chromium 目标链接到 System 动态加载器/libc，但数据文件仍相对于可执行文件目录解析。
+# 浏览器程序、启动器和相对路径资源统一放入自己的应用目录。
 set -euo pipefail
 
 script_dir="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -80,7 +78,7 @@ fi
 chrome_source="$chromium_out/chrome"
 launcher_source="$build_dir/elf/chrome-start.elf"
 esp_dir="$build_dir/esp"
-stage_dir="$esp_dir/sbin"
+stage_dir="$esp_dir/usr/apps/chrome"
 
 [[ -f "$chrome_source" && -x "$chrome_source" ]] || {
     echo "找不到可执行的 Debian Chromium：$chrome_source" >&2
@@ -127,7 +125,7 @@ try:
 except (OSError, subprocess.CalledProcessError) as error:
     raise SystemExit('Cannot inspect Chrome runtime dependencies: ' + str(error))
 interpreters = re.findall(r'Requesting program interpreter: ([^\]]+)\]', headers)
-allowed = ('/lib/ld-linux-system.so.1',) if mode == 'system' else ('/lib64/ld-linux-x86-64.so.2',)
+allowed = ('/lib/ld-linux-system.so.1',) if mode == 'system' else ('/usr/apps/chrome/lib/ld-linux-x86-64.so.2',)
 if len(interpreters) != 1 or interpreters[0] not in allowed:
     raise SystemExit('Chrome must use the system Linux-personality interpreter')
 needed = re.findall(r'\(NEEDED\).*Shared library: \[([^\]]+)\]', dynamic)
@@ -152,7 +150,7 @@ else:
         if not name or '/' in name or name in ('.', '..'):
             raise SystemExit('Invalid Chrome runtime dependency: '+name)
         inspected.add(name)
-        relative = 'compat/linux/lib/x86_64-linux-gnu/'+name
+        relative = 'usr/apps/chrome/lib/'+name
         dependency = esp/relative
         if not dependency.is_file():
             raise SystemExit('Missing actual Chrome runtime dependency: '+str(dependency))
@@ -165,15 +163,18 @@ else:
         pending.extend(re.findall(r'\(NEEDED\).*Shared library: \[([^\]]+)\]', detail))
     if len(sys.argv) < 5:
         raise SystemExit('Missing selected guest glibc baseline')
+    interpreter = esp/interpreters[0].lstrip('/')
+    if not interpreter.is_file():
+        raise SystemExit('Missing actual Chrome runtime dependency: '+str(interpreter))
     baseline = Path(sys.argv[4])
     for name in ('libc.so.6', 'libm.so.6', 'libdl.so.2', 'libpthread.so.0',
                  'librt.so.1', 'libresolv.so.2', 'libutil.so.1', 'ld-linux-x86-64.so.2'):
         if name not in inspected and name != 'ld-linux-x86-64.so.2':
             continue
         expected = baseline/name
-        actual = esp/'compat/linux/lib/x86_64-linux-gnu'/name
+        actual = esp/'usr/apps/chrome/lib'/name
         if not expected.is_file() or not actual.is_file() or expected.read_bytes() != actual.read_bytes():
-            raise SystemExit('Chrome guest glibc baseline mismatch: '+name)
+            raise SystemExit(('Chrome guest interpreter does not match its glibc baseline: ' if name == 'ld-linux-x86-64.so.2' else 'Chrome guest glibc baseline mismatch: ')+name)
     interpreter = esp/interpreters[0].lstrip('/')
     if not interpreter.is_file():
         raise SystemExit('Missing actual Chrome runtime dependency: '+str(interpreter))
@@ -187,9 +188,9 @@ PY
 )"
 if [[ "$chrome_runtime_mode" == glibc ]]; then
     python3 "$project_root/tools/nvidia/vulkan_runtime_abi.py" \
-        --runtime-dir "$esp_dir/compat/linux/lib/x86_64-linux-gnu" "$chrome_source"
+        --runtime-dir "$esp_dir/usr/apps/chrome/lib" "$chrome_source"
 fi
-# Select a launcher profile from the same graph which produced this ELF.
+# 从生成此 ELF 的同一构建图中选择启动器配置。
 chrome_gpu_profile="$(python3 - "$chromium_out/args.gn" "$chrome_runtime_mode" <<'PY'
 import re
 import sys
@@ -205,8 +206,8 @@ print('vulkan' if enabled else 'software')
 PY
 )"
 if [[ "$chrome_gpu_profile" == vulkan ]]; then
-    # dlopen roots do not appear in Chrome's DT_NEEDED. Check the actual ESP
-    # loader, NVIDIA ICD and shader compiler closure before publishing flags.
+    # dlopen 根依赖不会出现在 Chrome 的 DT_NEEDED 中。发布启动参数前，检查 ESP 中实际部署的加载器、
+    # NVIDIA ICD 和着色器编译器依赖闭包。
     python3 - "$project_root" "$esp_dir" <<'PY'
 import importlib.util
 import json
@@ -216,10 +217,13 @@ root, esp = map(Path, sys.argv[1:])
 spec = importlib.util.spec_from_file_location('chrome_vulkan_stage', root/'tools/nvidia/stage-vulkan.py')
 stage = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(stage)
-runtime = esp/'compat/linux/lib/x86_64-linux-gnu'
-icd = json.loads((esp/'usr/share/vulkan/icd.d/nvidia_icd.json').read_text())
-if icd.get('ICD', {}).get('library_path') != '/compat/linux/lib/x86_64-linux-gnu/libGLX_nvidia.so.0':
+runtime = esp/'usr/apps/chrome/lib'
+icd = json.loads((esp/'usr/apps/chrome/vulkan/nvidia_icd.json').read_text())
+if icd.get('ICD', {}).get('library_path') != '/usr/apps/chrome/lib/libGLX_nvidia.so.0':
     raise SystemExit('Chrome Vulkan ICD does not select the deployed NVIDIA driver')
+egl = json.loads((esp/'usr/apps/chrome/egl/10_nvidia.json').read_text())
+if egl.get('ICD', {}).get('library_path') != '/usr/apps/chrome/lib/libEGL_nvidia.so.0':
+    raise SystemExit('Chrome EGL vendor does not select the private NVIDIA driver')
 catalog = {path.name: path for path in runtime.iterdir() if path.is_file()}
 selected = stage.vulkan_closure(catalog, runtime)
 stage.abi.check(runtime, selected.values())
@@ -246,12 +250,12 @@ if ((dry_run)); then
     exit 0
 fi
 
-# The previous linked binary remains present during an incremental build.
-# Never mistake its existence for completion, or race the builder's link.
+# 增量构建期间，旧的已链接二进制仍然存在。
+# 不能把文件存在误认为构建完成，也不能与构建器的链接操作竞争。
 command -v flock >/dev/null || { echo "缺少 flock；无法保护统一构建/打包入口" >&2; exit 1; }
 command -v ninja >/dev/null || { echo "缺少 ninja；无法验证 Chromium 是否构建完成" >&2; exit 1; }
-# A systemd build survives its launching shell, which may release the flock.
-# Protect that live job as well, before loading another Ninja graph.
+# systemd 构建任务可能在启动 shell 退出后继续运行，而 shell 可能释放 flock。
+# 加载另一个 Ninja 构建图前，也要保护该活动任务。
 if pgrep -u "$(id -u)" -x ninja >/dev/null; then
     echo "Ninja 构建仍在运行；拒绝打包旧 Chrome，未修改镜像" >&2
     exit 1
@@ -276,9 +280,8 @@ if [[ "${build_check##*$'\n'}" != "ninja: no work to do." ]]; then
     echo "Chromium 尚有待构建内容；请先完成统一构建，未修改镜像" >&2
     exit 1
 fi
-# Browser flags live in the native launcher, not in Chromium's ELF. Require
-# its current build as part of the same deployment instead of silently using
-# an older launcher which still disables GPU compositing.
+# 浏览器参数保存在原生启动器中，而不在 Chromium ELF 内。要求同一次部署中也包含当前启动器构建，
+# 不要静默使用仍禁用 GPU 合成的旧启动器。
 if ! make -q -C "$project_root" "BUILD=$build_dir" "$launcher_source"; then
     echo "Chrome 启动器尚未构建完成；请先构建 chrome-start.elf，未修改镜像" >&2
     exit 1
@@ -287,8 +290,7 @@ fi
     echo "缺少 Chrome 启动器：$launcher_source，未修改镜像" >&2; exit 1
 }
 
-# H.264 on the native port is hardware-only. Build and validate its isolated
-# dlopen root before changing any browser/resources in the ESP.
+# 原生移植版的 H.264 仅支持硬件解码。修改 ESP 中任何浏览器/资源前，先构建并验证其独立 dlopen 依赖根。
 chrome_hw_video=false
 if python3 - "$chromium_out/args.gn" <<'PY'
 from pathlib import Path
@@ -300,15 +302,14 @@ then
     chrome_hw_video=true
     python3 "$project_root/tools/nvidia/build-video-decoder.py"
     python3 "$project_root/tools/nvidia/video-decoder-runtime-gate.py" \
-        --runtime-dir "$esp_dir/compat/linux/lib/x86_64-linux-gnu" \
+        --runtime-dir "$esp_dir/usr/apps/chrome/lib" \
         "$build_dir/nvidia/vulkan/libos-vulkan-video.so.1"
 fi
 
 mkdir -p "$stage_dir"
 
-# Probe once per destination filesystem/requested mode. FAT/NTFS mount masks
-# may expose 0777 even after chmod(0644); do not recopy identical large files
-# merely because those filesystems cannot represent the requested POSIX mode.
+# 每种目标文件系统/请求模式只探测一次。即使 chmod(0644)，FAT/NTFS 挂载掩码也可能显示为 0777；
+# 不要仅因文件系统无法表示请求的 POSIX 权限，就重新复制相同的大文件。
 declare -A stage_mode_cache=()
 stage_file_mode=""
 stage_effective_mode() {
@@ -365,39 +366,32 @@ install_data() {
     install_changed "$source" "$destination" 0644
 }
 
-mkdir -p "$esp_dir/etc/fonts"
+mkdir -p "$esp_dir/EFI/OS/fonts"
 # Fail closed while replacing a payload, including a Vulkan-to-software
-# transition. A failed stage must not leave the previous GPU profile attached
-# to a newly replaced binary; the final profile is committed below.
-install_data "$project_root/assets/chrome/gpu-staging.conf" "$esp_dir/etc/chrome-gpu-mode"
+# 切换。暂存失败时不能让旧 GPU 配置仍附着在新替换的二进制上；最终配置会在下方提交。
+install_data "$project_root/assets/chrome/gpu-staging.conf" "$stage_dir/gpu-mode"
 install_executable "$launcher_source" "$stage_dir/chrome-start"
 if $chrome_hw_video; then
-    mkdir -p "$esp_dir/compat/linux/lib/x86_64-linux-gnu"
+    mkdir -p "$esp_dir/usr/apps/chrome/lib"
     install_data "$build_dir/nvidia/vulkan/libos-vulkan-video.so.1" \
-                 "$esp_dir/compat/linux/lib/x86_64-linux-gnu/libos-vulkan-video.so.1"
+                 "$esp_dir/usr/apps/chrome/lib/libos-vulkan-video.so.1"
 fi
-install_data "$cjk_font" "$esp_dir/etc/fonts/NotoSansCJK-Regular.ttc"
-install_data "$cjk_font_license" "$esp_dir/etc/fonts/NotoSansCJK-LICENSE"
+install_data "$cjk_font" "$esp_dir/EFI/OS/fonts/NotoSansCJK-Regular.ttc"
+install_data "$cjk_font_license" "$esp_dir/EFI/OS/fonts/NotoSansCJK-LICENSE"
 
-# A debug Chromium binary contains several gigabytes of DWARF and static
-# symbol data. The boot volume is FAT32, whose practical single-file
-# limit is 4 GiB and whose QEMU/UEFI path is intentionally kept small.  Keep
-# the full debug binary in chromium_out for GDB, but put a runtime-only copy
-# in the ESP image.  --strip-unneeded retains the dynamic symbols required by
-# the runtime loader while removing debug-only/static symbols.
+# 调试版 Chromium 二进制包含数 GB 的 DWARF 和静态符号数据。启动卷为 FAT32，实际单文件上限为 4 GiB，
+# 且 QEMU/UEFI 路径刻意保持精简。完整调试二进制保留在 chromium_out 供 GDB 使用，ESP 映像中仅放运行时副本。
+# --strip-unneeded 会保留运行时加载器所需动态符号，并移除仅供调试/静态链接的符号。
 python3 "$script_dir/chromium/stage-binary.py" \
     --source "$chrome_source" --target "$stage_dir/chrome" --strip "$llvm_strip"
 
-# chrome_sandbox is optional for the first single-process launch, but
-# stage it whenever the target has produced one so a later multi-process
-# launch does not need another image-manual step. The guest does not use a
-# setuid sandbox bit; its policy is enforced by the target process ABI.
+# 首次单进程启动时 chrome_sandbox 为可选项，但目标生成该文件后就应暂存，避免之后多进程启动还需手动修改映像。
+# 来宾不使用 setuid 沙箱位；其策略由目标进程 ABI 执行。
 if [[ -f "$chromium_out/chrome_sandbox" ]]; then
     install_executable "$chromium_out/chrome_sandbox" "$stage_dir/chrome_sandbox"
 fi
 
-# Chromium's browser data files are all next to the executable in a normal
-# Linux distribution. Use nullglob so a missing optional class is harmless.
+# 常规 Linux 发行版会将 Chromium 浏览器数据文件放在可执行文件旁。使用 nullglob，使缺少可选文件类型时不报错。
 shopt -s nullglob
 for pattern in '*.pak' '*.dat' '*.bin'; do
     for source in "$chromium_out"/$pattern; do
@@ -406,8 +400,7 @@ for pattern in '*.pak' '*.dat' '*.bin'; do
     done
 done
 
-# Merge resource trees without rewriting unchanged payloads or removing
-# destination-only files. Publish each changed entry only after cp succeeds.
+# 合并资源目录时不重写未变负载，也不删除目标目录独有文件。仅在 cp 成功后发布每个变更项。
 merge_resources() (
     local source="$1" destination="$2" entry target temporary
     shopt -s dotglob nullglob
@@ -445,10 +438,10 @@ for directory in locales resources MEIPreload; do
 done
 shopt -u nullglob
 
-# Publish last: an interrupted browser/resource stage must not enable a new
-# GPU backend against an old executable. install_data replaces atomically.
+# 最后发布：浏览器/资源暂存中断时，不能让新 GPU 后端配置配合旧可执行文件启用。
+# install_data 会以原子方式替换文件。
 install_data "$project_root/assets/chrome/gpu-$chrome_gpu_profile.conf" \
-             "$esp_dir/etc/chrome-gpu-mode"
+             "$stage_dir/gpu-mode"
 
 manifest="$build_dir/chrome-staging.manifest"
 temporary_manifest="$(mktemp "$build_dir/.chrome-manifest.XXXXXX")"
@@ -460,12 +453,12 @@ trap 'rm -f -- "$temporary_manifest"' EXIT
     echo "chrome_gpu_profile=$chrome_gpu_profile"
     echo "chrome_hw_video=$chrome_hw_video"
     if $chrome_hw_video; then
-        sha256sum "$esp_dir/compat/linux/lib/x86_64-linux-gnu/libos-vulkan-video.so.1"
+        sha256sum "$esp_dir/usr/apps/chrome/lib/libos-vulkan-video.so.1"
     fi
     sha256sum "$stage_dir/chrome-start"
-    sha256sum "$esp_dir/etc/chrome-gpu-mode"
-    sha256sum "$esp_dir/etc/fonts/NotoSansCJK-Regular.ttc" \
-              "$esp_dir/etc/fonts/NotoSansCJK-LICENSE"
+    sha256sum "$stage_dir/gpu-mode"
+    sha256sum "$esp_dir/EFI/OS/fonts/NotoSansCJK-Regular.ttc" \
+              "$esp_dir/EFI/OS/fonts/NotoSansCJK-LICENSE"
     find "$stage_dir" -type f -printf '%P\n' | sort | while IFS= read -r relative; do
         sha256sum "$stage_dir/$relative"
     done

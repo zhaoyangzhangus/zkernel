@@ -1,4 +1,4 @@
-/* REFACTOR_SYSCALL_SYNC_OWNER: IPC, timer, wait and futex handlers. */
+/* REFACTOR_SYSCALL_SYNC_OWNER：IPC、定时器、等待和 futex 处理程序。 */
 
 #include <arch/x86_64/cpu.h>
 #include <arch/x86_64/uaccess.h>

@@ -100,7 +100,7 @@ int poll(struct pollfd *fds, nfds_t count, int timeout) {
         errno = fds == 0 && count != 0U ? EFAULT : EINVAL;
         return -1;
     }
-    /* Linux-personality sockets live in the Linux fd table.  Waiting on
+    /* Linux 兼容模式下的 socket 位于 Linux fd 表中。等待操作应使用
      * their public fd numbers as native System handles cannot observe data. */
     if (count != 0U) {
         bool all_linux = true;

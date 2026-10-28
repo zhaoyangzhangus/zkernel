@@ -11,8 +11,8 @@ assert 'LITEOS_' not in realtest and 'LITEOS_' not in boot
 path = re.search(r'g_realtest_loader_log_path\[\] = \{(.*?)\};',boot,re.S)[1]
 chars = re.findall(r"'((?:\\.|[^'])*)'",path)
 decoded = ''.join(bytes(char,'ascii').decode('unicode_escape') for char in chars)
-assert decoded == '\\EFI\\OS\\realtest.log', decoded
-assert "'EFI\\OS\\realtest.log'" in (ROOT / 'tools/collect-realtest-log.ps1').read_text()
+assert decoded == '\\log\\realtest.log', decoded
+assert "'log\\realtest.log'" in (ROOT / 'tools/collect-realtest-log.ps1').read_text()
 for source in (realtest,boot):
     # Persisted firmware identity stays compatible while the log path changes.
     assert '0x4C495445U, 0x4F53U, 0x5254U' in source

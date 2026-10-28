@@ -16,10 +16,8 @@ with tempfile.TemporaryDirectory(prefix='system-stage-dependencies-') as directo
     for name in ('ld-linux-system.so.1', 'ld-linux-liteos.so.1',
                  'libsystemc.so.1', 'libliteosc.so.1'):
         (esp/'lib'/name).touch()
-    compatibility = esp/'compat/linux/lib/x86_64-linux-gnu'
+    compatibility = esp/'usr/apps/chrome/lib'
     compatibility.mkdir(parents=True)
-    (esp/'lib64').mkdir()
-    (esp/'lib64/ld-linux-x86-64.so.2').touch()
     for name in ('libc.so.6', 'libm.so.6', 'ld-linux-x86-64.so.2'):
         (compatibility/name).touch()
     baseline = esp/'selected-glibc'
@@ -77,7 +75,7 @@ with tempfile.TemporaryDirectory(prefix='system-stage-dependencies-') as directo
         assert 'Missing actual Chrome runtime dependency:' in run(['/lib/'+loader], [library], missing)
     for libraries in (['libliteosc.so.1'], ['libsystemc.so.1', 'libliteosc.so.1']):
         assert 'retired runtime dependency' in run(['/lib/'+loader], libraries)
-    for interpreters in ([], ['/lib/ld-system.so.1'], ['/lib64/ld-linux-x86-64.so.2'],
+    for interpreters in ([], ['/lib/ld-system.so.1'], ['/usr/apps/chrome/lib/ld-linux-x86-64.so.2'],
                          ['/lib/ld-linux-liteos.so.1'],
                          ['/lib/ld-linux-system.so.1', '/lib/ld-linux-liteos.so.1']):
         assert 'Linux-personality interpreter' in run(interpreters, ['libsystemc.so.1'])
@@ -85,15 +83,13 @@ with tempfile.TemporaryDirectory(prefix='system-stage-dependencies-') as directo
         assert 'does not depend' in run(['/lib/ld-linux-system.so.1'], dependencies)
     assert 'Cannot inspect' in run([], [], error=True)
     assert 'mixes system and glibc' in run(['/lib/'+loader], [library, 'libc.so.6'])
-    glibc_interpreter = ['/lib64/ld-linux-x86-64.so.2']
+    glibc_interpreter = ['/usr/apps/chrome/lib/ld-linux-x86-64.so.2']
     graph = {'libc.so.6':['ld-linux-x86-64.so.2'], 'libm.so.6':['libc.so.6']}
     assert run(glibc_interpreter, ['libc.so.6', 'libm.so.6'], mode='glibc', graph=graph) is None
     graph['ld-linux-x86-64.so.2'] = ['libc.so.6']
     assert run(glibc_interpreter, ['libc.so.6'], mode='glibc', graph=graph) is None
     assert 'Missing actual' in run(glibc_interpreter, ['libc.so.6'], mode='glibc', graph=graph,
-                                  missing_relative='compat/linux/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2')
-    assert 'Missing actual' in run(glibc_interpreter, ['libc.so.6'], mode='glibc',
-                                  missing_relative='lib64/ld-linux-x86-64.so.2')
+                                  missing_relative='usr/apps/chrome/lib/ld-linux-x86-64.so.2')
     for names in ([], [library], ['libc.so.6', library]):
         assert 'exclusively depend' in run(glibc_interpreter, names, mode='glibc')
     for bad in ('../escape.so', '/host/libc.so.6'):
@@ -103,9 +99,9 @@ with tempfile.TemporaryDirectory(prefix='system-stage-dependencies-') as directo
     assert 'Invalid or duplicate' in run(glibc_interpreter, ['libc.so.6'], mode='host')
     assert 'Invalid or duplicate' in run(glibc_interpreter, ['libc.so.6'], mode='glibc', duplicate=True)
     assert 'baseline mismatch' in run(glibc_interpreter, ['libc.so.6'], mode='glibc', graph=graph,
-                                     tamper='compat/linux/lib/x86_64-linux-gnu/libc.so.6')
+                                     tamper='usr/apps/chrome/lib/libc.so.6')
     assert 'interpreter does not match' in run(glibc_interpreter, ['libc.so.6'], mode='glibc', graph=graph,
-                                             tamper='lib64/ld-linux-x86-64.so.2')
+                                             tamper='usr/apps/chrome/lib/ld-linux-x86-64.so.2')
 print('Actual Chrome staging gate: current runtime, retired/mixed dependencies rejected, missing dependencies, wrong/duplicate interpreter and inspection failures passed')
 
 begin = source.index('import re\n', source.index('chrome_gpu_profile="$(python3'))

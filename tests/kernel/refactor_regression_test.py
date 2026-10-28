@@ -9,11 +9,12 @@ import time
 root = Path(__file__).resolve().parents[2]
 groups = {
     'filesystem': ['block_cache_reservation', 'block_cache_perf', 'block_cache_copy',
-                   'fat_sector_copy', 'fat_cluster_seek_perf', 'fat_bulk_read',
+                   'block_cache_writeback_batch', 'block_cache_stream_write',
+                   'fat_sector_copy', 'fat_cluster_seek_perf', 'fat_bulk_read', 'fat_bulk_write',
                    'fat_lfn_invalidation',
                    'vfs_range_sync', 'vfs_resize_range', 'vfs_cached_exec_read',
-                   'vfs_io_progress', 'vfs_read_eof_revalidation',
-                   'vfs_user_path', 'vfs_registry_slots',
+                   'vfs_io_progress', 'vfs_user_write_batch', 'linux_file_io_progress', 'vfs_read_eof_revalidation',
+                   'vfs_user_path', 'vfs_current_directory', 'vfs_registry_slots',
                    'vfs_backend_registration',
                    'vfs_volatile_prefix',
                    'vfs_mount_scan',
@@ -64,7 +65,8 @@ groups = {
         'device_object_init', 'device_registry', 'device_io_registration', 'display_initialization', 'input_motion_eviction',
         'input_pending_publication', 'input_motion_coalesce', 'input_batch', 'gpu_fence_notification',
         'firmware_name', 'firmware_lifecycle', 'power_lifecycle',
-        'watchdog_lifecycle', 'xhci_event_guard', 'audio_period_copy', 'audio_lifecycle',
+        'watchdog_lifecycle', 'xhci_event_guard', 'xhci_storage_hid',
+        'xhci_event_batch_ack', 'xhci_runtime_handoff', 'audio_period_copy', 'audio_lifecycle',
         'bluetooth_lifecycle'],
     'sync': [
         'spinlock_contention', 'telemetry_ring', 'telemetry_snapshot_copy',
@@ -121,6 +123,7 @@ groups = {
         'handle_lifecycle', 'handle_exec_scan', 'job_lifecycle', 'service_lifecycle',
         'process_enumeration_lock',
         'process_enumeration_cursor',
+        'process_thread_enumeration_cursor',
         'task_monitor',
         'package_registry', 'hrtimer_lifecycle', 'timer_global_guard', 'timer_registry_slot', 'timer_bitmap_slot', 'io_registry_lifecycle', 'io_submission_publication',
         'deferred_priority_fairness', 'deferred_lock', 'deferred_critical_slot', 'deferred_ring_publication', 'scheduler_cpu_choice', 'scheduler_affinity_update',

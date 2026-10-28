@@ -50,8 +50,12 @@ typedef struct e1000_rx_packet {
     uint32_t sequence;
     uint32_t acknowledgement;
     uint16_t window;
+    uint16_t peer_mss;
+    uint8_t peer_window_scale;
+    bool peer_window_scale_present;
     uint8_t source_address6[16];
     uint8_t destination_address6[16];
+    /* Bytes beyond payload_length are unspecified and must not be read. */
     uint8_t payload[SOCKET_MAX_PAYLOAD];
 } e1000_rx_packet_t;
 
@@ -61,14 +65,20 @@ typedef struct e1000_software_queue {
     uint32_t head;
     uint32_t tail;
     uint32_t count;
+    bool borrowed;
     uint64_t dropped;
 } e1000_software_queue_t;
 
 void e1000_queue_init(e1000_software_queue_t *queue);
 bool e1000_queue_push(e1000_software_queue_t *queue,
                       const e1000_rx_packet_t *packet);
-bool e1000_queue_pop(e1000_software_queue_t *queue,
-                     e1000_rx_packet_t *packet);
+bool e1000_queue_push_payload(e1000_software_queue_t *queue,
+                              const e1000_rx_packet_t *packet,
+                              const uint8_t *payload);
+/* 借用期间槽位仍由队列持有，处理结束后必须归还。初始化只能在无使用者时进行。 */
+const e1000_rx_packet_t *e1000_queue_borrow(e1000_software_queue_t *queue);
+void e1000_queue_release(e1000_software_queue_t *queue,
+                         const e1000_rx_packet_t *packet);
 bool e1000_packet_queue_self_test(void);
 
 uint32_t e1000_flow_hash_ipv4(uint32_t source_address,

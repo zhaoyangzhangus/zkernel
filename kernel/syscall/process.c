@@ -1,4 +1,4 @@
-/* REFACTOR_SYSCALL_PROCESS_OWNER: process and thread syscall lifecycle. */
+/* REFACTOR_SYSCALL_PROCESS_OWNER：进程和线程系统调用生命周期。 */
 
 #include <arch/x86_64/cpu.h>
 #include <arch/x86_64/paging.h>
@@ -65,7 +65,7 @@ static void signal_unlock(process_t *process) {
 static kstatus_t queue_current_signal(uint32_t signal) {
     thread_t *thread = sched_current_thread();
     if (thread == 0 || thread->process == 0) return K_EPERM;
-    /* ponytail: target the caller until process-wide PID routing exists. */
+    /* ponytail：进程级 PID 路由实现前，将目标设为调用方。 */
     __atomic_fetch_or(&thread->signal_pending, signal_bit(signal),
                       __ATOMIC_RELEASE);
     return K_OK;
@@ -131,7 +131,7 @@ int64_t syscall_deliver_pending_signal(arch_trap_frame_t *frame,
         if ((action.flags & OS_SIG_FLAG_NODEFER) == 0U) {
             thread->signal_mask |= bit;
         }
-        /* SIGKILL and SIGSTOP may never be blocked. */
+        /* SIGKILL 和 SIGSTOP 永远不能被屏蔽。 */
         thread->signal_mask &= ~OS_SIGNAL_UNBLOCKABLE_MASK;
         thread->signal_frame = frame_address;
         ++thread->signal_depth;
@@ -347,9 +347,8 @@ int64_t syscall_linux_activate(uint64_t unused0, uint64_t unused1,
         process->personality = OS_PROCESS_PERSONALITY_LINUX_X86_64;
         activated = true;
     } else if (process->personality == OS_PROCESS_PERSONALITY_NATIVE) {
-        /* The same loader binary is also the interpreter for native System
-         * ELF services.  Their loader must be able to return to the native
-         * entry point without requesting a Linux ABI transition. */
+        /* 同一加载器二进制也作为 System 原生 ELF 服务的解释器。
+         * 这些服务的加载器必须能返回原生入口点，而不请求切换到 Linux ABI。 */
         native_noop = true;
     }
     process_thread_unlock(process);
@@ -489,9 +488,8 @@ int64_t syscall_thread_enumerate(uint64_t arguments_pointer, uint64_t unused1,
                         &arguments, sizeof(arguments));
 }
 
-/* Write into the suspended child's COW space, never the caller's TLS.
- * Pins resolve COW and hold the page through unmap; no CR3 switching or
- * raw access to another process's user pointer is required. */
+/* 写入已挂起子进程的 COW 地址空间，绝不写入调用方 TLS。
+ * pin 操作会处理 COW 并在 unmap 期间保持页面存活；无需切换 CR3，也不直接访问其他进程的用户指针。 */
 static kstatus_t process_fork_child_tid_write(process_t *process,
                                              uint64_t pointer, uint32_t tid) {
     process_thread_lock(process);

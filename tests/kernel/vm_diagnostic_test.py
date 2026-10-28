@@ -1,4 +1,4 @@
-"""Run production fault diagnostics, mocking only serial I/O and current thread."""
+"""Run production fault diagnostics with serial, task and page-stat fixtures."""
 from pathlib import Path
 import subprocess
 import tempfile
@@ -38,6 +38,15 @@ int kernel_serial_printf_serial_only(const char *, ...) __attribute__((format(pr
 static char output[1024];
 static size_t used;
 static thread_t *current;
+static kstatus_t stats_status = K_OK;
+static unsigned stats_calls;
+kstatus_t page_memory_get_stats(uint64_t *total, uint64_t *free) {
+    assert(total && free && !used);
+    ++stats_calls;
+    if (stats_status != K_OK) return stats_status;
+    *total = UINT64_MAX; *free = 0x123456789abcdef0ULL;
+    return K_OK;
+}
 thread_t *sched_current_thread(void) { return current; }
 static void capture(char c) { assert(used + 1 < sizeof(output)); output[used++] = c; }
 static void reset(void) { memset(output,0,sizeof(output)); used=0; }
@@ -52,9 +61,13 @@ int main(void) {
     vm_fault_info_t fault = {.address=UINT64_MAX,.access=UINT32_MAX,.cpu_error=UINT32_MAX};
     vm_area_t area = {.start=0x123456789abcdef0,.end=UINT64_MAX,.prot=7,.flags=VM_AREA_COW};
     vm_fault_diag_emit(&thread,&fault,UINT32_MAX,K_EIO,&area,UINT64_MAX,3);
-    assert(!strcmp(output,"OS_VM_USER_FAULT pid=0xffffffffffffffff address=0xffffffffffffffff access=0x00000000ffffffff error=0x00000000ffffffff status=0xfffffffffffffffb area=0x123456789abcdef0-0xffffffffffffffff prot=0x0000000000000007 object=0x0000000000000003 file_offset=0xffffffffffffffff\r\n"));
+    assert(!strcmp(output,"OS_VM_USER_FAULT pid=0xffffffffffffffff address=0xffffffffffffffff access=0x00000000ffffffff error=0x00000000ffffffff status=0xfffffffffffffffb area=0x123456789abcdef0-0xffffffffffffffff prot=0x0000000000000007 object=0x0000000000000003 file_offset=0xffffffffffffffff memory_status=0x0000000000000000 total_pages=0xffffffffffffffff free_pages=0x123456789abcdef0\r\n"));
     reset(); vm_fault_diag_emit(&thread,&fault,0,INT64_MIN,NULL,0,0);
     assert(strstr(output,"status=0x8000000000000000 area=0x0000000000000000-0x0000000000000000 prot=0x0000000000000000"));
+    stats_status = K_EIO;
+    reset(); vm_fault_diag_emit(&thread,&fault,0,K_EIO,NULL,0,0);
+    assert(strstr(output," memory_status=0xfffffffffffffffb total_pages=0x0000000000000000 free_pages=0x0000000000000000\r\n"));
+    assert(stats_calls == 3);
     reset(); vm_write_repair_diag("COW",&fault,&area,UINT64_MAX,UINT64_MAX,UINT64_MAX,INT64_MIN);
     assert(!strcmp(output,"OS_VM_WRITE_REPAIR stage=COW pid=ffffffffffffffff va=ffffffffffffffff page=ffffffffffffffff index=ffffffffffffffff area_flags=80000000 cow=1 pte_flags=ffffffffffffffff cpu_error=ffffffff status=-9223372036854775808\r\n"));
     current=NULL; reset(); vm_write_repair_diag(NULL,NULL,NULL,0,0,0,K_OK);

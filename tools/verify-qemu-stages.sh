@@ -22,10 +22,8 @@ if [[ ! -f "$contracts_path" ]]; then
     exit 2
 fi
 
-# These are the stable boot/runtime boundaries.  Fine-grained USER_RUNTIME
-# trace records are intentionally not required here; their purpose is to
-# locate a failure inside the user image, while these markers define the
-# acceptance boundary for a bootable debug image.
+# 这些是稳定的启动/运行边界。此处刻意不要求细粒度 USER_RUNTIME 跟踪记录；这些记录用于定位用户映像内部故障，
+# 而下列标记定义可启动调试映像的验收边界。
 required_markers=(
     'OS_KERNEL_OK'
     'OS_CPU_INIT_OK'
@@ -58,9 +56,8 @@ required_stages=(
     'OS_STAGE phase=USER_RUNTIME step=5 value=1'
     'OS_STAGE phase=DESKTOP step=4 value=1'
 
-    # Specification phases 0..18 have runtime self-test boundaries.  Phase
-    # 19/20 are deliberately reported as pending until the release gates are
-    # implemented; their presence still makes the stop point unambiguous.
+    # 规范阶段 0..18 均有运行时自测边界。阶段 19/20 在发布门禁实现前刻意标记为待处理；
+    # 保留这些标记仍可明确指出停止位置。
     'OS_STAGE phase=SPEC_P0_REPOSITORY step=5 value=1'
     'OS_STAGE phase=SPEC_P1_CPU step=5 value=1'
     'OS_STAGE phase=SPEC_P2_MEMORY step=5 value=1'
@@ -83,9 +80,8 @@ required_stages=(
     'OS_STAGE phase=SPEC_P19_ABI step=15 value=0'
     'OS_STAGE phase=SPEC_P20_OS1 step=15 value=0'
 
-    # Refactoring roadmap phases 0..9.  Phase 0 remains pending until the
-    # host-side benchmark baseline and regression gate are recorded; its
-    # in-kernel metric boundary still makes the stop point exact.
+    # 重构路线图阶段 0..9。阶段 0 在记录宿主基准和回归门禁前仍为待处理；
+    # 内核中的度量边界仍能准确标识停止位置。
     'OS_STAGE phase=REFACTOR_P0_BASELINE step=15 value=0'
     'OS_STAGE phase=REFACTOR_P0_BASELINE step=16 value=1'
     'OS_STAGE phase=REFACTOR_P1_HEADERS step=5 value=1'

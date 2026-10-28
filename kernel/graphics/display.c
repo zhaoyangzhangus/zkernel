@@ -1,19 +1,14 @@
 #include <kernel/display.h>
 #include <kernel/console.h>
-#include <kernel/qemu_stdvga.h>
 #include "internal.h"
 
-/* Hardware query and scanout selection stay outside the compositor. */
+/* 硬件查询和扫描输出选择逻辑保持在合成器之外。 */
 void window_display_reset_locked(void) {
     g_window_server.display_width = 0U;
     g_window_server.display_height = 0U;
     g_window_server.display_stride = 0U;
     g_window_server.display_format = 0U;
     g_window_server.framebuffer = 0;
-}
-
-void window_display_set_scanout_locked(volatile uint32_t *framebuffer) {
-    g_window_server.framebuffer = framebuffer;
 }
 
 bool window_display_prepare(void) {
@@ -34,12 +29,6 @@ bool window_display_prepare(void) {
     g_window_server.display_format = format;
     g_window_server.framebuffer =
         (volatile uint32_t *)(uintptr_t)display_core_framebuffer_virtual();
-
-    /* QEMU StdVGA may expose a complete front page for cursor-only updates. */
-    if (qemu_stdvga_flip_available()) {
-        volatile uint32_t *front = qemu_stdvga_front_buffer();
-        if (front != 0) g_window_server.framebuffer = front;
-    }
 
     if (g_window_server.framebuffer == 0 || width == 0U ||
         height == 0U || stride < width) {

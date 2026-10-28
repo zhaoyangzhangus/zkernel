@@ -53,7 +53,7 @@ int main(void) {
     free(allocation);
     p7_emit("OS_P7_MALLOC_FREE_PASS\n");
 
-    descriptor = open("/tests/p7-data.txt", O_RDONLY | O_CLOEXEC);
+    descriptor = open("/usr/apps/p7-glibc/p7-data.txt", O_RDONLY | O_CLOEXEC);
     if (descriptor < 0 ||
         read(descriptor, file_data, expected_data_size) !=
             (ssize_t)expected_data_size ||

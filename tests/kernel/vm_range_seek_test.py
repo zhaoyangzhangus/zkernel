@@ -43,6 +43,7 @@ program = r'''
 #include <assert.h>
 #include <string.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <kernel/vm.h>
 #include <uapi/mm.h>
 #define VM_USER_BASE 0x10000ULL
@@ -53,7 +54,7 @@ static uint64_t trace[128][4];
 static void map_lock(vm_space_t *s) { assert(s && !locked);locked=1; }
 static void map_unlock(vm_space_t *s) { assert(s && locked);locked=0; }
 static kstatus_t record(unsigned kind,uint64_t id,uint64_t first,uint64_t end) {
-    assert(locked && trace_count<128);
+    assert((kind==2 ? !locked : locked) && trace_count<128);
     trace[trace_count][0]=kind;trace[trace_count][1]=id;
     trace[trace_count][2]=first;trace[trace_count++][3]=end;
     return ++callbacks==fail_at?K_EIO:K_OK;
@@ -61,12 +62,24 @@ static kstatus_t record(unsigned kind,uint64_t id,uint64_t first,uint64_t end) {
 static kstatus_t sync_file(void *mapping,uint64_t first,uint64_t count) {
     return record(2,(uintptr_t)mapping,first,count);
 }
+void *kmalloc(size_t size,uint32_t flags) {(void)flags;return malloc(size);}
+void kfree(void *pointer) {assert(!locked);free(pointer);}
+void vm_object_get(vm_object_t *object) {
+    assert(locked);atomic_fetch_add(&object->refs.value,1U);
+}
+void vm_object_put(vm_object_t *object) {
+    assert(!locked&&atomic_fetch_sub(&object->refs.value,1U)>0U);
+}
 static kstatus_t vm_tlb_unmap_range(vm_space_t *s,uint64_t first,uint64_t end) {
     (void)s;return record(1,0,first,end);
 }
-static kstatus_t anon_page_discard_range(vm_object_t *o,uint64_t first,uint64_t end) {
+typedef struct anon_page_node anon_page_node_t;
+static kstatus_t anon_page_retire_range(vm_object_t *o,uint64_t first,uint64_t end,
+                                        anon_page_node_t **out) {
+    (void)out;
     return record(3,o->size,first,end);
 }
+static void anon_page_release_retired(anon_page_node_t *pages) {assert(!locked && !pages);}
 static void vm_tlb_bump_generation(vm_space_t *s) { (void)s;(void)record(4,0,0,0); }
 ''' + code + oracle + old + r'''
 static vm_area_t areas[4096];static vm_object_t objects[4096],shadows[4096];

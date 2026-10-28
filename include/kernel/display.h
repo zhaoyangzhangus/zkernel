@@ -6,25 +6,21 @@
 
 
 /*
- * Native scanout/page-flip contract.
+ * 原生扫描输出与翻页约定。
  *
- * display_commit_submit() remains the public submission API.  When no native
- * backend is registered, display core uses the GOP copy fallback.  Once a
- * native backend is registered, the same submission is handed to atomic_commit
- * after its acquire fence has completed.
+ * display_commit_submit() 是公开的提交接口。未注册原生后端时，显示核心使用
+ * GOP 复制回退路径；注册后，则在获取栅栏完成时将同一提交交给 atomic_commit。
  *
- * A K_OK return from atomic_commit transfers asynchronous ownership of the
- * request to the backend.  The backend MUST invoke complete exactly once.
+ * atomic_commit() 返回 K_OK 时，请求的异步所有权转交给后端。后端必须且只能
+ * 调用一次 complete。
  *
- * complete(K_OK) means the new surface has been latched for scanout and the
- * previous scanout surface is no longer being read by the display engine.
- * That point is normally flip-done/vblank.  Display core signals the user's
- * release fence only after this callback.
+ * complete(K_OK) 表示新表面已锁存用于扫描输出，显示引擎不再读取此前的扫描
+ * 输出表面。通常这一时刻对应翻页完成或垂直消隐。显示核心仅在此回调之后触发
+ * 用户的释放栅栏。
  *
- * The completion callback may run synchronously from atomic_commit or later
- * from a normal/deferred kernel context, but MUST NOT run directly in hard IRQ
- * context.  A GPU IRQ handler should ACK the interrupt and schedule its own
- * bottom half before invoking complete.
+ * 完成回调可以由 atomic_commit() 同步调用，也可以稍后在普通或延迟内核上下文
+ * 中调用，但绝不能直接在硬中断上下文中执行。GPU 中断处理程序应先确认中断，
+ * 再调度自身的下半部，之后才能调用 complete。
  */
 typedef struct display_scanout_request {
     uint32_t output;
@@ -42,6 +38,9 @@ typedef void (*display_scanout_complete_fn)(
 
 typedef struct display_scanout_backend {
     void *context;
+
+    /* 可选的、有界线程上下文进度/超时检查；不得在中断上下文中调用。 */
+    void (*poll)(void *context);
 
     kstatus_t (*atomic_commit)(
         void *context,
@@ -64,29 +63,29 @@ bool display_core_query(uint32_t output, uint32_t *width, uint32_t *height,
                         uint32_t *stride, uint32_t *format);
 
 /*
- * Register the native atomic scanout implementation for an output.
+ * 为指定输出注册原子原生扫描输出实现。
  *
- * Registration is intentionally one-shot in P7.  The backend context and its
- * function remain valid for the lifetime of the display device.
+ * P7 阶段有意将注册限制为一次。后端上下文及其函数在显示设备的整个生命周期内
+ * 必须保持有效。
  */
 kstatus_t display_core_register_scanout_backend(
     uint32_t output,
     const display_scanout_backend_t *backend);
 
 bool display_core_has_native_scanout(uint32_t output);
+void display_core_poll_scanout(void);
 
-/* Submit one full-frame CPU-WB buffer through the registered native backend
- * and wait for its release fence.  This is the boot-time hand-off test used
- * to separate native flip/event delivery from the later compositor wiring. */
+/* 通过已注册的原生后端提交一个完整帧的 CPU-WB 缓冲区，并等待其释放栅栏。
+ * 这是启动时的交接测试，用于将原生翻页/事件传递与后续合成器接入分开验证。 */
 bool display_core_native_self_test(void);
 
 /*
- * Kernel compositor fast path.
+ * 内核合成器快速路径。
  *
- * Source is XRGB8888 in ordinary WB RAM. Destination points into the current
- * scanout mapping.  The function does not fence: callers batch spans and issue
- * SFENCE at the transaction/chunk boundary.
+ * 源数据是普通 WB 内存中的 XRGB8888 格式；目标地址指向当前扫描输出映射。
+ * 此函数不执行栅栏：调用方应批量处理多个跨度，并在事务或分块边界发出 SFENCE。
  */
+void display_core_publish_xrgb8888_pixel(volatile uint32_t *destination, uint32_t pixel);
 void display_core_publish_xrgb8888_span(volatile uint32_t *destination,
                                         const uint32_t *source,
                                         uint32_t pixels);

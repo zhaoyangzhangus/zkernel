@@ -1,5 +1,6 @@
 """Actual pipe I/O, atomic threshold, wait-boundary races and object lifetime."""
 from pathlib import Path
+import re
 import subprocess
 import tempfile
 
@@ -11,6 +12,41 @@ source = source.replace('spinlock_lock(&state->lock);',
                         'spinlock_lock(&state->lock); assert(!lock_depth); ++lock_depth;')
 source = source.replace('spinlock_unlock(&state->lock);',
                         'assert(lock_depth==1); --lock_depth; spinlock_unlock(&state->lock);')
+unix_source = (root / 'kernel/syscall/linux.c').read_text()
+recvmsg = unix_source[unix_source.index('static int64_t linux_recvmsg('):
+                       unix_source.index('static int64_t linux_unix_sendto(')]
+assert 'pipe_read_limited(read_end, payload, request_length,' in recvmsg
+assert 'linux_unix_channel_pipe_limit, channel)' in recvmsg
+assert 'request_length = linux_unix_channel_read_limit(' not in recvmsg
+
+def unix_function(name):
+    match = re.search(r'static [^\n]+ ' + name + r'\(', unix_source)
+    assert match, name
+    opening = unix_source.index('{', match.start())
+    depth, end = 1, opening + 1
+    while depth:
+        depth += (unix_source[end] == '{') - (unix_source[end] == '}')
+        end += 1
+    return unix_source[match.start():end]
+
+ancillary = r'''
+#define LINUX_UNIX_MAX_MESSAGES 8
+typedef struct { uint64_t start_offset; uint32_t payload_length, fd_count; }
+ linux_unix_ancillary_record_t;
+typedef struct {
+ spinlock_t lock;
+ uint64_t bytes_written, bytes_read;
+ unsigned head, tail, count;
+ linux_unix_ancillary_record_t records[LINUX_UNIX_MAX_MESSAGES];
+} linux_unix_channel_t;
+static unsigned discarded_fds;
+static void linux_unix_ancillary_put_record(linux_unix_ancillary_record_t *r) {
+ discarded_fds+=r->fd_count;r->fd_count=0;
+}
+''' + '\n'.join(unix_function(name) for name in (
+    'linux_unix_channel_push', 'linux_unix_channel_commit_write',
+    'linux_unix_channel_read_limit', 'linux_unix_channel_pipe_limit',
+    'linux_unix_channel_commit_read'))
 code = r'''
 #include <assert.h>
 #include <stdlib.h>
@@ -155,6 +191,7 @@ static void *destroy_endpoint(void *endpoint) {
  object_put(endpoint);return 0;
 }
 int main(void) {
+ ancillary_boundary_tests();
  for(unsigned i=0;i<sizeof(input);++i)input[i]=(uint8_t)(i*17+3);
  for(unsigned stage=1;stage<=2;++stage) {
   reader=writer=0;fail_at=attempts+stage;
@@ -337,6 +374,64 @@ int main(void) {
  puts("PASS: two exact allocations per pipe with embedded endpoints/poisoned storage, one lock per transfer/probe, atomic threshold/short write, wait-boundary races, directional close wakes, close-during-notify/drain/refs, two OOM stages, 10000 FIFO operations, 4000 producer records and 2000 concurrent pair destructions");
 }
 '''
+boundary_tests = ancillary + r'''
+static linux_unix_channel_t ancillary_channel;
+static void send_fragment(unsigned n, unsigned fds) {
+ uint64_t bytes;
+ if(fds) {
+  linux_unix_ancillary_record_t record={.payload_length=n,.fd_count=fds};
+  assert(linux_unix_channel_push(&ancillary_channel,&record)==K_OK);
+  assert(!record.fd_count);
+ }
+ assert(pipe_write(writer,input,n,0,&bytes)==K_OK && bytes==n);
+ linux_unix_channel_commit_write(&ancillary_channel,bytes);
+}
+static void ancillary_arrives_while_waiting(void *context) {
+ assert(context==reader->state);
+ send_fragment(3,0);send_fragment(4,1);send_fragment(2,2);
+}
+static size_t invalid_limit(void *context,size_t available) {
+ return context?available+1:0;
+}
+static void ancillary_boundary_tests(void) {
+ uint64_t bytes;linux_unix_ancillary_record_t record={0};
+ memset(&ancillary_channel,0,sizeof(ancillary_channel));
+ spinlock_init(&ancillary_channel.lock);make_pipe();
+ /* The old pre-wait snapshot has no records and allows all nine bytes.
+  * Arrival while the reader sleeps must not make it consume/close both FDs. */
+ assert(linux_unix_channel_read_limit(&ancillary_channel,9)==9);
+ before_wait=ancillary_arrives_while_waiting;
+ assert(pipe_read_limited(reader,output,9,123,&bytes,
+  linux_unix_channel_pipe_limit,&ancillary_channel)==K_OK && bytes==3);
+ assert(!linux_unix_channel_commit_read(&ancillary_channel,bytes,true,&record));
+ assert(!discarded_fds && ancillary_channel.count==2);
+ assert(pipe_read_limited(reader,output,9,0,&bytes,
+  linux_unix_channel_pipe_limit,&ancillary_channel)==K_OK && bytes==4);
+ assert(linux_unix_channel_commit_read(&ancillary_channel,bytes,true,&record));
+ assert(record.fd_count==1 && !discarded_fds && ancillary_channel.count==1);
+ assert(pipe_read_limited(reader,output,1,0,&bytes,
+  linux_unix_channel_pipe_limit,&ancillary_channel)==K_OK && bytes==1);
+ assert(linux_unix_channel_commit_read(&ancillary_channel,bytes,true,&record));
+ assert(record.fd_count==2 && !discarded_fds && !ancillary_channel.count);
+ assert(pipe_read_limited(reader,output,9,0,&bytes,
+  linux_unix_channel_pipe_limit,&ancillary_channel)==K_OK && bytes==1);
+ assert(!linux_unix_channel_commit_read(&ancillary_channel,bytes,true,&record));
+ assert(ancillary_channel.bytes_read==9);
+ send_fragment(2,3);
+ assert(pipe_read(reader,output,2,0,&bytes)==K_OK && bytes==2);
+ assert(!linux_unix_channel_commit_read(&ancillary_channel,bytes,false,&record));
+ assert(discarded_fds==3); /* Plain read still intentionally discards rights. */
+ send_fragment(1,0);
+ assert(pipe_read_limited(reader,output,1,0,&bytes,invalid_limit,0)==K_EINVAL && !bytes);
+ assert(pipe_read_limited(reader,output,1,0,&bytes,invalid_limit,reader)==K_EINVAL && !bytes);
+ assert(pipe_read(reader,output,1,0,&bytes)==K_OK && bytes==1);
+ assert(pipe_read_limited(reader,output,1,0,&bytes,
+  linux_unix_channel_pipe_limit,&ancillary_channel)==K_ETIMEDOUT && !bytes);
+ release_pair();
+ puts("PASS: production Unix ancillary boundaries rechecked after blocking wait; multiple FD batches, partial reads, plain-read discard, invalid limiter");
+}
+'''
+code = code.replace('int main(void) {', boundary_tests + '\nint main(void) {', 1)
 with tempfile.TemporaryDirectory(prefix='liteos-pipe-io-') as directory:
     binary = str(Path(directory) / 'test')
     def run(actual):
@@ -346,6 +441,11 @@ with tempfile.TemporaryDirectory(prefix='liteos-pipe-io-') as directory:
                    input=actual, text=True, check=True)
         return subprocess.run([binary],capture_output=True,text=True,timeout=60)
     result=run(code);assert result.returncode==0,result.stderr;print(result.stdout.strip())
+    negative=code.replace('size_t bounded = limit(context, amount);',
+                          'size_t bounded = amount; (void)context;')
+    assert negative!=code
+    result=run(negative);assert result.returncode!=0,result.stderr
+    print('Negative control rejected: stale pre-wait boundary loses ancillary FDs')
     negative=code.replace('if (wake_readers) (void)wake_all(&state->read_waitq);',
                           '(void)wake_all(&state->read_waitq); (void)wake_readers;')
     assert negative!=code

@@ -9,6 +9,7 @@
 #define NET_IPV6_HEADER_SIZE     40U
 #define NET_UDP_HEADER_SIZE      8U
 #define NET_TCP_HEADER_SIZE      20U
+#define NET_TCP_SYN_HEADER_SIZE  (NET_TCP_HEADER_SIZE + 4U)
 #define NET_ARP_FRAME_SIZE       42U
 #define NET_ARP_CACHE_SIZE       16U
 #define NET_NDP_CACHE_SIZE       16U
@@ -62,7 +63,8 @@ typedef struct net_ipv6_udp_view {
     uint16_t payload_length;
 } net_ipv6_udp_view_t;
 
-/* TCP 无选项报文视图；payload 指向输入帧，不拥有该内存。 */
+/* Parsed TCP view; payload borrows the input frame. SYN options do not by
+ * themselves enable scaling: the owning socket must validate the handshake. */
 typedef struct net_tcp_view {
     uint8_t source_mac[6];
     uint8_t destination_mac[6];
@@ -77,6 +79,9 @@ typedef struct net_tcp_view {
     uint16_t window;
     uint8_t flags;
     uint8_t header_length;
+    uint16_t peer_mss;
+    uint8_t peer_window_scale;
+    bool peer_window_scale_present;
     const uint8_t *payload;
     uint16_t payload_length;
 } net_tcp_view_t;
@@ -210,6 +215,18 @@ kstatus_t net_tcp_build_ipv4(uint8_t *frame, size_t capacity,
 kstatus_t net_tcp_parse_ipv4(const uint8_t *frame, size_t frame_length,
                              net_tcp_view_t *view);
 
+/* receive_scale=-1 omits WS; 0..14 offers it on SYN only. The supplied window
+ * is already the wire value; SYN windows are never shifted by the builder. */
+kstatus_t net_tcp_build_ipv4_scaled(uint8_t *frame, size_t capacity,
+                             const uint8_t source_mac[6],
+                             const uint8_t destination_mac[6],
+                             uint32_t source_address, uint32_t destination_address,
+                             uint16_t source_port, uint16_t destination_port,
+                             uint32_t sequence, uint32_t acknowledgement,
+                             uint8_t flags, uint16_t window, int receive_scale,
+                             const void *payload, uint16_t payload_length,
+                             size_t *frame_length);
+
 kstatus_t net_tcp_build_ipv6(uint8_t *frame, size_t capacity,
                              const uint8_t source_mac[6],
                              const uint8_t destination_mac[6],
@@ -222,6 +239,16 @@ kstatus_t net_tcp_build_ipv6(uint8_t *frame, size_t capacity,
                              size_t *frame_length);
 kstatus_t net_tcp_parse_ipv6(const uint8_t *frame, size_t frame_length,
                              net_tcp_view_t *view);
+kstatus_t net_tcp_build_ipv6_scaled(uint8_t *frame, size_t capacity,
+                             const uint8_t source_mac[6],
+                             const uint8_t destination_mac[6],
+                             const uint8_t source_address[16],
+                             const uint8_t destination_address[16],
+                             uint16_t source_port, uint16_t destination_port,
+                             uint32_t sequence, uint32_t acknowledgement,
+                             uint8_t flags, uint16_t window, int receive_scale,
+                             const void *payload, uint16_t payload_length,
+                             size_t *frame_length);
 
 kstatus_t net_arp_build_ipv4(uint8_t *frame, size_t capacity,
                              const uint8_t source_mac[6],

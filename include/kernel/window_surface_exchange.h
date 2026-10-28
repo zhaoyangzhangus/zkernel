@@ -4,9 +4,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-/* Metadata only: callers hold the window lock for each operation, but never
- * while rendering. Snapshot references pin the backing allocation separately.
- * A back buffer cannot be reused until every snapshot of its old frame ends. */
+/* 此结构仅保存元数据：调用方在每次操作期间持有窗口锁，但渲染期间不持锁。
+ * 快照引用会单独固定后备分配区。旧帧的所有快照结束前，不得复用其后缓冲区。 */
 typedef struct window_surface_exchange {
     uint32_t readers[2];
     uint32_t front;
@@ -31,8 +30,8 @@ static inline bool window_surface_write_begin(window_surface_exchange_t *state,
     return true;
 }
 
-/* Successful GPU/CPU completion must precede commit. Abort leaves the last
- * complete frame visible, including after a partially overwriting failure. */
+/* 必须先成功完成 GPU/CPU 操作，再提交。中止时仍显示上一完整帧，
+ * 即使失败前已部分覆盖后缓冲区也一样。 */
 static inline bool window_surface_write_end(window_surface_exchange_t *state,
                                             uint64_t token, bool commit) {
     if (!state->writing || token != state->writer_token) return false;

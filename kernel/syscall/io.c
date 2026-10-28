@@ -1,4 +1,4 @@
-/* REFACTOR_SYSCALL_IO_OWNER: user I/O request marshalling and lifetime. */
+/* REFACTOR_SYSCALL_IO_OWNER：用户 I/O 请求编组和生命周期。 */
 
 #include <arch/x86_64/uaccess.h>
 #include <kernel/completion_port.h>
@@ -64,9 +64,8 @@ static void user_io_complete(io_request_t *request) {
             remaining -= length;
         }
     }
-    /* Submission and pending DMA may still hold request references after a
-     * cancellation publishes completion. Keep staging vectors alive with
-     * those references; private_release frees them at final destruction. */
+    /* 取消操作发布完成后，提交过程和待处理 DMA 仍可能持有请求引用。
+     * 暂存向量需随这些引用保持存活；最终销毁时由 private_release 释放。 */
 }
 
 int64_t syscall_io_submit(uint64_t arguments_pointer, uint64_t unused1,

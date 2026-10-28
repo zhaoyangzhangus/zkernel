@@ -27,7 +27,8 @@ abi = module('vulkan_abi_check', 'vulkan_runtime_abi.py')
 # Keep them explicit roots so their own dependencies are validated as well.
 NVIDIA_VULKAN_MODULES = ('libnvidia-glvkspirv.so.595.84',
                          'libnvidia-gpucomp.so.595.84',
-                         'libnvidia-rtcore.so.595.84')
+                         'libnvidia-rtcore.so.595.84',
+                         'libnvidia-eglcore.so.595.84')
 
 
 def vulkan_closure(catalog, package):
@@ -37,7 +38,9 @@ def vulkan_closure(catalog, package):
         if not source.is_file():
             raise RuntimeError('missing NVIDIA Vulkan runtime module: '+name)
         catalog[name] = source
+    # NVIDIA 的无显示 Vulkan 初始化也会动态加载 EGL，不能只检查 DT_NEEDED。
     return closure(catalog, ('libvulkan.so.1', 'libGLX_nvidia.so.0',
+                             'libEGL.so.1', 'libEGL_nvidia.so.0',
                              *NVIDIA_VULKAN_MODULES))
 
 
@@ -76,11 +79,10 @@ def main():
     build = ROOT/args.build
     out = build/'nvidia/vulkan'
     esp = build/'esp'
-    libdir = esp/'compat/linux/lib/x86_64-linux-gnu'
     runtime = build/'nvidia/host-deps/glibc/libc6-extract/lib/x86_64-linux-gnu'
     dev = build/'nvidia/host-deps/glibc/libc6-dev-extract/usr'
     package = build/'nvidia/official-595.84/extracted-gitbash'
-    catalog = {p.name: p for p in libdir.glob('*.so*') if p.is_file()}
+    catalog = {p.name: p for p in (esp/'usr/apps/cube/lib').glob('*.so*') if p.is_file()}
     for directory in ('usr/lib/x86_64-linux-gnu', 'lib/x86_64-linux-gnu'):
         catalog.update({p.name: p for p in (out/'deps/root'/directory).glob('*.so*') if p.is_file()})
     catalog['libvulkan.so.1'] = out/'loader/loader/libvulkan.so.1'
@@ -109,26 +111,36 @@ def main():
     inputs = [lib/'crt1.o', lib/'crti.o', obj, render_obj, shared_obj, lifetime_obj, selected['libvulkan.so.1'],
               runtime/'libc.so.6', lib/'libc_nonshared.a', lib/'crtn.o']
     command = [args.cc, '-nostdlib', '-nodefaultlibs', '-nostartfiles', '-no-pie',
-               '-Wl,--build-id=none,-dynamic-linker,/lib64/ld-linux-x86-64.so.2',
-               '-Wl,-rpath,/compat/linux/lib/x86_64-linux-gnu', '-Wl,--disable-new-dtags',
+               '-Wl,--build-id=none,-dynamic-linker,/usr/apps/vulkan-probe/lib/ld-linux-x86-64.so.2',
+               '-Wl,-rpath,/usr/apps/vulkan-probe/lib', '-Wl,--disable-new-dtags',
                '-Wl,-rpath-link,'+str(runtime), *map(str, inputs), '-o', str(binary)+'.tmp']
     stage.link_cube(binary, command, inputs)
     abi.check(runtime, [binary])
     icd = json.loads((package/'nvidia_icd.json').read_text())
     if icd['ICD']['library_path'] != 'libGLX_nvidia.so.0':
         raise RuntimeError('unexpected NVIDIA Vulkan ICD library')
-    icd['ICD']['library_path'] = '/compat/linux/lib/x86_64-linux-gnu/libGLX_nvidia.so.0'
-    icd_source = out/'nvidia_icd.json'
-    stage.builder.write_changed(icd_source, json.dumps(icd, indent=2)+'\n')
-    files = {libdir/name: source for name, source in selected.items()}
-    files[esp/'sbin/vulkan-probe'] = binary
-    files[esp/'usr/share/vulkan/icd.d/nvidia_icd.json'] = icd_source
-    for path in (out/'deps/root/usr/share/doc').glob('*/copyright'):
-        files[esp/'usr/share/licenses/vulkan'/path.parent.name/'copyright'] = path
-    files[esp/'usr/share/licenses/vulkan/nvidia/LICENSE'] = package/'LICENSE'
-    for path in (out/'licenses/loader').rglob('*'):
-        if path.is_file():
-            files[esp/'usr/share/licenses/vulkan/loader'/path.relative_to(out/'licenses/loader')] = path
+    files = {}
+    for app in ('chrome', 'vulkan-probe'):
+        appdir = esp/'usr/apps'/app
+        icd['ICD']['library_path'] = '/usr/apps/'+app+'/lib/libGLX_nvidia.so.0'
+        icd_source = out/(app+'-nvidia_icd.json')
+        stage.builder.write_changed(icd_source, json.dumps(icd, indent=2)+'\n')
+        files.update({appdir/'lib'/name: source for name, source in selected.items()})
+        files[appdir/'lib/ld-linux-x86-64.so.2'] = runtime/'ld-linux-x86-64.so.2'
+        files[appdir/'vulkan/nvidia_icd.json'] = icd_source
+        egl_source = out/(app+'-egl.json')
+        stage.builder.write_changed(egl_source, json.dumps({
+            'file_format_version': '1.0.0', 'ICD': {
+                'library_path': '/usr/apps/'+app+'/lib/libEGL_nvidia.so.0'}
+        }, indent=2)+'\n')
+        files[appdir/'egl/10_nvidia.json'] = egl_source
+        for path in (out/'deps/root/usr/share/doc').glob('*/copyright'):
+            files[appdir/'licenses'/path.parent.name/'copyright'] = path
+        files[appdir/'licenses/nvidia/LICENSE'] = package/'LICENSE'
+        for path in (out/'licenses/loader').rglob('*'):
+            if path.is_file():
+                files[appdir/'licenses/loader'/path.relative_to(out/'licenses/loader')] = path
+    files[esp/'usr/apps/vulkan-probe/vulkan-probe'] = binary
     if not (out/'licenses/loader/LICENSE.txt').is_file():
         raise RuntimeError('missing Vulkan loader licenses; rebuild loader first')
     for target, source in files.items():

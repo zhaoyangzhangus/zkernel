@@ -6,6 +6,7 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'app-layout.ps1')
 . (Join-Path $PSScriptRoot 'log-records.ps1')
 
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
@@ -35,10 +36,11 @@ function Require-Text([string]$Text, [string]$Pattern,
 }
 
 $buildRoot = Resolve-RepoPath $Build
+Assert-AppGuestLayout (Join-Path $buildRoot 'esp')
 $kernel = Join-Path $buildRoot 'esp\EFI\OS\kernel.elf'
 $testBinary = Join-Path $buildRoot 'esp\tests\p8-frontend'
-$loader = Join-Path $buildRoot 'esp\lib64\ld-linux-x86-64.so.2'
-$libc = Join-Path $buildRoot 'esp\lib\x86_64-linux-gnu\libc.so.6'
+$loader = Join-Path $buildRoot 'esp\usr\apps\p8-frontend\lib\ld-linux-x86-64.so.2'
+$libc = Join-Path $buildRoot 'esp\usr\apps\p8-frontend\lib\libc.so.6'
 $manifest = Join-Path $repoRoot 'build\nvidia\phase5\firmware.manifest'
 $uapiSource = Join-Path $repoRoot 'include\uapi\nvidia_frontend.h'
 $linuxSource = Join-Path $repoRoot 'kernel\syscall\linux.c'
@@ -230,7 +232,7 @@ $testProgram = @(& $readelf.Source '-lW' '--' $testBinary 2>&1 |
     ForEach-Object { $_.ToString() })
 if ($LASTEXITCODE -ne 0 -or
     @($testProgram | Where-Object {
-        $_ -match 'Requesting program interpreter:\s+/lib64/ld-linux-x86-64\.so\.2'
+        $_ -match 'Requesting program interpreter:\s+/usr/apps/p8-frontend/lib/ld-linux-x86-64\.so\.2'
     }).Count -ne 1) {
     Fail-Gate 'staged frontend probe does not carry the required PT_INTERP'
 }

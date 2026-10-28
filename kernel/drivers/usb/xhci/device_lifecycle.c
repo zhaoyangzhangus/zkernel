@@ -2,8 +2,8 @@
 #include <usb/hub.h>
 #include "internal.h"
 
-/* REFACTOR_P8_XHCI_DEVICE_LIFECYCLE_OWNER: device-context DMA lifetime,
- * Slot publication and controller teardown use one private Owner. */
+/* REFACTOR_P8_XHCI_DEVICE_LIFECYCLE_OWNER：设备上下文 DMA 生命周期、Slot 发布和
+ * 控制器拆除由同一个私有所有者负责。 */
 
 #define XHCI_STOP_ENDPOINT_TYPE 15U
 #define XHCI_DISABLE_SLOT_TYPE 10U
@@ -20,8 +20,8 @@ void xhci_zero_device_context(xhci_device_context_t *context) {
 /*
  * V3.10.6B8B
  *
- * xhci_copy_device_context() removed.
- * No published device context is copied between ownership stores.
+ * 已移除 xhci_copy_device_context()。
+ * 不会在所有权存储之间复制已发布的设备上下文。
  */
 
 
@@ -32,15 +32,15 @@ void xhci_clear_device_flags(void) {
 /*
  * V3.10.6B9C-FIX1
  *
- * xhci_set_device_kind() removed.
- * Published runtime state is recomputed from Slot Table.
+ * 已移除 xhci_set_device_kind()。
+ * 已发布的运行时状态由 Slot Table 重新计算。
  */
 
 
 /*
- * V3.10.6B6C EXPLICIT DEVICE RESOURCE TEARDOWN
+ * V3.10.6B6C 显式设备资源拆除
  *
- * DMA/resource lifetime belongs to an explicit device context.
+ * DMA/资源生命周期属于显式设备上下文。
  */
 
 static bool xhci_free_device_resources_device(
@@ -48,12 +48,11 @@ static bool xhci_free_device_resources_device(
     bool released = true;
     if (device == 0) return false;
     if (device->audio_stream != 0) {
-        /* 鐑嫈鍑哄厛璁╃粺涓€闊抽瀵硅薄杩涘叆 DISCONNECTED锛屽啀閲婃斁鍏剁鐐?DMA銆?*/
+        /* 热拔出时先将统一音频对象切换到 DISCONNECTED，再释放其端点 DMA。 */
         audio_stream_t *stream = device->audio_stream;
         device->audio_stream = 0;
         device->audio_stream_running = false;
         device->audio_stream_queued = false;
-        device->audio_stream_bound = false;
         (void)audio_stream_disconnect(stream);
     }
     if (device->bt_controller != 0) {
@@ -250,12 +249,16 @@ static bool xhci_free_device_resources_device(
     device->audio_cycle = 1U;
     device->audio_transfer_pending = false;
     device->audio_completed = 0U;
+    device->audio_stream_generation = 0U;
+    device->audio_transfer_generation = 0U;
+    device->audio_transfer_first = 0U;
+    device->audio_transfer_packets = 0U;
+    device->audio_transfer_failed = false;
     device->audio_stream = 0;
     device->audio_period = 0U;
     device->audio_frames = 0U;
     device->audio_stream_running = false;
     device->audio_stream_queued = false;
-    device->audio_stream_bound = false;
     device->hub_interface = 0U;
     device->hub_interface_present = false;
     device->hub_port_count = 0U;
@@ -289,7 +292,7 @@ static bool xhci_free_device_resources_device(
 }
 
 /*
- * Compatibility wrapper for unpublished/new-device enumeration.
+ * 供尚未发布/新设备枚举路径使用的兼容包装函数。
  */
 bool xhci_free_device_resources(
     xhci_state_t *state)
@@ -304,9 +307,8 @@ bool xhci_free_device_resources(
             &state->device);
 }
 
-/* The auxiliary HID controller has a private working context but no entry in
- * the primary controller's Slot Table or USB Core.  Tear it down without
- * touching the primary controller's published devices. */
+/* 辅助 HID 控制器有自己的私有工作上下文，但不在主控制器的 Slot Table 或 USB Core 中。
+ * 拆除它时不得触碰主控制器已发布的设备。 */
 bool xhci_free_hid_device_resources(xhci_state_t *state) {
     xhci_device_context_t *device;
     bool released = true;
@@ -330,12 +332,11 @@ bool xhci_free_hid_device_resources(xhci_state_t *state) {
 
 
 /*
- * 鍦ㄩ噴鏀剧鐐圭幆涔嬪墠鍏堝仠姝㈡墍鏈変粛鏈?TRB 鍦ㄩ鐨勭鐐广€侱isable Slot 浼氳
- * 璁惧澶辨晥锛屼絾鏄惧紡 Stop Endpoint 鑳芥妸鈥滄帶鍒跺櫒浠嶅彲鑳芥秷璐?DMA 鐜€濈殑
- * 鐢熷懡鍛ㄦ湡杈圭晫鍓嶇Щ锛涘嵆浣胯澶囧凡绐佺劧鎷斿嚭锛屽懡浠ゅけ璐ヤ篃鍙奖鍝嶈瘖鏂紝
- * 鍚庣画浠嶄細鎵ц鏈€灏忓寲鐨勮祫婧愬洖鏀躲€? */
-/*
- * V3.10.6B6C EXPLICIT ENDPOINT STOP
+ * 释放端点环之前，先停止仍有 TRB 在途的端点。Disable Slot 会使设备失效，但显式 Stop Endpoint
+ * 可将“控制器仍可能消费 DMA 环”的生命周期边界提前。即使设备突然拔出，停止命令失败也只影响诊断，
+ * 后续仍会执行尽可能安全的资源回收。
+ *
+ * V3.10.6B6C 显式端点停止
  */
 static bool xhci_stop_pending_endpoints_device(
     xhci_state_t *state,
@@ -384,37 +385,36 @@ static bool xhci_stop_pending_endpoints_device(
 }
 
 /*
- * Compatibility wrapper for the unpublished working context.
+ * 未发布工作上下文的兼容包装函数。
  */
 /*
- * V3.10.6B9E-FIX1 STOP ENDPOINT WRAPPER REMOVED
+ * V3.10.6B9E-FIX1 已移除 STOP ENDPOINT 包装函数
  *
- * Endpoint teardown always receives an explicit
- * xhci_device_context_t *.
+ * 端点拆除始终接收显式的 xhci_device_context_t *。
  */
 
 
 
-/* 璁惧鍙互鍦?active context 鍜?inventory 涔嬮棿绉诲姩锛屾嫇鎵戞爣璁板繀椤婚殢涔嬮噸绠椼€?*/
-/* V3.10.6B7D-FIX1 removed xhci_take_active_device(): runtime devices never activate state->device. */
+/* 设备可能在 active context 和 inventory 之间迁移，因此必须同步重新计算拓扑标记。 */
+/* V3.10.6B7D-FIX1 已移除 xhci_take_active_device()：运行时设备不会激活 state->device。 */
 
 
 
-/* V3.10.6B7D-FIX1 removed xhci_restore_active_device(): runtime devices never activate state->device. */
+/* V3.10.6B7D-FIX1 已移除 xhci_restore_active_device()：运行时设备不会激活 state->device。 */
 
 
 
 /*
- * V3.6.6 SLOT UNPUBLISH
+ * V3.6.6 取消发布 Slot
  *
- * Hardware teardown is still owned by xHCI.
+ * 硬件拆除仍由 xHCI 负责。
  *
- * Once Disable Slot has been issued, remove the same device from:
+ * 发出 Disable Slot 后，从以下位置移除同一设备：
  *
- *   xHCI Slot Table
- *   parent Hub child map
- *   USB Hub Core
- *   USB Device Core
+ *   xHCI Slot 表
+ *   父 Hub 子设备映射
+ *   USB Hub 核心
+ *   USB 设备核心
  */
 void xhci_unpublish_slot_device(
     uint8_t slot,
@@ -427,7 +427,7 @@ void xhci_unpublish_slot_device(
     }
 
     /*
-     * Detach from parent first.
+    * 先从父设备分离。
      */
     if(parent_slot != 0U &&
        parent_port != 0U)
@@ -444,8 +444,8 @@ void xhci_unpublish_slot_device(
     }
 
     /*
-     * Safe for non-Hub devices too:
-     * usb_hub_remove() simply clears the corresponding class slot.
+    * 对非 Hub 设备也安全：
+    * usb_hub_remove() 只会清除对应的类槽位。
      */
     usb_hub_remove(
         slot);
@@ -454,8 +454,8 @@ void xhci_unpublish_slot_device(
         slot);
 
         /*
-     * bt_controller_disconnect/destroy runs before unpublish.
-     * The callback binding can now be invalidated safely.
+    * bt_controller_disconnect/destroy 会在取消发布前执行。
+    * 此时可以安全地使回调绑定失效。
      */
     xhci_bt_transport_release(slot);
 
@@ -469,12 +469,11 @@ static bool xhci_release_device_context(
     xhci_device_context_t *device);
 
 /*
- * V3.10.6B9D UNIFIED EXPLICIT TEARDOWN
+ * V3.10.6B9D 统一显式拆除
  *
- * state->device is unpublished enumeration working storage.
+ * state->device 是尚未发布的枚举工作存储。
  *
- * Its resource lifetime uses the same explicit device-context
- * teardown core as a published Slot.context.
+ * 它的资源生命周期与已发布的 Slot.context 共用显式设备上下文拆除核心。
  */
 bool xhci_release_working_device(
     xhci_state_t *state)
@@ -493,11 +492,11 @@ bool xhci_release_working_device(
 }
 
 /*
- * V3.10.6B6C EXPLICIT DEVICE TEARDOWN
+ * V3.10.6B6C 显式设备拆除
  *
- * Destroy one device context without installing it in state->device.
+ * 销毁一个设备上下文，但不将其安装到 state->device。
  *
- * The caller owns current-device kind/flag bookkeeping.
+ * 当前设备类型/标志记账由调用方负责。
  */
 static bool xhci_release_device_context(
     xhci_state_t *state,
@@ -511,8 +510,7 @@ static bool xhci_release_device_context(
     }
 
     /*
-     * Resource teardown clears identity fields, therefore preserve
-     * software topology identity first.
+    * 资源拆除会清除身份字段，因此先保存软件拓扑身份信息。
      */
     uint8_t released_slot =
         device->device_slot;
@@ -538,9 +536,7 @@ static bool xhci_release_device_context(
            0))
     {
         /*
-         * A disconnected device may no longer produce a Disable
-         * Slot completion, but its software/DMA ownership still
-         * has to be released.
+         * 设备断开后可能不再返回 Disable Slot 完成事件，但仍必须释放软件/DMA 所有权。
          */
         xhci_set_error(61U);
     }
@@ -550,7 +546,7 @@ static bool xhci_release_device_context(
             device);
 
     /*
-     * Hardware Slot lifetime has ended.
+     * 硬件 Slot 生命周期已结束。
      */
     xhci_unpublish_slot_device(
         released_slot,
@@ -565,29 +561,28 @@ static bool xhci_release_device_context(
 
 
 /*
- * V3.9.2 DIRECT SLOT RELEASE
+ * V3.9.2 直接释放 Slot
  *
- * Hardware/device lifetime is now terminated directly by Slot ID.
+ * 现在可直接根据 Slot ID 终止硬件/设备生命周期。
  *
- * No:
+ * 不再需要：
  *
- *     inventory scan
- *     inventory index lookup
- *     inventory context
+ *     扫描 inventory
+ *     查找 inventory 索引
+ *     inventory 上下文
  *
- * is needed to stop endpoints, Disable Slot, release DMA or
- * unpublish topology.
+ * 即可停止端点、Disable Slot、释放 DMA 或取消发布拓扑。
  */
 /*
- * V3.10.6B6C CANONICAL SLOT TEARDOWN
+ * V3.10.6B6C 规范 Slot 拆除
  *
- * Published Slot.context is destroyed in place.
- * state->device remains untouched unless it is itself the target.
+ * 已发布的 Slot.context 会原位销毁。
+ * 除非 state->device 本身就是目标，否则不会触及它。
  */
 /*
- * V3.10.6B9C PURE PUBLISHED SLOT RELEASE
+ * V3.10.6B9C 仅释放已发布的 Slot
  *
- * This function owns one published hardware Slot only:
+ * 此函数仅负责一个已发布的硬件 Slot：
  *
  *     Slot ID
  *        |
@@ -597,8 +592,7 @@ static bool xhci_release_device_context(
  *        v
  * xhci_release_device_context()
  *
- * state->device is a separate unpublished enumeration lifetime and
- * is intentionally invisible here.
+ * state->device 属于独立的未发布枚举生命周期，此处有意不处理。
  */
 bool xhci_release_slot_device(
     xhci_state_t *state,
@@ -631,26 +625,25 @@ bool xhci_release_slot_device(
 
 
 /*
- * inventory[] compatibility wrapper.
+ * inventory[] 兼容封装。
  *
- * Initial enumeration still uses inventory metadata, but hardware
- * teardown itself is now purely Slot-based.
+ * 初始枚举仍使用 inventory 元数据，但硬件拆除本身现在完全基于 Slot。
  */
 
 /*
  * V3.10.6B8C
  *
- * xhci_release_inventory_entry() removed.
- * Teardown is Slot-ID based.
+ * 已移除 xhci_release_inventory_entry()。
+ * 拆除现在基于 Slot ID。
  */
 
 
 
 
 /*
- * V3.9.6 SLOT ONLY SAVE
+ * V3.9.6 仅保存 Slot
  *
- * Slot Table is the permanent device store.
+ * Slot 表是永久设备存储。
  *
 
 */
@@ -658,32 +651,29 @@ bool xhci_release_slot_device(
 /*
  * V3.10.6B8C
  *
- * xhci_save_active_device() removed.
- * Publication is Slot.context-only.
+ * 已移除 xhci_save_active_device()。
+ * 发布仅使用 Slot.context。
  */
 
 
 
 
 /*
- * V3.10.6B2 CANONICAL SELF TEST CONTEXT
+ * V3.10.6B2 规范自测上下文
  *
- * xhci_load_inventory_device() removed.
+ * 已移除 xhci_load_inventory_device()。
  *
- * Hardware self-test resolves initialization inventory directly
- * to canonical Slot.context and never installs published device
- * state into state->device.
+ * 硬件自测会将初始化 inventory 直接解析为规范 Slot.context，绝不将已发布设备状态安装到 state->device。
  */
 
 
 
 /*
- * V3.9.5 SLOT TABLE CONTROLLER TEARDOWN
+ * V3.9.5 Slot 表控制器拆除
  *
- * Controller destruction is driven exclusively by hardware Slot
- * identity.
+ * 控制器销毁完全由硬件 Slot 标识驱动。
  *
- * inventory[] is not inspected.
+ * 不检查 inventory[]。
  */
 bool xhci_free_slot_resources(
     xhci_state_t *state)
@@ -699,21 +689,19 @@ bool xhci_free_slot_resources(
 
 
     /*
-     * First handle the current working context.
+    * 首先处理当前工作上下文。
      *
-     * A fully enumerated active device should also exist in the
-     * Slot Table.  A partially constructed enumeration context may
-     * not, so retain a raw-resource fallback for that case.
+    * 完成枚举的活动设备也应存在于 Slot 表中。但部分构建的枚举上下文可能尚未入表，因此要为这种情况
+    * 保留原始资源回退路径。
      */
     if(state->device.device_slot != 0U)
     {
         /*
-         * V3.10.6B9B WORKING CONTEXT TEARDOWN
+         * V3.10.6B9B 工作上下文拆除
          *
-         * Slot.used may already be true during enumeration before
-         * Slot.context has been published.
+         * 枚举期间 Slot.context 尚未发布时，Slot.used 可能已经为 true。
          *
-         * Therefore state->device always owns its own teardown path.
+         * 因此 state->device 始终负责自己的拆除路径。
          */
         if(!xhci_release_working_device(
                state))
@@ -738,11 +726,11 @@ bool xhci_free_slot_resources(
 
 
     /*
-     * Every remaining published device is parked in Slot.context.
+    * 其余已发布设备均保存在 Slot.context 中。
      *
-     * xhci_release_slot_device() performs:
+    * xhci_release_slot_device() 会执行：
      *
-     *     Stop Endpoint
+    *     停止端点
      *        鈫?     *     Disable Slot
      *        鈫?     *     release DMA
      *        鈫?     *     unlink parent
@@ -764,11 +752,9 @@ bool xhci_free_slot_resources(
 
 
         /*
-         * Ignore an uncommitted/stale tentative node here.
+         * 忽略尚未提交或已过期的暂定节点。
          *
-         * If it somehow still owns the active working context it
-         * was handled above.  A published parked Slot must have a
-         * matching canonical context.
+         * 如果它仍拥有活动工作上下文，上方已处理。已发布且停放的 Slot 必须有匹配的规范上下文。
          */
         if(slot_dev->context.device_slot !=
            (uint8_t)slot)
@@ -793,7 +779,7 @@ bool xhci_free_slot_resources(
 
 
     /*
-     * Nothing may remain installed after controller teardown.
+    * 控制器拆除后不得残留任何已安装状态。
      */
     xhci_zero_device_context(
         &state->device);

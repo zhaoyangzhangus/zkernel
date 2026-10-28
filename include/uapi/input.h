@@ -17,7 +17,7 @@ enum os_input_event_value {
     OS_INPUT_VALUE_REPEAT = 2u,
 };
 
-/* Pointer code values are part of the input ABI. */
+/* 指针代码取值属于输入 ABI。 */
 enum os_input_relative_code {
     OS_INPUT_REL_X = 0u,
     OS_INPUT_REL_Y = 1u,

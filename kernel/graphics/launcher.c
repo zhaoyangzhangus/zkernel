@@ -11,12 +11,13 @@
 
 #ifdef OS_KERNEL_BUILD
 
-/* REFACTOR_P7A_SHELL_LAUNCHER_OWNER: desktop app launch and title policy. */
+/* REFACTOR_P7A_SHELL_LAUNCHER_OWNER：桌面应用启动和标题策略。 */
 
 #define DESKTOP_PROGRAM_MAX_BYTES (16ULL * 1024ULL * 1024ULL)
 
 #define DESKTOP_LAUNCH_WORKER_STACK_SIZE (32U * 1024U)
 #define DESKTOP_CHROME_LAUNCH_STARTING UINT64_MAX
+static atomic_bool g_desktop_launch_worker_starting;
 
 static uint8_t g_desktop_launch_worker_stack
     [DESKTOP_LAUNCH_WORKER_STACK_SIZE]
@@ -47,8 +48,8 @@ static bool desktop_chrome_launch_release(
         memory_order_acq_rel, memory_order_acquire);
 }
 
-/* Window lifetime and launch requests share WindowLock. Startup double clicks
- * coalesce, but a click after the last window closes survives process teardown. */
+/* 窗口生命周期和启动请求共用 WindowLock。启动期间的双击会合并；最后一个窗口关闭后发生的点击
+ * 则会跨越进程销毁保留下来。 */
 static bool desktop_chrome_request_launch(void) {
     bool claimed;
     window_lock();
@@ -87,9 +88,9 @@ void desktop_chrome_window_closed_locked(process_t *owner) {
             &g_window_server.desktop_chrome_launch_pid, memory_order_acquire)) {
         return;
     }
-    for (uint32_t i = 0U; i < g_window_server.count; ++i) {
-        if (g_window_server.windows[i] != 0 &&
-            g_window_server.windows[i]->owner == owner) return;
+    for (uint32_t i = 0U; i < g_window_server.scene.count; ++i) {
+        if (g_window_server.scene.children[i] != 0 &&
+            g_window_server.scene.children[i]->owner == owner) return;
     }
     g_window_server.desktop_chrome_closing_pid = owner->pid;
 }
@@ -126,23 +127,17 @@ bool desktop_chrome_launch_guard_self_test(void) {
 }
 
 const char *window_shell_program_path(uint32_t app) {
-    if (app == DESKTOP_APP_FILES) return "/sbin/fileman";
-    if (app == DESKTOP_APP_TERMINAL) return "/sbin/gshell";
-    if (app == DESKTOP_APP_NOTES) return "/sbin/notepad";
-    if (app == DESKTOP_APP_NETWORK) return "/sbin/netmgr";
-    if (app == DESKTOP_APP_TASKMGR) return "/sbin/taskmgr";
-    if (app == DESKTOP_APP_CHROME) return "/sbin/chrome-start";
-    return 0;
+    if (app==DESKTOP_APP_WALLPAPER) return "/usr/apps/settings/wallpaper";
+    return desktop_shell_assets_available() && app > 0U &&
+        app < sizeof(g_desktop_programs) / sizeof(g_desktop_programs[0]) &&
+        g_desktop_programs[app].path[0] ? g_desktop_programs[app].path : 0;
 }
 
 const char *window_shell_app_title(uint32_t app) {
-    if (app == DESKTOP_APP_FILES) return "FILEMAN";
-    if (app == DESKTOP_APP_TERMINAL) return "SHELL";
-    if (app == DESKTOP_APP_NOTES) return "NOTEPAD";
-    if (app == DESKTOP_APP_NETWORK) return "NETWORK";
-    if (app == DESKTOP_APP_TASKMGR) return "TASK MANAGER";
-    if (app == DESKTOP_APP_CHROME) return "CHROME";
-    return 0;
+    if (app==DESKTOP_APP_WALLPAPER) return "更换壁纸";
+    return desktop_shell_assets_available() && app > 0U &&
+        app < sizeof(g_desktop_programs) / sizeof(g_desktop_programs[0]) &&
+        g_desktop_programs[app].title[0] ? g_desktop_programs[app].title : 0;
 }
 
 bool window_shell_title_matches(const char *title, const char *expected) {
@@ -228,7 +223,9 @@ bool desktop_launch_enqueue(uint32_t app) {
                           count + 1U, memory_order_release);
     window_unlock();
 
-    (void)wake_one(&g_window_server.desktop_launch_waitq);
+    /* 工作线程会在再次等待前清空队列。仅从空变为非空时需要通知；后续追加已能被其就绪条件
+     * 观察到，无需额外获取等待锁。 */
+    if (count == 0U) (void)wake_one(&g_window_server.desktop_launch_waitq);
     return true;
 }
 
@@ -263,9 +260,10 @@ bool desktop_shell_start_launch_worker(uint32_t compositor_cpu) {
         return true;
     }
 
-    /* Keep launch I/O away from both the bootstrap CPU and compositor when a
-     * spare AP exists.  On a two-CPU guest, sharing the bootstrap CPU still
-     * leaves the compositor free to consume pointer input. */
+    if (current_cpu >= MAX_CPUS || sched_current_thread() == 0) return false;
+
+    /* 存在空闲 AP 时，启动 I/O 不应占用引导 CPU 或合成器。在双 CPU 客户机上，即使与引导
+     * CPU 共用，合成器仍可及时处理指针输入。 */
     for (uint32_t candidate = 0U;
          candidate < x86_smp_discovered_count() && candidate < MAX_CPUS;
          ++candidate) {
@@ -278,6 +276,10 @@ bool desktop_shell_start_launch_worker(uint32_t compositor_cpu) {
     }
     if (launch_cpu == UINT32_MAX) launch_cpu = current_cpu;
     if (launch_cpu >= MAX_CPUS) return false;
+    if (!window_worker_claim_start(&g_desktop_launch_worker_starting,
+                                    &g_window_server.desktop_launch_worker_started))
+        return atomic_load_explicit(&g_window_server.desktop_launch_worker_started,
+                                    memory_order_acquire);
 
     worker = &g_window_server.desktop_launch_worker;
     memset(worker, 0, sizeof(*worker));
@@ -288,67 +290,56 @@ bool desktop_shell_start_launch_worker(uint32_t compositor_cpu) {
     worker->object.ops = 0;
     worker->tid = UINT64_MAX - 5ULL;
     worker->process = 0;
-    atomic_init(&worker->state, THREAD_READY);
-    atomic_init(&worker->block_epoch, 0U);
-    atomic_init(&worker->command_ack, 0U);
+    sched_initialize_new_thread(worker, launch_cpu, true);
+    atomic_store_explicit(&worker->state, THREAD_READY, memory_order_relaxed);
     worker->kernel_stack_base = g_desktop_launch_worker_stack;
     worker->kernel_stack_size = sizeof(g_desktop_launch_worker_stack);
     worker->kernel_stack_top =
         ((vaddr_t)(uintptr_t)g_desktop_launch_worker_stack +
          sizeof(g_desktop_launch_worker_stack)) & ~(vaddr_t)0x0FULL;
-    worker->sched_class = SCHED_CLASS_FAIR;
-    worker->base_sched_class = SCHED_CLASS_FAIR;
-    worker->rt_priority = 0U;
-    worker->base_rt_priority = 0U;
-    worker->sched.weight = 1024U;
-    worker->sched.nice = 0;
-    worker->sched.vruntime = 0U;
-    list_init(&worker->sched.rt_node);
     list_init(&worker->process_node);
     list_init(&worker->owned_mutexes);
-    for (uint32_t word = 0U; word < MAX_CPUS / 64U; ++word) {
-        worker->affinity.bits[word] = 0U;
-    }
-    worker->affinity.bits[launch_cpu >> 6] =
-        1ULL << (launch_cpu & 63U);
-    worker->owner_cpu = (uint16_t)launch_cpu;
-    worker->current_cpu = (uint16_t)launch_cpu;
 
-    uintptr_t stack_top = (uintptr_t)worker->kernel_stack_top;
-    uintptr_t switch_stack = stack_top - sizeof(uint64_t);
-    *(uint64_t *)switch_stack =
-        (uint64_t)(uintptr_t)&x86_kernel_thread_start;
-    worker->arch.switch_ctx.rsp = switch_stack;
-    worker->arch.switch_ctx.r12 =
-        (uint64_t)(uintptr_t)&desktop_launch_worker_main;
-    worker->arch.switch_ctx.r13 = 0U;
-    worker->arch.switch_ctx.r14 = stack_top;
-    worker->arch.fs_base = 0U;
+    x86_prepare_kernel_thread(&worker->arch, worker->kernel_stack_top,
+                              desktop_launch_worker_main, 0);
 
     atomic_store_explicit(&g_window_server.desktop_launch_worker_started,
                           true, memory_order_release);
     if (!sched_enqueue_bootstrap(worker)) {
         atomic_store_explicit(&g_window_server.desktop_launch_worker_started,
                               false, memory_order_release);
+        atomic_store_explicit(&g_desktop_launch_worker_starting, false,
+                              memory_order_release);
         return false;
     }
+    sched_monitor_register(worker, "app-launcher");
+    atomic_store_explicit(&g_desktop_launch_worker_starting, false, memory_order_release);
     return true;
+}
+
+uint32_t desktop_window_app_locked(const window_server_window_t *window) {
+    if (!window || !window->owner || !desktop_shell_assets_available()) return DESKTOP_APP_NONE;
+    process_t *owner = window->owner;
+    uint32_t result = DESKTOP_APP_NONE;
+    spinlock_lock(&owner->info_lock);
+    for (uint32_t app=1; app<DESKTOP_APP_SLOTS; ++app) {
+        const char *path = g_desktop_programs[app].path, *base = path;
+        for (const char *p=path; *p; ++p) if (*p == '/') base = p+1;
+        if (window_shell_title_matches(owner->name, app == DESKTOP_APP_CHROME ? "chrome" : base)) {
+            result = app;
+            break;
+        }
+    }
+    if (window_shell_title_matches(owner->name,"wallpaper")) result=DESKTOP_APP_WALLPAPER;
+    spinlock_unlock(&owner->info_lock);
+    return result;
 }
 
 static bool desktop_window_matches_app_locked(
     const window_server_window_t *window, uint32_t app,
     const char *expected_title) {
-    if (app != DESKTOP_APP_CHROME)
-        return window_shell_title_matches(window->title, expected_title);
-    if (window->owner == 0) return false;
-
-    /* Chrome's native window currently has no fixed kernel title; page titles
-     * are not a stable identifier.  Match its owning process instead. */
-    process_t *owner = window->owner;
-    spinlock_lock(&owner->info_lock);
-    bool matches = window_shell_title_matches(owner->name, "chrome");
-    spinlock_unlock(&owner->info_lock);
-    return matches;
+    (void)expected_title;
+    return window->desktop_app == app;
 }
 
 bool desktop_restore_minimized_app(uint32_t app) {
@@ -357,11 +348,10 @@ bool desktop_restore_minimized_app(uint32_t app) {
     if (expected == 0) return false;
 
     window_lock();
-    for (uint32_t index = g_window_server.count; index != 0U; --index) {
+    for (uint32_t index = g_window_server.scene.count; index != 0U; --index) {
         window_server_window_t *candidate =
-            g_window_server.windows[index - 1U];
+            g_window_server.scene.children[index - 1U];
         if (candidate == 0 ||
-            (!candidate->minimized && app != DESKTOP_APP_CHROME) ||
             (candidate->flags & OS_WINDOW_VISIBLE) == 0U ||
             !desktop_window_matches_app_locked(candidate, app, expected)) {
             continue;
@@ -375,11 +365,13 @@ bool desktop_restore_minimized_app(uint32_t app) {
     }
 
     bool was_minimized = window->minimized;
+    window_animation_restore_locked(window);
     window->minimized = false;
     window->dirty = true;
     window_scene_focus_locked(window);
     window_mark_window_locked(window);
     if (was_minimized) window_enqueue_minimized_event_locked(window);
+    window_input_refresh_pointer_locked();
     window_unlock();
     (void)wake_all(&g_window_server.event_waitq);
     return true;
@@ -389,14 +381,12 @@ kstatus_t desktop_launch_program(uint32_t app) {
     const char *path = window_shell_program_path(app);
     bool chrome_launch_claimed = app == DESKTOP_APP_CHROME;
     uint64_t chrome_launch_token = 0U;
-    file_t *file = 0;
     process_t *process = 0;
     thread_t *thread = 0;
     user_elf_image_info_t info;
     vaddr_t stack_pointer = 0U;
-    uint8_t *image = 0;
-    uint64_t image_size;
-    uint64_t bytes = 0U;
+    void *image = 0;
+    size_t image_size = 0U;
     kstatus_t status;
 
     if (path == 0) return K_EINVAL;
@@ -406,48 +396,9 @@ kstatus_t desktop_launch_program(uint32_t app) {
         }
         chrome_launch_token = DESKTOP_CHROME_LAUNCH_STARTING;
     }
-    status = vfs_open_kernel(path, VFS_OPEN_READ, 0U, &file);
-    if (status != K_OK) {
-        if (chrome_launch_claimed) {
-            (void)desktop_chrome_launch_release(
-                &g_window_server.desktop_chrome_launch_pid,
-                chrome_launch_token);
-        }
-        return status;
-    }
-    if (file->vnode == 0 || file->vnode->size == 0U ||
-        file->vnode->size > DESKTOP_PROGRAM_MAX_BYTES) {
-        vfs_close(file);
-        if (chrome_launch_claimed) {
-            (void)desktop_chrome_launch_release(
-                &g_window_server.desktop_chrome_launch_pid,
-                chrome_launch_token);
-        }
-        return K_EINVAL;
-    }
-
-    image_size = file->vnode->size;
-    image = (uint8_t *)kmalloc((size_t)image_size, 0);
-    if (image == 0) {
-        vfs_close(file);
-        if (chrome_launch_claimed) {
-            (void)desktop_chrome_launch_release(
-                &g_window_server.desktop_chrome_launch_pid,
-                chrome_launch_token);
-        }
-        return K_ENOMEM;
-    }
-    status = vfs_read_kernel(file, image, image_size, &bytes);
-    vfs_close(file);
-    if (status != K_OK || bytes != image_size) {
-        kfree(image);
-        if (chrome_launch_claimed) {
-            (void)desktop_chrome_launch_release(
-                &g_window_server.desktop_chrome_launch_pid,
-                chrome_launch_token);
-        }
-        return status == K_OK ? K_EIO : status;
-    }
+    status = vfs_load_file_kernel(path, 1U, DESKTOP_PROGRAM_MAX_BYTES,
+                                  &image, &image_size);
+    if (status != K_OK) goto done;
 
     status = process_create(0, &process);
     if (status == K_OK) {
@@ -455,20 +406,17 @@ kstatus_t desktop_launch_program(uint32_t app) {
             if (!desktop_chrome_launch_publish_pid(
                     &g_window_server.desktop_chrome_launch_pid,
                     process->pid)) {
-                (void)process_abort(process);
-                object_put(process);
-                (void)desktop_chrome_launch_release(
-                    &g_window_server.desktop_chrome_launch_pid,
-                    chrome_launch_token);
-                return K_EBUSY;
+                status = K_EBUSY;
+                goto done;
             }
             chrome_launch_token = process->pid;
         }
         process_set_name(process, path);
-        status = process_load_elf_image(process, image, (size_t)image_size,
+        status = process_load_elf_image(process, image, image_size,
                                         &info, &stack_pointer);
     }
     kfree(image);
+    image = 0;
     if (status == K_OK) {
         status = thread_create_user_suspended(process, info.entry,
                                               stack_pointer, 0U, 0U,
@@ -477,26 +425,24 @@ kstatus_t desktop_launch_program(uint32_t app) {
     if (status == K_OK) {
         status = thread_start(thread);
     }
-    if (status != K_OK) {
-        if (thread != 0) {
-            (void)thread_terminate(thread, status);
-            object_put(thread);
-        }
-        if (process != 0) {
-            if (thread == 0) (void)process_abort(process);
-            object_put(process);
-        }
-        if (chrome_launch_claimed) {
-            (void)desktop_chrome_launch_release(
-                &g_window_server.desktop_chrome_launch_pid,
-                chrome_launch_token);
-        }
-        return status;
+done:
+    /* 每个指针都持有一个引用，直到上方或此处释放。包括 Chrome 启动声明丢失在内的失败情况，
+     * 都走相同处理路径。 */
+    if (image != 0) kfree(image);
+    if (thread != 0) {
+        if (status != K_OK) (void)thread_terminate(thread, status);
+        object_put(thread);
     }
-
-    object_put(thread);
-    object_put(process);
-    return K_OK;
+    if (process != 0) {
+        if (status != K_OK && thread == 0) (void)process_abort(process);
+        object_put(process);
+    }
+    if (status != K_OK && chrome_launch_claimed) {
+        (void)desktop_chrome_launch_release(
+            &g_window_server.desktop_chrome_launch_pid,
+            chrome_launch_token);
+    }
+    return status;
 }
 
 #endif

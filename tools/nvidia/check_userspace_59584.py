@@ -215,7 +215,7 @@ def norm_relative(value: str) -> str:
 
 def load_manifest(path: Path) -> dict:
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
+        value = json.loads(path.read_text(encoding="utf-8-sig"))
     except (OSError, json.JSONDecodeError) as error:
         raise CheckError(f"cannot read manifest {path}: {error}") from error
     if not isinstance(value, dict):
@@ -265,6 +265,62 @@ def verify_manifest(root: Path, manifest_path: Path, package_root: Path | None):
     }
     if not expected_aliases.issubset(required_aliases):
         raise CheckError("required GLVND symlink topology is incomplete")
+    return manifest
+
+
+def verify_app(root: Path, manifest_path: Path, package_root: Path | None = None):
+    """Verify a flattened guest bundle against the unchanged host import manifest."""
+    manifest = load_manifest(manifest_path)
+    files, aliases = manifest.get("files"), manifest.get("aliases")
+    if not isinstance(files, list) or not isinstance(aliases, list):
+        raise CheckError("userspace manifest has no files/aliases arrays")
+    prefix = "lib/x86_64-linux-gnu/"
+    checked = set()
+    for entry in files:
+        target = norm_relative(str(entry["target"]))
+        if not target.startswith(prefix):
+            continue  # Host-only loader duplicate and external-platform manifests.
+        name = target[len(prefix):]
+        if not name or "/" in name or name in (".", ".."):
+            raise CheckError(f"invalid library target: {target}")
+        path = root / "lib" / name
+        if (not path.is_file() or sha256(path) != str(entry["sha256"]).upper()
+                or path.stat().st_size != int(entry["size"])):
+            raise CheckError(f"app library mismatch: {name}")
+        if package_root is not None and entry.get("source_kind") == "nvidia":
+            source = package_root / norm_relative(str(entry["source"]))
+            if not source.is_file() or sha256(source) != sha256(path):
+                raise CheckError(f"NVIDIA source mismatch: {name}")
+        checked.add(name)
+    required = {"ld-linux-x86-64.so.2", "libc.so.6", "libEGL.so.1.1.0",
+                "libEGL_nvidia.so.595.84"}
+    if not required.issubset(checked):
+        raise CheckError("app library closure is incomplete")
+    checked_aliases = set()
+    for entry in aliases:
+        alias, target = (norm_relative(str(entry[k])) for k in ("alias", "target"))
+        if not alias.startswith(prefix) or not target.startswith(prefix):
+            raise CheckError("unexpected app alias topology")
+        alias, target = alias[len(prefix):], target[len(prefix):]
+        if "/" in alias + target or alias in (".", "..") or target in (".", ".."):
+            raise CheckError("invalid app alias")
+        a, b = root / "lib" / alias, root / "lib" / target
+        if not a.is_file() or not b.is_file() or sha256(a) != sha256(b):
+            raise CheckError(f"app alias mismatch: {alias}")
+        checked_aliases.add(alias)
+    if not {"libEGL.so.1", "libEGL.so", "libEGL_nvidia.so.0", "libOpenGL.so",
+            "libnvidia-allocator.so.1", "libnvidia-allocator.so"}.issubset(checked_aliases):
+        raise CheckError("required GLVND symlink topology is incomplete")
+    vendor = json.loads((root / "egl/10_nvidia.json").read_text(encoding="utf-8-sig"))
+    expected = f"/usr/apps/{root.name}/lib/libEGL_nvidia.so.0"
+    if (vendor.get("file_format_version") != "1.0.0" or
+            vendor.get("ICD", {}).get("library_path") != expected):
+        raise CheckError("EGL manifest does not point to the app-private ICD")
+    license = root / "licenses/NVIDIA-LICENSE"
+    if not license.is_file() or license.stat().st_size == 0:
+        raise CheckError("missing app NVIDIA license")
+    if package_root is not None and sha256(license) != sha256(package_root / "LICENSE"):
+        raise CheckError("app NVIDIA license mismatch")
     return manifest
 
 
@@ -318,18 +374,21 @@ def verify_elves(root: Path):
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--root", required=True, type=Path)
+    roots = parser.add_mutually_exclusive_group(required=True)
+    roots.add_argument("--root", type=Path)
+    roots.add_argument("--app-root", type=Path)
     parser.add_argument("--manifest", required=True, type=Path)
     parser.add_argument("--package-root", type=Path)
     args = parser.parse_args()
     try:
-        root = args.root.resolve()
+        root = (args.app_root or args.root).resolve()
         manifest_path = args.manifest.resolve()
         if not root.is_dir():
             raise CheckError(f"missing userspace root: {root}")
         if not manifest_path.is_file():
             raise CheckError(f"missing userspace manifest: {manifest_path}")
-        manifest = verify_manifest(root, manifest_path, args.package_root.resolve()
+        verify = verify_app if args.app_root else verify_manifest
+        manifest = verify(root, manifest_path, args.package_root.resolve()
                                    if args.package_root else None)
         package_run = manifest.get("package_run")
         if package_run and manifest.get("package_sha256"):
@@ -337,7 +396,7 @@ def main() -> int:
             if package_path.is_file() and sha256(package_path) != str(
                     manifest["package_sha256"]).upper():
                 raise CheckError("official 595.84 package hash changed")
-        elf_count = verify_elves(root)
+        elf_count = verify_elves(root / "lib" if args.app_root else root)
     except (CheckError, OSError, ValueError, KeyError) as error:
         print(f"CHECK_USERSPACE_59584=FAIL: {error}", file=sys.stderr)
         return 1

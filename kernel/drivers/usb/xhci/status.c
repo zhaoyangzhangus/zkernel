@@ -1,10 +1,8 @@
 #include <kernel/xhci.h>
 #include "internal.h"
 
-/* REFACTOR_P8_XHCI_STATUS_OWNER: public controller presence, USB topology
- * status projections, and diagnostic error queries. */
-/* REFACTOR_P8_XHCI_STATUS_STATE_OWNER: diagnostic state is mutated here;
- * other xHCI units use the private setters below. */
+/* REFACTOR_P8_XHCI_STATUS_OWNER：控制器公开存在状态、USB 拓扑状态投影和诊断错误查询。 */
+/* REFACTOR_P8_XHCI_STATUS_STATE_OWNER：诊断状态仅在此处修改；其他 xHCI 单元使用下方私有 setter。 */
 
 static bool g_xhci_present;
 static uint32_t g_xhci_error;

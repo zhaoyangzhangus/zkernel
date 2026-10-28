@@ -35,6 +35,8 @@ typedef struct power_device {
 struct device;
 
 bool power_manager_init(void);
+/* action：0 为重启，1 为关机；同步文件并停止网卡后才交给固件。 */
+kstatus_t power_system_request(uint32_t action);
 kstatus_t power_register_device(const char *name, power_suspend_fn suspend,
                                 power_resume_fn resume, void *context,
                                 power_device_t **out);

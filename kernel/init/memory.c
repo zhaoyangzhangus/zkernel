@@ -9,6 +9,7 @@
 #include <kernel/mm_boot.h>
 #include <kernel/perf.h>
 #include <kernel/telemetry.h>
+#include <kernel/pci.h>
 
 #define FRAMEBUFFER_KERNEL_VIRTUAL_BASE (X86_64_MMIO_BASE + 0x20000000ULL)
 
@@ -50,10 +51,8 @@ BOOLEAN map_framebuffer_wc(const OS_BOOT_INFO *info,
             paddr_make(physical_page + mapped),
             X86_PAGE_WRITE | X86_PAGE_GLOBAL,
             /*
-             * The physical GOP range aliases NVIDIA BAR1 on this machine.
-             * Use UC for the firmware-owned scanout aperture so a cache-type
-             * conflict cannot leave CPU publication invisible to the display
-             * engine or to a subsequent diagnostic read.
+             * 早期启动阶段尚不知道 PCI 资源归属。在 framebuffer_enable_wc 确认显示 BAR 受支持且不存在
+             * 冲突别名前，保持此映射为 UC。与 NVIDIA BAR 重叠的区域继续使用 UC。
              */
             X86_CACHE_UC);
         if (status != K_OK) {
@@ -69,6 +68,65 @@ BOOLEAN map_framebuffer_wc(const OS_BOOT_INFO *info,
         mapped += PAGE_SIZE;
     }
     *virtual_base = FRAMEBUFFER_KERNEL_VIRTUAL_BASE + page_offset;
+    return 1;
+}
+
+/* PCI 资源归属尚未确定时，早期启动使用 UC。仅将完整且可预取的 AMD/QEMU 显示 BAR 升级；
+ * NVIDIA BAR 别名仍采用保守映射。 */
+static bool framebuffer_wc_owner(const OS_BOOT_INFO *info, const pci_host_t *host) {
+    if (info == 0 || host == 0 || !host->initialized ||
+        host->device_count > PCI_MAX_DEVICES ||
+        info->FrameBufferBase == 0U || info->FrameBufferSize == 0U ||
+        info->FrameBufferSize > UINT64_MAX - info->FrameBufferBase) return false;
+    uint64_t start = info->FrameBufferBase & ~(PAGE_SIZE - 1ULL);
+    uint64_t end = info->FrameBufferBase + info->FrameBufferSize;
+    if (end > UINT64_MAX - (PAGE_SIZE - 1ULL)) return false;
+    end = (end + PAGE_SIZE - 1ULL) & ~(PAGE_SIZE - 1ULL);
+    bool owner = false;
+    for (uint32_t i = 0U; i < host->device_count; ++i) {
+        const pci_device_t *device = &host->devices[i];
+        for (uint32_t j = 0U; j < PCI_MAX_BARS; ++j) {
+            const pci_bar_t *bar = &device->bars[j];
+            if ((bar->flags & PCI_RESOURCE_MEMORY) == 0U || bar->length == 0U ||
+                bar->length > UINT64_MAX - bar->address) continue;
+            uint64_t limit = bar->address + bar->length;
+            if (start >= limit || end <= bar->address) continue;
+            bool supported = device->class_code == 3U &&
+                (device->vendor_id == 0x1002U ||
+                 (device->vendor_id == 0x1234U && device->device_id == 0x1111U));
+            if (owner || !supported || (bar->flags & PCI_RESOURCE_PREFETCH) == 0U ||
+                start < bar->address || end > limit) return false;
+            owner = true;
+        }
+    }
+    return owner;
+}
+
+BOOLEAN framebuffer_enable_wc(const OS_BOOT_INFO *info, UINT64 virtual_base) {
+    if (!framebuffer_wc_owner(info, pci_current_host()) ||
+        virtual_base == 0U ||
+        (virtual_base & (PAGE_SIZE - 1ULL)) !=
+            (info->FrameBufferBase & (PAGE_SIZE - 1ULL))) return 0;
+    uint64_t offset = info->FrameBufferBase & (PAGE_SIZE - 1ULL);
+    uint64_t span = (info->FrameBufferSize + offset + PAGE_SIZE - 1ULL) &
+                    ~(PAGE_SIZE - 1ULL);
+    uint64_t base = virtual_base - offset;
+    if (span > UINT64_MAX - base) return 0;
+    paddr_t root = x86_current_root_table();
+    uint64_t changed = 0U;
+    __asm__ volatile ("sfence" : : : "memory");
+    while (changed < span) {
+        if (x86_protect_page(root, base + changed,
+                X86_PAGE_WRITE | X86_PAGE_GLOBAL, X86_CACHE_WC) != K_OK) {
+            while (changed != 0U) {
+                changed -= PAGE_SIZE;
+                (void)x86_protect_page(root, base + changed,
+                    X86_PAGE_WRITE | X86_PAGE_GLOBAL, X86_CACHE_UC);
+            }
+            return 0;
+        }
+        changed += PAGE_SIZE;
+    }
     return 1;
 }
 
@@ -113,8 +171,7 @@ static BOOLEAN canonical_uaccess_self_test(void) {
     return 1;
 }
 
-/* Exercise the legacy Buddy orders directly; orders 0..5 are served by the
- * per-CPU small-page pools and therefore do not prove Buddy coalescing. */
+/* 直接测试旧版 Buddy 阶；0..5 阶由每 CPU 小页池服务，因此不能证明 Buddy 合并正确。 */
 static BOOLEAN canonical_buddy_random_self_test(void) {
 #define MM_BUDDY_STRESS_COUNT 32U
     page_t *blocks[MM_BUDDY_STRESS_COUNT] = {0};
@@ -153,8 +210,7 @@ static BOOLEAN canonical_buddy_random_self_test(void) {
         ++allocated;
     }
 
-    /* Free in a deterministic pseudo-random order to force both merge
-     * directions and repeated split/coalesce decisions. */
+    /* 按确定性的伪随机顺序释放，以覆盖两个合并方向及重复拆分/合并决策。 */
     for (UINT32 remaining = MM_BUDDY_STRESS_COUNT; remaining != 0U;
          --remaining) {
         random_state = random_state * 1664525U + 1013904223U;
@@ -165,8 +221,7 @@ static BOOLEAN canonical_buddy_random_self_test(void) {
         blocks[remaining - 1U] = 0;
     }
 
-    /* A coalesced high-order block must be available again after the full
-     * randomized release, otherwise the test above only exercised splitting. */
+    /* 完整随机释放后，高阶合并块必须再次可用；否则上方测试只覆盖了拆分路径。 */
     page_t *coalesced = page_alloc(9U, 0);
     if (coalesced == 0 || coalesced->order != 9U) {
         if (coalesced != 0) page_free(coalesced);
@@ -232,7 +287,7 @@ static BOOLEAN canonical_mm_self_test(void) {
     page_free(compound);
     kernel_perf_emit_scope("mm.multi_page_alloc_free", benchmark_start);
 
-    /* Exercise the canonical page_t Buddy split/coalesce path directly. */
+    /* 直接测试规范 page_t Buddy 拆分/合并路径。 */
 #define MM_ALLOCATOR_STRESS_COUNT 96U
     page_t *blocks[MM_ALLOCATOR_STRESS_COUNT] = {0};
     UINT32 random_state = 0x13579BDFU;
@@ -311,8 +366,7 @@ BOOLEAN kernel_init_memory(OS_BOOT_INFO *info,
     if (!direct_map_self_test(info)) {
         return memory_fail(hooks, "OS_DIRECT_MAP_FAIL\r\n");
     }
-    /* Direct-map validation is a boot diagnostic.  Keep it in serial and
-     * realtest capture, but do not paint it over the desktop GOP surface. */
+    /* 直接映射验证属于启动诊断。保留串口和 realtest 捕获输出，但不要绘制到桌面 GOP surface 上。 */
     kernel_serial_write_serial_only("OS_DIRECT_MAP_OK\r\n");
     if (!lapic_use_kernel_mapping()) {
         return memory_fail(hooks, "OS_MM_INIT_FAIL\r\n");

@@ -70,6 +70,9 @@ kstatus_t nv_port_thread_create(nv_port_thread_fn_t function, void *argument,
     thread->thread.object.type = KOBJECT_TYPE_THREAD;
     thread->thread.object.flags = 0U;
     thread->thread.object.ops = 0;
+    /* RM lock ownership and per-thread state require a unique nonzero ID;
+     * zero-filled kernel workers must not alias one another. */
+    thread->thread.tid = process_allocate_task_id();
     thread->thread.process = 0;
     sched_initialize_new_thread(&thread->thread, x86_current_cpu_index(), true);
     list_init(&thread->thread.process_node);
@@ -79,14 +82,9 @@ kstatus_t nv_port_thread_create(nv_port_thread_fn_t function, void *argument,
     thread->thread.kernel_stack_top =
         ((vaddr_t)(uintptr_t)thread->stack_base + NV_PORT_THREAD_STACK_SIZE) &
         ~(vaddr_t)0x0FULL;
-    uintptr_t stack_top = (uintptr_t)thread->thread.kernel_stack_top;
-    uintptr_t switch_stack = stack_top - sizeof(uint64_t);
-    *(uint64_t *)switch_stack = (uint64_t)(uintptr_t)&x86_kernel_thread_start;
-    thread->thread.arch.switch_ctx.rsp = switch_stack;
-    thread->thread.arch.switch_ctx.r12 =
-        (uint64_t)(uintptr_t)&nv_port_kernel_thread_entry;
-    thread->thread.arch.switch_ctx.r13 = (uint64_t)(uintptr_t)thread;
-    thread->thread.arch.switch_ctx.r14 = stack_top;
+    x86_prepare_kernel_thread(&thread->thread.arch, thread->thread.kernel_stack_top,
+                              nv_port_kernel_thread_entry, thread);
+    sched_monitor_register(&thread->thread, "nvidia-worker");
 #endif
     *out = thread;
     return K_OK;
@@ -107,8 +105,16 @@ kstatus_t nv_port_thread_start(nv_port_thread_t *thread) {
     thread->host_thread_valid = true;
     return K_OK;
 #else
+    /* A DEAD state precedes the final context switch. Retain an execution
+     * reference until the scheduler's post-switch reaper releases it. */
+    object_get(&thread->thread);
+    __atomic_fetch_or(&thread->thread.flags, THREAD_FLAG_EXECUTION_REF,
+                      __ATOMIC_RELEASE);
     kstatus_t status = sched_start_thread(&thread->thread);
     if (status != K_OK) {
+        __atomic_fetch_and(&thread->thread.flags, ~THREAD_FLAG_EXECUTION_REF,
+                           __ATOMIC_RELEASE);
+        object_put(&thread->thread);
         atomic_store_explicit(&thread->started, false, memory_order_release);
     }
     return status;
@@ -159,6 +165,7 @@ kstatus_t nv_port_thread_destroy(nv_port_thread_t *thread) {
     if (!atomic_load_explicit(&thread->started, memory_order_acquire)) {
         if (atomic_load_explicit(&thread->thread.state, memory_order_acquire) !=
             THREAD_NEW) return K_EBUSY;
+        sched_monitor_unregister(&thread->thread);
         vfree(thread->stack_base);
         kfree(thread);
         return K_OK;
@@ -177,6 +184,12 @@ kstatus_t nv_port_thread_destroy(nv_port_thread_t *thread) {
     if (sched_current_thread() == &thread->thread) return K_EBUSY;
     if (atomic_load_explicit(&thread->thread.state, memory_order_acquire) !=
         THREAD_DEAD) return K_EBUSY;
+    if (atomic_load_explicit(&thread->thread.object.refs.value,
+                             memory_order_acquire) != 1U ||
+        (__atomic_load_n(&thread->thread.flags, __ATOMIC_ACQUIRE) &
+         (THREAD_FLAG_EXECUTION_REF | THREAD_FLAG_EXECUTION_REAPING)) != 0U)
+        return K_EBUSY;
+    sched_monitor_unregister(&thread->thread);
     vfree(thread->stack_base);
     kfree(thread);
 #endif

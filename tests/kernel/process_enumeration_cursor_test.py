@@ -11,7 +11,7 @@ enumerate_body = source[source.index('kstatus_t process_enumerate('):
                         source.index('kstatus_t process_enumerate_thread(')]
 enumerate_body = enumerate_body.replace('process_t *process = list_entry', '++visits; process_t *process = list_entry')
 monitor = source[source.index('static process_t *process_monitor_find('):
-                 source.index('/* Caller holds thread_lock, including the VM lifetime guard. */')]
+                 source.index('static bool process_monitor_protected(')]
 monitor = monitor.replace('process_t *candidate = list_entry', '++monitor_visits; process_t *candidate = list_entry')
 insert_start = source.index('    process_registry_invalidate_cursors_locked();', source.index('kstatus_t process_create_named('))
 insert_end = source.index('    process_registry_unlock();', insert_start)
@@ -31,6 +31,7 @@ fixture = r'''
 #define K_EINVAL -22
 #define K_ENOENT -2
 typedef int kstatus_t;
+static kstatus_t sched_monitor_process(os_process_snapshot_t *s) {(void)s;return K_ENOENT;}
 typedef struct list_head { struct list_head *next,*prev; } list_head_t;
 #define list_entry(n,t,m) ((t *)((char *)(n)-offsetof(t,m)))
 typedef struct process {

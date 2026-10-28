@@ -13,8 +13,7 @@ bool sched_balance_self_test(void) {
     uint32_t selected = scheduler_choose_cpu(&thread, current_cpu);
     if (!scheduler_cpu_available(selected)) return false;
 
-    /* Initial starts must honor affinity instead of blindly using the
-     * creating CPU. */
+    /* 线程首次启动时必须遵循亲和性，不能盲目使用创建线程的 CPU。 */
     uint32_t remote_cpu = UINT32_MAX;
     for (uint32_t cpu_id = 0U; cpu_id < g_cpu_count; ++cpu_id) {
         if (cpu_id != current_cpu && scheduler_cpu_available(cpu_id)) {
@@ -40,7 +39,7 @@ bool sched_balance_self_test(void) {
         }
     }
 
-    /* A restricted mask must override the load-based choice. */
+    /* 受限的 CPU 掩码必须优先于基于负载的选择。 */
     for (uint32_t word = 0; word < MAX_CPUS / 64U; ++word) {
         thread.affinity.bits[word] = 0U;
     }
@@ -80,14 +79,20 @@ bool scheduler_select_cpu_mask(const cpumask_t *mask, uint32_t current_cpu,
         uint64_t candidates = mask->bits[base >> 6];
         uint32_t remaining = cpu_count - base;
         if (remaining < 64U) candidates &= (1ULL << remaining) - 1ULL;
-        /* Ascending set-bit order retains the existing tie-break rules while
-         * skipping CPUs the thread cannot use. Never scan zero with ctz. */
+        /* 按置位从低到高遍历，在跳过线程不可用 CPU 的同时保留现有平局规则。
+         * 绝不能对零调用 ctz。 */
         while (candidates != 0U) {
             uint32_t cpu_id = base + (uint32_t)__builtin_ctzll(candidates);
             candidates &= candidates - 1U;
             if (!scheduler_cpu_available(cpu_id)) continue;
             scheduler_cpu_t *cpu = &g_cpus[cpu_id];
             uint32_t load = scheduler_snapshot_load(cpu);
+            /* 负载为零时已无更优选择，且负载相同时当前 CPU 始终胜出。
+             * 若本地空闲 CPU 符合条件，启动工作时无需访问其他 CPU 的缓存行。 */
+            if (load == 0U && cpu_id == current_cpu) {
+                *selected_cpu = cpu_id;
+                return true;
+            }
             if (!found || load < best_load ||
                 (load == best_load && cpu_id == current_cpu)) {
                 best_cpu = cpu_id;

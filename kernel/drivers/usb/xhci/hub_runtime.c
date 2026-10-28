@@ -4,7 +4,7 @@
 #include <kernel/console.h>
 #include <usb/hub.h>
 
-/* REFACTOR_P8_XHCI_HUB_RUNTIME_OWNER: Hub runtime event and arm state. */
+/* REFACTOR_P8_XHCI_HUB_RUNTIME_OWNER：Hub 运行时事件和重新挂起状态。 */
 
 #define XHCI_HUB_RESET_TIMEOUT_NS 1000000000ULL
 #define XHCI_HUB_RESET_POLL_NS       1000000ULL
@@ -47,9 +47,8 @@ static bool xhci_hub_reset_port(
 }
 
 /*
- * A Transfer Event identifies the permanent Hub Slot.  Runtime Hub state is
- * therefore updated in Slot.context; state->device remains reserved for an
- * unpublished child during enumeration.
+ * Transfer Event 标识永久 Hub Slot。因此运行时 Hub 状态更新到 Slot.context；
+ * 枚举期间 state->device 仍保留给尚未发布的子设备。
  */
 bool xhci_hub_runtime_handle_transfer_event(
     xhci_state_t *state,
@@ -127,11 +126,11 @@ bool xhci_hub_runtime_handle_transfer_event(
         }
 
         device->hub_change_bitmap |= bitmap;
-        /* Re-arm follows reconciliation so C_PORT_* is acknowledged first. */
+        /* 先完成状态协调并确认 C_PORT_*，之后再重新挂起传输。 */
     }
     else if(completion != 0U)
     {
-        /* Topology reconciliation performs final removal after cancellation. */
+        /* 拓扑协调会在取消操作后执行最终移除。 */
         xhci_set_error(73U + completion);
     }
 

@@ -1,4 +1,4 @@
-/* REFACTOR_SYSCALL_FILESYSTEM_OWNER: VFS and file syscall handlers. */
+/* REFACTOR_SYSCALL_FILESYSTEM_OWNER：VFS 和文件系统调用处理程序。 */
 
 #include <arch/x86_64/uaccess.h>
 #include <kernel/process.h>
@@ -65,6 +65,34 @@ int64_t syscall_file_enumerate(uint64_t arguments_pointer, uint64_t unused1,
     if (status != K_OK) return status;
     return copy_to_user((void __user *)(uintptr_t)arguments_pointer,
                         &arguments, sizeof(arguments));
+}
+
+int64_t syscall_file_enumerate_batch(uint64_t arguments_pointer, uint64_t unused1,
+                                    uint64_t unused2, uint64_t unused3,
+                                    uint64_t unused4, uint64_t unused5) {
+    (void)unused1; (void)unused2; (void)unused3; (void)unused4; (void)unused5;
+    os_file_enumerate_batch_t arguments;
+    os_file_info_t entries[OS_FILE_ENUMERATE_BATCH_MAX];
+    if (current_process() == 0) return K_EPERM;
+    kstatus_t status = copy_from_user(&arguments,
+        (const void __user *)(uintptr_t)arguments_pointer, sizeof(arguments));
+    if (status != K_OK) return status;
+    if (!versioned_header_valid(&arguments.hdr, sizeof(arguments)) ||
+        arguments.path == 0U || arguments.entries == 0U || arguments.reserved != 0U ||
+        arguments.capacity == 0U || arguments.capacity > OS_FILE_ENUMERATE_BATCH_MAX)
+        return K_EINVAL;
+    size_t bytes = (size_t)arguments.capacity * sizeof(*entries);
+    if (!x86_user_range_valid((void __user *)(uintptr_t)arguments.entries, bytes))
+        return K_EACCES;
+    arguments.count = 0U;
+    status = vfs_enumerate_batch((const char __user *)(uintptr_t)arguments.path,
+        arguments.index, entries, arguments.capacity, &arguments.count);
+    if (status != K_OK) return status;
+    if (arguments.count == 0U || arguments.count > arguments.capacity) return K_EIO;
+    status = copy_to_user((void __user *)(uintptr_t)arguments.entries, entries,
+                          (size_t)arguments.count * sizeof(*entries));
+    if (status != K_OK) return status;
+    return copy_to_user((void __user *)(uintptr_t)arguments_pointer, &arguments, sizeof(arguments));
 }
 
 int64_t syscall_file_seek(uint64_t arguments_pointer, uint64_t unused1,
@@ -302,3 +330,26 @@ int64_t syscall_file_fsync(uint64_t handle, uint64_t unused1, uint64_t unused2,
 }
 
 /* IO_SUBMIT(args)：将用户向量复制到内核缓冲区后提交到设备。 */
+
+/* 当前目录由进程持有；访问用户缓冲区和解析磁盘路径时不持有进程锁。 */
+int64_t syscall_file_chdir(uint64_t path, uint64_t unused1, uint64_t unused2,
+                           uint64_t unused3, uint64_t unused4, uint64_t unused5) {
+    (void)unused1; (void)unused2; (void)unused3; (void)unused4; (void)unused5;
+    return vfs_change_directory((const char __user *)(uintptr_t)path);
+}
+
+int64_t syscall_file_getcwd(uint64_t buffer, uint64_t size, uint64_t unused2,
+                            uint64_t unused3, uint64_t unused4, uint64_t unused5) {
+    (void)unused2; (void)unused3; (void)unused4; (void)unused5;
+    process_t *process = current_process();
+    if (process == 0) return K_EPERM;
+    if (size == 0U) return K_EINVAL;
+    char cwd[PROCESS_CWD_CAPACITY];
+    kstatus_t status = process_cwd_copy(process, cwd);
+    if (status != K_OK) return status;
+    size_t length = 0U;
+    while (length + 1U < sizeof(cwd) && cwd[length] != '\0') ++length;
+    if (length + 1U > size) return K_ENAMETOOLONG;
+    status = copy_to_user((void __user *)(uintptr_t)buffer, cwd, length + 1U);
+    return status == K_OK ? (int64_t)(length + 1U) : status;
+}

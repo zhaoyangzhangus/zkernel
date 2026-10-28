@@ -5,7 +5,7 @@ import tempfile
 
 root = Path(__file__).resolve().parents[2]
 source = (root/'kernel/syscall/linux.c').read_text()
-path = source[source.index('static kstatus_t linux_path_from_user('):
+path = source[source.index('static kstatus_t linux_system_config_path('):
               source.index('static uint32_t linux_open_flags(')]
 mkdir = source[source.index('static int64_t linux_mkdir('):
                source.index('static int64_t linux_symlink(')]
@@ -20,7 +20,11 @@ program = r'''
 #include <uapi/linux_abi.h>
 #define LINUX_MAX_PATH 256
 #define LINUX_EFAULT K_EFAULT
-typedef struct { char linux_cwd[256]; } process_t;
+typedef struct { char cwd[256]; } process_t;
+static kstatus_t process_cwd_copy(process_t *p,char *out) {
+    if(!p || !out)return K_EINVAL;
+    memcpy(out,p->cwd,sizeof(p->cwd));return K_OK;
+}
 typedef struct { uint64_t rax, rdi, rsi, rdx; } arch_trap_frame_t;
 static char last_path[256];
 static uint32_t last_mode;
@@ -41,7 +45,7 @@ static kstatus_t vfs_directory_path_kernel(void *file,char *out,size_t size){
     strcpy(out,"/tmp/renamed-directory");return K_OK;
 }
 static void linux_copy(void *out, const void *in, size_t length) {
-    memcpy(out, in, length);
+    memmove(out, in, length);
 }
 static kstatus_t linux_copy_string(uint64_t pointer, char *out, size_t size) {
     if (pointer <= 1) return K_EFAULT;
@@ -57,6 +61,11 @@ static kstatus_t vfs_mkdir_kernel(const char *path, uint32_t mode) {
     last_mode = mode;
     return result;
 }
+static bool vfs_path_needs_resolution(const char *path) { (void)path; return false; }
+static kstatus_t vfs_resolve_path_kernel(const char *path, bool follow,
+                                         bool missing, char out[256]) {
+    (void)path;(void)follow;(void)missing;(void)out;return K_ENOSYS;
+}
 ''' + path + mkdir + r'''
 static int64_t dispatch(process_t *process, arch_trap_frame_t *frame) {
     switch (frame->rax) {
@@ -66,6 +75,15 @@ static int64_t dispatch(process_t *process, arch_trap_frame_t *frame) {
 }
 int main(void) {
     process_t process = {"/tmp"};
+    char config[256];
+    assert(linux_path_from_user(&process,LINUX_AT_FDCWD,(uintptr_t)"/etc/resolv.conf",config)==K_OK);
+    assert(!strcmp(config,"/EFI/OS/resolv.conf"));
+    assert(linux_path_from_user(&process,LINUX_AT_FDCWD,(uintptr_t)"/etc",config)==K_OK);
+    assert(!strcmp(config,"/EFI/OS"));
+    assert(linux_path_from_user(&process,LINUX_AT_FDCWD,(uintptr_t)"/etcetera",config)==K_OK);
+    assert(!strcmp(config,"/etcetera"));
+    char oversized[256];memset(oversized,'a',255);oversized[255]=0;memcpy(oversized,"/etc/",5);
+    assert(linux_path_from_user(&process,LINUX_AT_FDCWD,(uintptr_t)oversized,config)==K_ENAMETOOLONG);
     assert(LINUX_SYS_MKDIR == 83 && LINUX_SYS_MKDIRAT == 258);
     assert(linux_mkdir(&process, LINUX_AT_FDCWD, (uintptr_t)"profile", 0700) == K_OK);
     assert(calls == 1 && !strcmp(last_path, "/tmp/profile") && last_mode == 0040700);

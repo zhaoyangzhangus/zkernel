@@ -5,7 +5,7 @@ import gdb, subprocess, struct, json, time, os, sys
 from pathlib import Path
 sys.path.insert(0, str(Path("tools/chromium").resolve()))
 from trace_build import validate_chrome_build
-expected = 'Build ID: ccd5fc305e3b0600'
+expected = 'Build ID: 2ea4a62ae34e05c9'
 try:
     validate_chrome_build(expected)
 except RuntimeError as error:
@@ -74,7 +74,7 @@ class Present(gdb.Breakpoint):
         Returned(int(current()['tid']))
         return False
 Input('input_core_push',gdb.BP_HARDWARE_BREAKPOINT,internal=True)
-Press('*0x4aca8d90',gdb.BP_HARDWARE_BREAKPOINT,internal=True)
+Press('*0x4ad73980',gdb.BP_HARDWARE_BREAKPOINT,internal=True)
 Present('window_server_present',gdb.BP_HARDWARE_BREAKPOINT,internal=True)
 end
 continue

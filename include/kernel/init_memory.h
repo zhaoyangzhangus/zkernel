@@ -15,6 +15,8 @@ BOOLEAN kernel_init_memory(OS_BOOT_INFO *info,
                            const kernel_init_memory_hooks_t *hooks,
                            UINT64 *framebuffer_virtual_base);
 
-/* Reuse the same WC framebuffer mapping after a high-half hand-off. */
+/* Conservative early GOP mapping, reused after the high-half hand-off. */
 BOOLEAN map_framebuffer_wc(const OS_BOOT_INFO *info,
                                   UINT64 *virtual_base);
+/* After PCI discovery, safely upgrade a supported, non-overlapping GOP BAR. */
+BOOLEAN framebuffer_enable_wc(const OS_BOOT_INFO *info, UINT64 virtual_base);

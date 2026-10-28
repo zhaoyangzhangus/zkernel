@@ -20,7 +20,7 @@ def main():
     parser.add_argument('--build', default='build')
     parser.add_argument('--source', default='/usr/lib/firmware/rtl_nic')
     args = parser.parse_args()
-    target = Path(args.build) / 'esp/rtl_nic'
+    target = Path(args.build) / 'esp/EFI/OS/firmware/rtl8126'
     payloads = {}
     for name in ('rtl8126a-2.fw', 'rtl8126a-3.fw'):
         source = Path(args.source) / name

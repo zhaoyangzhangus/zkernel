@@ -13,16 +13,16 @@ int __libc_query_memory_info(os_memory_info_t *info) {
     return status < 0 ? __libc_status_result(status) : 0;
 }
 
-/* This helper also accepts forward-safe overlap for memmove. Do not rely on
- * compiler builtin memcpy assumptions when the ranges overlap. */
+/* 此辅助函数也接受 memmove 可安全前向复制的重叠区间。范围重叠时不要依赖编译器
+ * 对内建 memcpy 的假设。 */
 static void *libc_copy_forward(void *destination, const void *source, size_t length) {
     uint8_t *out = (uint8_t *)destination;
     const uint8_t *in = (const uint8_t *)source;
 #if defined(__x86_64__)
     if (length >= 64U) {
         size_t words = length / sizeof(uint64_t);
-        /* No AVX/ERMS feature requirement or alignment/guard-page overread.
-         * Leave DF clear, including across asynchronous signal delivery. */
+        /* 不要求 AVX/ERMS 特性或对齐，也不会越过保护页读取。
+         * 即使发生异步信号投递，也始终保持 DF 清零。 */
         __asm__ volatile("cld; rep movsq"
                          : "+D"(out), "+S"(in), "+c"(words)
                          : : "memory", "cc");

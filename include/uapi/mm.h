@@ -15,15 +15,15 @@ enum os_vm_flags {
     OS_VM_STACK   = 1u << 3,
 };
 
-/* VM_SYNC flags mirror the portable msync contract.  ASYNC is currently
- * completed synchronously, which is stronger than the minimum guarantee. */
+/* VM_SYNC 标志遵循通用 msync 约定。当前 ASYNC 操作也会同步完成，
+ * 保证强于最低要求。 */
 enum os_vm_sync_flags {
     OS_VM_SYNC_ASYNC      = 1u << 0,
     OS_VM_SYNC_INVALIDATE = 1u << 1,
     OS_VM_SYNC_SYNC       = 1u << 2,
 };
 
-/* VM_ADVISE values intentionally use the POSIX numeric namespace. */
+/* VM_ADVISE 的取值刻意沿用 POSIX 数值空间。 */
 enum os_vm_advice {
     OS_VM_ADVICE_NORMAL    = 0,
     OS_VM_ADVICE_RANDOM    = 1,

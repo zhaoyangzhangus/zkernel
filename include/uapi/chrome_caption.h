@@ -25,9 +25,19 @@
  * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
  * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
  * POSSIBILITY OF SUCH DAMAGE.
- * Paths retained in hundredths of a DIP; 8x8 coverage instead of Skia.
+ * 路径坐标以百分之一 DIP 为单位保存；使用 8x8 覆盖采样，不依赖 Skia。
  */
 #define CHROME_CAPTION_WIDTH 32U
+/* 整数覆盖率在圆周保留一个像素的过渡，任意字号都保持居中圆形。 */
+static inline uint32_t os_window_caption_circle_alpha(uint32_t diameter, uint32_t x, uint32_t y) {
+    if (!diameter || x>=diameter || y>=diameter) return 0U;
+    int64_t dx=2*(int64_t)x+1-diameter,dy=2*(int64_t)y+1-diameter;
+    int64_t distance=dx*dx+dy*dy;
+    int64_t outer=(int64_t)diameter*diameter;
+    int64_t inner=diameter>2U ? (int64_t)(diameter-2U)*(diameter-2U) : 0;
+    if (distance>=outer) return 0U;
+    return distance<=inner ? 255U : (uint32_t)((outer-distance)*255/(outer-inner));
+}
 #define CHROME_CAPTION_HEIGHT 40U
 #define CHROME_CAPTION_ICON_SIZE 12U
 #define CHROME_FRAME_RADIUS 8U
@@ -38,8 +48,8 @@ static inline uint32_t chrome_frame_inset(uint32_t row, uint32_t width) {
     return width >= 16U && row < 8U ? inset[row] : 0U;
 }
 
-/* Fixed 8x8 subpixel coverage of an 8-DIP circle, mirrored at all four
- * corners. No floating point or supersampling in the compositor hot path. */
+/* 8 DIP 圆形的固定 8x8 子像素覆盖率，镜像应用于四个角。
+ * 合成器热路径中不使用浮点运算或超采样。 */
 static const uint8_t chrome_corner_coverage[8][8] = {
     {0,0,0,0,48,155,215,255},
     {0,0,12,155,255,255,255,255},
@@ -49,6 +59,17 @@ static const uint8_t chrome_corner_coverage[8][8] = {
     {155,255,255,255,255,255,255,255},
     {215,255,255,255,255,255,255,255},
     {255,255,255,255,255,255,255,255},
+};
+/* 系统 1px 窗框的内圈覆盖率，与外圈同心，避免在圆角处产生方形色块。 */
+static const uint8_t chrome_corner_inner_coverage[8][8] = {
+    {0,0,0,0,0,0,0,0},
+    {0,0,0,0,24,135,211,251},
+    {0,0,0,92,243,255,255,255},
+    {0,0,92,255,255,255,255,255},
+    {0,24,243,255,255,255,255,255},
+    {0,135,255,255,255,255,255,255},
+    {0,211,255,255,255,255,255,255},
+    {0,251,255,255,255,255,255,255},
 };
 static inline uint8_t chrome_frame_alpha(uint32_t x, uint32_t y,
                                          uint32_t width, uint32_t height) {

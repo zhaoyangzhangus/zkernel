@@ -5,7 +5,7 @@ import gdb, subprocess, struct, json, time, os, sys
 from pathlib import Path
 sys.path.insert(0, str(Path("tools/chromium").resolve()))
 from trace_build import validate_chrome_build
-expected = 'Build ID: ccd5fc305e3b0600'
+expected = 'Build ID: 2ea4a62ae34e05c9'
 try:
     validate_chrome_build(expected)
 except RuntimeError as error:
@@ -82,9 +82,9 @@ class Decision(gdb.Breakpoint):
              'diagnostic_host_ms':(time.monotonic()-started)*1000,
              'draw_to_decision_ms':(time.monotonic()-pending['begin'])*1000})
         return False
-Input('*0x51e890e0',gdb.BP_HARDWARE_BREAKPOINT,internal=True)
-Draw('*0x4eaad300',gdb.BP_HARDWARE_BREAKPOINT,internal=True)
-Paint('*0x4eb671d0',gdb.BP_HARDWARE_BREAKPOINT,internal=True)
-if mode=='decision':Decision('*0x4ea8b240',gdb.BP_HARDWARE_BREAKPOINT,internal=True)
+Input('*0x520f0100',gdb.BP_HARDWARE_BREAKPOINT,internal=True)
+Draw('*0x4ecf4de0',gdb.BP_HARDWARE_BREAKPOINT,internal=True)
+Paint('*0x4edaf0c0',gdb.BP_HARDWARE_BREAKPOINT,internal=True)
+if mode=='decision':Decision('*0x4ecd2cd0',gdb.BP_HARDWARE_BREAKPOINT,internal=True)
 end
 continue

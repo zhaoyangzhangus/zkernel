@@ -27,15 +27,16 @@ code = r'''
 static char g_text[8192],g_load_text[8192],g_file_path[]="/tmp/dialog-test";
 static size_t g_text_length,g_cursor,g_selection_anchor;
 static uint32_t g_scroll_line;
-static bool g_dirty,g_follow_cursor,g_mouse_selecting;
+static bool g_dirty,g_follow_cursor,g_mouse_selecting,g_named_document=true;
+static unsigned picker_calls;static bool picker_save;
+static void show_file_picker(bool save){++picker_calls;picker_save=save;}
 static ui_message_box_t g_message;
-enum notepad_pending {NOTEPAD_PENDING_NONE,NOTEPAD_PENDING_CLOSE,NOTEPAD_PENDING_NEW,NOTEPAD_PENDING_RELOAD};
+enum notepad_pending {NOTEPAD_PENDING_NONE,NOTEPAD_PENDING_CLOSE,NOTEPAD_PENDING_NEW,NOTEPAD_PENDING_RELOAD,NOTEPAD_PENDING_OPEN};
 static enum notepad_pending g_pending;
 static unsigned mode,position,stored_size;
 static char stored[8193];
 static jmp_buf exited;
 static void notepad_exit(uint64_t status){assert(!status);longjmp(exited,1);}
-static void notepad_damage_all(void){}
 static void history_reset(void){g_selection_anchor=SIZE_MAX;g_mouse_selecting=false;}
 static void mark_saved(void){g_dirty=false;}
 static void begin_edit(void){}
@@ -58,9 +59,13 @@ static int64_t notepad_syscall_four(uint64_t number,uint64_t a,uint64_t b,uint64
 static void reset(void){
  strcpy(g_text,"unsaved content");g_text_length=strlen(g_text);g_cursor=4;g_dirty=true;
  g_pending=NOTEPAD_PENDING_NONE;g_message.active=false;mode=0;position=stored_size=0;
+ g_named_document=true;strcpy(g_file_path,"/tmp/dialog-test");picker_calls=0;
 }
 static void ask(enum notepad_pending action){request_action(action);assert(g_message.active&&g_pending==action);g_message.active=false;}
 int main(void){
+ reset();g_named_document=false;ask(NOTEPAD_PENDING_CLOSE);complete_message(OS_MESSAGE_SAVE);
+ assert(picker_calls==1&&picker_save&&g_pending==NOTEPAD_PENDING_CLOSE&&g_dirty);
+ reset();g_dirty=false;request_action(NOTEPAD_PENDING_OPEN);assert(picker_calls==1&&!picker_save);
  reset();reload_document();assert(g_pending==NOTEPAD_PENDING_RELOAD&&g_message.active&&g_dirty);
  reset();new_document();assert(g_pending==NOTEPAD_PENDING_NEW&&g_message.active&&g_dirty);
  reset();ask(NOTEPAD_PENDING_CLOSE);complete_message(OS_MESSAGE_CANCEL);

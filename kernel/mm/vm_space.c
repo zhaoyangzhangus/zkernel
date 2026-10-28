@@ -14,15 +14,15 @@ static atomic_uint g_vm_init_state;
 typedef struct {
     uint64_t duration_ns, root, caller, tid;
 } vm_lock_diagnostic_t;
-static vm_lock_diagnostic_t g_vm_lock_diagnostics[2]; /* wait, hold */
+static vm_lock_diagnostic_t g_vm_lock_diagnostics[2]; /* 等待、持有 */
 static atomic_flag g_vm_lock_diagnostic_guard = ATOMIC_FLAG_INIT;
-/* Opt-in fine sampling; default preserves the historical 10ms fast gate. */
+/* 可选的精细采样；默认保留原有的 10ms 快速门限。 */
 static volatile uint64_t g_vm_lock_trace_threshold_ns = 10000000ULL;
 
 static void vm_lock_record(unsigned kind, uint64_t ticks, uint64_t root,
                             uint64_t caller, uint64_t tid) {
-    /* Only publish long delays, never allocate, print, or wait on another
-     * diagnostic writer while holding an address-space lock. */
+    /* 仅发布较长延迟；持有地址空间锁时绝不分配内存、打印，
+     * 也不等待其他诊断写入者。 */
     uint64_t threshold = g_vm_lock_trace_threshold_ns;
     if (threshold == 0U) threshold = 10000000ULL;
     if (threshold < 100000ULL) threshold = 100000ULL;
@@ -56,9 +56,8 @@ void map_lock(vm_space_t *space) {
             __asm__ volatile ("sti" : : : "memory");
             enabled_delivery = true;
         }
-        /* Poll shared cache lines without repeatedly taking write ownership.
-         * Only retry the acquire operation after the holder releases. Keep
-         * the CPU pinned and TLB delivery enabled throughout this wait. */
+        /* 轮询共享缓存行，不要反复争取写所有权。仅在持有者释放后重试获取操作。
+         * 等待期间保持 CPU 固定，并启用 TLB 消息接收。 */
         do {
             __asm__ volatile ("pause");
         } while (atomic_load_explicit(&space->map_lock.state,
@@ -207,15 +206,13 @@ void vm_space_put(vm_space_t *space) {
         list_del(&area->ordered_node);
         list_add_tail(&retired, &area->ordered_node);
     }
-    /* The last reference excludes live mutators. On a failed TLB operation,
-     * retain a valid index for the intentionally leaked, still-backed VMAs;
-     * it must not refer to any successfully retired area below. */
+    /* 最后一个引用意味着不再有活动修改者。TLB 操作失败时，要为有意保留且仍有后备的 VMA 保留有效索引；
+     * 索引不得指向下方已成功回收的区域。 */
     if (!failed) space->areas.root = 0;
     else if (!list_empty(&retired)) rebuild_area_tree(space);
     map_unlock(space);
-    /* Backing destructors may free thousands of pages. As in ordinary unmap,
-     * only detach after TLB acknowledgement, and release outside map_lock's
-     * preemption guard so another process's UI can run during reclamation. */
+    /* 后备对象析构可能释放数千个页面。与常规取消映射一样，只能在 TLB 确认后摘除；并在 map_lock 的
+     * 抢占保护之外释放，以便回收期间其他进程的界面仍可运行。 */
     while (!list_empty(&retired)) {
         vm_area_t *area = area_from_list(retired.next);
         list_del(&area->ordered_node);
@@ -228,9 +225,8 @@ void vm_space_put(vm_space_t *space) {
 }
 
 
-/* Split VMAs retain the same backing object. Clone it once per fork, both
- * to preserve aliases in the child and to avoid copying its page index for
- * every protection fragment. Entries borrow references owned by child VMAs. */
+/* 拆分后的 VMA 仍引用同一后备对象。每次 fork 只克隆一次，既保留子进程中的别名关系，也避免为每个
+ * 权限片段都复制页索引。条目借用子进程 VMA 所持有的引用。 */
 typedef struct vm_clone_entry {
     vm_object_t *source;
     vm_object_t *copy;
@@ -270,8 +266,7 @@ static kstatus_t clone_anon_cached(rb_root_t *cache,
     return K_OK;
 }
 
-/* Private balanced tree: postorder release is linear and its recursion is
- * bounded by RB height. Entries borrow references from live child VMAs. */
+/* 私有平衡树：后序释放为线性复杂度，递归深度受红黑树高度限制。条目借用活动子进程 VMA 的引用。 */
 static void clone_cache_release_node(rb_node_t *node) {
     if (node == 0) return;
     clone_cache_release_node(node->left);
@@ -361,9 +356,8 @@ kstatus_t vm_space_clone_cow(vm_space_t *source, vm_space_t **out) {
                 continue;
             }
 
-            /* Include the current area before any PTE can fail. Untouched
-             * existing COW areas have no OLD_COW marker, so a whole-list
-             * rollback would incorrectly make their shared pages writable. */
+            /* 任何 PTE 操作可能失败前，先记录当前区域。未修改的现有 COW 区域没有 OLD_COW 标记；若回滚
+             * 整个列表，会错误地将其共享页面改为可写。 */
             if (cow_first == &source->area_list)
                 cow_first = &area->ordered_node;
             cow_end = source_item;
@@ -374,8 +368,7 @@ kstatus_t vm_space_clone_cow(vm_space_t *source, vm_space_t **out) {
                     old_cow_first = &area->ordered_node;
                 old_cow_end = source_item;
             } else cow_metadata_changed = true;
-            /* Publish COW before changing the first PTE, including when a
-             * later protect fails. Rollback must cover that partial area. */
+            /* 更改首个 PTE 前先发布 COW，即使后续 protect 失败也如此。回滚必须覆盖该部分修改的区域。 */
             area->flags |= VM_AREA_COW;
             copy->flags |= VM_AREA_COW;
             if ((area->prot & VM_PROT_WRITE) != 0) {
@@ -406,9 +399,8 @@ kstatus_t vm_space_clone_cow(vm_space_t *source, vm_space_t **out) {
         }
     }
 
-    /* Publish the entire COW restriction with one acknowledged user-root
-     * flush, rather than one IPI round trip per resident page. The child is
-     * still private, and map_lock prevents simultaneous VM metadata edits. */
+    /* 通过一次已确认的用户根页表刷新，发布全部 COW 权限限制，而不是为每个驻留页单独往返一次 IPI。
+     * 此时子进程仍为私有状态，map_lock 可阻止并发修改 VM 元数据。 */
     if (status == K_OK && protection_changed &&
         !x86_tlb_shootdown_root(source->root_table)) status = K_EIO;
     uint64_t protection_done = x86_read_tsc();
@@ -422,8 +414,7 @@ kstatus_t vm_space_clone_cow(vm_space_t *source, vm_space_t **out) {
             bool cow_backed = (area->flags & VM_MAP_PRIVATE) != 0 &&
                 area->object != 0 && (area->object->type == VM_OBJECT_ANON ||
                                      area->private_object != 0);
-            /* Consume the rollback marker in this same traversal, retaining
-             * its meaning locally before any permission restoration. */
+            /* 在同一次遍历中消费回滚标记，并在恢复权限前将其含义保存在局部变量中。 */
             if (was_cow && cow_backed) area->flags &= ~VM_AREA_CLONE_OLD_COW;
             if ((area->flags & VM_AREA_COW) == 0 ||
                 was_cow ||
@@ -452,8 +443,7 @@ kstatus_t vm_space_clone_cow(vm_space_t *source, vm_space_t **out) {
             if (!restored) area->flags |= VM_AREA_COW;
         }
     } else {
-        /* Failed clones consumed markers during rollback above. A successful
-         * first fork sets none; only clear the actual old-marker span. */
+        /* 失败的克隆已在上方回滚时消费标记。首次成功 fork 不会设置标记；这里只清除实际的旧标记范围。 */
         for (list_head_t *item = old_cow_first;
              item != old_cow_end; item = item->next) {
             vm_area_t *area = area_from_list(item);
@@ -469,13 +459,11 @@ kstatus_t vm_space_clone_cow(vm_space_t *source, vm_space_t **out) {
             vm_tlb_bump_generation(source);
     }
     map_unlock(source);
-    /* Fork changes parent permissions/COW flags, never its VMA boundaries or
-     * address-index summaries. The child is still private until *out below:
-     * build its index without extending the parent's preemption guard. */
+    /* Fork 会改变父进程的权限/COW 标志，但不会改变其 VMA 边界或地址索引摘要。下方设置 *out 前，子进程
+     * 仍为私有状态；构建其索引时无需延长父进程的抢占保护。 */
     if (status == K_OK) rebuild_area_tree(child);
-    /* Cache entries borrow object references and are private to this fork.
-     * Their allocator work need not extend the source map's preemption guard;
-     * keep child VMA references alive until the bookkeeping is released. */
+    /* 缓存条目借用对象引用，并且仅属于此次 fork。分配缓存不必延长源映射的抢占保护；记账完成前要保留
+     * 子进程 VMA 引用。 */
     clone_cache_release(&clone_cache);
     uint64_t finished = x86_read_tsc();
     if (x86_tsc_to_ns(finished - started) >= 50000000ULL) {

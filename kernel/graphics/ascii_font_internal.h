@@ -16,7 +16,7 @@ typedef struct ascii_font_point {
     bool on_curve;
 } ascii_font_point_t;
 
-/* Private TTF parser state.  The cache/raster unit owns the lifetime. */
+/* 私有 TTF 解析器状态。生命周期由缓存/光栅化单元管理。 */
 typedef struct ascii_font_parser {
     const uint8_t *file;
     size_t file_size;

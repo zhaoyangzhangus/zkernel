@@ -8,7 +8,9 @@ source = (root / 'kernel/fs/vfs/core.c').read_text()
 directory = source[source.index('static bool vfs_directory_exists_locked('):
                    source.index('static bool vfs_parent_directory_exists_locked(')]
 equals = source[source.index('static bool vfs_path_range_equals('):
-                source.index('/* Memory-backed /tmp')]
+                source.index('static uint32_t vfs_free_node_slot_locked(')]
+parent = source[source.index('static bool vfs_parent_directory_exists_locked('):
+                source.index('static void vfs_set_leaf_name(')]
 code = r'''
 #include <assert.h>
 #include <stdbool.h>
@@ -26,19 +28,28 @@ typedef struct {void *fs_private;} vnode_t;
 typedef struct {unsigned type;} os_file_info_t;
 static vnode_t *g_vfs_nodes[4];static uint32_t g_vfs_node_capacity;
 static bool mounted;static unsigned mounted_type,scans;
+static bool path_sensitive;static unsigned fat_calls;
 static size_t vfs_string_length(const char *p){
  ++scans;size_t n=0;while(n<256&&p[n])++n;return n;
 }
 static bool vfs_fat32_stat_absolute(const char *p,os_file_info_t *info,char *relative){
- assert(p&&relative);info->type=mounted_type;return mounted;
+ assert(p&&relative);++fat_calls;
+ if(path_sensitive){
+  if(!strcmp(p,"/disk/parent")){info->type=OS_FILE_TYPE_DIRECTORY;return true;}
+  if(!strcmp(p,"/disk/parent/file")){info->type=1;return true;}
+  return false;
+ }
+ info->type=mounted_type;return mounted;
 }
-''' + equals + directory + r'''
+''' + equals + directory + parent + r'''
 static bool previous_directory(const char *path,size_t n){
- if(!path||!n)return false;
+ if(!path||!n||n>256)return false;
  if(n==1&&path[0]=='/')return true;
  if(n==4&&vfs_path_range_equals(path,n,"/tmp",4))return true;
- char relative[256];os_file_info_t info;
- if(vfs_fat32_stat_absolute(path,&info,relative))return info.type==OS_FILE_TYPE_DIRECTORY;
+ /* FAT 查询修正为父目录前缀；内存节点仍与原有逐槽算法比较。 */
+ char relative[256],prefix[256];os_file_info_t info;
+ if(n<256){memcpy(prefix,path,n);prefix[n]=0;
+  if(vfs_fat32_stat_absolute(prefix,&info,relative))return info.type==OS_FILE_TYPE_DIRECTORY;}
  for(uint32_t i=0;i<g_vfs_node_capacity;++i){
   vnode_t *v=g_vfs_nodes[i];vfs_backend_node_t *b=v?(vfs_backend_node_t*)v->fs_private:0;
   if(!b)continue;
@@ -90,6 +101,15 @@ int main(void){
  }
  g_vfs_nodes[0]=0;v[1].fs_private=0;
  compare("/tmp/a",6);compare(0,0);compare("/x",SIZE_MAX);
+ /* 子文件存在或不存在，都必须查询父目录，不能查询完整子文件名。 */
+ path_sensitive=true;g_vfs_node_capacity=0;
+ const char *child="/disk/parent/file";
+ assert(vfs_parent_directory_exists_locked(child,strlen(child)));
+ child="/disk/parent/new-file";
+ assert(vfs_parent_directory_exists_locked(child,strlen(child)));
+ assert(!vfs_directory_exists_locked("/disk/parent/file",17));
+ assert(!vfs_parent_directory_exists_locked("/disk/missing/file",18));
+ path_sensitive=false;
  /* Path ends at the protected page: [256] must never be read. */
  long page=sysconf(_SC_PAGESIZE);assert(page>=(long)sizeof(b[0]));
  char *arena=mmap(0,(size_t)page*2,PROT_READ|PROT_WRITE,
@@ -99,6 +119,9 @@ int main(void){
  memset(edge,0,sizeof(*edge));edge->directory=true;
  v[0].fs_private=edge;g_vfs_nodes[0]=&v[0];g_vfs_node_capacity=1;
  memset(edge->path,'x',256);memset(request,'x',256);compare(request,256);
+ unsigned calls=fat_calls;
+ assert(vfs_directory_exists_locked(edge->path,256));
+ assert(fat_calls==calls);
  assert(!munmap(arena,(size_t)page*2));
  printf("Directory scans: %u old/new cases, %u candidate-scanning routes now skip strlen; bounded paths, mounted status, holes and first-match precedence preserved\n",cases,reduced);
 }

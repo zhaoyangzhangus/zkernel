@@ -50,6 +50,16 @@ static bool requeue_self_on_put;
 static thread_t *fifo_base;
 static unsigned fifo_index;
 static unsigned deferred, reaped;
+static bool background_ready;
+static bool deferred_background_worker_started(void) {return background_ready;}
+static bool background_full;
+static void (*background_work)(void *);
+static void *background_argument;
+static bool deferred_background_schedule(void (*work)(void *),void *arg) {
+    if(background_full)return false;
+    assert(!background_work);background_work=work;background_argument=arg;return true;
+}
+static uint32_t x86_current_cpu_index(void){return current_cpu;}
 static void scheduler_reap_schedule_deferred(uint32_t cpu) { assert(cpu==current_cpu); ++deferred; }
 static void scheduler_reap_drain_cpu(uint32_t cpu) {
     (void)cpu; assert(irq && !locked && !tlb); ++reaped;
@@ -62,7 +72,8 @@ static bool scheduler_current_cpu(uint32_t *cpu) { *cpu=current_cpu; return curr
 static bool sched_preempt_disabled(void) { return locked; }
 static bool x86_tlb_shootdown_active(void) { return tlb; }
 static void scheduler_command_release_enqueue_local(scheduler_cpu_t *,thread_t *);
-static void object_put(thread_t *thread) {
+static void object_put(void *object) {
+    thread_t *thread=object;
     assert(irq && !locked && !tlb && thread->refs);
     --thread->refs; ++thread->puts; ++releases;
     if (fifo_base) {
@@ -138,6 +149,42 @@ int main(void) {
     for(unsigned n=0;n<64;++n)
         assert(!batch[n].refs&&batch[n].puts==256&&!batch[n].command_release_count);
     fifo_base=0;
+    /* Once background cleanup is available, the last owned reference must
+     * leave the switching thread without running its destructor there. */
+    background_ready=true;
+    thread_t background_case={.refs=1};queue(0,&background_case,1);
+    unsigned before_deferred=deferred,before_reaped=reaped;
+    sched_finish_switch();
+    assert(!background_case.puts&&background_case.refs==1);
+    assert(deferred==before_deferred+1&&reaped==before_reaped);
+    assert(background_argument==&background_case&&background_work);
+    background_work(background_argument);background_work=0;
+    assert(background_case.puts==1&&!background_case.refs);
+    // A saturated cleanup queue must retain the last reference for retry.
+    thread_t saturated={.refs=256};queue(0,&saturated,256);
+    background_full=true;sched_finish_switch();
+    assert(saturated.refs==1&&saturated.puts==255&&!background_work);
+    assert(g_cpus[0].command_release_pending&&saturated.command_release_count==1);
+    background_full=false;sched_finish_switch();
+    assert(saturated.refs==1&&!g_cpus[0].command_release_pending);
+    background_work(background_argument);background_work=0;
+    assert(!saturated.refs&&saturated.puts==256);
+    /* An interruptible release can migrate after a non-final put. Restore
+     * the retained reference on the new CPU, not the stale source FIFO. */
+    thread_t migrated={.refs=3};queue(0,&migrated,3);
+    background_full=true;migrate_on_put=true;
+    scheduler_command_release_drain(0);
+    assert(current_cpu==1&&migrated.refs==1&&migrated.puts==2);
+    assert(!g_cpus[0].command_release_pending);
+    assert(g_cpus[1].command_release_head==&migrated);
+    assert(g_cpus[1].command_release_pending&&migrated.command_release_count==1);
+    background_full=false;scheduler_command_release_drain(0);
+    assert(!background_work&&migrated.refs==1);
+    scheduler_command_release_drain(1);
+    assert(background_argument==&migrated&&background_work);
+    assert(!g_cpus[1].command_release_pending);
+    background_work(background_argument);background_work=0;
+    assert(!migrated.refs&&migrated.puts==3);
     puts("Coalesced release publications: 16384 references/64 FIFO nodes -> 1 pending publication; FIFO and same-node reentry passed");
 }
 '''

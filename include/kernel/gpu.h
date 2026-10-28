@@ -32,9 +32,8 @@ enum gpu_context_state {
 };
 
 /*
- * A Window owns only a gpu_allocation_t reference.  Backend-private RM/KMS
- * handles stay behind this enum and callback table; generic graphics code
- * never interprets backend_private.
+ * Window 仅持有 gpu_allocation_t 引用。后端私有的 RM/KMS 句柄由此枚举和回调表封装；
+ * 通用图形代码不会解释 backend_private。
  */
 typedef enum gpu_allocation_backend {
     GPU_ALLOCATION_BACKEND_CPU_WB = 0,
@@ -45,8 +44,7 @@ typedef enum gpu_allocation_backend {
 typedef struct gpu_allocation gpu_allocation_t;
 
 typedef struct gpu_allocation_backend_ops {
-    /* Release backend ownership; the allocation object itself is freed by
-     * GPU core after this callback returns. */
+    /* 释放后端所有权；回调返回后由 GPU 核心释放分配对象本身。 */
     void (*release)(gpu_allocation_t *allocation, void *backend_private);
     kstatus_t (*pin)(gpu_allocation_t *allocation, void *backend_private);
     void (*unpin)(gpu_allocation_t *allocation, void *backend_private);
@@ -69,8 +67,8 @@ struct gpu_allocation {
     const gpu_allocation_backend_ops_t *backend_ops;
     void *backend_private;
 
-    /* CPU_WB/CPU_WC backing only.  NVIDIA backend state is never stored in
-     * these fields and is never exposed to user space. */
+    /* 仅用于 CPU_WB/CPU_WC 后备存储。NVIDIA 后端状态绝不保存在这些字段中，
+     * 也不会暴露给用户态。 */
     void *backing;
     paddr_t backing_phys;
     uint64_t backing_size;

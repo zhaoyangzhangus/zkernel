@@ -172,11 +172,11 @@ int main(void)
      * pinned NVIDIA ICD; the JSON is still parsed and the vendor is still
      * loaded by libEGL itself. */
     if (setenv("__EGL_VENDOR_LIBRARY_FILENAMES",
-               "/usr/share/glvnd/egl_vendor.d/10_nvidia.json", 1) != 0) {
+               "/usr/apps/p10-egl-context/egl/10_nvidia.json", 1) != 0) {
         return p10_fail("OS_P10_GLVND_ENV_FAIL\n");
     }
     egl_handle = dlopen(
-        "/compat/linux/lib/x86_64-linux-gnu/libEGL.so.1",
+        "/usr/apps/p10-egl-context/lib/libEGL.so.1",
         P10_RTLD_NOW | P10_RTLD_GLOBAL);
     dlopen_error = dlerror();
     if (dlopen_error != 0) {

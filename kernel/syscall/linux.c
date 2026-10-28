@@ -39,12 +39,11 @@
 #define OS_DEBUG_SERIAL 0
 #endif
 
-/* Linux x86-64 legacy wall clock, used by the NVIDIA Vulkan runtime. */
+/* NVIDIA Vulkan 运行时使用的 Linux x86-64 旧版墙上时钟。 */
 #define LINUX_SYS_GETTIMEOFDAY 96U
 #define LINUX_MAP_32BIT 0x40U
 #define LINUX_MAP_NORESERVE 0x4000U
 
-static uint32_t g_linux_madvise_fail_logs;
 static uint32_t g_linux_fd_exhaustion_logs;
 static uint32_t g_linux_tmp_open_failure_logs;
 static uint32_t g_linux_mmap_fail_logs;
@@ -55,9 +54,23 @@ static uint32_t g_linux_chrome_trace_bytes;
 #define LINUX_DEBUG_COM1_DATA   0x3F8U
 #define LINUX_DEBUG_COM1_STATUS 0x3FDU
 #define LINUX_CHROME_STDERR_LIMIT (16U * 1024U)
+#define LINUX_CHROME_UART_POLL_LIMIT 128U
+
+/* 默认关闭诊断串口；需要诊断时可随串口构建开关启用，或由调试器显式开启。 */
+static bool g_linux_chrome_uart_disabled = !OS_DEBUG_SERIAL;
+
+static uint8_t linux_chrome_uart_status(void) {
+    uint8_t status;
+    __asm__ volatile ("inb %w1, %0" : "=a"(status) : "d"(LINUX_DEBUG_COM1_STATUS));
+    return status;
+}
+
+static void linux_chrome_uart_write(uint8_t value) {
+    __asm__ volatile ("outb %0, %w1" : : "a"(value), "d"(LINUX_DEBUG_COM1_DATA));
+}
 
 static bool linux_process_is_chrome_image(const process_t *process) {
-    static const char path[] = "/sbin/chrome";
+    static const char path[] = "/usr/apps/chrome/chrome";
     if (process == 0) return false;
     for (size_t index = 0U; index < sizeof(path); ++index) {
         if (process->linux_exe[index] != path[index]) return false;
@@ -66,14 +79,19 @@ static bool linux_process_is_chrome_image(const process_t *process) {
 }
 
 static void linux_chrome_diag_char(char value) {
-    for (uint32_t attempt = 0U; attempt < 100000U; ++attempt) {
-        uint8_t ready;
-        __asm__ volatile ("inb %w1, %0" : "=a"(ready) : "d"(LINUX_DEBUG_COM1_STATUS));
-        if ((ready & 0x20U) != 0U) break;
+    /* 不可因 UART 缺失或卡住而延迟系统调用。尽力输出失败一次后，
+     * 就禁用该诊断输出通道，而不是每个字节都重试。 */
+    if (__atomic_load_n(&g_linux_chrome_uart_disabled, __ATOMIC_RELAXED)) return;
+    for (uint32_t attempt = 0U; attempt < LINUX_CHROME_UART_POLL_LIMIT; ++attempt) {
+        uint8_t ready = linux_chrome_uart_status();
+        if (ready == 0xffU) break;
+        if ((ready & 0x20U) != 0U) {
+            linux_chrome_uart_write((uint8_t)value);
+            return;
+        }
         __asm__ volatile ("pause");
     }
-    __asm__ volatile ("outb %0, %w1" : : "a"((uint8_t)value),
-                      "d"(LINUX_DEBUG_COM1_DATA));
+    __atomic_store_n(&g_linux_chrome_uart_disabled, true, __ATOMIC_RELAXED);
 }
 
 static void linux_chrome_diag_text(const char *text) {
@@ -87,23 +105,6 @@ static void linux_chrome_diag_hex(uint64_t value) {
     for (int shift = 60; shift >= 0; shift -= 4) {
         linux_chrome_diag_char(digits[(value >> (uint32_t)shift) & 0xfU]);
     }
-}
-
-static void linux_chrome_madvise_failure(process_t *process,
-                                         uint64_t address, uint64_t length,
-                                         uint64_t advice, int64_t status) {
-    if (!linux_process_is_chrome_image(process)) return;
-    linux_chrome_diag_text("OS_CHROME_MADVISE_FAIL pid=");
-    linux_chrome_diag_hex(process->pid);
-    linux_chrome_diag_text(" addr=");
-    linux_chrome_diag_hex(address);
-    linux_chrome_diag_text(" len=");
-    linux_chrome_diag_hex(length);
-    linux_chrome_diag_text(" advice=");
-    linux_chrome_diag_hex(advice);
-    linux_chrome_diag_text(" status=");
-    linux_chrome_diag_hex((uint64_t)status);
-    linux_chrome_diag_text("\r\n");
 }
 
 static void linux_chrome_vm_failure(const char *operation,
@@ -133,7 +134,7 @@ void linux_chrome_stderr_write(process_t *process,
     uint32_t captured;
     if (!linux_process_is_chrome_image(process) || text == 0 || length == 0U)
         return;
-    /* High-volume porting marks must not consume the error-log budget. */
+    /* 高频移植标记不能占用错误日志额度。 */
     bool trace = (length >= 3U && text[0] == 'O' && text[1] == 'S' &&
                   text[2] == '_') ||
                  (length >= 7U && text[0] == 'L' && text[1] == 'I' &&
@@ -191,12 +192,13 @@ static void linux_debug_socket_io(uint32_t operation, int64_t descriptor,
 #endif
 
 /*
- * The Linux ABI is intentionally an adapter, not a second native kernel ABI.
- * It owns only the translation required by a Linux x86-64 image and calls
- * the existing System VFS/VM/scheduler primitives for the actual operation.
+ * Linux ABI 刻意设计为适配层，而不是第二套内核原生 ABI。
+ * 它只负责 Linux x86-64 映像所需的转换，实际操作调用现有的 System
+ * VFS/VM/调度器原语完成。
  */
 
 #define LINUX_EFAULT        K_EFAULT
+#define LINUX_ERANGE        (-34LL)
 #define LINUX_ENOTTY        (-25LL)
 #define LINUX_ENODEV        (-19LL)
 #define LINUX_EEXIST        (-17LL)
@@ -206,7 +208,6 @@ static void linux_debug_socket_io(uint32_t operation, int64_t descriptor,
 #define LINUX_MAX_PATH      256U
 #define LINUX_MAX_COPY      (64U * 1024U)
 #define LINUX_MAX_POLL_FDS  OS_LINUX_FD_LIMIT
-#define LINUX_POLL_WAIT_SOURCES (3U * LINUX_MAX_POLL_FDS)
 #define LINUX_ECONNRESET    (-104LL)
 #define LINUX_ENOTCONN      (-107LL)
 #define LINUX_EAFNOSUPPORT  (-97LL)
@@ -228,9 +229,8 @@ static void linux_debug_socket_io(uint32_t operation, int64_t descriptor,
 #define LINUX_UNIX_MAX_MESSAGES    64U
 #define LINUX_UNIX_MAX_CONTROL     4096U
 
-/* Keep the Linux ABI hot path quiet during normal boots.  These diagnostics
- * were useful while bringing PartitionAlloc up, but each character is sent
- * through the emulated COM1 device and makes Chrome startup needlessly slow. */
+/* 正常启动时保持 Linux ABI 热路径安静。这些诊断曾用于调通 PartitionAlloc，
+ * 但每个字符都会经由模拟的 COM1 设备发送，徒增 Chrome 启动耗时。 */
 #define OS_LINUX_MAP_DIAGNOSTICS 0
 #define OS_PARTITION_DIAG_RANGES 8U
 
@@ -296,8 +296,8 @@ typedef struct linux_iovec {
     uint64_t length;
 } linux_iovec_t;
 
-/* Linux x86-64 struct msghdr.  Keep the explicit padding: this structure is
- * copied from a Linux image and must not inherit a host ABI. */
+/* Linux x86-64 的 struct msghdr。保留显式填充字段：该结构从 Linux 映像复制而来，
+ * 不能采用宿主机 ABI。 */
 typedef struct linux_msghdr {
     uint64_t name;
     uint32_t name_length;
@@ -331,10 +331,9 @@ typedef struct linux_sockaddr_in6 {
     uint32_t scope_id;
 } linux_sockaddr_in6_t;
 
-/* x86-64 Linux exposes epoll_event as a packed 12-byte syscall ABI:
- * uint32_t events followed immediately by the 64-bit user data union.  Keep
- * this packed; adding a padding/reserved word makes epoll_ctl() read past the
- * caller's event and epoll_wait() write with the wrong array stride. */
+/* x86-64 Linux 将 epoll_event 定义为 12 字节紧凑系统调用 ABI：uint32_t events
+ * 后紧接 64 位用户数据联合体。必须保持紧凑；添加填充/保留字段会导致
+ * epoll_ctl() 越界读取调用方事件，epoll_wait() 也会按错误步长写入数组。 */
 typedef struct __attribute__((packed)) linux_epoll_event {
     uint32_t events;
     uint64_t data;
@@ -348,7 +347,8 @@ typedef struct linux_epoll_watch {
     void *private_data;
     uint8_t kind;
     uint8_t used;
-    uint8_t reserved[6];
+    uint8_t disabled;
+    uint8_t reserved[5];
     struct linux_fd_description *description;
     struct linux_epoll_object *epoll;
     struct linux_epoll_watch *description_next;
@@ -364,10 +364,9 @@ typedef struct linux_epoll_object {
     linux_epoll_watch_t watches[LINUX_MAX_EPOLL_WATCHES];
 } linux_epoll_object_t;
 
-/* External references include descriptors, fork/dup lookup pins and queued
- * SCM_RIGHTS. Epoll interests retain the metadata separately, so they cannot
- * keep the open description alive forever. One lock protects only the reverse
- * interest list; never take an epoll lock while holding this lock. */
+/* 外部引用包括描述符、fork/dup 查找固定引用和排队中的 SCM_RIGHTS。
+ * Epoll interest 会单独保留元数据，因此不能让打开描述永久存活。
+ * 此锁只保护反向 interest 链表；持有此锁时不可获取 epoll 锁。 */
 typedef struct linux_fd_description {
     atomic_uint references;
     atomic_uint external_references;
@@ -396,8 +395,8 @@ typedef struct linux_unix_ancillary_record {
 static void linux_unix_ancillary_put_record(
     linux_unix_ancillary_record_t *record);
 
-/* Pipe bytes and SCM_RIGHTS metadata share one stream position.  Ordinary
- * send()/write() bytes need no record but must advance the same position. */
+/* 管道字节和 SCM_RIGHTS 元数据共用一个流位置。普通 send()/write() 字节无需
+ * 记录，但必须推进同一个位置。 */
 typedef struct linux_unix_channel {
     object_header_t object;
     spinlock_t lock;
@@ -662,8 +661,8 @@ static kstatus_t linux_unix_socket_shutdown(linux_unix_socket_t *socket,
     return K_OK;
 }
 
-/* The descriptor pins the socket, not endpoints detached by shutdown.
- * Retain each directional endpoint/channel pair under their publication lock. */
+/* 描述符固定的是 socket，而不是 shutdown 时分离的端点。
+ * 在各自的发布锁保护下保留每个方向的端点/通道对。 */
 static void linux_unix_socket_pin_io(linux_unix_socket_t *socket, bool write,
                                      pipe_endpoint_t **endpoint,
                                      linux_unix_channel_t **channel) {
@@ -714,7 +713,9 @@ static bool linux_epoll_watch_ready(const linux_epoll_watch_t *watch,
     uint32_t ready = 0U;
     bool read_requested;
     bool write_requested;
-    if (watch == 0 || !watch->used || watch->events == 0U) return false;
+    /* interest 掩码为零时仍会收到 ERR/HUP。只有 ONESHOT 投递会禁用该 interest，
+     * 直到 EPOLL_CTL_MOD 显式重新启用。 */
+    if (watch == 0 || !watch->used || watch->disabled) return false;
     read_requested = linux_epoll_read_requested(watch->events);
     write_requested = linux_epoll_write_requested(watch->events);
     switch (watch->kind) {
@@ -899,9 +900,8 @@ static bool linux_epoll_watch_matches_entry(const linux_epoll_watch_t *watch,
            watch->description != 0 && watch->description == entry->description;
 }
 
-/* Drop registrations only when the last descriptor for the underlying
- * description closes.  A dup alias must keep the old interest alive, even if
- * the numeric fd is subsequently reused for a different socket. */
+/* 仅当底层描述的最后一个描述符关闭时才移除注册。dup 别名必须保持旧 interest 有效，
+ * 即使之后相同数字 fd 被另一个 socket 复用也一样。 */
 static void linux_epoll_prune_description(linux_epoll_object_t *epoll,
                                           linux_fd_description_t *description) {
     bool changed = false;
@@ -940,8 +940,8 @@ static void linux_description_put_external(linux_fd_description_t *description) 
         spinlock_lock(&description->lock);
         for (linux_epoll_watch_t *watch = description->watches; watch != 0;
              watch = watch->description_next) {
-            /* A zero-ref epoll is already being destroyed. Its destructor
-             * will unlink its remaining interests and release metadata. */
+            /* 引用计数为零的 epoll 已在销毁过程中。析构函数会解除其余 interest 的链接，
+             * 并释放元数据。 */
             if (object_try_get(watch->epoll)) {
                 epoll = watch->epoll;
                 break;
@@ -1073,8 +1073,8 @@ static void linux_unix_channel_commit_write(linux_unix_channel_t *channel,
     spinlock_unlock(&channel->lock);
 }
 
-/* A recvmsg must stop before the first byte carrying an FD.  Once it reaches
- * that byte, deliver the FD with the first read of its sendmsg payload. */
+/* recvmsg 必须在第一个携带 FD 的字节前停止。到达该字节后，随 sendmsg 负载的首次读取
+ * 一并交付 FD。 */
 static size_t linux_unix_channel_read_limit(linux_unix_channel_t *channel,
                                             size_t request) {
     uint64_t remaining;
@@ -1092,8 +1092,14 @@ static size_t linux_unix_channel_read_limit(linux_unix_channel_t *channel,
     return request;
 }
 
-/* Called under read_mutex after pipe_read; records skipped by read()/recv()
- * are discarded, while recvmsg() may take the record at the old offset. */
+/* pipe_read_limited 在每次等待后、持有环锁时调用此函数。写入方在获取环锁前发布
+ * 辅助数据元信息，且不会持有通道锁进入管道操作（ring -> channel）。 */
+static size_t linux_unix_channel_pipe_limit(void *context, size_t available) {
+    return linux_unix_channel_read_limit(context, available);
+}
+
+/* pipe_read 后在 read_mutex 保护下调用；read()/recv() 跳过的记录会被丢弃，
+ * 而 recvmsg() 可以在旧偏移处取得该记录。 */
 static bool linux_unix_channel_commit_read(
     linux_unix_channel_t *channel, uint64_t bytes, bool receive_control,
     linux_unix_ancillary_record_t *received) {
@@ -1146,8 +1152,8 @@ void linux_fd_table_release_stdio(linux_fd_entry_t previous[3]) {
         linux_fd_entry_put(&previous[descriptor]);
 }
 
-/* Caller holds the source table lock or otherwise owns this entry. A file
- * description and its concrete object always travel as one external pin. */
+/* 调用方持有源表锁，或以其他方式拥有此表项。文件描述及其具体对象始终作为一个外部引用
+ * 一同传递。 */
 static void linux_fd_entry_get(const linux_fd_entry_t *entry) {
     linux_description_get_external(entry->description);
     if (entry->kind == LINUX_FD_FILE && entry->file != 0) {
@@ -1168,8 +1174,7 @@ static void linux_fd_entry_get(const linux_fd_entry_t *entry) {
 
 void linux_fd_table_init(linux_fd_table_t *table) {
     if (table == 0) return;
-    /* Initialization owns an unpublished table: install stdio in the same
-     * pass, without locking or rewriting its first three slots afterward. */
+    /* 初始化阶段拥有尚未发布的表：在同一轮中安装 stdio，无需加锁，也不必之后重写前三个槽位。 */
     spinlock_init(&table->lock);
     for (uint32_t descriptor = 0U; descriptor < OS_LINUX_FD_LIMIT;
          ++descriptor) {
@@ -1184,8 +1189,7 @@ void linux_fd_table_destroy(linux_fd_table_t *table) {
     linux_fd_entry_t entries[OS_LINUX_FD_LIMIT];
     uint32_t count = 0U;
     if (table == 0) return;
-    /* Compact only owned entries; detach the complete table before any
-     * callback runs, including callbacks that reenter or destroy it again. */
+    /* 仅压缩自有表项；运行任何回调前先分离整张表，包括可能重入或再次销毁该表的回调。 */
     spinlock_lock(&table->lock);
     for (uint32_t descriptor = 0U; descriptor < OS_LINUX_FD_LIMIT;
          ++descriptor) {
@@ -1208,10 +1212,8 @@ kstatus_t linux_fd_table_clone(const linux_fd_table_t *source,
         return source == destination ? K_OK : K_EINVAL;
     }
     linux_fd_table_destroy(destination);
-    /* Destroy preserves the initialized lock; the copy replaces every slot,
-     * including stdio and unused entries, so no second initialization is needed. */
-    /* A fixed order applies independently of clone direction. uintptr_t
-     * avoids ordering unrelated C object pointers directly. */
+    /* 销毁过程保留已初始化的锁；复制操作会替换所有槽位，包括 stdio 和未使用项，因此无需再次初始化。 */
+    /* 无论克隆方向如何，都采用固定顺序。uintptr_t 可避免直接比较无关的 C 对象指针。 */
     spinlock_t *source_lock = (spinlock_t *)&source->lock;
     spinlock_t *destination_lock = &destination->lock;
     spinlock_t *first = (uintptr_t)source_lock < (uintptr_t)destination_lock ?
@@ -1273,7 +1275,7 @@ void linux_fd_table_close_on_exec(process_t *process) {
             descriptor_6_removed = table->entries[descriptor].kind != LINUX_FD_UNUSED;
         }
 #endif
-        /* Only detached entries are initialized and later released. */
+        /* 只有已分离的表项会被初始化并在之后释放。 */
         entries[entry_count++] = table->entries[descriptor];
         linux_fd_release_locks(process, &table->entries[descriptor]);
         table->entries[descriptor] = (linux_fd_entry_t){0};
@@ -1379,8 +1381,8 @@ static int64_t linux_fd_install_description(process_t *process, int64_t requeste
     if (result == K_EMFILE &&
         __atomic_fetch_add(&g_linux_fd_exhaustion_logs, 1U,
                            __ATOMIC_RELAXED) < 16U) {
-        /* EMFILE means the locked allocation scan found every slot occupied.
-         * Report that snapshot, not a second, unlocked scan racing closes. */
+        /* EMFILE 表示加锁的分配扫描发现所有槽位均被占用。
+         * 报告该次快照，不要再进行一次可能与并发关闭竞争的无锁扫描。 */
         kernel_serial_printf_serial_only(
             "OS_LINUX_FD_FULL pid=%llu occupied=%u kind=%u\r\n",
             (unsigned long long)process->pid,
@@ -1917,6 +1919,7 @@ static int64_t linux_epoll_ctl(process_t *process, int64_t epoll_descriptor,
         }
         watch->events = event.events;
         watch->data = event.data;
+        watch->disabled = 0U;
     }
     ++epoll->control_sequence;
     spinlock_unlock(&epoll->lock);
@@ -1975,7 +1978,7 @@ static int64_t linux_epoll_collect(linux_epoll_object_t *epoll,
         next = index + 1U;
         if (next == watch_limit) next = 0U;
         if ((watch->events & LINUX_EPOLLONESHOT) != 0U) {
-            watch->events = 0U;
+            watch->disabled = 1U;
         }
     }
     if (count != 0U) epoll->next_watch_index = next;
@@ -1991,7 +1994,7 @@ typedef struct linux_epoll_wait_context {
 static bool linux_epoll_watch_has_wait_source(
     const linux_epoll_watch_t *watch) {
     if (watch == 0 || !watch->used || watch->private_data == 0 ||
-        watch->events == 0U) return false;
+        watch->disabled) return false;
     switch (watch->kind) {
     case LINUX_FD_NVIDIA:
     case LINUX_FD_PIPE:
@@ -2001,8 +2004,7 @@ static bool linux_epoll_watch_has_wait_source(
     case LINUX_FD_EVENTFD:
         return true;
     default:
-        /* Regular files are reported ready by linux_epoll_collect() and do
-         * not have an object signal queue to subscribe to. */
+        /* 普通文件的就绪状态由 linux_epoll_collect() 提供，不存在可供订阅的对象信号队列。 */
         return false;
     }
 }
@@ -2025,8 +2027,7 @@ static kstatus_t linux_epoll_wait_set_add(void **objects, size_t *count,
     return K_OK;
 }
 
-/* Take source references while the watch table is locked.  epoll itself is
- * already pinned by the fd lookup for the lifetime of linux_epoll_wait(). */
+/* 持有监视表锁时获取源对象引用。linux_epoll_wait() 的整个生命周期内，epoll 本身已由 fd 查找固定。 */
 static kstatus_t linux_epoll_capture_wait_set(
     linux_epoll_object_t *epoll, void **objects, size_t capacity,
     size_t *object_count, uint64_t *control_sequence) {
@@ -2047,8 +2048,7 @@ static kstatus_t linux_epoll_capture_wait_set(
         if (status != K_OK) break;
         if (watch->kind == LINUX_FD_UNIX_SOCKET) {
             linux_unix_socket_t *socket = (linux_unix_socket_t *)source;
-            /* The wrapper itself is not notified on pipe I/O.  Subscribe to
-             * both endpoints while the socket lock keeps them alive. */
+            /* 管道 I/O 不会通知包装对象本身。持有 socket 锁时订阅两个端点，确保它们保持存活。 */
             spinlock_lock(&socket->lock);
             status = linux_epoll_wait_set_add(objects, &count, capacity,
                                               socket->read_end);
@@ -2078,9 +2078,8 @@ static void linux_epoll_release_wait_set(void *const *objects, size_t count) {
     }
 }
 
-/* The predicate runs after enrollment on every subscribed object queue.
- * Check mask-aware readiness and the control generation so ctl changes cannot
- * be lost between snapshot capture and waiter enrollment. */
+/* 谓词会在每个已订阅对象队列完成登记后运行。检查按掩码过滤的就绪状态和控制代数，
+ * 避免 ctl 变更在快照捕获与等待者登记之间丢失。 */
 static bool linux_epoll_wait_ready(void *opaque) {
     linux_epoll_wait_context_t *context =
         (linux_epoll_wait_context_t *)opaque;
@@ -2102,13 +2101,46 @@ static bool linux_epoll_wait_ready(void *opaque) {
     return ready;
 }
 
+/* 保存有界失败快照，而非逐次等待日志。渲染器拆除并释放内存前，先保留各阶段首次压力采样。
+ * 只有成功获取写入权的一方才读取无锁物理页计数器。 */
+enum { LINUX_EPOLL_FAILURE_SCRATCH, LINUX_EPOLL_FAILURE_SIGNALS };
+typedef struct linux_epoll_wait_failure {
+    uint64_t failures;
+    uint32_t state; /* 0 empty, 1 writer, 2 published (read with acquire). */
+    kstatus_t stats_status;
+    uint64_t capacity;
+    uint64_t captured;
+    uint64_t total_pages;
+    uint64_t free_pages;
+} linux_epoll_wait_failure_t;
+static linux_epoll_wait_failure_t g_linux_epoll_wait_failures[2];
+
+static void linux_epoll_note_wait_failure(unsigned stage, size_t capacity,
+                                           size_t captured) {
+    if (stage >= 2U) return;
+    linux_epoll_wait_failure_t *failure = &g_linux_epoll_wait_failures[stage];
+    __atomic_fetch_add(&failure->failures, 1U, __ATOMIC_RELAXED);
+    uint32_t expected = 0U;
+    if (!__atomic_compare_exchange_n(&failure->state, &expected, 1U, false,
+                                    __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) return;
+    uint64_t total = 0U, free = 0U;
+    failure->stats_status = page_memory_get_stats(&total, &free);
+    failure->capacity = capacity;
+    failure->captured = captured;
+    failure->total_pages = total;
+    failure->free_pages = free;
+    __atomic_store_n(&failure->state, 2U, __ATOMIC_RELEASE);
+}
+
 static int64_t linux_epoll_wait(process_t *process, int64_t descriptor,
                                 uint64_t events_pointer, int64_t maxevents,
                                 int64_t timeout_ms) {
     linux_fd_entry_t entry = {0};
     linux_epoll_object_t *epoll;
     linux_epoll_event_t events[LINUX_MAX_EPOLL_WATCHES];
-    void **wait_objects = 0;
+    void *inline_wait_objects[WAIT_INLINE_QUEUE_COUNT];
+    void **wait_objects = inline_wait_objects;
+    size_t wait_object_capacity = WAIT_INLINE_QUEUE_COUNT;
     size_t wait_object_count = 0U;
     uint32_t capacity;
     uint64_t timeout_ns;
@@ -2159,19 +2191,34 @@ static int64_t linux_epoll_wait(process_t *process, int64_t descriptor,
         } else {
             timeout_ns = UINT64_MAX;
         }
-        if (wait_objects == 0) {
-            size_t capacity_bytes =
-                (size_t)LINUX_EPOLL_WAIT_SOURCES * sizeof(*wait_objects);
-            wait_objects = (void **)kmalloc(capacity_bytes, 0U);
-            if (wait_objects == 0) {
+        /* 在监视表保护锁外计算大小，并在伪唤醒之间保留分配结果。小型 epoll（包括一个 Unix socket 的
+         * 三个来源）无需临时分配，更不需要旧版固定的 24 KiB 缓冲区。提示与捕获之间若监视项增长，
+         * 会在下方重试。 */
+        spinlock_lock(&epoll->lock);
+        size_t required = (size_t)epoll->watch_limit * 3U + 1U;
+        spinlock_unlock(&epoll->lock);
+        if (required > LINUX_EPOLL_WAIT_SOURCES) {
+            result = K_EINVAL;
+            break;
+        }
+        if (required > wait_object_capacity) {
+            void **grown = kmalloc(required * sizeof(*grown), 0U);
+            if (grown == 0) {
+                linux_epoll_note_wait_failure(LINUX_EPOLL_FAILURE_SCRATCH,
+                                               required, 0U);
                 result = K_ENOMEM;
                 break;
             }
+            if (wait_objects != inline_wait_objects) kfree(wait_objects);
+            wait_objects = grown;
+            wait_object_capacity = required;
         }
         linux_epoll_wait_context_t context = {0};
         status = linux_epoll_capture_wait_set(
-            epoll, wait_objects, (size_t)LINUX_EPOLL_WAIT_SOURCES,
+            epoll, wait_objects, wait_object_capacity,
             &wait_object_count, &context.control_sequence);
+        /* 溢出时 capture 会释放已固定的部分对象。重新检查就绪状态和原始截止时间，再次采样并发增长。 */
+        if (status == K_ENOSPC) continue;
         if (status != K_OK) {
             result = status;
             break;
@@ -2180,6 +2227,11 @@ static int64_t linux_epoll_wait(process_t *process, int64_t descriptor,
         status = object_wait_on_signals(
             wait_objects, wait_object_count, linux_epoll_wait_ready, &context,
             timeout_ns);
+        if (status == K_ENOMEM) {
+            linux_epoll_note_wait_failure(LINUX_EPOLL_FAILURE_SIGNALS,
+                                           wait_object_capacity,
+                                           wait_object_count);
+        }
         linux_epoll_release_wait_set(wait_objects, wait_object_count);
         wait_object_count = 0U;
         if (status == K_ETIMEDOUT) break;
@@ -2191,7 +2243,7 @@ static int64_t linux_epoll_wait(process_t *process, int64_t descriptor,
     if (wait_object_count != 0U) {
         linux_epoll_release_wait_set(wait_objects, wait_object_count);
     }
-    if (wait_objects != 0) kfree(wait_objects);
+    if (wait_objects != inline_wait_objects) kfree(wait_objects);
     linux_fd_entry_put(&entry);
     return result;
 }
@@ -2206,9 +2258,8 @@ static int64_t linux_getresids(uint64_t real_pointer,
                                uint64_t saved_pointer) {
     uint32_t zero = 0U;
 
-    /* System currently exposes one identity to Linux-personality processes.
-     * Validate all three destinations before writing any of them so a bad
-     * pointer cannot leave a partially updated result tuple. */
+    /* System 当前向 Linux 兼容进程公开一个统一身份。写入前先验证三个目标地址，
+     * 避免错误指针导致结果元组只更新一部分。 */
     if (!linux_user_pointer(real_pointer, sizeof(zero)) ||
         !linux_user_pointer(effective_pointer, sizeof(zero)) ||
         !linux_user_pointer(saved_pointer, sizeof(zero))) {
@@ -2240,11 +2291,28 @@ static kstatus_t linux_copy_string(uint64_t pointer, char *destination,
     return K_ENAMETOOLONG;
 }
 
+static kstatus_t linux_system_config_path(char path[LINUX_MAX_PATH]) {
+    static const char previous[] = "/etc";
+    static const char current[] = "/EFI/OS";
+    size_t index = 0U;
+    while (index < sizeof(previous) - 1U && path[index] == previous[index]) ++index;
+    if (index != sizeof(previous) - 1U ||
+        (path[index] != '\0' && path[index] != '/')) return K_OK;
+    size_t length = index;
+    while (length < LINUX_MAX_PATH && path[length] != '\0') ++length;
+    size_t growth = sizeof(current) - sizeof(previous);
+    if (length >= LINUX_MAX_PATH - growth) return K_ENAMETOOLONG;
+    /* 预编译 libc 与驱动仍请求传统配置路径。只在 ABI 入口换算，磁盘不保留旧目录。 */
+    linux_copy(path + sizeof(current) - 1U, path + index, length - index + 1U);
+    linux_copy(path, current, sizeof(current) - 1U);
+    return K_OK;
+}
+
 static kstatus_t linux_path_from_user(process_t *process, int64_t dirfd,
                                       uint64_t pointer, char output[256]) {
     char input[LINUX_MAX_PATH];
     char directory[LINUX_MAX_PATH];
-    const char *base = process != 0 ? process->linux_cwd : 0;
+    const char *base = 0;
     size_t base_length = 0U;
     size_t input_length = 0U;
     if (process == 0 || output == 0) return K_EPERM;
@@ -2264,14 +2332,19 @@ static kstatus_t linux_path_from_user(process_t *process, int64_t dirfd,
             linux_fd_entry_put(&entry);
             if (status != K_OK) return status;
             base = directory;
+        } else {
+            status = process_cwd_copy(process, directory);
+            if (status != K_OK) return status;
+            base = directory;
         }
         while (base_length + 1U < LINUX_MAX_PATH &&
                base[base_length] != '\0') ++base_length;
-        if (base_length + 1U + input_length >= LINUX_MAX_PATH) {
+        size_t separator = base_length == 0U || base[base_length - 1U] != '/' ? 1U : 0U;
+        if (base_length + separator + input_length >= LINUX_MAX_PATH) {
             return K_ENAMETOOLONG;
         }
         linux_copy(output, base, base_length);
-        if (base_length == 0U || output[base_length - 1U] != '/') {
+        if (separator) {
             output[base_length++] = '/';
         }
     }
@@ -2280,7 +2353,7 @@ static kstatus_t linux_path_from_user(process_t *process, int64_t dirfd,
     }
     linux_copy(output + base_length, input, input_length + 1U);
     if (output[0] == '\0') return K_ENOENT;
-    return K_OK;
+    return linux_system_config_path(output);
 }
 
 static uint32_t linux_open_flags(uint64_t flags) {
@@ -2338,8 +2411,10 @@ static int64_t linux_readlinkat(process_t *process, int64_t dirfd,
     return status == K_OK ? (int64_t)count : LINUX_EFAULT;
 }
 
-#define LINUX_PROC_DATA_MAX (64U * 1024U)
-#define LINUX_PROC_MAP_LINE_MAX 128U
+/* 读取少量内存计数时，不应要求分配 128 KiB Buddy 块。maps 缓冲区会在 map_lock 外按需扩容。 */
+#define LINUX_PROC_DATA_MAX 4096U
+#define LINUX_PROC_MAPS_MAX (16U * 1024U * 1024U)
+#define LINUX_PROC_MAP_LINE_MAX (128U + 4U * LINUX_MAX_PATH)
 
 enum linux_proc_node {
     LINUX_PROC_NODE_PROC_DIR = 1U,
@@ -2367,6 +2442,7 @@ enum linux_proc_node {
     LINUX_PROC_NODE_CPU_THREAD_SIBLINGS,
     LINUX_PROC_NODE_NVIDIA_PARAMS,
     LINUX_PROC_NODE_SELF_FD_DIR,
+    LINUX_PROC_NODE_MEMINFO,
 };
 
 struct linux_proc_file {
@@ -2382,6 +2458,8 @@ struct linux_proc_file {
     uint8_t reserved[3];
     uint16_t fd_count;
     uint16_t fd_entries[OS_LINUX_FD_LIMIT];
+    char *extended_data;
+    uint32_t extended_capacity;
     char data[LINUX_PROC_DATA_MAX];
 };
 
@@ -2396,12 +2474,23 @@ static void linux_proc_maps_diag(const char *stage, uint32_t value) {
 
 static atomic_uint_fast64_t g_linux_proc_next_inode;
 
+static char *linux_proc_data(linux_proc_file_t *file) {
+    return file->extended_data != 0 ? file->extended_data : file->data;
+}
+
+static size_t linux_proc_capacity(const linux_proc_file_t *file) {
+    return file->extended_data != 0 ? file->extended_capacity :
+                                     sizeof(file->data);
+}
+
 static bool linux_proc_append_bytes(linux_proc_file_t *file,
                                     const void *source, size_t length) {
-    if (file == 0 || source == 0 || length > sizeof(file->data) - file->length) {
+    if (file == 0 || source == 0 ||
+        file->length > linux_proc_capacity(file) ||
+        length > linux_proc_capacity(file) - file->length) {
         return false;
     }
-    linux_copy(file->data + file->length, source, length);
+    linux_copy(linux_proc_data(file) + file->length, source, length);
     file->length += (uint32_t)length;
     return true;
 }
@@ -2572,6 +2661,16 @@ static bool linux_proc_append_hex64(linux_proc_file_t *file, uint64_t value) {
     return true;
 }
 
+/* 与 proc maps 一致转义换行，避免一个文件名伪造多条映射记录。 */
+static bool linux_proc_append_maps_label(linux_proc_file_t *file, const char *label) {
+    for (size_t index = 0U; label[index] != 0; ++index) {
+        if (label[index] == '\n') {
+            if (!linux_proc_append_text(file, "\\012")) return false;
+        } else if (!linux_proc_append_char(file, label[index])) return false;
+    }
+    return true;
+}
+
 static bool linux_proc_append_maps_line(linux_proc_file_t *file,
                                         const vm_area_t *area,
                                         const process_t *process) {
@@ -2579,6 +2678,8 @@ static bool linux_proc_append_maps_line(linux_proc_file_t *file,
     uint64_t offset = 0U;
     uint64_t inode = 0U;
     const char *label = 0;
+    char mapping_path[256];
+    bool deleted = false;
     if (file == 0 || area == 0 || area->end <= area->start) return false;
     object = area->object;
     if (object != 0 && object->type == VM_OBJECT_FILE) {
@@ -2588,8 +2689,10 @@ static bool linux_proc_append_maps_line(linux_proc_file_t *file,
         vnode_t *vnode = (vnode_t *)object->u.file.mapping;
         if (vnode != 0 && vnode->object.type == KOBJECT_TYPE_VNODE) {
             inode = vnode->inode_id;
+            if (vfs_vnode_path_kernel(vnode, mapping_path, sizeof(mapping_path), &deleted) == K_OK)
+                label = mapping_path;
         }
-        label = "[file]";
+        if (label == 0) label = "[file]";
     } else if ((area->flags & VM_MAP_STACK) != 0U) {
         label = "[stack]";
     } else if ((area->flags & VM_MAP_GUARD) != 0U) {
@@ -2618,7 +2721,8 @@ static bool linux_proc_append_maps_line(linux_proc_file_t *file,
         !linux_proc_append_text(file, " 00:00 ") ||
         !linux_proc_append_u64(file, inode) ||
         !linux_proc_append_char(file, ' ') ||
-        !linux_proc_append_text(file, label) ||
+        !linux_proc_append_maps_label(file, label) ||
+        (deleted && !linux_proc_append_text(file, " (deleted)")) ||
         !linux_proc_append_char(file, '\n')) {
         return false;
     }
@@ -2628,10 +2732,13 @@ static bool linux_proc_append_maps_line(linux_proc_file_t *file,
 static bool linux_proc_build_maps(linux_proc_file_t *file,
                                   process_t *process) {
     vm_space_t *space;
+    uint32_t initial_length;
 #if OS_DEBUG_SERIAL
     uint32_t area_count = 0U;
 #endif
     if (file == 0) return false;
+    initial_length = file->length;
+    if (initial_length > linux_proc_capacity(file)) return false;
     space = process != 0 ? process_vm_reference(process) : 0;
     if (space == 0) {
 #if OS_DEBUG_SERIAL
@@ -2640,16 +2747,38 @@ static bool linux_proc_build_maps(linux_proc_file_t *file,
         return true;
     }
 
+retry_snapshot:
+    file->length = initial_length;
+#if OS_DEBUG_SERIAL
+    area_count = 0U;
+#endif
     map_lock(space);
     for (list_head_t *item = space->area_list.next;
          item != &space->area_list; item = item->next) {
         vm_area_t *area = area_from_list(item);
-        /* Do not leave a truncated final line in the proc snapshot. */
-        if (sizeof(file->data) - file->length < LINUX_PROC_MAP_LINE_MAX) {
-#if OS_DEBUG_SERIAL
-            linux_proc_maps_diag("TRUNC=", area_count);
-#endif
-            break;
+        /* maps 文件被截断时绝不能报告快照成功。尤其不能仅因 Chrome 创建了许多低地址映射，
+         * 就漏掉高地址栈。先在 VM 锁外分配，再对同一份仍持有引用的 VM 重新生成完整快照。 */
+        size_t capacity = linux_proc_capacity(file);
+        if (file->length > capacity ||
+            capacity - file->length < LINUX_PROC_MAP_LINE_MAX) {
+            map_unlock(space);
+            if (capacity >= LINUX_PROC_MAPS_MAX) {
+                vm_space_put(space);
+                return false;
+            }
+            size_t next_capacity = capacity * 2U;
+            if (next_capacity > LINUX_PROC_MAPS_MAX)
+                next_capacity = LINUX_PROC_MAPS_MAX;
+            char *expanded = (char *)kmalloc(next_capacity, 0U);
+            if (expanded == 0) {
+                vm_space_put(space);
+                return false;
+            }
+            linux_copy(expanded, linux_proc_data(file), initial_length);
+            kfree(file->extended_data);
+            file->extended_data = expanded;
+            file->extended_capacity = (uint32_t)next_capacity;
+            goto retry_snapshot;
         }
         if (!linux_proc_append_maps_line(file, area, process)) {
 #if OS_DEBUG_SERIAL
@@ -2727,6 +2856,22 @@ static bool linux_proc_append_cpu_stat_line(linux_proc_file_t *file,
     return linux_proc_append_char(file, '\n');
 }
 
+static bool linux_proc_build_meminfo(linux_proc_file_t *file) {
+    uint64_t total, free;
+    if (page_memory_get_stats(&total, &free) != K_OK || free > total ||
+        total > UINT64_MAX / (PAGE_SIZE / 1024U)) return false;
+    /* free 包含可复用的 CPU 池槽位。这些页面上的所有者标签可能已过期，不要将其计为活动匿名分配。
+     * 没有回收估算器时，MemAvailable 保守地报告空闲 RAM。未实现的缓存/回收统计应省略，不能伪造。 */
+    const char *names[] = {"MemTotal:\t", "MemFree:\t", "MemAvailable:\t"};
+    const uint64_t pages[] = {total, free, free};
+    for (size_t index = 0U; index < 3U; ++index) {
+        if (!linux_proc_append_text(file, names[index]) ||
+            !linux_proc_append_u64(file, pages[index] * (PAGE_SIZE / 1024U)) ||
+            !linux_proc_append_text(file, " kB\n")) return false;
+    }
+    return linux_proc_append_text(file, "SwapTotal:\t0 kB\nSwapFree:\t0 kB\n");
+}
+
 static bool linux_proc_build_data(linux_proc_file_t *file,
                                   process_t *process) {
     char name[OS_PROCESS_NAME_MAX];
@@ -2735,6 +2880,8 @@ static bool linux_proc_build_data(linux_proc_file_t *file,
     if (file == 0) return false;
     file->length = 0U;
     switch (file->node) {
+    case LINUX_PROC_NODE_MEMINFO:
+        return linux_proc_build_meminfo(file);
     case LINUX_PROC_NODE_CMDLINE:
         linux_proc_copy_process_name(process, name);
         name_length = 0U;
@@ -2800,9 +2947,8 @@ static bool linux_proc_build_data(linux_proc_file_t *file,
     case LINUX_PROC_NODE_CPU_THREAD_SIBLINGS:
         return linux_proc_build_cpu_mask(file, file->cpu_index);
     case LINUX_PROC_NODE_NVIDIA_PARAMS:
-        /* Keep this snapshot limited to parameters represented by the real
-         * System RM/frontend path.  The file is exposed only after the
-         * hardware-backed GSP state has reached READY. */
+        /* 此快照仅包含真实 System RM/frontend 路径支持的参数。
+         * 只有硬件 GSP 状态达到 READY 后才公开该文件。 */
         return linux_proc_append_text(file, "ModifyDeviceFiles: 0\n") &&
                linux_proc_append_text(file, "RegisterPCIDriver: 1\n") &&
                linux_proc_append_text(file, "EnableGpuFirmware: 1\n") &&
@@ -2829,6 +2975,7 @@ static void linux_proc_file_get(linux_proc_file_t *file) {
 static void linux_proc_file_put(linux_proc_file_t *file) {
     if (file != 0 && atomic_fetch_sub_explicit(&file->refs, 1U,
                                                 memory_order_acq_rel) == 1U) {
+        kfree(file->extended_data);
         kfree(file);
     }
 }
@@ -2859,10 +3006,22 @@ static linux_proc_file_t *linux_proc_file_create(process_t *process,
     file->cpu_index = cpu_index;
     file->cpu_cache_index = cpu_cache_index;
     file->process_id = process != 0 ? process->pid : 0U;
+    if (node == LINUX_PROC_NODE_CPUINFO || node == LINUX_PROC_NODE_STAT) {
+        /* 两种格式每 CPU 使用量均小于 64 字节；stat 还包含汇总行。
+         * 格式化前一次性预留容量，不能因主机 CPU 数超过内嵌区可容纳数量而截断快照。 */
+        size_t capacity = ((size_t)linux_proc_cpu_count() + 1U) * 64U;
+        if (capacity > sizeof(file->data)) {
+            file->extended_data = kmalloc(capacity, 0U);
+            if (file->extended_data == 0) {
+                linux_proc_file_put(file);
+                return 0;
+            }
+            file->extended_capacity = (uint32_t)capacity;
+        }
+    }
     if (node == LINUX_PROC_NODE_SELF_FD_DIR && process != 0) {
-        /* Snapshot before linux_fd_install() adds the directory's own fd.
-         * This is the set CloseSuperfluousFds() needs to inspect, and avoids
-         * turning procfs enumeration into a live fd-table race. */
+        /* 在 linux_fd_install() 加入目录自身 fd 前获取快照。这正是 CloseSuperfluousFds() 要检查的集合，
+         * 也可避免 procfs 枚举与实时 fd 表发生竞争。 */
         spinlock_lock(&process->linux_fds.lock);
         for (uint32_t descriptor = 0U;
              descriptor < OS_LINUX_FD_LIMIT; ++descriptor) {
@@ -2947,6 +3106,8 @@ static kstatus_t linux_proc_open_path(process_t *process, const char *path,
         node = LINUX_PROC_NODE_STATUS;
     } else if (linux_exact_path(path, "/proc/cpuinfo")) {
         node = LINUX_PROC_NODE_CPUINFO;
+    } else if (linux_exact_path(path, "/proc/meminfo")) {
+        node = LINUX_PROC_NODE_MEMINFO;
     } else if (linux_exact_path(path, "/proc/self/maps")) {
 #if OS_DEBUG_SERIAL
         linux_proc_maps_diag("PATH=", 1U);
@@ -3009,7 +3170,7 @@ static bool linux_proc_set_dirent_name(char *name, size_t capacity,
 static uint32_t linux_proc_directory_count(const linux_proc_file_t *file) {
     if (file == 0) return 0U;
     switch (file->node) {
-    case LINUX_PROC_NODE_PROC_DIR: return 5U;
+    case LINUX_PROC_NODE_PROC_DIR: return 6U;
     case LINUX_PROC_NODE_SELF_DIR: return 7U;
     case LINUX_PROC_NODE_TASK_DIR: return 3U;
     case LINUX_PROC_NODE_SYS_DIR: return 3U;
@@ -3038,6 +3199,10 @@ static bool linux_proc_directory_entry(const linux_proc_file_t *file,
         if (index == 3U) {
             *type = 8U;
             return linux_proc_set_dirent_name(name, capacity, "cpuinfo");
+        }
+        if (index == 5U) {
+            *type = 8U;
+            return linux_proc_set_dirent_name(name, capacity, "meminfo");
         }
         *type = 8U;
         return linux_proc_set_dirent_name(name, capacity, "stat");
@@ -3155,7 +3320,7 @@ static int64_t linux_proc_read_file(linux_proc_file_t *file,
     available = file->length - file->position;
     count = length < available ? length : available;
     status = copy_to_user((void __user *)(uintptr_t)buffer,
-                          file->data + file->position, (size_t)count);
+                          linux_proc_data(file) + file->position, (size_t)count);
     if (status == K_OK) file->position += count;
     spinlock_unlock(&file->lock);
     return status == K_OK ? (int64_t)count : LINUX_EFAULT;
@@ -3210,11 +3375,23 @@ static uint32_t linux_be32(uint32_t value) {
 }
 
 static int64_t linux_socket_status(kstatus_t status) {
-    if (status == K_ETIMEDOUT) return K_EAGAIN;
     if (status == K_EDEVREMOVED || status == K_EDEVLOST) {
         return LINUX_ECONNRESET;
     }
     return status;
+}
+
+/* 接收等待超时是临时状态；TCP 传输超时则为终止状态。混淆两者会使 EPOLLERR 持续置位，
+ * 同时 recv 永远报告 EAGAIN。只在特殊超时路径查询，且不消费 socket 错误。 */
+static int64_t linux_socket_receive_status(socket_t *socket, kstatus_t status) {
+    if (status == K_ETIMEDOUT) {
+        int32_t error = 0;
+        kstatus_t query = socket_get_option(socket, OS_SOCKET_OPTION_ERROR, &error);
+        if (query != K_OK) return linux_socket_status(query);
+        if (error == 0) return K_EAGAIN;
+        return -error;
+    }
+    return linux_socket_status(status);
 }
 
 static uint64_t linux_socket_timeout(const linux_fd_entry_t *entry,
@@ -3428,7 +3605,7 @@ static int64_t linux_socket_receive_payload(
         return LINUX_EAFNOSUPPORT;
     }
     if (status != K_OK && !(status == K_EAGAIN && bytes != 0U)) {
-        return linux_socket_status(status);
+        return linux_socket_receive_status(socket, status);
     }
     if (bytes > request_length) return K_EIO;
     if (address_pointer != 0U) {
@@ -3515,9 +3692,8 @@ static int64_t linux_socket_send(socket_t *socket,
     if (socket->type == OS_SOCK_DGRAM && length > SOCKET_MAX_PAYLOAD) {
         return LINUX_EMSGSIZE;
     }
-    /* TCP is a byte stream: a caller's TLS record is not a datagram and may
-     * exceed our bounded copy buffer. Return a short write, just as sendmsg
-     * already does, so the caller retries the unsent suffix. */
+    /* TCP 是字节流：调用方的 TLS 记录不是数据报，可能超过有界复制缓冲区。
+     * 像 sendmsg 一样返回短写，使调用方重试未发送的后缀。 */
     request_length = length > SOCKET_MAX_PAYLOAD ? SOCKET_MAX_PAYLOAD :
                      (size_t)length;
     if (request_length != 0U) {
@@ -3652,8 +3828,7 @@ static kstatus_t linux_unix_ancillary_collect(
         }
         aligned_length = (header.length + (LINUX_CMSG_ALIGNMENT - 1U)) &
                          ~(uint64_t)(LINUX_CMSG_ALIGNMENT - 1U);
-        /* Chromium sets msg_controllen to cmsg_len, so the final cmsg need
-         * not include trailing alignment bytes. */
+        /* Chromium 将 msg_controllen 设为 cmsg_len，因此最后一个 cmsg 不必包含尾部对齐字节。 */
         if (aligned_length > remaining) {
             if (header.length != remaining) {
                 linux_unix_ancillary_put_record(record);
@@ -3778,7 +3953,7 @@ static int64_t linux_message_scatter(const linux_iovec_t *vectors,
 static int64_t linux_sendmsg(process_t *process, int64_t descriptor,
                              uint64_t message_pointer, uint32_t message_flags) {
     linux_msghdr_t message;
-    /* linux_message_load copies every active vector before any consumer. */
+    /* linux_message_load 会在任何消费者处理前复制所有活动向量。 */
     linux_iovec_t vectors[LINUX_MAX_IOV];
     uint64_t total_length;
     uint8_t payload[SOCKET_MAX_PAYLOAD];
@@ -3887,7 +4062,7 @@ static int64_t linux_sendmsg(process_t *process, int64_t descriptor,
 static int64_t linux_recvmsg(process_t *process, int64_t descriptor,
                              uint64_t message_pointer, uint32_t message_flags) {
     linux_msghdr_t message;
-    /* Unused vector slots are never inspected by gather/scatter. */
+    /* gather/scatter 不会检查未使用的向量槽。 */
     linux_iovec_t vectors[LINUX_MAX_IOV];
     uint64_t total_length;
     uint8_t payload[SOCKET_MAX_PAYLOAD];
@@ -3909,10 +4084,8 @@ static int64_t linux_recvmsg(process_t *process, int64_t descriptor,
         socket_t *socket = (socket_t *)entry.private_data;
         uint64_t name_length_pointer = message_pointer +
             __builtin_offsetof(linux_msghdr_t, name_length);
-        if (message.control_length != 0U) {
-            linux_fd_entry_put(&entry);
-            return LINUX_EOPNOTSUPP;
-        }
+        /* msg_control 是输出容量，不是发送辅助数据的请求。Chromium 等调用方每次 UDP 读取都会提供该值。
+         * 未启用接收控制选项时，下方返回 msg_controllen=0；若拒绝该容量，连普通 DNS 读取也会失败。 */
         if (socket == 0 || socket->object.type != KOBJECT_TYPE_SOCKET) {
             linux_fd_entry_put(&entry);
             return K_ENOTSOCK;
@@ -3976,12 +4149,11 @@ static int64_t linux_recvmsg(process_t *process, int64_t descriptor,
                      kmutex_lock(&channel->read_mutex,
                                  linux_socket_timeout(&entry, message_flags)) : K_OK;
             if (status == K_OK) {
-                request_length = linux_unix_channel_read_limit(
-                    channel, request_length);
-                status = pipe_read(read_end, payload, request_length,
+                status = pipe_read_limited(read_end, payload, request_length,
                                    (entry.flags & LINUX_O_NONBLOCK) != 0U ||
                                    (message_flags & LINUX_MSG_DONTWAIT) != 0U ?
-                                   0U : UINT64_MAX, &bytes);
+                                   0U : UINT64_MAX, &bytes,
+                                   linux_unix_channel_pipe_limit, channel);
                 if (status == K_OK && bytes != 0U)
                     have_record = linux_unix_channel_commit_read(
                         channel, bytes, true, &record);
@@ -4027,6 +4199,7 @@ static int64_t linux_unix_sendto(const linux_fd_entry_t *entry,
         entry != 0 ? (linux_unix_socket_t *)entry->private_data : 0;
     linux_unix_channel_t *channel;
     pipe_endpoint_t *write_end;
+    uint8_t inline_payload[256];
     uint8_t *payload;
     size_t request;
     uint64_t bytes = 0U;
@@ -4041,17 +4214,18 @@ static int64_t linux_unix_sendto(const linux_fd_entry_t *entry,
     request = length > LINUX_PIPE_COPY_MAX ? LINUX_PIPE_COPY_MAX :
               (size_t)length;
     if (!linux_user_pointer(buffer, request)) return LINUX_EFAULT;
-    payload = (uint8_t *)kmalloc(request, 0U);
+    payload = request <= sizeof(inline_payload) ? inline_payload :
+              (uint8_t *)kmalloc(request, 0U);
     if (payload == 0) return K_ENOMEM;
     status = copy_from_user(payload,
                             (const void __user *)(uintptr_t)buffer, request);
     if (status != K_OK) {
-        kfree(payload);
+        if (payload != inline_payload) kfree(payload);
         return LINUX_EFAULT;
     }
     linux_unix_socket_pin_io(socket, true, &write_end, &channel);
     if (write_end == 0) {
-        kfree(payload);
+        if (payload != inline_payload) kfree(payload);
         return K_EPIPE;
     }
     status = channel != 0 ?
@@ -4068,7 +4242,7 @@ static int64_t linux_unix_sendto(const linux_fd_entry_t *entry,
             (void)kmutex_unlock(&channel->write_mutex);
     }
     linux_unix_socket_unpin_io(write_end, channel);
-    kfree(payload);
+    if (payload != inline_payload) kfree(payload);
     return status == K_OK ? (int64_t)bytes : linux_pipe_status(status);
 }
 
@@ -4081,6 +4255,7 @@ static int64_t linux_unix_recvfrom(const linux_fd_entry_t *entry,
         entry != 0 ? (linux_unix_socket_t *)entry->private_data : 0;
     linux_unix_channel_t *channel;
     pipe_endpoint_t *read_end;
+    uint8_t inline_payload[256];
     uint8_t *payload;
     size_t request;
     uint64_t bytes = 0U;
@@ -4094,11 +4269,12 @@ static int64_t linux_unix_recvfrom(const linux_fd_entry_t *entry,
     request = length > LINUX_PIPE_COPY_MAX ? LINUX_PIPE_COPY_MAX :
               (size_t)length;
     if (!linux_user_pointer(buffer, request)) return LINUX_EFAULT;
-    payload = (uint8_t *)kmalloc(request, 0U);
+    payload = request <= sizeof(inline_payload) ? inline_payload :
+              (uint8_t *)kmalloc(request, 0U);
     if (payload == 0) return K_ENOMEM;
     linux_unix_socket_pin_io(socket, false, &read_end, &channel);
     if (read_end == 0) {
-        kfree(payload);
+        if (payload != inline_payload) kfree(payload);
         return 0;
     }
     status = channel != 0 ?
@@ -4118,7 +4294,7 @@ static int64_t linux_unix_recvfrom(const linux_fd_entry_t *entry,
     if (status == K_OK && copy_to_user(
             (void __user *)(uintptr_t)buffer, payload,
             (size_t)bytes) != K_OK) status = K_EACCES;
-    kfree(payload);
+    if (payload != inline_payload) kfree(payload);
     return status == K_OK ? (int64_t)bytes : linux_pipe_status(status);
 }
 
@@ -4309,6 +4485,8 @@ static int64_t linux_socket_accept(process_t *process, int64_t descriptor,
                                0U : UINT64_MAX,
                            &accepted);
     linux_fd_entry_put(&entry);
+    /* accept 仅有队列等待超时，不涉及已建立 TCP 连接的在途数据。 */
+    if (status == K_ETIMEDOUT) status = K_EAGAIN;
     status = linux_socket_status(status);
     if (status != K_OK) return status;
     if ((flags & LINUX_SOCK_NONBLOCK) != 0U) descriptor_flags |= LINUX_O_NONBLOCK;
@@ -4588,8 +4766,9 @@ typedef struct linux_poll_wait_context {
 } linux_poll_wait_context_t;
 
 typedef struct linux_poll_wait_set {
-    void *objects[LINUX_POLL_WAIT_SOURCES];
-    uint8_t owned[LINUX_POLL_WAIT_SOURCES];
+    void **objects;
+    uint8_t *owned;
+    uint32_t capacity;
     uint32_t count;
 } linux_poll_wait_set_t;
 
@@ -4607,15 +4786,15 @@ static kstatus_t linux_poll_wait_set_add(linux_poll_wait_set_t *set,
     if (source == 0) return K_OK;
     for (uint32_t index = 0U; index < set->count; ++index) {
         if (set->objects[index] != source) continue;
-        /* A mutable Unix-socket endpoint can alias a source already borrowed
-         * from an fd snapshot. Upgrade once while its owner lock is held. */
+        /* 可变 Unix socket 端点可能与 fd 快照中已借用的源对象别名。
+         * 持有其所有者锁时只升级一次引用。 */
         if (take_reference && !set->owned[index]) {
             if (!object_try_get(source)) return K_ENOENT;
             set->owned[index] = 1U;
         }
         return K_OK;
     }
-    if (set->count >= LINUX_POLL_WAIT_SOURCES) return K_ENOSPC;
+    if (set->count >= set->capacity) return K_ENOSPC;
     if (take_reference && !object_try_get(source)) return K_ENOENT;
     set->objects[set->count] = source;
     set->owned[set->count] = take_reference ? 1U : 0U;
@@ -4659,8 +4838,7 @@ static kstatus_t linux_poll_capture_wait_set(
         if (entry->kind == LINUX_FD_UNIX_SOCKET) {
             linux_unix_socket_t *socket =
                 (linux_unix_socket_t *)entry->private_data;
-            /* shutdown can drop either endpoint: pin both while the socket
-             * lock protects their pointers, then subscribe to pipe I/O. */
+            /* shutdown 可能移除任一端点：在 socket 锁保护指针期间固定两端，随后订阅管道 I/O。 */
             spinlock_lock(&socket->lock);
             status = linux_poll_wait_set_add(set, socket->read_end, true);
             if (status == K_OK) {
@@ -4693,8 +4871,8 @@ static uint64_t linux_poll_timeout_ns(int64_t timeout_ms) {
     return (uint64_t)timeout_ms * 1000000ULL;
 }
 
-/* One table snapshot per scan; readiness and all release callbacks remain
- * outside the table lock. Each repeated fd still owns a separate pin. */
+/* 每次扫描获取一份表快照；就绪检查和所有释放回调均在表锁外执行。
+ * 同一 fd 重复出现时仍分别持有引用。 */
 static void linux_poll_capture_entries(process_t *process, linux_pollfd_t *fds,
                                        uint64_t count, linux_fd_entry_t *entries) {
     if (count == 0U) return;
@@ -4720,12 +4898,23 @@ static void linux_poll_capture_entries(process_t *process, linux_pollfd_t *fds,
 
 static int64_t linux_poll(process_t *process, uint64_t fds_pointer,
                            uint64_t count, int64_t timeout_ms) {
-    /* User copy and capture initialize every active element before use. */
+    /* 用户态复制和捕获会在使用前初始化每个活动元素。 */
     linux_pollfd_t inline_fds[8];
     linux_fd_entry_t inline_entries[8];
     linux_pollfd_t *fds = inline_fds;
     linux_fd_entry_t *entries = inline_entries;
-    linux_poll_wait_set_t *wait_set = 0;
+    /* 每个描述符最多贡献一个包装对象和两个 Unix 端点。
+     * 常见的 <=8 fd 等待使用栈空间，不再使用旧版完整上限
+     * 27 KiB table. Larger blocking sets allocate once, never under a lock. */
+    void *inline_objects[3U * 8U];
+    uint8_t inline_owned[3U * 8U];
+    linux_poll_wait_set_t inline_wait_set = {
+        .objects = inline_objects,
+        .owned = inline_owned,
+        .capacity = 3U * 8U,
+    };
+    linux_poll_wait_set_t *wait_set = &inline_wait_set;
+    void *wait_storage = 0;
     int ready_count;
     uint64_t timeout_ns;
     uint64_t deadline;
@@ -4785,14 +4974,19 @@ static int64_t linux_poll(process_t *process, uint64_t fds_pointer,
         if (ready_count != 0 || timeout_ms == 0) break;
         if (deadline != UINT64_MAX &&
             (int64_t)(x86_read_tsc() - deadline) >= 0) break;
-        /* Ready and zero-timeout scans never subscribe. Keep their common
-         * small-fd path allocation-free and allocate once for actual waits. */
-        if (wait_set == 0) {
-            wait_set = kmalloc(sizeof(*wait_set), 0U);
-            if (wait_set == 0) {
+        /* 就绪扫描和零超时扫描不会订阅对象。常见的小 fd 路径保持无分配，
+         * 仅真实等待时才分配一次。 */
+        if (count > 8U && wait_storage == 0) {
+            size_t source_capacity = (size_t)count * 3U;
+            wait_storage = kmalloc(source_capacity *
+                (sizeof(*wait_set->objects) + sizeof(*wait_set->owned)), 0U);
+            if (wait_storage == 0) {
                 ready_count = K_ENOMEM;
                 break;
             }
+            wait_set->objects = wait_storage;
+            wait_set->owned = (uint8_t *)(wait_set->objects + source_capacity);
+            wait_set->capacity = (uint32_t)source_capacity;
         }
         status = linux_poll_capture_wait_set(fds, entries, count, wait_set);
         if (status != K_OK) {
@@ -4840,7 +5034,7 @@ static int64_t linux_poll(process_t *process, uint64_t fds_pointer,
             (size_t)count * sizeof(linux_pollfd_t)) != K_OK) {
         ready_count = LINUX_EFAULT;
     }
-    kfree(wait_set);
+    kfree(wait_storage);
     if (count > 8U) { kfree(fds); kfree(entries); }
     return ready_count;
 }
@@ -4883,9 +5077,8 @@ static int64_t linux_read(process_t *process, int64_t descriptor,
             status = copy_to_user(
                 (void __user *)(uintptr_t)buffer, &event, sizeof(event));
 #if OS_DEBUG_SERIAL
-            /* Native shell windows use the native ABI.  Reaching this path
-             * therefore proves that the Linux/Ozone client consumed an input
-             * event from its System window descriptor. */
+            /* 原生 shell 窗口使用原生 ABI。因此执行到此路径可证明 Linux/Ozone 客户端已从 System 窗口描述符
+             * 消费输入事件。 */
             if (status == K_OK && event.type == OS_WINDOW_EVENT_INPUT &&
                 event.input.type == OS_INPUT_EVENT_KEY &&
                 event.input.value == OS_INPUT_VALUE_PRESS) {
@@ -4999,7 +5192,8 @@ static int64_t linux_read(process_t *process, int64_t descriptor,
     status = vfs_read(entry.file, (void __user *)(uintptr_t)buffer,
                       (size_t)length, &bytes);
     linux_fd_entry_put(&entry);
-    return status == K_OK ? (int64_t)bytes : linux_copy_status(status);
+    /* 后续批次失败时，向调用方报告已经完成的字节，避免重试时重复处理。 */
+    return status == K_OK || bytes != 0U ? (int64_t)bytes : linux_copy_status(status);
 }
 
 static int64_t linux_console_write(process_t *process, int64_t descriptor,
@@ -5150,7 +5344,30 @@ static int64_t linux_write(process_t *process, int64_t descriptor,
     status = vfs_write(entry.file, (const void __user *)(uintptr_t)buffer,
                        (size_t)length, &bytes);
     linux_fd_entry_put(&entry);
-    return status == K_OK ? (int64_t)bytes : linux_copy_status(status);
+    return status == K_OK || bytes != 0U ? (int64_t)bytes : linux_copy_status(status);
+}
+
+/* 保持普通 FAT 路径的快速打开，同时正确处理内存文件系统的链接和特殊分量。 */
+static kstatus_t linux_resolve_open_path(const char *path, uint64_t flags,
+                                         char resolved[LINUX_MAX_PATH],
+                                         const char **result) {
+    bool exclusive = (flags & (LINUX_O_CREAT | LINUX_O_EXCL)) ==
+                     (LINUX_O_CREAT | LINUX_O_EXCL);
+    bool nofollow = (flags & LINUX_O_NOFOLLOW) != 0U;
+    bool create = (flags & LINUX_O_CREAT) != 0U;
+    *result = path;
+    if (!vfs_path_needs_resolution(path)) return K_OK;
+    kstatus_t status = vfs_resolve_path_kernel(path, !exclusive && !nofollow,
+                                               create, resolved);
+    if (status != K_OK) return status;
+    if (nofollow && !exclusive) {
+        os_file_info_t info;
+        status = vfs_stat_kernel(resolved, &info);
+        if (status == K_OK && info.type == OS_FILE_TYPE_SYMLINK) return K_ELOOP;
+        if (status != K_OK && !(create && status == K_ENOENT)) return status;
+    }
+    *result = resolved;
+    return K_OK;
 }
 
 static int64_t linux_positioned_io(process_t *process, int64_t descriptor,
@@ -5166,8 +5383,7 @@ static int64_t linux_positioned_io(process_t *process, int64_t descriptor,
         linux_fd_entry_put(&entry);
         return K_ESPIPE;
     }
-    /* The descriptor reference owns the vnode throughout this call. Use a
-     * borrowed, private I/O view: never change the shared open-file offset. */
+    /* 整个调用期间，描述符引用持有 vnode。使用借用的私有 I/O 视图，绝不改变共享打开文件偏移。 */
     positioned.object.type = KOBJECT_TYPE_FILE;
     positioned.vnode = entry.file->vnode;
     positioned.ops = entry.file->ops;
@@ -5175,13 +5391,14 @@ static int64_t linux_positioned_io(process_t *process, int64_t descriptor,
     positioned.flags = entry.file->flags;
     positioned.rights = entry.file->rights;
     positioned.private_data = entry.file->private_data;
+    vfs_file_position_init(&positioned);
     status = write_operation ?
         vfs_write(&positioned, (const void __user *)(uintptr_t)buffer,
                   (size_t)length, &bytes) :
         vfs_read(&positioned, (void __user *)(uintptr_t)buffer,
                  (size_t)length, &bytes);
     linux_fd_entry_put(&entry);
-    return status == K_OK ? (int64_t)bytes : linux_copy_status(status);
+    return status == K_OK || bytes != 0U ? (int64_t)bytes : linux_copy_status(status);
 }
 
 static int64_t linux_openat(process_t *process, int64_t dirfd,
@@ -5205,7 +5422,7 @@ static int64_t linux_openat(process_t *process, int64_t dirfd,
         const uint64_t supported_flags = 3U | LINUX_O_NOCTTY |
             LINUX_O_CREAT | LINUX_O_EXCL | LINUX_O_TRUNC |
             LINUX_O_APPEND | LINUX_O_NONBLOCK |
-            LINUX_O_DIRECTORY | LINUX_O_CLOEXEC;
+            LINUX_O_DIRECTORY | LINUX_O_NOFOLLOW | LINUX_O_CLOEXEC;
         if ((flags & ~supported_flags) != 0U || (flags & 3U) == 3U)
             return K_EINVAL;
         if ((flags & LINUX_O_DIRECTORY) != 0U) return K_ENOTDIR;
@@ -5255,13 +5472,17 @@ static int64_t linux_openat(process_t *process, int64_t dirfd,
         return descriptor;
     }
     uint32_t vfs_flags = linux_open_flags(flags);
-    status = vfs_open_kernel(path, vfs_flags, (uint32_t)mode, &file);
+    char resolved[LINUX_MAX_PATH];
+    const char *vfs_path;
+    status = linux_resolve_open_path(path, flags, resolved, &vfs_path);
+    if (status != K_OK) return status;
+    status = vfs_open_kernel(vfs_path, vfs_flags, (uint32_t)mode, &file);
     if ((flags & (LINUX_O_WRONLY | LINUX_O_RDWR | LINUX_O_CREAT |
                   LINUX_O_TRUNC | LINUX_O_APPEND | LINUX_O_DIRECTORY)) == 0U &&
         (status == K_EISDIR ||
          (status == K_ENOENT && linux_exact_path(path, "/tmp")))) {
-        /* Linux permits O_RDONLY on a directory without O_DIRECTORY. */
-        status = vfs_open_kernel(path, vfs_flags | VFS_OPEN_DIRECTORY,
+        /* Linux 允许目录仅以 O_RDONLY 打开，不要求设置 O_DIRECTORY。 */
+        status = vfs_open_kernel(vfs_path, vfs_flags | VFS_OPEN_DIRECTORY,
                                  (uint32_t)mode, &file);
     }
     if (status != K_OK) {
@@ -5416,8 +5637,53 @@ static int64_t linux_fstat(process_t *process, int64_t descriptor,
     return linux_copy_status(status);
 }
 
+static int64_t linux_statfs_copy(const vfs_space_info_t *space,
+                                uint64_t output_pointer) {
+    linux_statfs_t stat;
+    linux_zero(&stat, sizeof(stat));
+    stat.type = space->type;
+    stat.block_size = space->block_size;
+    stat.fragment_size = space->block_size;
+    stat.blocks = space->blocks;
+    stat.blocks_free = space->blocks_free;
+    stat.blocks_available = space->blocks_free;
+    stat.filesystem_id[0] = (uint32_t)space->filesystem_id;
+    stat.filesystem_id[1] = (uint32_t)(space->filesystem_id >> 32U);
+    stat.name_max = space->name_max;
+    return linux_copy_status(copy_to_user(
+        (void __user *)(uintptr_t)output_pointer, &stat, sizeof(stat)));
+}
+
+static int64_t linux_statfs(process_t *process, uint64_t path_pointer,
+                           uint64_t output_pointer) {
+    char path[LINUX_MAX_PATH];
+    vfs_space_info_t space;
+    kstatus_t status = linux_path_from_user(process, LINUX_AT_FDCWD,
+                                           path_pointer, path);
+    if (status != K_OK) return status;
+    status = vfs_space_kernel(path, &space);
+    return status == K_OK ? linux_statfs_copy(&space, output_pointer) : status;
+}
+
+static int64_t linux_fstatfs(process_t *process, int64_t descriptor,
+                            uint64_t output_pointer) {
+    linux_fd_entry_t entry;
+    vfs_space_info_t space;
+    kstatus_t status = linux_fd_lookup(process, descriptor, &entry);
+    if (status != K_OK) return status;
+    status = entry.file != 0 ? vfs_file_space(entry.file, &space) : K_ENOSYS;
+    linux_fd_entry_put(&entry);
+    return status == K_OK ? linux_statfs_copy(&space, output_pointer) : status;
+}
+
 static kstatus_t linux_vfs_stat_path(const char *path, uint64_t flags,
                                    os_file_info_t *info) {
+    /* 磁盘上没有符号链接且无特殊分量时，先直接查询目标，避免逐级重复访问目录。
+     * 缺失时仍须逐段解析，以区分文件不存在和中间分量不是目录。 */
+    if (!vfs_path_needs_resolution(path)) {
+        kstatus_t fast = vfs_stat_kernel(path, info);
+        if (fast != K_ENOENT) return fast;
+    }
     char resolved[LINUX_MAX_PATH];
     kstatus_t status = vfs_resolve_path_kernel(path,
         (flags & LINUX_AT_SYMLINK_NOFOLLOW) == 0U, false, resolved);
@@ -5772,8 +6038,7 @@ typedef struct linux_lock_wait {
     unsigned sequence;
 } linux_lock_wait_t;
 
-/* The wait predicate runs under scheduler/queue locks. Only read an atomic
- * generation here: acquiring fd or record locks would invert notification. */
+/* 等待谓词在调度器/队列锁下运行。此处只读取 atomic 代数：获取 fd 或记录锁会反转通知锁序。 */
 static bool linux_record_lock_changed(void *context) {
     linux_lock_wait_t *wait = context;
     return atomic_load_explicit(&wait->node->record_lock_sequence,
@@ -5913,10 +6178,9 @@ static int64_t linux_mmap(process_t *process, uint64_t requested_address,
                           uint64_t length, uint64_t protection,
                           uint64_t flags, int64_t descriptor,
                           uint64_t offset) {
-    /* glibc forwards the fd argument register without clearing its upper
-     * half. Linux fget consumes an unsigned int, not that whole register.
-     * Preserve the low 32-bit descriptor and reject negative/invalid fds
-     * through the normal lookup instead of rejecting harmless upper bits. */
+    /* glibc 会直接转发 fd 参数寄存器而不清除高位。Linux fget 接收 unsigned int，
+     * 而非整个寄存器。保留低 32 位描述符，并通过常规查找拒绝负数/无效 fd，
+     * 不要因为无害的高位而拒绝请求。 */
     descriptor = (int64_t)(int32_t)descriptor;
     vm_object_t *object = 0;
     linux_fd_entry_t entry = {0};
@@ -5948,13 +6212,17 @@ static int64_t linux_mmap(process_t *process, uint64_t requested_address,
     if ((flags & (LINUX_MAP_GROWSDOWN | LINUX_MAP_STACK)) != 0U) {
         vm_flags |= VM_MAP_STACK;
     }
-    /* V8 uses a Linux-style RWX transition while initializing its JIT code
-     * range. Keep this exception scoped to Linux-personality mappings;
-     * native System VM mappings remain W^X. */
+    /* V8 初始化 JIT 代码区域时会使用 Linux 风格的 RWX 转换。
+     * 此例外仅适用于 Linux 兼容映射；System 原生 VM 映射仍遵循 W^X。 */
     vm_flags |= VM_MAP_ALLOW_RWX;
     address = (vaddr_t)requested_address;
-    /* Anonymous VM objects already allocate physical pages on demand.
-     * NORESERVE needs no eager reservation; FIXED ignores Linux MAP_32BIT. */
+    /* 将稀缺的 MAP_32BIT 区域留给确实需要它的调用方。普通无提示分配（包括 V8/PartitionAlloc 的稀疏预留）
+     * 不得在 pthread 栈分配前耗尽整个低地址区域。显式提示和固定加载器/设备映射仍使用指定地址。 */
+    if (address == 0U &&
+        (flags & (LINUX_MAP_32BIT | LINUX_MAP_FIXED |
+                  LINUX_MAP_FIXED_NOREPLACE)) == 0U)
+        address = 0x100000000ULL;
+    /* 匿名 VM 对象本就按需分配物理页。NORESERVE 无需提前预留；FIXED 会忽略 Linux MAP_32BIT。 */
     if ((flags & LINUX_MAP_32BIT) != 0U &&
         (flags & (LINUX_MAP_FIXED | LINUX_MAP_FIXED_NOREPLACE)) == 0U)
         vm_flags |= VM_MAP_LOW32;
@@ -6069,10 +6337,9 @@ static int64_t linux_mmap(process_t *process, uint64_t requested_address,
 }
 
 /*
- * System owns the window server, but a Linux-personality desktop client must
- * still be able to create its own window.  Keep this as a narrow adapter:
- * window allocation, mapping, ownership and teardown remain the existing
- * Window Server operations, and the returned integer is only a Linux fd.
+ * System 管理窗口服务器，但 Linux 兼容模式的桌面客户端仍必须能创建自己的窗口。
+ * 此处仅作为窄适配层：窗口分配、映射、所有权和拆除仍由现有 Window Server 操作完成，
+ * 返回的整数仅是 Linux fd。
  */
 static int64_t linux_window_create(process_t *process,
                                    uint64_t arguments_pointer) {
@@ -6146,8 +6413,7 @@ static int64_t linux_window_create(process_t *process,
         if (status != K_OK) goto fail;
     }
 
-    /* Give the fd table its own reference; keep our local reference until
-     * publication completes, even if a sibling closes the fd meanwhile. */
+    /* 为 fd 表单独持有一个引用；即使同进程线程同时关闭 fd，本地引用也要保留到发布完成。 */
     object_get(window);
     descriptor = linux_fd_install(
         process, -1, 0, window, LINUX_FD_WINDOW,
@@ -6333,15 +6599,16 @@ static kstatus_t linux_window_surface_ioctl(process_t *process,
     switch (command.operation) {
     case OS_SURFACE_BEGIN:
         if (command.frame.token || command.frame.address || command.frame.capacity ||
-            command.frame.width || command.frame.height || command.frame.stride)
+            command.frame.width || command.frame.height || command.frame.stride ||
+            command.frame.damage_x || command.frame.damage_y ||
+            command.frame.damage_width || command.frame.damage_height)
             return K_EINVAL;
         status = window_server_surface_begin(process, window, &command.frame);
         if (status != K_OK) return status;
         status = copy_to_user((void __user *)(uintptr_t)argument_pointer,
                               &command, sizeof(command));
         if (status != K_OK) {
-            /* The client never received its token: no lease may survive an
-             * EFAULT while returning the acquired back buffer. */
+            /* 客户端从未收到 token：返回已获取的后缓冲区时若发生 EFAULT，不得留下租约。 */
             (void)window_server_surface_end(process, window, &command.frame, false);
         }
         return status == K_OK ? K_OK : linux_copy_status(status);
@@ -6362,7 +6629,7 @@ static int64_t linux_ioctl(process_t *process, int64_t descriptor,
     kstatus_t status;
     status = linux_fd_lookup(process, descriptor, &entry);
     if (status != K_OK) return status;
-    if (request == 0x541bU) { /* Linux FIONREAD: legacy ioctl, no encoded size. */
+    if (request == 0x541bU) { /* Linux FIONREAD：旧式 ioctl，不编码数据大小。 */
         int64_t result = linux_fionread(&entry, argument_pointer);
         linux_fd_entry_put(&entry);
         return result;
@@ -6478,8 +6745,7 @@ static int64_t linux_brk(process_t *process, uint64_t requested) {
         process_thread_unlock(process);
         return (int64_t)old_brk;
     }
-    /* Metadata and VM must describe the same image. Retain their snapshot
-     * while mapping, then reject a stale publication after exit/exec/brk. */
+    /* 元数据和 VM 必须描述同一映像。映射期间保留其快照，之后若发生 exit/exec/brk，则拒绝过期发布。 */
     vm_space_t *space = process->vm;
     if (space != 0) vm_space_get(space);
     process_thread_unlock(process);
@@ -6560,9 +6826,8 @@ static int64_t linux_futex(process_t *process, uint64_t address,
     bool private_key = (modifiers & LINUX_FUTEX_PRIVATE_FLAG) != 0U;
     int64_t result = K_EINVAL;
     bool absolute_timeout = false;
-    /* The low 7 bits are the futex command; the remaining bits are operation
-     * modifiers.  Chromium's Abseil waiter uses WAIT_BITSET with the private
-     * and realtime modifiers, including for an infinite wait. */
+    /* 低 7 位是 futex 命令，其余位为操作修饰符。Chromium 的 Abseil 等待器使用 WAIT_BITSET，
+     * 并设置 private 和 realtime 修饰符，即使等待时间为无限。 */
     if ((modifiers & ~(LINUX_FUTEX_PRIVATE_FLAG |
                        LINUX_FUTEX_CLOCK_REALTIME)) != 0U ||
         address == 0U || (address & 3U) != 0U) {
@@ -6615,9 +6880,8 @@ static int64_t linux_futex(process_t *process, uint64_t address,
     result = K_ENOSYS;
 done:
 #if OS_DEBUG_SERIAL
-    /* Wake calls are extremely frequent during startup.  Keep a small wake
-     * sample, but reserve the rest of the budget for WAIT/other operations so
-     * a renderer failure is not hidden behind allocator wakeups. */
+    /* 启动期间 wake 调用极其频繁。仅采样少量 wake，其余预算留给 WAIT/其他操作，
+     * 避免渲染器故障被分配器唤醒掩盖。 */
     if (g_debug_linux_futex_logs < 256U &&
         (operation != (LINUX_FUTEX_WAKE | LINUX_FUTEX_PRIVATE_FLAG) ||
          g_debug_linux_futex_logs < 32U)) {
@@ -6639,9 +6903,8 @@ void linux_thread_exit_cleanup(struct thread *raw_thread) {
     thread->linux_clear_tid_pending = false;
     if (put_user_u32((uint32_t __user *)(uintptr_t)address, 0U) == K_OK) {
         uint32_t ignored = 0U;
-        /* Linux clear_child_tid wakes the shared FUTEX_WAKE key. glibc's
-         * pthread_join uses WAIT_BITSET without FUTEX_PRIVATE_FLAG; a private
-         * wake clears the word but leaves an already sleeping join blocked. */
+        /* Linux clear_child_tid 会唤醒共享 FUTEX_WAKE 键。glibc 的 pthread_join 使用不带
+         * FUTEX_PRIVATE_FLAG 的 WAIT_BITSET；若用私有 wake，只会清除字，而已休眠的 join 仍会阻塞。 */
         (void)futex_wake_keyed(thread->process,
                          (uint32_t __user *)(uintptr_t)address, 1U, &ignored,
                          false);
@@ -6665,18 +6928,19 @@ static bool linux_string_equal(const char *left, const char *right) {
 }
 
 bool linux_elf_interpreter_path(const char *path) {
-    static const char exact_path[] = "/lib64/ld-linux-x86-64.so.2";
-    static const char distro_path[] =
-        "/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2";
-    /* Keep the native System interpreter distinct from the Linux ABI
-     * personality. Native services use /lib/ld-system.so.1; using that
-     * path here would silently route their native syscall numbers through the
-     * Linux adapter. */
-    static const char system_linux_path[] = "/lib/ld-linux-system.so.1";
+    /* 系统 Linux ABI 服务与应用私有 glibc 加载器都走适配层，原生加载器仍独立。 */
+    if (linux_string_equal(path, "/lib/ld-linux-system.so.1")) return true;
     if (path == 0) return false;
-    return linux_string_equal(path, exact_path) ||
-           linux_string_equal(path, distro_path) ||
-           linux_string_equal(path, system_linux_path);
+    static const char prefix[] = "/usr/apps/";
+    for (size_t index = 0U; index < sizeof(prefix) - 1U; ++index) {
+        if (path[index] != prefix[index]) return false;
+    }
+    const char *app = path + sizeof(prefix) - 1U;
+    const char *cursor = app;
+    while ((*cursor >= 'a' && *cursor <= 'z') ||
+           (*cursor >= 'A' && *cursor <= 'Z') ||
+           (*cursor >= '0' && *cursor <= '9') || *cursor == '-' || *cursor == '_') ++cursor;
+    return cursor != app && linux_string_equal(cursor, "/lib/ld-linux-x86-64.so.2");
 }
 
 static int64_t linux_arch_prctl(thread_t *thread, uint64_t command,
@@ -6707,9 +6971,8 @@ static int64_t linux_prctl(process_t *process, uint64_t option,
             copy_from_user(name,
                            (const void __user *)(uintptr_t)argument0,
                            sizeof(name)) != K_OK) return LINUX_EFAULT;
-        /* System has one process name rather than a separate scheduler-visible
-         * comm field per thread.  Accept the Linux operation and keep the
-         * bytes validated so Chromium's thread setup can proceed. */
+        /* System 只有一个进程名称，没有每线程独立且供调度器查看的 comm 字段。
+         * 接受 Linux 操作并验证输入字节，使 Chromium 线程初始化能继续。 */
         return K_OK;
     }
     if (option == LINUX_PR_GET_NAME) {
@@ -6796,12 +7059,10 @@ static int64_t linux_clock_gettime(uint64_t clock_id, uint64_t pointer) {
         return copy_to_user((void __user *)(uintptr_t)pointer, &value,
                             sizeof(value)) == K_OK ? K_OK : LINUX_EFAULT;
     }
-    /* Our monotonic source is the unadjusted TSC, with no NTP frequency
-     * discipline. RAW therefore has the same source/epoch here; it must not
-     * read realtime or acquire its adjustable offset. Abseil uses RAW while
-     * calibrating CycleClock, before its call_once flag can be completed. */
+    /* 单调时钟源是未经校准的 TSC，不受 NTP 频率调整。因此此处 RAW 与其时钟源/纪元相同；
+     * 不得读取 realtime 或获取可调整偏移。Abseil 会在 CycleClock 校准期间、call_once 标志完成前使用 RAW。 */
     if (clock_id == 4U) clock_id = OS_LINUX_CLOCK_MONOTONIC;
-    /* Linux coarse clocks may use a more precise clock implementation. */
+    /* Linux coarse 时钟也可以使用精度更高的时钟实现。 */
     if (clock_id == 5U) clock_id = OS_LINUX_CLOCK_REALTIME;
     if (clock_id == 6U) clock_id = OS_LINUX_CLOCK_MONOTONIC;
     if (clock_id != OS_LINUX_CLOCK_REALTIME &&
@@ -6822,14 +7083,14 @@ static int64_t linux_gettimeofday(uint64_t time_pointer,
         os_timespec_t clock_value;
         kstatus_t status = kernel_clock_read(OS_CLOCK_REALTIME, &clock_value);
         if (status != K_OK) return status;
-        /* Linux x86-64 timeval has two signed 64-bit fields. */
+        /* Linux x86-64 timeval 包含两个有符号 64 位字段。 */
         int64_t value[2] = {clock_value.seconds,
                            clock_value.nanoseconds / 1000};
         if (copy_to_user((void __user *)(uintptr_t)time_pointer,
                          value, sizeof(value)) != K_OK) return LINUX_EFAULT;
     }
     if (timezone_pointer != 0U) {
-        /* The guest clock is UTC; the obsolete timezone structure uses ints. */
+        /* 来宾时钟为 UTC；旧版 timezone 结构使用 int 字段。 */
         int32_t timezone[2] = {0, 0};
         if (copy_to_user((void __user *)(uintptr_t)timezone_pointer,
                          timezone, sizeof(timezone)) != K_OK) return LINUX_EFAULT;
@@ -6852,42 +7113,52 @@ static int64_t linux_uname(uint64_t pointer) {
 
 static int64_t linux_getcwd(process_t *process, uint64_t pointer,
                             uint64_t size) {
+    char cwd[PROCESS_CWD_CAPACITY];
     size_t length = 0U;
-    if (process == 0 || size == 0U || size > (uint64_t)SIZE_MAX) return K_EINVAL;
-    while (length + 1U < sizeof(process->linux_cwd) &&
-           process->linux_cwd[length] != '\0') ++length;
-    if (length + 1U > size) return K_ENAMETOOLONG;
-    kstatus_t status = copy_to_user((void __user *)(uintptr_t)pointer,
-                                    process->linux_cwd, length + 1U);
+    if (process == 0 || size > (uint64_t)SIZE_MAX) return K_EINVAL;
+    kstatus_t status = process_cwd_copy(process, cwd);
+    if (status != K_OK) return status;
+    while (length + 1U < sizeof(cwd) && cwd[length] != '\0') ++length;
+    if (length + 1U > size) return LINUX_ERANGE;
+    status = copy_to_user((void __user *)(uintptr_t)pointer, cwd, length + 1U);
     return status == K_OK ? (int64_t)(length + 1U) : LINUX_EFAULT;
 }
 
 static int64_t linux_chdir(process_t *process, uint64_t pointer) {
     char path[LINUX_MAX_PATH];
+    char resolved[LINUX_MAX_PATH];
     os_file_info_t info;
     kstatus_t status = linux_path_from_user(process, LINUX_AT_FDCWD,
                                             pointer, path);
     if (status != K_OK) return status;
-    status = vfs_stat_kernel(path, &info);
+    status = vfs_resolve_path_kernel(path, true, false, resolved);
+    if (status != K_OK) return status;
+    status = vfs_stat_kernel(resolved, &info);
     if (status != K_OK) return status;
     if (info.type != OS_FILE_TYPE_DIRECTORY) return K_ENOTDIR;
-    linux_copy(process->linux_cwd, path, sizeof(process->linux_cwd));
-    return K_OK;
+    return process_cwd_set(process, resolved);
 }
 
 static int64_t linux_mkdir(process_t *process, int64_t dirfd,
                           uint64_t pointer, uint64_t mode) {
     char path[LINUX_MAX_PATH];
+    char resolved[LINUX_MAX_PATH];
     kstatus_t status = linux_path_from_user(process, dirfd, pointer, path);
     if (status != K_OK) return status;
     size_t length = 0U;
     while (path[length] != '\0') ++length;
-    /* A trailing separator is valid for mkdir; the native VFS takes a leaf. */
+    /* mkdir 允许路径以分隔符结尾；原生 VFS 接收的是叶名称。 */
     while (length > 1U && path[length - 1U] == '/') path[--length] = '\0';
     if (length == 1U && path[0] == '/') return K_EEXIST;
-    /* Native mode zero requests defaults. Include the directory type so a
-     * Linux request for no permission bits remains exactly mode 0000. */
-    return vfs_mkdir_kernel(path, 0040000U | ((uint32_t)mode & 0777U));
+    const char *target = path;
+    if (vfs_path_needs_resolution(path)) {
+        status = vfs_resolve_path_kernel(path, false, true, resolved);
+        if (status != K_OK) return status;
+        if (resolved[0] == '/' && resolved[1] == '\0') return K_EEXIST;
+        target = resolved;
+    }
+    /* 原生 mode 为零表示使用默认值。需包含目录类型，确保 Linux 请求权限位为零时仍精确得到 mode 0000。 */
+    return vfs_mkdir_kernel(target, 0040000U | ((uint32_t)mode & 0777U));
 }
 
 static int64_t linux_symlink(process_t *process, uint64_t target_pointer,
@@ -6908,8 +7179,7 @@ static int64_t linux_unlinkat(process_t *process, int64_t dirfd,
     if ((flags & ~LINUX_AT_REMOVEDIR) != 0U) return K_EINVAL;
     kstatus_t status = linux_path_from_user(process, dirfd, pointer, path);
     if (status != K_OK) return status;
-    /* Follow parent links, never the leaf: dangling links can be removed.
-     * The VFS checks the victim's type at the deletion boundary. */
+    /* 跟随父路径链接，但不跟随叶节点：悬空链接也可以删除。VFS 会在删除边界处检查目标类型。 */
     status = vfs_resolve_path_kernel(path, false, false, resolved);
     if (status != K_OK) return status;
     if (resolved[0] == '/' && resolved[1] == '\0') return K_EBUSY;
@@ -6927,9 +7197,8 @@ static int64_t linux_renameat(process_t *process, int64_t old_dirfd,
     if (status != K_OK) return status;
     status = linux_path_from_user(process, new_dirfd, new_pointer, new_path);
     if (status != K_OK) return status;
-    /* Move the leaf itself, including dangling symlinks. Resolve both parents
-     * but permit a missing destination; the VFS publishes replacement under
-     * its namespace lock and preserves existing open-file references. */
+    /* 移动叶节点本身，包括悬空符号链接。解析两侧父目录，但允许目标不存在；VFS 会在命名空间锁下发布替换，
+     * 并保留已有打开文件引用。 */
     status = vfs_resolve_path_kernel(old_path, false, false, old_resolved);
     if (status != K_OK) return status;
     status = vfs_resolve_path_kernel(new_path, false, true, new_resolved);
@@ -6949,8 +7218,7 @@ static int64_t linux_sysinfo(uint64_t pointer) {
         return K_EOVERFLOW;
     status = kernel_clock_read(OS_CLOCK_MONOTONIC, &uptime);
     if (status != K_OK) return status;
-    /* Zero unsupported accounting fields and all ABI padding; never expose
-     * stack bytes to glibc's sysconf(_SC_PHYS_PAGES) conversion. */
+    /* 将不支持的记账字段和所有 ABI 填充清零，绝不把栈字节暴露给 glibc 的 sysconf(_SC_PHYS_PAGES) 转换。 */
     linux_zero(&info, sizeof(info));
     info.uptime = uptime.seconds;
     info.totalram = total_pages * PAGE_SIZE;
@@ -7003,16 +7271,26 @@ static int64_t linux_sched_getaffinity(uint64_t pid, uint64_t size,
                                        uint64_t pointer) {
     uint64_t mask[4];
     uint32_t cpus;
-    if (pid != 0U || size == 0U) return K_EINVAL;
+    int32_t tid = (int32_t)(uint32_t)pid;
+    if (tid < 0 || size == 0U) return K_EINVAL;
+    thread_t *target = linux_thread_reference_by_tid((uint64_t)tid);
+    if (target == 0) return K_ESRCH;
     linux_zero(mask, sizeof(mask));
     cpus = x86_smp_discovered_count();
     if (cpus == 0U) cpus = 1U;
     if (cpus > 256U) cpus = 256U;
     size_t mask_bytes = ((cpus + 63U) / 64U) * sizeof(uint64_t);
-    if (size < mask_bytes) return K_EINVAL;
-    for (uint32_t cpu = 0U; cpu < cpus; ++cpu) {
-        mask[cpu >> 6] |= 1ULL << (cpu & 63U);
+    if (size < mask_bytes) {
+        object_put(target);
+        return K_EINVAL;
     }
+    for (uint32_t word = 0U; word < (cpus + 63U) / 64U; ++word) {
+        mask[word] = __atomic_load_n(&target->affinity.bits[word],
+                                     __ATOMIC_RELAXED);
+    }
+    if ((cpus & 63U) != 0U)
+        mask[cpus >> 6] &= (1ULL << (cpus & 63U)) - 1ULL;
+    object_put(target);
     if (copy_to_user((void __user *)(uintptr_t)pointer, mask, mask_bytes) != K_OK) {
         return LINUX_EFAULT;
     }
@@ -7118,17 +7396,19 @@ static int64_t linux_readv(process_t *process, int64_t descriptor,
     return total;
 }
 
-static int64_t linux_nanosleep(uint64_t request_pointer,
-                               uint64_t remaining_pointer) {
+static int64_t linux_nanosleep(uint32_t clock_id, uint32_t flags,
+                               uint64_t request_pointer, uint64_t remaining_pointer) {
     linux_timespec_t request;
     linux_timespec_t remaining = {0};
-    timer_object_t *timer = 0;
-    void *objects[1];
-    uint32_t signaled_index = 0U;
-    int64_t wait_value = 0;
+    wait_queue_t sleep_queue;
     uint64_t delay_ns;
     kstatus_t status;
 
+    /* glibc 的 nanosleep 通过 clock_nanosleep 进入；两种 ABI 必须共用真实阻塞路径。 */
+    if ((clock_id != OS_LINUX_CLOCK_REALTIME && clock_id != OS_LINUX_CLOCK_MONOTONIC) ||
+        (flags & ~1U) != 0U) return K_EINVAL;
+    /* 绝对截止时间不读取或写入 remaining，即使传入的是无效地址。 */
+    if (flags == 1U) remaining_pointer = 0U;
     if (copy_from_user(&request, (const void __user *)(uintptr_t)request_pointer,
                        sizeof(request)) != K_OK) return LINUX_EFAULT;
     if (request.seconds < 0 || request.nanoseconds < 0 ||
@@ -7146,17 +7426,32 @@ static int64_t linux_nanosleep(uint64_t request_pointer,
 
     delay_ns = (uint64_t)request.seconds * 1000000000ULL +
                (uint64_t)request.nanoseconds;
-    status = timer_create(delay_ns, 0U, &timer);
-    if (status != K_OK) return status;
-    objects[0] = timer;
-    status = object_wait_many(objects, 1U, false, UINT64_MAX,
-                              &signaled_index, &wait_value);
-    (void)signaled_index;
-    (void)wait_value;
+    if (flags == 1U) {
+        os_timespec_t now;
+        status = kernel_clock_read(clock_id, &now);
+        if (status != K_OK) return status;
+        /* 先比较秒和纳秒，再换算正差，避免实时纪元或大截止时间产生加减溢出。 */
+        if (request.seconds < now.seconds ||
+            (request.seconds == now.seconds && request.nanoseconds <= now.nanoseconds)) return K_OK;
+        uint64_t seconds = (uint64_t)(request.seconds - now.seconds);
+        if (request.nanoseconds < now.nanoseconds) --seconds;
+        uint64_t nanos = request.nanoseconds >= now.nanoseconds ?
+            (uint64_t)(request.nanoseconds - now.nanoseconds) :
+            (uint64_t)(1000000000LL + request.nanoseconds - now.nanoseconds);
+        delay_ns = seconds * 1000000000ULL + nanos;
+    }
+    /* 截止等待直接使用栈队列，避免每次短睡眠分配对象并争用定时器注册表。
+     * 长睡眠分段为一小时，避免有限时长被通用等待核心的无限期哨兵或 TSC 饱和吞掉。 */
+    wait_queue_init(&sleep_queue);
+    do {
+        uint64_t chunk = delay_ns < 3600000000000ULL ? delay_ns : 3600000000000ULL;
+        status = wait_on_queue(&sleep_queue, linux_poll_never_ready, 0, chunk);
+        if (status != K_ETIMEDOUT) break;
+        delay_ns -= chunk;
+    } while (delay_ns != 0U);
+    if (status == K_ETIMEDOUT) status = K_OK;
     if (status != K_OK && remaining_pointer != 0U) {
-        /* The current wait core has no signal interruption path yet.  Keep
-         * the Linux ABI honest for any future cancellation by returning the
-         * complete request as the conservative remaining duration. */
+        /* 沿用取消时返回完整请求的保守行为；精确的信号中断剩余时间仍需单独实现。 */
         remaining = request;
         if (copy_to_user((void __user *)(uintptr_t)remaining_pointer,
                          &remaining, sizeof(remaining)) != K_OK) {
@@ -7167,7 +7462,6 @@ static int64_t linux_nanosleep(uint64_t request_pointer,
                             &remaining, sizeof(remaining)) != K_OK) {
         status = LINUX_EFAULT;
     }
-    object_put(timer);
     return status;
 }
 
@@ -7210,8 +7504,7 @@ static int64_t linux_proc_getdents64(linux_proc_file_t *file,
             spinlock_unlock(&file->lock);
             return total != 0U ? (int64_t)total : K_EINVAL;
         }
-        /* Header and name are overwritten below; initialize only alignment
-         * padding, the remaining bytes that will be exposed to userspace. */
+        /* 下方会覆写头部和名称；这里只初始化对齐填充，即其余将暴露给用户态的字节。 */
         linux_zero(record + sizeof(header) + name_length + 1U,
                     record_length - sizeof(header) - name_length - 1U);
         header.inode = inode;
@@ -7254,6 +7547,11 @@ static int64_t linux_getdents64(process_t *process, int64_t descriptor,
         return K_ENOTDIR;
     }
 
+    status = vfs_file_position_lock(entry.file);
+    if (status != K_OK) {
+        linux_fd_entry_put(&entry);
+        return status;
+    }
     os_file_info_t batch[16U];
     uint32_t batch_count = 0U;
     uint32_t batch_cursor = 0U;
@@ -7323,6 +7621,7 @@ static int64_t linux_getdents64(process_t *process, int64_t descriptor,
         entry.file->position = index + 1U;
         ++batch_cursor;
     }
+    vfs_file_position_unlock(entry.file);
     linux_fd_entry_put(&entry);
     return status == K_OK ? (int64_t)total : status;
 }
@@ -7335,10 +7634,8 @@ int64_t linux_syscall_dispatch(arch_trap_frame_t *frame) {
         return K_EPERM;
     }
     number = frame->rax;
-    /* Keep the System serial-only diagnostic sink available after the
-     * personality switch.  The libc stderr fallback uses this reserved native
-     * number because the inherited descriptors are System debug handles, not
-     * Linux file descriptors. */
+    /* personality 切换后仍保留 System 仅串口诊断通道。libc stderr 后备路径使用此保留的原生调用号，
+     * 因为继承的描述符是 System 调试句柄，不是 Linux 文件描述符。 */
     if (number == OS_SYS_DEBUG_WRITE) {
         return syscall_debug_write(frame->rdi, frame->rsi, frame->rdx,
                                    frame->r10, frame->r8, frame->r9);
@@ -7357,6 +7654,11 @@ int64_t linux_syscall_dispatch(arch_trap_frame_t *frame) {
     case LINUX_SYS_OPEN:
         return linux_openat(process, LINUX_AT_FDCWD, frame->rdi, frame->rsi,
                             frame->rdx);
+    case LINUX_SYS_CREAT:
+        /* creat(path, mode) 等价于只写打开并创建/截断，权限来自第二参数。 */
+        return linux_openat(process, LINUX_AT_FDCWD, frame->rdi,
+                            LINUX_O_WRONLY | LINUX_O_CREAT | LINUX_O_TRUNC,
+                            frame->rsi);
     case LINUX_SYS_OPENAT:
         return linux_openat(process, (int64_t)frame->rdi, frame->rsi,
                             frame->rdx, frame->r10);
@@ -7576,6 +7878,10 @@ int64_t linux_syscall_dispatch(arch_trap_frame_t *frame) {
                                frame->rsi);
     case LINUX_SYS_FSTAT:
         return linux_fstat(process, (int64_t)frame->rdi, frame->rsi);
+    case LINUX_SYS_STATFS:
+        return linux_statfs(process, frame->rdi, frame->rsi);
+    case LINUX_SYS_FSTATFS:
+        return linux_fstatfs(process, (int64_t)frame->rdi, frame->rsi);
     case LINUX_SYS_NEWFSTATAT:
         return linux_stat_path(process, (int64_t)frame->rdi, frame->rsi,
                                frame->r10, frame->rdx);
@@ -7664,22 +7970,6 @@ int64_t linux_syscall_dispatch(arch_trap_frame_t *frame) {
                                      (size_t)frame->rsi,
                                      (uint32_t)frame->rdx);
         vm_space_put(space);
-        if (status != K_OK && g_linux_madvise_fail_logs < 32U) {
-            if (linux_process_is_chrome_image(process)) {
-                linux_chrome_madvise_failure(
-                    process, frame->rdi, frame->rsi, frame->rdx,
-                    (int64_t)status);
-            } else {
-                kernel_serial_printf_serial_only(
-                    "OS_DIAG_MADVISE_FAIL pid=%llx addr=%llx len=%llx advice=%llu status=%lld\r\n",
-                    (unsigned long long)process->pid,
-                    (unsigned long long)frame->rdi,
-                    (unsigned long long)frame->rsi,
-                    (unsigned long long)frame->rdx,
-                    (long long)status);
-            }
-            ++g_linux_madvise_fail_logs;
-        }
         return status;
     }
     case LINUX_SYS_DUP:
@@ -7733,10 +8023,8 @@ int64_t linux_syscall_dispatch(arch_trap_frame_t *frame) {
         return (int64_t)process->pid;
     case LINUX_SYS_GETTID:
         if (thread == 0 || process == 0) return K_EPERM;
-        /* Linux makes the thread-group leader's TID equal to getpid().
-         * System allocates process and thread objects from one global ID
-         * stream, so translate only that leader instead of changing the
-         * native IDs exposed by the scheduler. */
+        /* Linux 将线程组 leader 的 TID 作为 getpid() 返回值。System 从同一全局 ID 流分配进程和线程对象，
+         * 因此仅转换该 leader，不修改调度器公开的原生 ID。 */
         return (int64_t)linux_thread_visible_tid(thread);
     case LINUX_SYS_GETUID:
     case LINUX_SYS_GETGID:
@@ -7883,7 +8171,7 @@ int64_t linux_syscall_dispatch(arch_trap_frame_t *frame) {
     case LINUX_SYS_WAIT4:
         if ((frame->rdx & ~(uint64_t)OS_PROCESS_WAIT_NOHANG) != 0U)
             return K_EINVAL;
-        /* rusage accounting is not implemented; never report fabricated data. */
+        /* 尚未实现 rusage 记账；绝不伪造数据。 */
         if (frame->r10 != 0U) return K_ENOSYS;
         return syscall_process_wait(frame->rdi, frame->rdx, frame->rsi,
                                      0U, 0U, 0U);
@@ -7963,7 +8251,10 @@ int64_t linux_syscall_dispatch(arch_trap_frame_t *frame) {
         return linux_ioctl(process, (int64_t)frame->rdi, (uint32_t)frame->rsi,
                             frame->rdx);
     case LINUX_SYS_NANOSLEEP:
-        return linux_nanosleep(frame->rdi, frame->rsi);
+        return linux_nanosleep(OS_LINUX_CLOCK_REALTIME, 0U, frame->rdi, frame->rsi);
+    case LINUX_SYS_CLOCK_NANOSLEEP:
+        return linux_nanosleep((uint32_t)frame->rdi, (uint32_t)frame->rsi,
+                               frame->rdx, frame->r10);
     case LINUX_SYS_SCHED_YIELD:
         schedule();
         return K_OK;

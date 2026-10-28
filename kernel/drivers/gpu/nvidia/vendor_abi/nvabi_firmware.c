@@ -14,6 +14,8 @@
 #define NVABI_FIRMWARE_MAGIC 0x4E564657U
 #define NVABI_FIRMWARE_PATH_CAP 128U
 #define NVABI_FIRMWARE_MAX_BYTES (128U * 1024U * 1024U)
+/* 固件句柄沿用厂商的 32 位长度，读取上限不得突破这个 ABI。 */
+_Static_assert(NVABI_FIRMWARE_MAX_BYTES <= UINT32_MAX, "固件上限必须适配厂商长度字段");
 
 typedef struct nvabi_firmware_handle {
     uint32_t magic;
@@ -125,12 +127,9 @@ const void *NV_API_CALL nv_get_firmware(
     char resolved[NVABI_FIRMWARE_PATH_CAP];
     uint8_t digest[32];
     char digest_text[65];
-    file_t *file = NULL;
-    uint8_t *data = NULL;
+    void *data = NULL;
     nvabi_firmware_handle_t *handle = NULL;
-    uint64_t file_size;
-    uint64_t bytes;
-    kstatus_t status;
+    size_t file_size = 0U;
 
     (void)nv;
     if (fw_buf != NULL) *fw_buf = NULL;
@@ -155,36 +154,8 @@ const void *NV_API_CALL nv_get_firmware(
         if (!nvabi_firmware_path(resolved, sizeof(resolved),
                                  roots[root_index], name))
             continue;
-        file = NULL;
-        status = vfs_open_kernel(resolved, VFS_OPEN_READ, 0U, &file);
-        if (status != K_OK || file == NULL || file->vnode == NULL) {
-            if (file != NULL) vfs_close(file);
-            file = NULL;
-            continue;
-        }
-        file_size = file->vnode->size;
-        if (file_size == 0U || file_size > NVABI_FIRMWARE_MAX_BYTES ||
-            file_size > UINT32_MAX || file_size > SIZE_MAX) {
-            vfs_close(file);
-            file = NULL;
-            continue;
-        }
-        data = (uint8_t *)kmalloc((size_t)file_size, 0U);
-        if (data == NULL) {
-            vfs_close(file);
-            file = NULL;
-            continue;
-        }
-        bytes = 0U;
-        status = vfs_read_kernel(file, data, (size_t)file_size, &bytes);
-        vfs_close(file);
-        file = NULL;
-        if (status != K_OK || bytes != file_size) {
-            kfree(data);
-            data = NULL;
-            continue;
-        }
-        break;
+        if (vfs_load_file_kernel(resolved, 1U, NVABI_FIRMWARE_MAX_BYTES,
+                                 &data, &file_size) == K_OK) break;
     }
 
     if (data == NULL) {

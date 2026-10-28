@@ -31,6 +31,13 @@ kstatus_t pipe_create(uint32_t flags, pipe_endpoint_t **read_end,
                       pipe_endpoint_t **write_end);
 kstatus_t pipe_read(pipe_endpoint_t *endpoint, void *buffer, size_t length,
                     uint64_t timeout_ns, uint64_t *bytes);
+/* Recheck a protocol boundary immediately before consuming available bytes.
+ * Called under the ring spinlock: the limiter must not sleep, allocate, or
+ * re-enter pipe operations, and must return a value in [1, available]. */
+typedef size_t (*pipe_read_limit_fn)(void *context, size_t available);
+kstatus_t pipe_read_limited(pipe_endpoint_t *endpoint, void *buffer, size_t length,
+                            uint64_t timeout_ns, uint64_t *bytes,
+                            pipe_read_limit_fn limit, void *context);
 kstatus_t pipe_write(pipe_endpoint_t *endpoint, const void *buffer,
                      size_t length, uint64_t timeout_ns, uint64_t *bytes);
 kstatus_t pipe_stat(const pipe_endpoint_t *endpoint, os_file_info_t *info);

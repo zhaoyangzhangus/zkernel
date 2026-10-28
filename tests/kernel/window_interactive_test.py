@@ -25,8 +25,8 @@ typedef struct Window {
  process_t *owner; unsigned identifier,flags; int x,y;
  bool client_button_capture,client_pointer_capture,client_hidden,minimized,maximized,fullscreen;
 } window_server_window_t;
-static struct {unsigned count,pointer_x,pointer_y,dragging_identifier;
- window_server_window_t *windows[2];} g_window_server;
+static struct {unsigned pointer_x,pointer_y,dragging_identifier;
+ struct {unsigned count;window_server_window_t *children[2];} scene;} g_window_server;
 static bool ready=true,registered=true,locked;
 static unsigned clears,wakes,marks,edges_seen;
 static int offset_x,offset_y;
@@ -53,7 +53,7 @@ int main(void){
   .flags=OS_WINDOW_VISIBLE|OS_WINDOW_RESIZABLE|OS_WINDOW_EXPLICIT_MOVE_RESIZE,
   .client_button_capture=true,.client_pointer_capture=true};
  window_server_window_t other={.owner=&foreign,.identifier=8};
- g_window_server.count=2;g_window_server.windows[0]=&w;g_window_server.windows[1]=&other;
+ g_window_server.scene.count=2;g_window_server.scene.children[0]=&w;g_window_server.scene.children[1]=&other;
  g_window_server.pointer_x=61;g_window_server.pointer_y=99;
  for(unsigned edges=0;edges<32;++edges){
   bool valid=edges<16&&(edges&3)!=3&&(edges&12)!=12;

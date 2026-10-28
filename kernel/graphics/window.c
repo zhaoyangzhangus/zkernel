@@ -3,17 +3,21 @@
 #include <kernel/console.h>
 #include <kernel/frame_trace.h>
 #include <kernel/kmem.h>
+#include <kernel/string.h>
 #include <kernel/perf.h>
 #include <kernel/telemetry.h>
 #include <kernel/vm.h>
 #include "internal.h"
 #include "../process/internal.h"
 
-/* REFACTOR_P7A_WINDOW_OWNER: registry lifetime, removal, and public window API. */
+/* REFACTOR_P7A_WINDOW_OWNER：注册表生命周期、窗口移除及公共窗口 API。 */
 
 void window_object_destroy(void *raw_object) {
     window_server_window_t *window = (window_server_window_t *)raw_object;
     if (window == 0) return;
+
+    window_control_document_put(window->controls);
+    caption_text_put(window->caption);
 
     if (window->compositor_cache != 0) {
         kfree(window->compositor_cache);
@@ -45,8 +49,8 @@ static bool window_is_signaled(const void *raw_object) {
     signaled = signaled || atomic_load_explicit(&window->registry_removed,
                                                memory_order_acquire);
     window_unlock();
-    /* A removed window is a persistent HUP condition for poll/select users.
-     * The fd reference keeps the object alive while the waiter observes it. */
+    /* 对 poll/select 用户而言，已移除窗口会持续保持 HUP 状态。
+     * 等待者观察期间，fd 引用会使对象保持存活。 */
     return signaled;
 }
 
@@ -96,9 +100,8 @@ uint64_t window_surface_page_span(uint32_t width, uint32_t height) {
     return (bytes + PAGE_SIZE - 1ULL) & ~(PAGE_SIZE - 1ULL);
 }
 
-/* Window surfaces are intentionally fully backed before they are published.
- * A client and the compositor can then touch any pixel, including pixels
- * exposed by a later resize, without taking a first-touch page fault. */
+/* 窗口 surface 会在发布前完整分配后备页。客户端和合成器之后可访问任意像素，
+ * 包括后续缩放才会显示的像素，而不会触发首次访问缺页。 */
 static kstatus_t window_surface_allocate(shared_section_t *section,
                                          uint64_t bytes) {
     if (section == 0 || section->vm_object == 0 || bytes == 0U ||
@@ -116,8 +119,8 @@ static kstatus_t window_surface_allocate(shared_section_t *section,
     return K_OK;
 }
 
-/* One allocation owns both slots, so resize never grows either slot lazily.
- * Failure releases all pages and must not publish a partially backed surface. */
+/* 一次分配同时拥有两个槽位，因此缩放时无需延迟扩展任一槽位。失败时释放所有页面，
+ * 不得发布后备存储不完整的 surface。 */
 static kstatus_t window_surface_create_backing(uint64_t span, uint32_t slots,
                                                shared_section_t **out) {
     if (out == 0) return K_EINVAL;
@@ -139,13 +142,14 @@ static kstatus_t window_surface_create_backing(uint64_t span, uint32_t slots,
     return K_OK;
 }
 
-/* Capture pins the exact front slot, not just the allocation's lifetime.
- * The scene lock serializes slot publication with this reader acquisition. */
+/* 捕获操作固定准确的前台槽位，而不只是延长分配区生命周期。
+ * 场景锁会将槽位发布与此读者获取操作串行化。 */
 void window_surface_snapshot_capture_locked(compositor_window_view_t *view) {
     window_server_window_t *window = view->reference;
     view->surface_offset = 0U;
     view->surface_slot = 0U;
     view->surface_lease = false;
+    view->surface_width = view->surface_height = 0U;
     if (window == 0 || !window->surface_exchange_enabled) return;
     view->buffer_size = window->surface_span;
     if (!window_surface_read_begin(&window->surface_exchange,
@@ -154,11 +158,12 @@ void window_surface_snapshot_capture_locked(compositor_window_view_t *view) {
         return;
     }
     view->surface_offset = view->surface_slot * window->surface_span;
+    view->surface_width = window->surface_front_width;
+    view->surface_height = window->surface_front_height;
     view->surface_lease = true;
 }
 
-/* Both occlusion pruning and normal frame completion retire leases here.
- * Keep the reference alive through the unlocked wake to preserve queue life. */
+/* 遮挡裁剪和常规帧完成都会在此释放租约。无锁唤醒期间保留引用，确保等待队列仍然有效。 */
 void window_surface_snapshot_release(compositor_window_view_t *view) {
     window_server_window_t *window = view->reference;
     if (window == 0 || !view->surface_lease) return;
@@ -183,21 +188,27 @@ const object_ops_t g_window_object_ops = {
 };
 
 void window_registry_reset_locked(void) {
-    g_window_server.count = 0U;
+    for (uint32_t index = 0U; index < g_window_server.scene.count; ++index) {
+        window_server_window_t *window = g_window_server.scene.children[index];
+        if (window != 0) window->scene_parent = 0;
+    }
+    g_window_server.scene.count = 0U;
+    g_window_server.scene.hovered_window_identifier = 0U;
+    g_window_server.scene.hovered_title_button = WINDOW_TITLE_BUTTON_NONE;
     g_window_server.next_identifier = 1U;
 
     for (uint32_t index = 0U;
          index < WINDOW_SERVER_MAX_WINDOWS;
          ++index) {
-        g_window_server.windows[index] = 0;
+        g_window_server.scene.children[index] = 0;
     }
 }
 
 bool window_registry_append_locked(window_server_window_t *window) {
     uint32_t identifier;
 
-    if (window == 0 ||
-        g_window_server.count >= WINDOW_SERVER_MAX_WINDOWS) {
+    if (window == 0 || window->scene_parent != 0 ||
+        g_window_server.scene.count >= WINDOW_SERVER_MAX_WINDOWS) {
         return false;
     }
 
@@ -207,32 +218,35 @@ bool window_registry_append_locked(window_server_window_t *window) {
     }
 
     window->identifier = identifier;
-    g_window_server.windows[g_window_server.count++] = window;
+    window->desktop_app = desktop_window_app_locked(window);
+    window->scene_parent = &g_window_server.scene;
+    g_window_server.scene.children[g_window_server.scene.count++] = window;
     desktop_chrome_window_opened_locked(window->owner);
     return true;
 }
 
 bool window_registry_remove_locked(window_server_window_t *window) {
-    if (window == 0) {
+    if (window == 0 || window->scene_parent != &g_window_server.scene) {
         return false;
     }
 
     for (uint32_t index = 0U;
-         index < g_window_server.count;
+         index < g_window_server.scene.count;
          ++index) {
-        if (g_window_server.windows[index] != window) {
+        if (g_window_server.scene.children[index] != window) {
             continue;
         }
 
         for (uint32_t move = index + 1U;
-             move < g_window_server.count;
+             move < g_window_server.scene.count;
              ++move) {
-            g_window_server.windows[move - 1U] =
-                g_window_server.windows[move];
+            g_window_server.scene.children[move - 1U] =
+                g_window_server.scene.children[move];
         }
 
-        --g_window_server.count;
-        g_window_server.windows[g_window_server.count] = 0;
+        --g_window_server.scene.count;
+        g_window_server.scene.children[g_window_server.scene.count] = 0;
+        window->scene_parent = 0;
         return true;
     }
 
@@ -242,31 +256,35 @@ bool window_registry_remove_locked(window_server_window_t *window) {
 void window_registry_move_to_front_locked(window_server_window_t *window) {
     uint32_t position;
 
-    if (window == 0) {
+    if (window == 0 || window->scene_parent != &g_window_server.scene) {
         return;
     }
 
+    /* 目标已在末尾时直接返回，避免再次扫描整个场景。 */
+    if (g_window_server.scene.count == 0U ||
+        g_window_server.scene.children[g_window_server.scene.count - 1U] == window) return;
+
     for (position = 0U;
-         position < g_window_server.count;
+         position < g_window_server.scene.count;
          ++position) {
-        if (g_window_server.windows[position] == window) {
+        if (g_window_server.scene.children[position] == window) {
             break;
         }
     }
 
-    if (position >= g_window_server.count ||
-        position + 1U >= g_window_server.count) {
+    if (position >= g_window_server.scene.count ||
+        position + 1U >= g_window_server.scene.count) {
         return;
     }
 
     for (uint32_t index = position + 1U;
-         index < g_window_server.count;
+         index < g_window_server.scene.count;
          ++index) {
-        g_window_server.windows[index - 1U] =
-            g_window_server.windows[index];
+        g_window_server.scene.children[index - 1U] =
+            g_window_server.scene.children[index];
     }
 
-    g_window_server.windows[g_window_server.count - 1U] = window;
+    g_window_server.scene.children[g_window_server.scene.count - 1U] = window;
 }
 
 static bool window_lifecycle_test_fail(uint32_t step, kstatus_t status) {
@@ -309,7 +327,7 @@ bool window_lifecycle_self_test(void) {
     }
 
     window_lock();
-    initial_count = g_window_server.count;
+    initial_count = g_window_server.scene.count;
     window_unlock();
 
     if (!compositor_copy_self_test()) {
@@ -491,7 +509,7 @@ cleanup:
     }
     if (owner != 0) {
         window_lock();
-        count_restored = g_window_server.count == initial_count;
+        count_restored = g_window_server.scene.count == initial_count;
         window_unlock();
         (void)process_abort(owner);
         object_put(owner);
@@ -511,8 +529,9 @@ void remove_window_locked(window_server_window_t *window) {
         return;
     }
 
-    /* Publish before the close paths wake event_waitq. A removed surface
-     * can never acquire a later display fence; cancellation is not an ACK. */
+    /* 在关闭路径唤醒 event_waitq 前先发布状态。已移除的表面不可能再获得后续显示栅栏；
+     * 取消操作不等同于确认。 */
+    window_animation_depart_locked(window, false);
     atomic_store_explicit(&window->registry_removed, true, memory_order_release);
     window_surface_exchange_close(&window->surface_exchange);
     desktop_chrome_window_closed_locked(window->owner);
@@ -521,9 +540,9 @@ void remove_window_locked(window_server_window_t *window) {
 
     if (g_window_server.focused_identifier == window->identifier) {
         window_scene_set_focus_identifier_locked(0U);
-        for (uint32_t j = g_window_server.count; j != 0U; --j) {
+        for (uint32_t j = g_window_server.scene.count; j != 0U; --j) {
             window_server_window_t *candidate =
-                g_window_server.windows[j - 1U];
+                g_window_server.scene.children[j - 1U];
             if (!candidate->minimized && !candidate->client_show_inactive &&
                 (candidate->flags & OS_WINDOW_VISIBLE) != 0U) {
                 window_scene_set_focus_identifier_locked(candidate->identifier);
@@ -543,7 +562,7 @@ void remove_window_locked(window_server_window_t *window) {
     }
 
     window_mark_window_locked(new_focused);
-    object_put(window); /* registry reference */
+    object_put(window); /* 注册表引用 */
 }
 
 
@@ -578,13 +597,15 @@ kstatus_t window_server_create(process_t *owner, int32_t x, int32_t y,
                    OS_WINDOW_PREMULTIPLIED_ALPHA |
                    OS_WINDOW_STANDARD_CAPTION_CONTROLS |
                    OS_WINDOW_SURFACE_EXCHANGE |
-                   OS_WINDOW_EXPLICIT_MOVE_RESIZE)) != 0U) {
+                   OS_WINDOW_DARK_CAPTION |
+                   OS_WINDOW_EXPLICIT_MOVE_RESIZE |
+                   OS_WINDOW_CAPTION_HEIGHT_MASK)) != 0U ||
+        !os_window_caption_create_valid(flags, height)) {
         return K_EINVAL;
     }
 
-    /* Resizable windows get a stable surface large enough for any on-screen
-     * size.  Allocate that complete backing now, before publishing the
-     * window, so later presents and resizes do not fault in new pages. */
+    /* 可调整大小的窗口使用足以覆盖任意屏幕尺寸的稳定表面。在发布窗口前分配完整后备区，
+     * 使后续呈现和调整大小时无需再触发新页面缺页。 */
     if ((flags & OS_WINDOW_RESIZABLE) != 0U) {
         if (!window_server_kernel_ready()) return K_EIO;
         if (width > g_window_server.display_width ||
@@ -620,7 +641,7 @@ kstatus_t window_server_create(process_t *owner, int32_t x, int32_t y,
     window->y = y;
     window->width = width;
     window->height = height;
-    /* Publish only after the caller has mapped the already-backed surface. */
+    /* 仅在调用方映射已分配后备区的表面后发布窗口。 */
     window->flags = flags & ~OS_WINDOW_VISIBLE;
     window->background = background;
     window->buffer_size = bytes * slots;
@@ -663,6 +684,8 @@ kstatus_t window_server_create(process_t *owner, int32_t x, int32_t y,
         if (window->title[i] == '\0') break;
     }
     window->title[sizeof(window->title) - 1U] = '\0';
+    window->caption=caption_text_create(window->title,caption_text_height(flags));
+    if (!window->caption) {object_put(window);return K_ENOMEM;}
     window_lock();
     old_focused = window_scene_find_locked(g_window_server.focused_identifier);
     if (!window_registry_append_locked(window)) {
@@ -670,7 +693,7 @@ kstatus_t window_server_create(process_t *owner, int32_t x, int32_t y,
         object_put(window);
         return K_ENOMEM;
     }
-    object_get(window); /* registry reference */
+    object_get(window); /* 注册表引用 */
     window_mark_window_locked(old_focused);
     window_mark_window_locked(window);
     window_unlock();
@@ -697,8 +720,8 @@ kstatus_t window_server_lookup_owner(process_t *owner,
                                      window_server_window_t **out) {
     if (owner == 0 || out == 0 || !window_server_init()) return K_EINVAL;
     window_lock();
-    for (uint32_t index = 0U; index < g_window_server.count; ++index) {
-        window_server_window_t *window = g_window_server.windows[index];
+    for (uint32_t index = 0U; index < g_window_server.scene.count; ++index) {
+        window_server_window_t *window = g_window_server.scene.children[index];
         if (window != 0 && window->owner == owner && object_try_get(window)) {
             *out = window;
             window_unlock();
@@ -744,13 +767,13 @@ void window_server_close_process(process_t *owner) {
     bool relaunch_ready;
     if (owner == 0 || !window_server_init()) return;
     window_lock();
-    for (uint32_t index = 0U; index < g_window_server.count;) {
-        window_server_window_t *window = g_window_server.windows[index];
+    for (uint32_t index = 0U; index < g_window_server.scene.count;) {
+        window_server_window_t *window = g_window_server.scene.children[index];
         if (window == 0 || window->owner != owner) {
             ++index;
             continue;
         }
-        /* remove_window_locked() compacts the array, so keep the index. */
+        /* remove_window_locked() 会压缩数组，因此保留当前索引。 */
         object_get(window);
         remove_window_locked(window);
         if (removed_count < WINDOW_SERVER_MAX_WINDOWS) {
@@ -759,8 +782,8 @@ void window_server_close_process(process_t *owner) {
             object_put(window);
         }
     }
-    /* Release only the slot owned by this PID. A late teardown callback from
-     * an older Chrome instance must not clear a newer launch's guard. */
+    /* 仅释放此 PID 所拥有的槽位。较早 Chrome 实例延迟到达的拆除回调不得清除较新启动实例
+     * 的保护状态。 */
     relaunch_ready = desktop_chrome_process_released_locked(owner->pid);
     window_unlock();
     if (relaunch_ready) (void)wake_one(&g_window_server.desktop_launch_waitq);
@@ -833,6 +856,8 @@ static bool window_surface_writer_ready(void *raw) {
                 .width = window->width,
                 .height = window->height,
                 .stride = window->width * sizeof(uint32_t),
+                .damage_width = window->width,
+                .damage_height = window->height,
             };
             context->acquired = true;
         }
@@ -883,22 +908,39 @@ kstatus_t window_server_surface_end(process_t *owner,
         frame->capacity != window->surface_span ||
         frame->width != window->surface_writer_width ||
         frame->height != window->surface_writer_height ||
-        frame->stride != frame->width * sizeof(uint32_t))) {
+        frame->stride != frame->width * sizeof(uint32_t) ||
+        frame->damage_x < 0 || frame->damage_y < 0 ||
+        frame->damage_width == 0U || frame->damage_height == 0U ||
+        (uint64_t)(uint32_t)frame->damage_x + frame->damage_width > frame->width ||
+        (uint64_t)(uint32_t)frame->damage_y + frame->damage_height > frame->height)) {
         window_unlock();
-        return K_EINVAL; // Invalid submit retains the lease for explicit cancel.
+        return K_EINVAL; // 提交无效时保留租约，等待显式取消。
     }
     if (commit && (window->width != frame->width || window->height != frame->height))
-        status = K_EAGAIN; // Resize raced the write; retain the old complete frame.
+        status = K_EAGAIN; // 调整大小与写入发生竞争；保留旧的完整帧。
     if (commit && window->present_sequence == UINT64_MAX) status = K_EINVAL;
     bool publish = commit && status == K_OK;
     (void)window_surface_write_end(&window->surface_exchange, frame->token, publish);
     bool show = publish && (window->flags & OS_WINDOW_VISIBLE) == 0U;
     int32_t x = window->x, y = window->y;
     if (publish) {
+        bool full_damage = show || window->resize_pending ||
+            window->surface_front_width != frame->width ||
+            window->surface_front_height != frame->height;
+        int32_t damage_x = full_damage ? 0 : frame->damage_x;
+        int32_t damage_y = full_damage ? 0 : frame->damage_y;
+        uint32_t damage_width = full_damage ? frame->width : frame->damage_width;
+        uint32_t damage_height = full_damage ? frame->height : frame->damage_height;
         ++window->present_sequence;
+        window->surface_front_width = frame->width;
+        window->surface_front_height = frame->height;
         window->resize_pending = false;
         window->dirty = true;
-        window_mark_surface_locked(window, 0, 0, window->width, window->height);
+        if (window->controls)
+            window_control_surface_damage_locked(window, damage_x, damage_y,
+                damage_width, damage_height);
+        else window_mark_surface_locked(window, damage_x, damage_y,
+                damage_width, damage_height);
     }
     window_unlock();
     if (!publish) (void)wake_all(&window->surface_waitq);
@@ -977,6 +1019,7 @@ kstatus_t window_server_set_fullscreen_owned(process_t *owner,
     window->resize_pending = true;
     window_mark_window_locked(window);
     window_enqueue_resize_event_locked(window);
+    window_input_refresh_pointer_locked();
     window_unlock();
     window_server_notify_worker();
     return K_OK;
@@ -1007,8 +1050,8 @@ kstatus_t window_server_begin_interactive_owned(process_t *owner,
         window_unlock();
         return K_EBUSY;
     }
-    for (uint32_t i = 0; i < g_window_server.count; ++i) {
-        window_server_window_t *other = g_window_server.windows[i];
+    for (uint32_t i = 0; i < g_window_server.scene.count; ++i) {
+        window_server_window_t *other = g_window_server.scene.children[i];
         if (other && other != window &&
             (other->client_pointer_capture || other->client_button_capture)) {
             window_unlock();
@@ -1231,8 +1274,8 @@ kstatus_t window_server_resize(process_t *owner,
         return K_EPERM;
     }
     flags = window->flags;
-    /* Client decorations also cover Chromium's small popups/tooltips.
-     * Native drag minima protect server decorations, not these surfaces. */
+    /* 客户端装饰也包含 Chromium 的小型弹出窗口/工具提示。
+     * 原生拖动最小尺寸限制保护的是服务端装饰，而非这些表面。 */
     if ((window->fullscreen && (width != window->width || height != window->height)) ||
         ((flags & OS_WINDOW_CLIENT_DECORATIONS) == 0U &&
          (width < WINDOW_MIN_WIDTH || height < WINDOW_MIN_HEIGHT)) ||
@@ -1289,11 +1332,11 @@ kstatus_t window_server_snapshot(uint32_t index, window_server_snapshot_t *out) 
     window_server_window_t *window;
     if (out == 0 || !window_server_init()) return K_EINVAL;
     window_lock();
-    if (index >= g_window_server.count) {
+    if (index >= g_window_server.scene.count) {
         window_unlock();
         return K_ENOENT;
     }
-    window = g_window_server.windows[index];
+    window = g_window_server.scene.children[index];
     out->identifier = window->identifier;
     out->owner_pid = window->owner != 0 ? (uint32_t)window->owner->pid : 0U;
     out->x = window->x;
@@ -1316,6 +1359,7 @@ static kstatus_t window_server_set_internal(process_t *owner,
     int32_t old_x;
     int32_t old_y;
     bool defer_first_surface = false;
+    bool old_visible, old_hidden;
     if (window == 0 || (visible & ~(client_visibility ? 3U : 1U)) != 0U ||
         visible == WINDOW_SERVER_SHOW_INACTIVE) return K_EINVAL;
     window_lock();
@@ -1323,23 +1367,20 @@ static kstatus_t window_server_set_internal(process_t *owner,
         window_unlock();
         return K_EPERM;
     }
+    old_visible = (window->flags & OS_WINDOW_VISIBLE) != 0U;
+    old_hidden = window->client_hidden;
     if (!move) { x = window->x; y = window->y; }
     if (client_visibility) {
         window->client_show_inactive =
             (visible & WINDOW_SERVER_SHOW_INACTIVE) != 0U;
         visible &= 1U;
         window->client_hidden = visible == 0U;
-        /* Do not expose an uninitialized first surface. */
+        /* 不要公开尚未初始化的首个表面。 */
         defer_first_surface = visible != 0U && window->present_sequence == 0U;
         if (defer_first_surface) visible = 0U;
     } else if (visible != 0U && window->client_hidden) {
         window_unlock();
         return K_OK;
-    }
-    /* Every hide path relinquishes both kinds of pointer capture. */
-    if (visible == 0U && !defer_first_surface) {
-        window->client_pointer_capture = false;
-        window->client_button_capture = false;
     }
     old_x = window->x;
     old_y = window->y;
@@ -1359,8 +1400,8 @@ static kstatus_t window_server_set_internal(process_t *owner,
     }
     if (visible == 0U && g_window_server.focused_identifier == window->identifier) {
         window_scene_set_focus_identifier_locked(0U);
-        for (uint32_t i = g_window_server.count; i != 0U; --i) {
-            window_server_window_t *candidate = g_window_server.windows[i - 1U];
+        for (uint32_t i = g_window_server.scene.count; i != 0U; --i) {
+            window_server_window_t *candidate = g_window_server.scene.children[i - 1U];
             if (!candidate->client_show_inactive &&
                 (candidate->flags & OS_WINDOW_VISIBLE) != 0U) {
                 window_scene_set_focus_identifier_locked(candidate->identifier);
@@ -1370,6 +1411,13 @@ static kstatus_t window_server_set_internal(process_t *owner,
     }
     window_mark_window_locked(old_focused);
     window_mark_window_locked(window);
+    /* 更新场景后再清理旧捕获，保留离开事件所需的控件信息。 */
+    if (old_x != x || old_y != y ||
+        old_visible != ((window->flags & OS_WINDOW_VISIBLE) != 0U) ||
+        old_hidden != window->client_hidden)
+        window_input_refresh_pointer_locked();
+    if (visible == 0U && !defer_first_surface)
+        window_input_release_pointer_locked(window);
     window_unlock();
     window_server_notify_worker();
     return K_OK;
@@ -1388,6 +1436,7 @@ kstatus_t window_server_set_visibility_owned(process_t *owner,
 
 kstatus_t window_server_capture_owned(process_t *owner,
     window_server_window_t *window, uint32_t capture) {
+    bool repaint = false;
     if (owner == 0 || window == 0 || capture > 1U ||
         !window_server_kernel_ready()) return K_EINVAL;
     window_lock();
@@ -1396,16 +1445,16 @@ kstatus_t window_server_capture_owned(process_t *owner,
         return K_EPERM;
     }
     if (capture != 0U) {
-        /* A shown popup reserves capture before its first frame. Keeping an
-         * uninitialized surface off screen must not reject its input capture. */
+        /* 已显示的弹出窗口会在首帧前预留输入捕获。尚未初始化的表面保持在屏幕外时，不得
+         * 因此拒绝其输入捕获。 */
         if (window->client_hidden || window->minimized ||
             ((window->flags & OS_WINDOW_VISIBLE) == 0U &&
              window->present_sequence != 0U)) {
             window_unlock();
             return K_EINVAL;
         }
-        for (uint32_t i = 0; i < g_window_server.count; ++i) {
-            window_server_window_t *other = g_window_server.windows[i];
+        for (uint32_t i = 0; i < g_window_server.scene.count; ++i) {
+            window_server_window_t *other = g_window_server.scene.children[i];
             if (other != 0 && other != window &&
                 (other->client_pointer_capture ||
                  (other->client_button_capture && other->owner != owner))) {
@@ -1413,18 +1462,22 @@ kstatus_t window_server_capture_owned(process_t *owner,
                 return K_EBUSY;
             }
         }
-        /* A menu opens during its parent's button press. Its explicit grab
-         * supersedes that same-process implicit grab, but never steals an
-         * explicit grab or any other process's input. Validate every conflict
-         * before changing state so a later conflict cannot leave a half-grab. */
-        for (uint32_t i = 0; i < g_window_server.count; ++i) {
-            window_server_window_t *other = g_window_server.windows[i];
-            if (other != 0 && other != window && other->owner == owner)
-                other->client_button_capture = false;
+        /* 菜单会在父窗口按下按钮期间打开。它的显式捕获可替代同一进程的隐式捕获，但不能
+         * 抢占其他显式捕获或其他进程的输入。修改状态前先验证所有冲突，避免后续冲突导致
+         * 捕获状态只更新一半。 */
+        for (uint32_t i = 0; i < g_window_server.scene.count; ++i) {
+            window_server_window_t *other = g_window_server.scene.children[i];
+            if (other != 0 && other != window && other->owner == owner &&
+                other->client_button_capture) {
+                /* 释放事件将交给弹出窗口，原控件的按压必须在此结束。
+                 * 悬停仍归场景路由管理，捕获转移不改变物理命中目标。 */
+                repaint |= window_control_cancel_pointer_press_locked(other);
+            }
         }
     }
     window->client_pointer_capture = capture != 0U;
     window_unlock();
+    if (repaint) window_server_notify_worker();
     return K_OK;
 }
 
@@ -1445,12 +1498,14 @@ kstatus_t window_server_set_minimized_owned(process_t *owner,
         if (minimized != 0U) {
             (void)window_minimize_locked(window);
         } else {
+            window_animation_restore_locked(window);
             window->minimized = false;
             window->dirty = true;
             window_mark_window_locked(window);
             if ((window->flags & OS_WINDOW_VISIBLE) != 0U)
                 window_scene_focus_locked(window);
             window_enqueue_minimized_event_locked(window);
+            window_input_refresh_pointer_locked();
         }
     }
     window_unlock();
@@ -1468,6 +1523,7 @@ kstatus_t window_server_focus(uint32_t identifier) {
         return K_ENOENT;
     }
     window_scene_focus_locked(window);
+    window_input_refresh_pointer_locked();
     window_unlock();
     window_server_notify_worker();
     return K_OK;
@@ -1571,8 +1627,8 @@ static bool window_event_available(void *raw_context) {
     bool available = false;
     window_lock();
     if (context->window != 0) {
-        /* The blocking read owns this reference. Close wakes the embedded
-         * queue after publishing registry_removed, even with no input left. */
+        /* 阻塞读取持有此引用。即使没有剩余输入，close 也会在发布 registry_removed 后唤醒
+         * 内嵌队列。 */
         context->cancelled = atomic_load_explicit(
             &context->window->registry_removed, memory_order_acquire);
         available = context->cancelled ||
@@ -1580,8 +1636,8 @@ static bool window_event_available(void *raw_context) {
         window_unlock();
         return available;
     }
-    for (uint32_t i = 0U; i < g_window_server.count; ++i) {
-        window_server_window_t *window = g_window_server.windows[i];
+    for (uint32_t i = 0U; i < g_window_server.scene.count; ++i) {
+        window_server_window_t *window = g_window_server.scene.children[i];
         if (window->owner != context->process ||
             (context->identifier != 0U && window->identifier != context->identifier) ||
             window->event_count == 0U) continue;
@@ -1607,8 +1663,7 @@ kstatus_t window_server_event_read(process_t *process, uint32_t identifier,
     if (window_event_available(&context)) return K_OK;
     if (timeout_ns == 0U) return K_EAGAIN;
     if (identifier != 0U) {
-        /* Keep the embedded queue alive across a blocked read.  Teardown
-         * wakes this queue before dropping the registry reference. */
+        /* 阻塞读取期间保持内嵌队列有效。拆除过程会先唤醒此队列，再释放注册表引用。 */
         if (window_server_lookup(identifier, &wait_window) != K_OK ||
             wait_window->owner != process) {
             if (wait_window != 0) window_server_put(wait_window);
@@ -1629,6 +1684,7 @@ static kstatus_t window_server_update_internal(
     uint32_t width, uint32_t height, uint32_t flags,
     uint64_t *present_sequence) {
     window_server_window_t *window;
+    caption_text_t *previous_caption=0;
 #if OS_ENABLE_FRAME_TRACE
     bool report_surface = false;
     uint64_t first_present_tsc = 0U;
@@ -1659,6 +1715,23 @@ static kstatus_t window_server_update_internal(
         }
         uint32_t next_flags = (window->flags & ~OS_WINDOW_CAPTION_HEIGHT_MASK) | flags;
         if (next_flags != window->flags) {
+            char title[32];memcpy(title,window->title,sizeof(title));
+            window_unlock();
+            caption_text_t *next=caption_text_create(title,caption_text_height(next_flags));
+            if (!next) return K_ENOMEM;
+            window_lock();
+            window=window_scene_find_locked(identifier);
+            if (!window || window->owner!=process) {
+                window_unlock();caption_text_put(next);return K_EPERM;
+            }
+            if (memcmp(title,window->title,sizeof(title)) || !window_standard_caption(window->flags) ||
+                caption>window->height) {
+                window_unlock();caption_text_put(next);return K_EAGAIN;
+            }
+            next_flags=(window->flags & ~OS_WINDOW_CAPTION_HEIGHT_MASK) | flags;
+            previous_caption=window->caption;window->caption=next;
+            /* 标题栏度量会改变外边界。在较小标题栏隐藏旧底边前，也要使旧占用区域失效。 */
+            window_mark_window_locked(window);
             window->flags = next_flags;
             window_mark_window_locked(window);
         }
@@ -1684,24 +1757,26 @@ static kstatus_t window_server_update_internal(
 #endif
 
     /*
-     * A resizable client acknowledges the current row stride by submitting a
-     * full-surface damage rectangle with exactly the current width/height.
-     * A stale redraw for an older resize cannot expose mis-strided pixels.
+    * 可调整大小的客户端通过提交宽高恰好等于当前尺寸的完整表面损坏矩形，确认当前行跨度。
+    * 旧尺寸的过期重绘不能因此暴露行跨度错误的像素。
      */
     if (window->resize_pending && x == 0 && y == 0 &&
         width == window->width && height == window->height) {
         window->resize_pending = false;
     }
 
+    /* 普通 UPDATE 不产生呈现栅栏，但也是有效的首次内容提交。 */
+    window->surface_content_ready = true;
     window->dirty = true;
     if (width == 0U) {
         window_mark_window_locked(window);
+    } else if (window->controls) {
+        window_control_surface_damage_locked(window, x, y, width, height);
     } else {
         window_mark_surface_locked(window, x, y, width, height);
     }
-    /* Publish the fence and its damage in one registry transaction. A
-     * snapshot for unrelated cursor/window damage must never acknowledge
-     * this sequence before the submitted surface damage becomes visible. */
+    /* 在同一个注册表事务中发布栅栏及其损坏区域。无关光标/窗口损坏的快照绝不能在已提交的
+     * 表面损坏可见前确认此序列。 */
     if (present_sequence != 0) {
         if (window->present_sequence == UINT64_MAX) {
             window->present_sequence = 1U;
@@ -1711,6 +1786,7 @@ static kstatus_t window_server_update_internal(
         *present_sequence = window->present_sequence;
     }
     window_unlock();
+    caption_text_put(previous_caption);
 #if OS_ENABLE_FRAME_TRACE
     if (report_surface) {
         kernel_frame_trace_emit_value(
@@ -1742,9 +1818,8 @@ static kstatus_t window_server_update_internal(
         vm_fault_telemetry_report();
     }
 #endif
-    /* A client update is independent of input.  Wake the compositor even
-     * when the input queue is empty; otherwise the worker can sleep until the
-     * next mouse report and every redraw appears one event late. */
+    /* 客户端更新独立于输入。即使输入队列为空，也要唤醒合成器；否则工作线程可能休眠至下次
+     * 鼠标报告到达，导致每次重绘都晚一个事件。 */
     window_server_notify_worker();
     return K_OK;
 }
@@ -1762,17 +1837,33 @@ kstatus_t window_server_title_owned(process_t *owner, uint32_t identifier,
         window_unlock();
         return K_EPERM;
     }
+    if (!memcmp(window->title,title,length+1U)) {window_unlock();return K_OK;}
+    uint32_t title_height=caption_text_height(window->flags);
+    window_unlock();
+    caption_text_t *caption=caption_text_create(title,title_height);
+    if (!caption) return K_ENOMEM;
+    window_lock();
+    window=window_scene_find_locked(identifier);
+    if (window==0 || window->owner!=owner) {
+        window_unlock();caption_text_put(caption);return K_EPERM;
+    }
+    if (caption_text_height(window->flags)!=title_height) {
+        window_unlock();caption_text_put(caption);return K_EAGAIN;
+    }
     bool changed = false;
     for (size_t index = 0U; index < sizeof(window->title); ++index) {
         char character = index < length ? title[index] : '\0';
         changed |= window->title[index] != character;
         window->title[index] = character;
     }
+    caption_text_t *previous=window->caption;
+    window->caption=caption;
     if (changed) window_mark_rect_locked(window->x, window->y,
         window_outer_width(window->width, window->flags),
         window_client_decorations(window->flags) ? os_window_caption_height(window->flags) :
         window_client_offset_y(window->flags));
     window_unlock();
+    caption_text_put(previous);
     if (changed) window_server_notify_worker();
     return K_OK;
 }

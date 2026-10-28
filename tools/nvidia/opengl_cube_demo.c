@@ -1,18 +1,15 @@
 /*
- * System NVIDIA OpenGL demo.
+ * System NVIDIA OpenGL 演示程序。
  *
- * The demo creates its own System window through the Linux-personality
- * extension, then keeps the window bridge small: OpenGL renders into an
- * off-screen FBO, then glReadPixels writes directly into the preallocated
- * System window surface shared with the compositor.  The window ioctl only
- * publishes the completed shared buffer.  Mouse input is read from the
- * owning window's Linux fd and changes yaw/pitch only while the left button
- * is held.
+ * 演示程序通过 Linux 兼容扩展自行创建 System 窗口，并将窗口桥接保持精简：OpenGL 渲染到离屏 FBO，
+ * 再由 glReadPixels 直接写入预分配且与合成器共享的 System 窗口 surface。窗口 PRESENT 调用会发布帧，
+ * 并等待合成器消费。鼠标输入从所属窗口的 Linux fd 读取；仅在按住左键时改变 yaw/pitch。
  */
 #include <stdint.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <stdbool.h>
+#include <stdio.h>
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
@@ -21,6 +18,7 @@
 #include <uapi/display.h>
 #include <uapi/window.h>
 #include <uapi/chrome_caption.h>
+#include "cube_timing.h"
 
 #ifndef CUBE_WIDTH
 #define CUBE_WIDTH              800U
@@ -44,8 +42,7 @@
 #define CUBE_FRAME_CONDITION    (!quit)
 #define CUBE_FRAME_PACING       0
 #else
-/* The finite run is only for the non-interactive CI gate.  The normal cube
- * application keeps rendering until Esc/window-close sets quit. */
+/* 有限帧运行仅用于非交互式 CI 门禁。正常立方体应用会持续渲染，直到按下 Esc 或关闭窗口设置 quit。 */
 #define CUBE_FRAME_LIMIT        600U
 #define CUBE_FRAME_CONDITION    (frame < CUBE_FRAME_LIMIT && !quit)
 #define CUBE_FRAME_PACING       1
@@ -65,9 +62,8 @@ extern int sched_yield(void);
 extern int *__errno_location(void);
 extern long syscall(long, ...);
 
-/* OS_WINDOW_RESIZABLE windows use the server-side frame geometry.  Keep the
- * constants here in sync with the public window geometry contract so a small
- * firmware framebuffer can still host the diagnostic window. */
+/* OS_WINDOW_RESIZABLE 窗口使用服务器侧边框几何。此处常量需与公共窗口几何约定同步，
+ * 以便较小的固件帧缓冲区也能容纳诊断窗口。 */
 #define CUBE_WINDOW_FRAME_EXTRA 2U
 #define CUBE_WINDOW_TITLEBAR    CHROME_CAPTION_HEIGHT
 #define CUBE_WINDOW_MIN_WIDTH   160U
@@ -300,9 +296,8 @@ typedef struct cube_gl_api {
     cube_gl_get_tex_level_parameteriv_fn get_tex_level_parameteriv;
 } cube_gl_api_t;
 
-/* glReadPixels targets this address directly.  window_server_present() waits
- * for the compositor to consume the previous sequence before the next frame
- * can overwrite the shared surface. */
+/* glReadPixels 直接写入此地址。window_server_present() 会等待合成器消费前一序列，
+ * 然后才能用下一帧覆盖共享 surface。 */
 static uint32_t g_cube_shared_buffer_reported;
 static uint64_t g_cube_window_buffer_address = CUBE_HBUFFER_ADDRESS;
 
@@ -311,11 +306,11 @@ extern void *dlsym(void *, const char *);
 extern int dlclose(void *);
 extern int setenv(const char *, const char *, int);
 
-/* Keep one bounded result on the boot filesystem for desktop launches with
- * no visible stdout. Failure to write diagnostics must not alter rendering. */
-static void cube_record_result(const char *text) {
-    if (text == 0) return;
-    int descriptor = open("/cube-result.log", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+/* 在启动文件系统中保留一条有界结果，供没有可见 stdout 的桌面启动使用。
+ * 写入诊断失败不得改变渲染行为。 */
+static void cube_record_log(const char *path, const char *text) {
+    if (path == 0 || text == 0) return;
+    int descriptor = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
     if (descriptor < 0) return;
     size_t remaining = strlen(text);
     while (remaining != 0U) {
@@ -327,6 +322,10 @@ static void cube_record_result(const char *text) {
     }
     (void)fsync(descriptor);
     (void)close(descriptor);
+}
+
+static void cube_record_result(const char *text) {
+    cube_record_log("/log/cube-result.log", text);
 }
 
 static void cube_emit(const char *text) {
@@ -634,7 +633,7 @@ static uint32_t cube_build_vertices(cube_vertex_t *vertices) {
         cube_add_triangle(vertices, &count, cube_corner(a), cube_corner(c),  \
                           cube_corner(d));                                   \
     } while (0)
-    /* back, front, left, right, bottom, top */
+    /* 后、前、左、右、底、顶 */
     CUBE_FACE(1U, 0U, 3U, 2U);
     CUBE_FACE(4U, 5U, 6U, 7U);
     CUBE_FACE(0U, 4U, 7U, 3U);
@@ -723,8 +722,7 @@ static void cube_build_mvp(float mvp[16], float yaw, float pitch,
     view[14] = -5.0F;
     for (uint32_t index = 0U; index < 16U; ++index) projection[index] = 0.0F;
     projection[0] = focal / aspect;
-    /* glReadPixels starts at the bottom row.  Render vertically inverted so
-     * the shared surface is already top-to-bottom and needs no row copy. */
+    /* glReadPixels 从最底行开始。垂直翻转渲染，使共享 surface 已按从上到下排列，无需逐行复制。 */
     projection[5] = -focal;
     projection[10] = (far_plane + near_plane) / (near_plane - far_plane);
     projection[11] = -1.0F;
@@ -788,7 +786,7 @@ static void cube_fill_rect(uint8_t *pixels, uint32_t width, uint32_t height,
             pixel[0] = blue;
             pixel[1] = green;
             pixel[2] = red;
-            /* Window surfaces are XRGB8888; byte 3 is not an alpha channel. */
+            /* 窗口 surface 为 XRGB8888；第 3 字节不是 alpha 通道。 */
             pixel[3] = 0U;
         }
     }
@@ -845,13 +843,18 @@ static void cube_draw_overlay(uint8_t *pixels, uint32_t width, uint32_t height,
 
 static int cube_present(const cube_gl_api_t *api, int descriptor,
                         uint32_t width, uint32_t height, uint32_t frames,
-                        uint64_t elapsed_ns) {
+                        uint64_t elapsed_ns, cube_timing_sample_t *timing) {
+    uint64_t read_begin = 0U, read_end = 0U, publish_begin = 0U, publish_end = 0U;
+    int clock_valid = 0;
+    if (timing != 0) timing->valid = 0;
     uint8_t *pixels = (uint8_t *)(uintptr_t)g_cube_window_buffer_address;
     uint64_t pixel_count = (uint64_t)width * height;
     if (api == 0 || descriptor < 0 || width == 0U || height == 0U ||
         pixel_count > SIZE_MAX / 4U || pixels == 0) return 0;
+    if (timing != 0) clock_valid = cube_now_ns(&read_begin);
     api->read_pixels(0, 0, (cube_gl_sizei_t)width, (cube_gl_sizei_t)height,
                      CUBE_GL_BGRA, CUBE_GL_UNSIGNED_BYTE, pixels);
+    if (clock_valid) clock_valid = cube_now_ns(&read_end);
     if (api->get_error() != CUBE_GL_NO_ERROR) return 0;
     if (g_cube_shared_buffer_reported == 0U) {
         uint64_t nonclear = 0U;
@@ -870,8 +873,7 @@ static int cube_present(const cube_gl_api_t *api, int descriptor,
             for (uint32_t x = 0U; x < width; ++x) {
                 uint64_t offset = ((uint64_t)y * width + x) * 4U;
                 if (pixels[offset + 3U] != 0U) ++reserved_nonzero;
-                /* The diagnostic is reported in logical RGB order while the
-                 * shared XRGB surface is stored as B,G,R,X bytes. */
+                /* 诊断以逻辑 RGB 顺序报告，而共享 XRGB surface 按 B、G、R、X 字节存储。 */
                 bool differs = pixels[offset + 2U] != 9U ||
                                pixels[offset + 1U] != 11U ||
                                pixels[offset] != 19U;
@@ -937,11 +939,51 @@ static int cube_present(const cube_gl_api_t *api, int descriptor,
         if (reserved_nonzero != 0U) return 0;
         g_cube_shared_buffer_reported = 1U;
     }
-    /* The FBO clear and fragment output already produce XRGB's zero high
-     * byte. Do not read/modify/write the complete shared surface again. */
+    /* FBO 清屏和片元输出已生成 XRGB 的高位零字节。不要再次读/改/写整个共享 surface。 */
     cube_draw_overlay(pixels, width, height, frames, elapsed_ns);
-    return cube_window_command(descriptor, LINUX_WINDOW_OPERATION_PRESENT,
-                               0, 0, width, height);
+    if (clock_valid) clock_valid = cube_now_ns(&publish_begin);
+    int presented = cube_window_command(descriptor, LINUX_WINDOW_OPERATION_PRESENT,
+                                        0, 0, width, height);
+    if (clock_valid) clock_valid = cube_now_ns(&publish_end);
+    if (timing != 0 && presented && clock_valid && read_end >= read_begin &&
+        publish_end >= publish_begin) {
+        timing->readback_ns = read_end - read_begin;
+        timing->publish_ns = publish_end - publish_begin;
+        timing->valid = 1;
+    }
+    return presented;
+}
+
+static void cube_record_profile(uint32_t display_width, uint32_t display_height,
+                                uint32_t width, uint32_t height,
+                                const char *renderer) {
+    char line[384];
+    if (renderer == 0) return;
+    int length = snprintf(line, sizeof(line),
+        "OS_CUBE_PROFILE display=%ux%u surface=%ux%u renderer=%.160s\n"
+        "readback=GPU_wait_and_CPU_copy submit=window_present_ACK_wait\n",
+        display_width, display_height, width, height, renderer);
+    if (length <= 0 || (size_t)length >= sizeof(line)) return;
+    cube_record_log("/log/cube-profile.log", line);
+}
+
+/* 回读时间包含等待先前 GPU 工作。旧版 PRESENT 系统调用除了提交损坏区域，还会等待合成器消费/ACK；
+ * 因此该值既不是单独的 CPU 提交开销，也不是物理显示器刷新时间。 */
+static void cube_report_timing(const cube_timing_totals_t *totals) {
+    if (totals->frames == 0U) return;
+    char line[256];
+    int length = snprintf(line, sizeof(line),
+        "OS_CUBE_TIMING frames=%llu readback_avg_us=%llu readback_max_us=%llu "
+        "submit_avg_us=%llu submit_max_us=%llu\n",
+        (unsigned long long)totals->frames,
+        (unsigned long long)(totals->readback_ns / totals->frames / 1000U),
+        (unsigned long long)(totals->readback_max_ns / 1000U),
+        (unsigned long long)(totals->publish_ns / totals->frames / 1000U),
+        (unsigned long long)(totals->publish_max_ns / 1000U));
+    if (length <= 0 || (size_t)length >= sizeof(line)) return;
+    cube_emit(line);
+    /* 桌面启动可能丢弃 stdout。在启动卷中只保留最新区间，每 5 秒写入一条小型有界记录。 */
+    cube_record_log("/log/cube-timing.log", line);
 }
 
 static int cube_process_events(int descriptor, int *dragging, int *quit,
@@ -1050,6 +1092,8 @@ int main(void) {
     uint32_t drag_events = 0U;
     uint32_t rendered_frames = 0U;
     uint64_t start_ns = 0U;
+    uint64_t timing_report_ns = 0U;
+    cube_timing_totals_t timing_totals = {0};
 #if CUBE_FRAME_PACING
     uint64_t next_deadline = 0U;
 #endif
@@ -1059,24 +1103,23 @@ int main(void) {
     int32_t cube_y = CUBE_WINDOW_Y;
     int32_t create_x;
     int32_t create_y;
-    uint32_t display_width;
-    uint32_t display_height;
+    uint32_t display_width = 0U;
+    uint32_t display_height = 0U;
     linux_window_create_t window_create = {
         .x = 0,
         .y = 0,
         .width = 0,
         .height = 0,
-        /* Let Ring0 draw the frame/titlebar so this is a normal window. */
+        /* 由 Ring0 绘制边框/标题栏，使其成为普通窗口。 */
         .flags = OS_WINDOW_RESIZABLE | OS_WINDOW_STANDARD_CAPTION_CONTROLS,
         .background = 0x00121C2EU,
         .address = CUBE_HBUFFER_ADDRESS,
-        .title = "GB205 OpenGL Cube",
+        .title = "立方体 - OpenGL",
     };
 
     cube_record_result("OS_CUBE_MAIN_ENTERED\n");
-    /* Query the actual guest output instead of assuming the firmware mode.
-     * The no-PCI-resource RAMFB path is intentionally only 800x600 on the
-     * current OVMF build, while a real 1080p GOP needs no fallback. */
+    /* 查询来宾实际输出模式，不要假定固件模式。当前 OVMF 构建中，无 PCI 资源的 RAMFB 路径
+     * 刻意限制为 800x600；而真实 1080p GOP 无需后备模式。 */
     if (CUBE_INTERACTIVE && cube_query_display(&display_width,
                                                &display_height)) {
         if (!cube_fit_geometry(display_width, display_height,
@@ -1115,9 +1158,8 @@ int main(void) {
     if (!cube_window_command(window_descriptor,
                              LINUX_WINDOW_OPERATION_RESIZE, 0, 0,
                              cube_width, cube_height)) {
-        /* An older kernel may not expose DISPLAY_GET_INFO yet.  The initial
-         * interactive window is created at (0,0), so retry with the largest
-         * decorated client area that fits the known 800x600 fallback. */
+        /* 较旧内核可能尚未提供 DISPLAY_GET_INFO。初始交互窗口在 (0,0) 创建，
+         * 因此按已知的 800x600 后备模式，重试可容纳的最大装饰客户端区域。 */
         if (!CUBE_INTERACTIVE ||
             cube_width <= CUBE_WINDOW_FRAME_EXTRA ||
             cube_height <= CUBE_WINDOW_FRAME_EXTRA + CUBE_WINDOW_TITLEBAR) {
@@ -1136,7 +1178,7 @@ int main(void) {
         }
         cube_emit("OS_CUBE_WINDOW_FALLBACK\n");
     }
-    /* Exercise the Linux window resize/move adapter before the first frame. */
+    /* 首帧前测试 Linux 窗口缩放/移动适配器。 */
     if (!cube_window_command(window_descriptor,
                              LINUX_WINDOW_OPERATION_MOVE,
                              cube_x, cube_y, 0U, 0U)) {
@@ -1150,11 +1192,11 @@ int main(void) {
     cube_emit("\n");
     cube_emit("OS_CUBE_WINDOW_READY\n");
     if (setenv("__EGL_VENDOR_LIBRARY_FILENAMES",
-               "/usr/share/glvnd/egl_vendor.d/10_nvidia.json", 1) != 0) {
+               "/usr/apps/cube/egl/10_nvidia.json", 1) != 0) {
         failure_marker = "OS_CUBE_GLVND_ENV_FAIL\n";
         goto cleanup;
     }
-    egl_handle = dlopen("/compat/linux/lib/x86_64-linux-gnu/libEGL.so.1",
+    egl_handle = dlopen("/usr/apps/cube/lib/libEGL.so.1",
                         CUBE_RTLD_NOW | CUBE_RTLD_GLOBAL);
     if (egl_handle == 0) {
         failure_marker = "OS_CUBE_LIBEGL_FAIL\n";
@@ -1269,6 +1311,8 @@ int main(void) {
         cube_emit_value("OS_CUBE_GL_VENDOR=", (const char *)vendor);
         cube_emit_value("OS_CUBE_GL_RENDERER=", (const char *)renderer);
         cube_emit_value("OS_CUBE_GL_VERSION=", (const char *)version);
+        cube_record_profile(display_width, display_height, cube_width,
+                            cube_height, (const char *)renderer);
     }
     (void)gl.get_error();
     gl.gen_framebuffers(1, &framebuffer);
@@ -1397,6 +1441,7 @@ int main(void) {
         uint64_t now;
         uint64_t elapsed_ns;
         float mvp[16];
+        cube_timing_sample_t timing = {0};
         if (!cube_process_events(window_descriptor, &dragging, &quit, &yaw,
                                  &pitch, &drag_events)) {
             failure_marker = "OS_CUBE_WINDOW_READ_FAIL\n";
@@ -1413,15 +1458,23 @@ int main(void) {
         gl.clear_color(0.035F, 0.045F, 0.075F, 0.0F);
         gl.clear(CUBE_GL_COLOR_BUFFER_BIT | CUBE_GL_DEPTH_BUFFER_BIT);
         gl.draw_arrays(CUBE_GL_TRIANGLES, 0, 36);
-        /* Client-memory ReadPixels below completes prior rendering itself;
-         * a separate Finish would add another whole-context CPU/GPU wait. */
+        /* 下方写入客户端内存的 ReadPixels 会自行等待此前渲染完成；单独调用 Finish 会额外增加一次
+         * 整个上下文的 CPU/GPU 等待。 */
         if (gl.get_error() != CUBE_GL_NO_ERROR ||
             !cube_present(&gl, window_descriptor, cube_width, cube_height,
-                          frame + 1U, elapsed_ns)) {
+                          frame + 1U, elapsed_ns, &timing)) {
             failure_marker = "OS_CUBE_PRESENT_FAIL\n";
             goto cleanup;
         }
         rendered_frames = frame + 1U;
+        /* 排除首帧像素验证和驱动预热时间。 */
+        if (frame != 0U) cube_timing_add(&timing_totals, &timing);
+        if (elapsed_ns >= timing_report_ns &&
+            elapsed_ns - timing_report_ns >= 5000000000ULL) {
+            cube_report_timing(&timing_totals);
+            timing_totals = (cube_timing_totals_t){0};
+            timing_report_ns = elapsed_ns;
+        }
         if (rendered_frames == 1U) cube_emit("OS_CUBE_VISIBLE\n");
 #if CUBE_FRAME_PACING
         if (next_deadline > UINT64_MAX - CUBE_FRAME_NS) {
@@ -1447,6 +1500,7 @@ int main(void) {
         failure_marker = "OS_CUBE_NO_FRAME_FAIL\n";
         goto cleanup;
     }
+    cube_report_timing(&timing_totals);
     {
         uint64_t finish_ns;
         uint64_t elapsed_ns;

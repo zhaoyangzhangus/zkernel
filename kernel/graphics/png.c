@@ -434,26 +434,33 @@ static bool png_unfilter(uint8_t *scanlines, uint32_t height,
             scanlines + (size_t)(row - 1U) * row_stride + 1U;
         uint8_t filter = scanlines[(size_t)row * row_stride];
 
-        if (filter > 4U) return false;
-        for (size_t column = 0U; column < row_bytes; ++column) {
-            uint8_t left = column >= bytes_per_pixel ?
-                current[column - bytes_per_pixel] : 0U;
-            uint8_t up = previous == 0 ? 0U : previous[column];
-            uint8_t up_left = previous == 0 || column < bytes_per_pixel ?
-                0U : previous[column - bytes_per_pixel];
-
-            if (filter == 1U) {
-                current[column] = (uint8_t)(current[column] + left);
-            } else if (filter == 2U) {
-                current[column] = (uint8_t)(current[column] + up);
-            } else if (filter == 3U) {
-                current[column] = (uint8_t)(current[column] +
-                                            ((uint32_t)left + up) / 2U);
-            } else if (filter == 4U) {
-                current[column] = (uint8_t)(current[column] +
-                    png_paeth(left, up, up_left));
+        /* 过滤类型整行不变；无过滤行不扫描，首行也不反复判断上一行是否存在。 */
+        if (filter == 0U || (filter == 2U && !previous)) continue;
+        size_t prefix = row_bytes < bytes_per_pixel ? row_bytes : bytes_per_pixel;
+        if (filter == 1U || (filter == 4U && !previous)) {
+            for (size_t column = prefix; column < row_bytes; ++column)
+                current[column] = (uint8_t)(current[column] + current[column-bytes_per_pixel]);
+        } else if (filter == 2U) {
+            for (size_t column = 0U; column < row_bytes; ++column)
+                current[column] = (uint8_t)(current[column] + previous[column]);
+        } else if (filter == 3U) {
+            if (previous) {
+                for (size_t column = 0U; column < prefix; ++column)
+                    current[column] = (uint8_t)(current[column] + previous[column]/2U);
+                for (size_t column = prefix; column < row_bytes; ++column)
+                    current[column] = (uint8_t)(current[column] +
+                        ((uint32_t)current[column-bytes_per_pixel]+previous[column])/2U);
+            } else {
+                for (size_t column = prefix; column < row_bytes; ++column)
+                    current[column] = (uint8_t)(current[column] + current[column-bytes_per_pixel]/2U);
             }
-        }
+        } else if (filter == 4U) {
+            for (size_t column = 0U; column < prefix; ++column)
+                current[column] = (uint8_t)(current[column] + previous[column]);
+            for (size_t column = prefix; column < row_bytes; ++column)
+                current[column] = (uint8_t)(current[column] + png_paeth(
+                    current[column-bytes_per_pixel],previous[column],previous[column-bytes_per_pixel]));
+        } else return false;
     }
     return true;
 }

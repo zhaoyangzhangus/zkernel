@@ -18,7 +18,7 @@
 #include "../fs/vfs/internal.h"
 #include "filesystem_internal.h"
 
-/* REFACTOR_P3_FILESYSTEM_SELF_TEST_OWNER: FAT32, VFS, and file-map tests. */
+/* REFACTOR_P3_FILESYSTEM_SELF_TEST_OWNER：FAT32、VFS 和文件映射测试。 */
 
 #define FAT32_TEST_SECTOR_COUNT 128U
 static UINT8 g_fat32_test_disk[FAT32_TEST_SECTOR_COUNT * 512U];
@@ -87,8 +87,7 @@ static BOOLEAN filesystem_vfs_fat_delete_self_test(void) {
     if (shared == 0 || shared->fat_file == 0) goto cleanup;
     OS_FAT32_FILE *retained_inode = shared->fat_file;
     if (!fat32_create_path(mount->filesystem, "/vfspress.asm", 0)) goto cleanup;
-    /* A cached VFS open needs no spare native FAT slot. Saturate the raw
-     * table, then verify both read and write opens retain the same inode. */
+    /* 缓存命中的 VFS open 不需要备用原生 FAT 槽位。先填满原始表，再验证读/写 open 均保留同一 inode。 */
     while (pressure_count < OS_FAT32_MAX_OPEN_FILES &&
            fat32_open(mount->filesystem, relative, &pressure[pressure_count])) {
         ++pressure_count;
@@ -110,8 +109,7 @@ static BOOLEAN filesystem_vfs_fat_delete_self_test(void) {
     vfs_close(pressure_open);
     pressure_open = 0;
     /* /sample.txt is an idle canonical inode from the preceding test. A
-     * cache miss must reclaim that spare handle while retaining this live
-     * reader's inode, even with every native slot currently occupied. */
+    * 缓存未命中时必须回收备用句柄，同时保留当前读取者的 inode，即使此时所有原生槽位都已占用。 */
     if (vfs_open_kernel("/vfspress.asm", VFS_OPEN_READ, 0U, &pressure_open) != K_OK ||
         pressure_open == 0 || shared->fat_file != retained_inode ||
         ((vfs_backend_node_t *)pressure_open->vnode->fs_private)->fat_file == 0) goto cleanup;
@@ -158,7 +156,7 @@ static BOOLEAN filesystem_vfs_fat_delete_self_test(void) {
     for (UINT32 index = 0U; index < sizeof(source) - 1U; ++index) {
         if (result[index] != source[index]) goto cleanup;
     }
-    /* Reusing the pathname must not redirect an already-open old version. */
+    /* 复用路径名不能重定向已打开的旧版本。 */
     if (vfs_open_kernel(path,
                         VFS_OPEN_READ | VFS_OPEN_WRITE | VFS_OPEN_CREATE |
                             VFS_OPEN_TRUNCATE,
@@ -259,13 +257,11 @@ cleanup:
     return success;
 }
 
-/* Chrome's startup profile is deliberately an in-memory namespace during the
- * compatibility smoke run.  Keep the namespace contract (mkdir/open/write/
- * stat/rename/remove) covered independently from the FAT backend. */
+/* 兼容性冒烟测试期间，Chrome 启动 profile 刻意使用内存命名空间。
+ * 独立于 FAT 后端覆盖命名空间约定（mkdir/open/write/stat/rename/remove）。 */
 static BOOLEAN filesystem_vfs_chrome_profile_overlay_self_test(void) {
-    /* Never place test Preferences under Chrome's live user-data directory:
-     * desktop launch can overlap late filesystem checks, and Chromium treats
-     * the intentionally minimal fixture below as a corrupt real profile. */
+    /* 不要将测试 Preferences 放入 Chrome 正在使用的 user-data 目录：桌面启动可能与后续文件系统检查重叠，
+     * Chromium 会将下方刻意精简的夹具视为损坏的真实 profile。 */
     static const CHAR8 root[] = "/tmp/vfs-chrome-profile-test";
     static const CHAR8 profile[] = "/tmp/vfs-chrome-profile-test/Default";
     static const CHAR8 preferences[] =
@@ -351,9 +347,8 @@ cleanup:
     return success;
 }
 
-/* Chromium also creates large anonymous/shared-memory backing files directly
- * in /tmp (for example .org.chromium.Chromium.*).  Ensure these use the
- * volatile memory backend rather than FAT before the browser starts. */
+/* Chromium 也会直接在 /tmp 创建大型匿名/共享内存后备文件（例如 .org.chromium.Chromium.*）。
+ * 浏览器启动前确保这些文件使用易失内存后端，而不是 FAT。 */
 static BOOLEAN filesystem_vfs_tmp_shared_file_self_test(void) {
     static const CHAR8 path[] = "/tmp/.org.chromium.Chromium.000000";
     static const UINT64 shared_size = 4198400U;
@@ -424,9 +419,8 @@ static VOID filesystem_test_numbered_path(const CHAR8 *prefix, UINT32 index,
     output[length + 2U] = '\0';
 }
 
-/* Chrome's first profile creates more than the old fixed 64-node VFS cache.
- * Keep that capacity requirement executable so a small namespace regression
- * cannot silently return K_ENOMEM during browser startup. */
+/* Chrome 首个 profile 创建的节点数超过旧版固定 64 节点 VFS 缓存。
+ * 将容量要求保留为可执行测试，避免小型命名空间回归在浏览器启动时静默返回 K_ENOMEM。 */
 static BOOLEAN filesystem_vfs_chrome_profile_capacity_self_test(void) {
     static const CHAR8 root[] = "/tmp/vfs-chrome-profile-test";
     static const CHAR8 capacity_root[] =
@@ -675,21 +669,21 @@ static BOOLEAN filesystem_vfs_lock_preemption_self_test(void) {
     vnode_t vnode = {0};
     vfs_backend_node_t backend = {0};
     if (sched_preempt_disabled()) return 0;
-    atomic_init(&vnode.lock.state, 0U);
-    atomic_init(&backend.io_lock.state, 0U);
+    io_mutex_init(&vnode.lock, true);
+    io_mutex_init(&backend.io_lock, true);
 
     vfs_vnode_lock(&vnode);
-    BOOLEAN vnode_nonpreemptible = sched_preempt_disabled();
+    BOOLEAN vnode_preemptible = !sched_preempt_disabled();
     vfs_vnode_unlock(&vnode);
-    if (!vnode_nonpreemptible || sched_preempt_disabled()) return 0;
+    if (!vnode_preemptible || sched_preempt_disabled()) return 0;
 
     vfs_backend_lock(&backend);
-    BOOLEAN backend_nonpreemptible = sched_preempt_disabled();
+    BOOLEAN backend_preemptible = !sched_preempt_disabled();
     vfs_backend_unlock(&backend);
-    return backend_nonpreemptible && !sched_preempt_disabled();
+    return backend_preemptible && !sched_preempt_disabled();
 }
 
-/* File-backed fault callbacks must never run while the address-space lock is held. */
+/* 持有地址空间锁时绝不能调用文件后备缺页回调。 */
 static BOOLEAN filesystem_vm_fault_lock_self_test(void) {
     vm_fault_lock_test_context_t context = {0};
     vm_object_t *object = 0;
@@ -721,11 +715,10 @@ cleanup:
 /* 验证同一个 vnode 的文件页在多个地址空间之间共享统一页缓存。 */
 BOOLEAN filesystem_file_mapping_self_test(void) {
     /*
-     * The boot image pre-seeds this 8.3 file.  QEMU 10's vvfat backend
-     * asserts when a guest creates/removes a directory entry, so the test
-     * reuses the existing inode and only exercises vnode/page-cache mapping.
+    * 启动映像预置了此 8.3 文件。QEMU 10 的 vvfat 后端会在来宾创建/删除目录项时触发断言，
+    * 因此测试复用已有 inode，仅测试 vnode/页缓存映射。
      */
-    static const CHAR8 test_path[] = "/etc/vfsmap.tst";
+    static const CHAR8 test_path[] = "/EFI/OS/vfsmap.tst";
     static const UINT8 initial[] = {'w', 'o', 'r', 'l', 'd'};
     file_t *file = 0;
     file_t *write_file = 0;

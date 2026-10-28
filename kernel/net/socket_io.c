@@ -8,8 +8,10 @@
 
 #include "socket_internal.h"
 #include "socket_model.h"
+#include "tcp_output.h"
+#include "tcp_retry.h"
 
-/* REFACTOR_P8_SOCKET_IO_OWNER: socket send, receive, and async I/O. */
+/* REFACTOR_P8_SOCKET_IO_OWNER：socket 发送、接收和异步 I/O。 */
 
 static kstatus_t socket_send_stream(socket_t *socket,
                                     socket_private_t *private,
@@ -28,6 +30,12 @@ static kstatus_t socket_send_stream(socket_t *socket,
     socket_tcp6_output_get(&output6, &output6_context);
     socket_lock(&socket->lock);
 
+    if (atomic_load_explicit(&private->closed, memory_order_acquire)) {
+        socket_unlock(&socket->lock);
+        *bytes = 0U;
+        return K_EDEVREMOVED;
+    }
+
     if (atomic_load_explicit(&private->send_shutdown, memory_order_acquire)) {
         socket_unlock(&socket->lock);
         *bytes = 0U;
@@ -42,6 +50,8 @@ static kstatus_t socket_send_stream(socket_t *socket,
 
         if (private->tcp_send_failed) {
             status = K_EIO;
+            int reset = atomic_load_explicit(&private->tcp_error, memory_order_acquire);
+            if (reset != 0) status = reset;
         } else if (private->tcp_state == SOCKET_TCP_SYN_SENT ||
                    private->tcp_state == SOCKET_TCP_SYN_RECEIVED) {
             status = K_EAGAIN;
@@ -61,13 +71,23 @@ static kstatus_t socket_send_stream(socket_t *socket,
         private->tcp_state == SOCKET_TCP_ESTABLISHED;
 
     if (wire_output) {
-        if (private->tcp_send_pending || private->tcp_send_failed ||
-            private->tcp_peer_window == 0U ||
-            length > private->tcp_peer_window ||
-            length > SOCKET_MAX_PAYLOAD) {
+        if (length == 0U) {
             socket_unlock(&socket->lock);
             *bytes = 0U;
-            return private->tcp_send_failed ? K_EIO : K_EAGAIN;
+            return K_OK;
+        }
+        /* 在现有重传缓冲区中保留有界的在途数据。TLS 写入无需每发送一个 MSS
+         * 都等待一次往返。 */
+        uint16_t peer_mss = private->tcp_peer_mss;
+        size_t room = socket_tcp_send_room_locked(socket->family, private);
+        if (length > room) length = room;
+        if (length == 0U) {
+            kstatus_t status = private->tcp_send_failed ? K_EIO : K_EAGAIN;
+            if (!private->tcp_send_failed && private->tcp_peer_window == 0U)
+                socket_tcp_persist_arm_locked(private, x86_read_tsc());
+            socket_unlock(&socket->lock);
+            *bytes = 0U;
+            return status;
         }
 
         if ((socket->family == OS_AF_INET4 && output4 == 0) ||
@@ -77,23 +97,25 @@ static kstatus_t socket_send_stream(socket_t *socket,
             return K_EAGAIN;
         }
 
-        private->tcp_send_unacknowledged = private->tcp_send_next_sequence;
+        uint32_t sequence_wire = private->tcp_send_next_sequence;
+        size_t retained = private->tcp_send_pending ? private->tcp_send_length : 0U;
+        if (!private->tcp_send_pending) {
+            private->tcp_send_unacknowledged = sequence_wire;
+            private->tcp_send_retransmits = 0U;
+            private->tcp_local_retry_tsc = 0U;
+            private->tcp_send_deadline_tsc =
+                socket_tcp_retransmit_deadline(x86_read_tsc());
+        }
         private->tcp_send_next_sequence += (uint32_t)length;
-        private->tcp_send_length = (uint16_t)length;
+        private->tcp_send_length = (uint16_t)(retained + length);
         private->tcp_send_flags = NET_TCP_FLAG_ACK | NET_TCP_FLAG_PSH;
         private->tcp_send_pending = true;
-        private->tcp_send_retransmits = 0U;
-        private->tcp_send_deadline_tsc =
-            socket_tcp_retransmit_deadline(x86_read_tsc());
-        socket_copy(private->tcp_send_payload, buffer, length);
+        socket_copy(private->tcp_send_payload + retained, buffer, length);
 
         uint16_t source_port_wire = private->local_port;
         uint16_t destination_port_wire = private->peer_port;
-        uint32_t sequence_wire = private->tcp_send_unacknowledged;
         uint32_t acknowledgement_wire = private->tcp_next_sequence;
-        uint16_t window_wire = (uint16_t)(
-            SOCKET_STREAM_BUFFER_SIZE -
-            atomic_load_explicit(&private->stream_count, memory_order_relaxed));
+        uint16_t window_wire = socket_tcp_receive_window(private, false);
         uint32_t source_address_wire = private->local_address;
         uint32_t destination_address_wire = private->peer_address;
         uint8_t source_address6_wire[16];
@@ -104,32 +126,37 @@ static kstatus_t socket_send_stream(socket_t *socket,
 
         kstatus_t output_status;
         if (socket->family == OS_AF_INET4) {
-            output_status = output4(
+            output_status = socket_tcp_output4_batch(output4,
                 output4_context, source_address_wire, source_port_wire,
                 destination_address_wire, destination_port_wire,
                 sequence_wire, acknowledgement_wire,
                 NET_TCP_FLAG_ACK | NET_TCP_FLAG_PSH, window_wire,
-                buffer, length);
+                buffer, length, peer_mss);
         } else {
-            output_status = output6(
+            output_status = socket_tcp_output6_batch(output6,
                 output6_context, source_address6_wire, source_port_wire,
                 destination_address6_wire, destination_port_wire,
                 sequence_wire, acknowledgement_wire,
                 NET_TCP_FLAG_ACK | NET_TCP_FLAG_PSH, window_wire,
-                buffer, length);
+                buffer, length, peer_mss);
         }
 
-        if (output_status == K_EAGAIN) {
-            *bytes = 0U;
-            return K_EAGAIN;
+        socket_lock(&socket->lock);
+        bool failed = socket_tcp_local_output_locked(private, sequence_wire, sequence_wire + (uint32_t)length,
+                                                      output_status, x86_read_tsc());
+        int error = atomic_load_explicit(&private->tcp_error, memory_order_acquire);
+        socket_unlock(&socket->lock);
+        if (failed) {
+            (void)wake_all(&socket->waitq);
+            object_notify_changed(socket);
         }
-        if (output_status != K_OK) {
-            socket_lock(&socket->lock);
-            private->tcp_send_pending = false;
-            private->tcp_send_failed = true;
-            socket_unlock(&socket->lock);
+
+        /* SND.NXT 和保留的重传负载已经接管此次写入。ARP/TX 背压会将其留在队列中，
+         * 由 socket_tcp_poll 处理；若报告接受字节数为零，调用方会在排队写入完成后
+         * 使用新的序列号重发相同字节。 */
+        if (error != 0) {
             *bytes = 0U;
-            return output_status;
+            return error;
         }
 
         *bytes = length;
@@ -164,7 +191,8 @@ static kstatus_t socket_send_stream(socket_t *socket,
         *bytes = 0U;
         return K_EPIPE;
     }
-    if (count > SOCKET_STREAM_BUFFER_SIZE - length) {
+    if (length > socket_stream_capacity(peer_private) ||
+        count > socket_stream_capacity(peer_private) - length) {
         socket_unlock(&peer->lock);
         object_put(peer);
         *bytes = 0U;
@@ -373,8 +401,11 @@ static kstatus_t socket_send_async_common(socket_t *socket, const void *buffer, 
         return K_EPIPE;
     }
 
-    request = (socket_async_send_t *)kzalloc(sizeof(*request), 0);
+    /* length is bounded by SOCKET_MAX_PAYLOAD above. Do not allocate or clear
+     * the unused maximum payload for every small asynchronous send. */
+    request = (socket_async_send_t *)kmalloc(sizeof(*request) + length, 0);
     if (request == 0) return K_ENOMEM;
+    socket_zero(request, sizeof(*request));
     socket_ref = object_try_get(socket);
     port_ref = object_try_get(completion_port);
     if (!socket_ref || !port_ref) {
@@ -425,6 +456,38 @@ kstatus_t socket_send_async_ipv6(socket_t *socket, const void *buffer,
                                     completion_port, user_key, request_id);
 }
 
+/* 消费回环流后恢复对端写额度；调用方在接收锁内保留引用，解锁后通知。 */
+static void socket_receive_notify_peer(socket_t *peer) {
+    if (peer == 0) return;
+    (void)wake_all(&peer->waitq);
+    object_notify_changed(peer);
+    object_put(peer);
+}
+
+/* 调用方持有接收 socket 的锁。两种地址族共用消费、PEEK 和写额度唤醒事务；
+ * 对端引用在锁内固定，通知和释放由调用方解锁后执行。 */
+static size_t socket_receive_stream_locked(socket_private_t *private,
+                                           void *buffer, size_t length,
+                                           uint32_t count, bool peek,
+                                           socket_t **notify_peer,
+                                           bool *window_update) {
+    size_t copied = count < length ? count : length;
+    uint32_t read_index = socket_stream_read_locked(private, buffer, copied);
+    *notify_peer = 0;
+    *window_update = !peek && private->peer == 0 &&
+        private->tcp_state == SOCKET_TCP_ESTABLISHED &&
+        private->tcp_sequence_valid && copied != 0U &&
+        count >= socket_stream_capacity(private) * 3U / 4U;
+    if (!peek) {
+        private->stream_read = read_index;
+        atomic_store_explicit(&private->stream_count, count - (uint32_t)copied,
+                              memory_order_release);
+        if (copied != 0U && private->peer != 0 && object_try_get(private->peer))
+            *notify_peer = private->peer;
+    }
+    return copied;
+}
+
 static bool socket_receive_ready(void *context) {
     socket_wait_context_t *wait = (socket_wait_context_t *)context;
     if (wait == 0 || wait->private == 0) return false;
@@ -438,8 +501,7 @@ static bool socket_receive_ready(void *context) {
                                 memory_order_acquire) ||
            atomic_load_explicit(&wait->private->peer_closed,
                                 memory_order_acquire) ||
-           atomic_load_explicit(&wait->private->tcp_keep_failed,
-                                memory_order_acquire);
+           atomic_load_explicit(&wait->private->tcp_error, memory_order_acquire) != 0;
 }
 
 static kstatus_t socket_recv_ipv4_impl(socket_t *socket, void *buffer,
@@ -452,10 +514,6 @@ static kstatus_t socket_recv_ipv4_impl(socket_t *socket, void *buffer,
     if (socket == 0 || socket->object.type != KOBJECT_TYPE_SOCKET ||
         socket->family != OS_AF_INET4 || private == 0 || source == 0 ||
         bytes == 0 || (buffer == 0 && length != 0U)) return K_EINVAL;
-    if (socket->type == OS_SOCK_STREAM &&
-        length > SOCKET_STREAM_BUFFER_SIZE) {
-        length = SOCKET_STREAM_BUFFER_SIZE;
-    }
 
     socket_wait_context_t wait = {.socket = socket, .private = private};
     for (;;) {
@@ -491,55 +549,48 @@ static kstatus_t socket_recv_ipv4_impl(socket_t *socket, void *buffer,
             uint32_t count = atomic_load_explicit(
                 &private->stream_count, memory_order_relaxed);
             if (count != 0U) {
-                size_t copy_length = count < length ? count : length;
-                uint32_t read_index = socket_stream_read_locked(private, buffer, copy_length);
-                if (!peek) private->stream_read = read_index;
+                socket_t *notify_peer = 0;
+                bool window_update;
+                size_t copy_length = socket_receive_stream_locked(
+                    private, buffer, length, count, peek, &notify_peer, &window_update);
                 source->address = private->peer_address;
                 source->port = private->peer_port;
                 source->reserved = 0U;
                 *bytes = copy_length;
 
-                uint32_t new_count = peek ? count :
-                    count - (uint32_t)copy_length;
-                bool window_update =
-                    !peek &&
-                    private->peer == 0 &&
-                    private->tcp_state == SOCKET_TCP_ESTABLISHED &&
-                    private->tcp_sequence_valid &&
-                    count >= (SOCKET_STREAM_BUFFER_SIZE * 3U / 4U);
                 uint32_t update_source = private->local_address;
-                uint16_t update_source_port = private->local_port;
                 uint32_t update_destination = private->peer_address;
+                uint16_t update_source_port = private->local_port;
                 uint16_t update_destination_port = private->peer_port;
                 uint32_t update_sequence = private->tcp_send_next_sequence;
                 uint32_t update_acknowledgement = private->tcp_next_sequence;
-                uint16_t update_window = (uint16_t)(
-                    SOCKET_STREAM_BUFFER_SIZE - new_count);
-                if (!peek) {
-                    atomic_store_explicit(&private->stream_count, new_count,
-                                          memory_order_release);
-                }
+                uint16_t update_window = window_update ? socket_tcp_window_for_count(
+                    private, count - (uint32_t)copy_length, false) : 0U;
                 socket_unlock(&socket->lock);
+                socket_receive_notify_peer(notify_peer);
 
                 if (window_update) {
                     socket_tcp_ipv4_output_fn output = 0;
                     void *output_context = 0;
                     socket_tcp_output_get(&output, &output_context);
                     if (output != 0) {
-                        (void)output(output_context, update_source,
+                        kstatus_t output_status = output(output_context, update_source,
                                      update_source_port, update_destination,
                                      update_destination_port, update_sequence,
                                      update_acknowledgement, NET_TCP_FLAG_ACK,
                                      update_window, 0, 0U);
+                        socket_tcp_ack_output_ipv4(update_source, update_source_port,
+                            update_destination, update_destination_port,
+                            NET_TCP_FLAG_ACK, output_status);
                     }
                 }
                 return K_OK;
             }
 
-            if (atomic_load_explicit(&private->tcp_keep_failed,
-                                     memory_order_acquire)) {
+            int error = atomic_load_explicit(&private->tcp_error, memory_order_acquire);
+            if (error != 0) {
                 socket_unlock(&socket->lock);
-                return K_ETIMEDOUT;
+                return error;
             }
             bool closed =
                 atomic_load_explicit(&private->closed,
@@ -613,10 +664,6 @@ static kstatus_t socket_recv_ipv6_impl(socket_t *socket, void *buffer,
     if (socket == 0 || socket->object.type != KOBJECT_TYPE_SOCKET ||
         private == 0 || socket->family != OS_AF_INET6 || source == 0 ||
         bytes == 0 || (buffer == 0 && length != 0U)) return K_EINVAL;
-    if (socket->type == OS_SOCK_STREAM &&
-        length > SOCKET_STREAM_BUFFER_SIZE) {
-        length = SOCKET_STREAM_BUFFER_SIZE;
-    }
 
     socket_wait_context_t wait = {.socket = socket, .private = private};
     for (;;) {
@@ -652,58 +699,52 @@ static kstatus_t socket_recv_ipv6_impl(socket_t *socket, void *buffer,
             uint32_t stream_count = atomic_load_explicit(
                 &private->stream_count, memory_order_relaxed);
             if (stream_count != 0U) {
-                size_t copy_length = stream_count < length ?
-                    stream_count : length;
-                uint32_t read_index = socket_stream_read_locked(private, buffer, copy_length);
-                if (!peek) private->stream_read = read_index;
+                socket_t *notify_peer = 0;
+                bool window_update;
+                size_t copy_length = socket_receive_stream_locked(
+                    private, buffer, length, stream_count, peek, &notify_peer, &window_update);
                 socket_copy(source->address, private->peer_address6, 16U);
                 source->port = private->peer_port;
                 source->reserved = 0U;
                 *bytes = copy_length;
 
-                uint32_t new_count = peek ? stream_count :
-                    stream_count - (uint32_t)copy_length;
-                bool window_update =
-                    !peek &&
-                    private->peer == 0 &&
-                    private->tcp_state == SOCKET_TCP_ESTABLISHED &&
-                    private->tcp_sequence_valid &&
-                    stream_count >= (SOCKET_STREAM_BUFFER_SIZE * 3U / 4U);
                 uint8_t update_source[16];
                 uint8_t update_destination[16];
-                socket_copy(update_source, private->local_address6, 16U);
-                socket_copy(update_destination, private->peer_address6, 16U);
+                if (window_update) {
+                    socket_copy(update_source, private->local_address6, 16U);
+                    socket_copy(update_destination, private->peer_address6, 16U);
+                }
                 uint16_t update_source_port = private->local_port;
                 uint16_t update_destination_port = private->peer_port;
                 uint32_t update_sequence = private->tcp_send_next_sequence;
                 uint32_t update_acknowledgement = private->tcp_next_sequence;
-                uint16_t update_window = (uint16_t)(
-                    SOCKET_STREAM_BUFFER_SIZE - new_count);
-                if (!peek) {
-                    atomic_store_explicit(&private->stream_count, new_count,
-                                          memory_order_release);
-                }
+                uint16_t update_window = window_update ? socket_tcp_window_for_count(
+                    private, stream_count - (uint32_t)copy_length, false) : 0U;
                 socket_unlock(&socket->lock);
+                socket_receive_notify_peer(notify_peer);
 
                 if (window_update) {
                     socket_tcp_ipv6_output_fn output = 0;
                     void *output_context = 0;
                     socket_tcp6_output_get(&output, &output_context);
                     if (output != 0) {
-                        (void)output(output_context, update_source,
+                        kstatus_t output_status = output(output_context, update_source,
                                      update_source_port, update_destination,
                                      update_destination_port, update_sequence,
                                      update_acknowledgement, NET_TCP_FLAG_ACK,
                                      update_window, 0, 0U);
+                        socket_tcp_ack_output_ipv6(update_source, update_source_port,
+                            update_destination, update_destination_port,
+                            NET_TCP_FLAG_ACK, output_status);
                     }
                 }
                 return K_OK;
             }
 
-            if (atomic_load_explicit(&private->tcp_keep_failed,
-                                     memory_order_acquire)) {
+            int error = atomic_load_explicit(&private->tcp_error, memory_order_acquire);
+            if (error != 0) {
                 socket_unlock(&socket->lock);
-                return K_ETIMEDOUT;
+                return error;
             }
             bool stream_closed =
                 atomic_load_explicit(&private->closed,

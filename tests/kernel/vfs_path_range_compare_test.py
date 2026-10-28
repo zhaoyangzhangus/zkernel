@@ -6,7 +6,7 @@ import tempfile
 root = Path(__file__).resolve().parents[2]
 source = (root / 'kernel/fs/vfs/core.c').read_text()
 predicate = source[source.index('static bool vfs_path_range_equals('):
-                   source.index('/* Memory-backed /tmp')].replace('memcmp(', 'actual_memcmp(')
+                   source.index('static uint32_t vfs_free_node_slot_locked(')].replace('memcmp(', 'actual_memcmp(')
 strings = (root / 'kernel/string.c').read_text()
 compare = strings[strings.index('int memcmp('):].replace('int memcmp(', 'int actual_memcmp(')
 compare = compare.replace('while (length >= sizeof(uint64_t)) {',

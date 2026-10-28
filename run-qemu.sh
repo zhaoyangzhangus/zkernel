@@ -11,7 +11,9 @@ qemu_img_path="${QEMU_IMG:-$(command -v qemu-img || true)}"
 firmware="${OVMF_CODE:-}"
 build_dir="${BUILD:-build}"
 debug=0
+start_paused=0
 no_build=0
+reuse_image=0
 prepare_only=0
 headless=0
 usb_nested=0
@@ -22,9 +24,11 @@ vga_width=0
 vga_height=0
 vga_memory_mb=64
 vfio_devices=()
+usb_audio_devices=()
+[[ -z "${QEMU_USB_AUDIO:-}" ]] || usb_audio_devices+=("$QEMU_USB_AUDIO")
 vfio_primary=""
 # Boot from the removable FAT volume by default.  The USB-root kernel path
-# already validates /init and /init-runtime before selecting it as /.  Keep an
+# already validates /EFI/OS/init and /EFI/OS/init-runtime before selecting it as /.  Keep an
 # explicit NVMe switch for diagnostics and for comparing the old path.
 usb_storage=1
 chrome_fast=0
@@ -34,6 +38,8 @@ keep_open=0
 fullscreen=0
 no_kvm=0
 net_dump=""
+emulated_net=0
+physical_nic="${QEMU_PHYSICAL_NIC:-0000:07:00.0}"
 seconds=10
 cpu_count=4
 qemu_memory="${QEMU_MEMORY:-4096M}"
@@ -54,6 +60,7 @@ usage() {
 
 选项：
   --debug             启动 GDB stub，监听 127.0.0.1:1234
+  --start-paused      在首条指令前暂停，通过已有 QMP 继续，不开放 GDB 端口
   --gdb-port N        修改 GDB 端口
   --headless          不显示图形窗口
   --usb-nested        测试 xHCI -> Hub -> Hub -> Mouse
@@ -64,6 +71,7 @@ usage() {
   --no-stdvga         不添加 QEMU Standard VGA（给 VFIO GPU 直通使用）
   --vga-1080p         使用 1920x1080 QEMU Standard VGA framebuffer
   --ramfb             使用不占 PCI 资源的 EFI/QEMU RAM framebuffer
+  --usb-audio VID:PID  直通指定 USB 声卡（如 0db0:cc78）
   --vfio-pci BDF      将主机 PCI 设备 BDF 直通到来宾（可重复）
   --vfio-primary BDF  将一个 VFIO GPU 作为来宾 primary VGA（启用 x-vga）
   --monitor-socket P  在 Unix socket P 开启 HMP monitor
@@ -72,12 +80,15 @@ usage() {
   --fullscreen        将 QEMU GTK 输出切换为全屏并按窗口缩放
   --seconds N         普通运行模式最多运行 N 秒（默认 10）
   --no-build          使用现有 build/esp，不重新编译
+  --reuse-image       复用现有磁盘，保留来宾数据（必须与 --no-build 一起使用）
   --prepare-only      只准备统一磁盘镜像，不启动 QEMU（可配合 --no-build）
   --debug-level N     编译 DEBUG 等级（默认 2）
   --serial-trace      保留 COM1 串口诊断输出（会明显降低启动速度）
   --cpu N             vCPU 数量（默认 4）
   --no-kvm            强制使用软件模拟
   --net-dump PATH     将 QEMU 虚拟网卡报文保存到 PATH（诊断用）
+  --no-emulated-net   使用物理网卡 VFIO（默认，QEMU_PHYSICAL_NIC 指定 BDF）
+  --emulated-net      显式使用 e1000e/SLIRP（仅对照诊断）
   --qemu PATH         指定 Linux QEMU 路径
   --firmware PATH     指定 OVMF_CODE 固件路径
   -h, --help          显示帮助
@@ -88,6 +99,7 @@ EOF
 while (($# > 0)); do
     case "$1" in
         --debug) debug=1; shift ;;
+        --start-paused) start_paused=1; shift ;;
         --gdb-port)
             (($# >= 2)) || { echo "--gdb-port 需要参数" >&2; exit 2; }
             gdb_port="$2"; shift 2 ;;
@@ -110,6 +122,15 @@ while (($# > 0)); do
             shift
             ;;
         --ramfb) ramfb=1; stdvga=0; shift ;;
+        --usb-audio)
+            (($# >= 2)) || { echo "--usb-audio 需要 VID:PID" >&2; exit 2; }
+            usb_audio="$2"
+            usb_audio_devices+=("$usb_audio")
+            [[ "$usb_audio" =~ ^[[:xdigit:]]{4}:[[:xdigit:]]{4}$ ]] || {
+                echo "USB 声卡标识必须为四位十六进制 VID:PID" >&2; exit 2;
+            }
+            shift 2
+            ;;
         --vfio-pci)
             (($# >= 2)) || { echo "--vfio-pci 需要 BDF 参数" >&2; exit 2; }
             if [[ ! "$2" =~ ^([0-9a-fA-F]{4}:)?[0-9a-fA-F]{2}:[0-9a-fA-F]{2}\.[0-7]$ ]]; then
@@ -155,6 +176,7 @@ while (($# > 0)); do
             (($# >= 2)) || { echo "--seconds 需要参数" >&2; exit 2; }
             seconds="$2"; shift 2 ;;
         --no-build) no_build=1; shift ;;
+        --reuse-image) reuse_image=1; shift ;;
         --prepare-only) prepare_only=1; shift ;;
         --debug-level)
             (($# >= 2)) || { echo "--debug-level 需要参数" >&2; exit 2; }
@@ -164,6 +186,8 @@ while (($# > 0)); do
             (($# >= 2)) || { echo "--cpu 需要参数" >&2; exit 2; }
             cpu_count="$2"; shift 2 ;;
         --no-kvm) no_kvm=1; shift ;;
+        --no-emulated-net) emulated_net=0; shift ;;
+        --emulated-net) emulated_net=1; shift ;;
         --net-dump)
             (($# >= 2)) || { echo "--net-dump 需要参数" >&2; exit 2; }
             net_dump="$2"; shift 2 ;;
@@ -178,11 +202,62 @@ while (($# > 0)); do
     esac
 done
 
+# USB 设备直通前检查唯一性和访问权限，避免启动后才静默丢失声卡。
+for usb_audio in "${usb_audio_devices[@]}"; do
+    [[ "$usb_audio" =~ ^[[:xdigit:]]{4}:[[:xdigit:]]{4}$ ]] || {
+        echo "USB 声卡标识必须为 VID:PID" >&2; exit 2;
+    }
+    usb_audio="${usb_audio,,}"
+    if ((prepare_only == 0)); then
+        audio_matches=()
+        for audio_device in /sys/bus/usb/devices/*; do
+            [[ -f "$audio_device/idVendor" && -f "$audio_device/idProduct" ]] || continue
+            [[ "$(<"$audio_device/idVendor"):$(<"$audio_device/idProduct")" == "$usb_audio" ]] || continue
+            audio_matches+=("$audio_device")
+        done
+        ((${#audio_matches[@]} == 1)) || {
+            echo "USB 声卡 $usb_audio 匹配到 ${#audio_matches[@]} 个设备，需要唯一的已连接设备" >&2; exit 1;
+        }
+        audio_device="${audio_matches[0]}"
+        printf -v audio_node '/dev/bus/usb/%03d/%03d' "$(<"$audio_device/busnum")" "$(<"$audio_device/devnum")"
+        [[ -r "$audio_node" && -w "$audio_node" ]] || {
+            echo "无法访问 USB 声卡 $audio_node，请配置该设备的 USB 访问权限" >&2; exit 1;
+        }
+    fi
+done
+
+if ((reuse_image && !no_build)); then
+    echo "--reuse-image 必须与 --no-build 一起使用，避免构建后误用旧镜像" >&2
+    exit 2
+fi
+
+# Canonical physical network selection. Never detach a host driver here:
+# the existing VFIO preflight must fail closed if the NIC is not ready.
+if ((emulated_net == 0)); then
+    if [[ ! "$physical_nic" =~ ^([0-9a-fA-F]{4}:)?[0-9a-fA-F]{2}:[0-9a-fA-F]{2}\.[0-7]$ ]]; then
+        echo "无效的 QEMU_PHYSICAL_NIC：$physical_nic" >&2
+        exit 2
+    fi
+    physical_nic="${physical_nic,,}"
+    [[ "$physical_nic" == ????:??:??.? ]] || physical_nic="0000:$physical_nic"
+    physical_nic_present=0
+    for candidate in "${vfio_devices[@]}"; do
+        candidate="${candidate,,}"
+        [[ "$candidate" == ????:??:??.? ]] || candidate="0000:$candidate"
+        if [[ "$candidate" == "$physical_nic" ]]; then physical_nic_present=1; fi
+    done
+    if ((physical_nic_present == 0)); then vfio_devices+=("$physical_nic"); fi
+fi
+
 # Chrome maps large read-only assets and performs many small profile I/O
 # operations during startup. Keep USB as the explicit default for storage
 # validation, but let the runtime-oriented launch select the fast NVMe path.
 if ((chrome_fast)); then
     usb_storage=0
+fi
+if ((emulated_net == 0)) && [[ -n "$net_dump" ]]; then
+    echo "--net-dump 仅支持模拟网卡，不能与 --no-emulated-net 同用" >&2
+    exit 2
 fi
 
 # B10B-3 HMP HOTPLUG MONITOR
@@ -294,6 +369,9 @@ if ((no_build == 0)); then
         exit "$build_status"
     fi
 fi
+if ((reuse_image == 0)); then
+python3 "$script_dir/tools/migrate-system-layout.py" "$build_dir/esp"
+python3 "$script_dir/tools/finalize-app-layout.py" "$build_dir/esp" --strict
 [[ -f "$build_dir/esp/EFI/OS/kernel.elf" ]] || {
     echo "找不到 $build_dir/esp/EFI/OS/kernel.elf，请先构建镜像" >&2
     exit 1
@@ -311,12 +389,14 @@ mkdir -p "$stale_dir"
 for stale_entry in \
     "$build_dir/esp/vfs-api" \
     "$build_dir/esp/vfs-filemap-test"* \
-    "$build_dir/esp/etc/vfs-filemap-test"*; do
+    "$build_dir/esp/etc/vfs-filemap-test"* \
+    "$build_dir/esp/EFI/OS/vfs-filemap-test"*; do
     [[ -e "$stale_entry" ]] || continue
     stale_name="$(basename -- "$stale_entry")"
     stale_target="$stale_dir/"$stale_name".$$"
     mv -- "$stale_entry" "$stale_target"
 done
+fi
 
 # Do not boot directly from QEMU's `fat:rw:<directory>` backend.  Its vvfat
 # implementation can abort the whole emulator when a guest truncates or
@@ -424,14 +504,54 @@ if [[ -e "$qemu_fat_image" ]]; then
     fi
 fi
 
-materialize_fat_image "$qemu_fat_image"
-if ((all_disks)); then
-    materialize_fat_image "$qemu_secondary_image"
+if ((reuse_image)); then
+    [[ -s "$qemu_fat_image" && -r "$qemu_fat_image" && -w "$qemu_fat_image" ]] || {
+        echo "无法复用现有磁盘：$qemu_fat_image" >&2; exit 1;
+    }
+    if ((all_disks)); then
+        [[ -s "$qemu_secondary_image" && -r "$qemu_secondary_image" && -w "$qemu_secondary_image" ]] || {
+            echo "无法复用现有磁盘：$qemu_secondary_image" >&2; exit 1;
+        }
+        if fuser "$qemu_secondary_image" >/dev/null 2>&1; then
+            echo "拒绝复用正在使用的 QEMU 磁盘：$qemu_secondary_image" >&2; exit 1;
+        fi
+    fi
+else
+    python3 "$script_dir/tools/preserve-qemu-app-data.py" "$qemu_fat_image" "$build_dir/esp"
+    materialize_fat_image "$qemu_fat_image"
+    if ((all_disks)); then
+        materialize_fat_image "$qemu_secondary_image"
+    fi
 fi
 
 if ((prepare_only)); then
     echo "QEMU 磁盘镜像已准备：$qemu_fat_image（未启动虚拟机）"
     exit 0
+fi
+
+# Split OVMF images need their matching writable variable flash. Keep it
+# alongside the canonical disk, and never replace firmware settings on restart.
+firmware_vars_template="${OVMF_VARS_TEMPLATE:-}"
+if [[ -z "$firmware_vars_template" ]]; then
+    case "${firmware##*/}" in
+        OVMF_CODE_4M*.fd) firmware_vars_template="${firmware%/*}/OVMF_VARS_4M.fd" ;;
+        OVMF_CODE.fd) firmware_vars_template="${firmware%/*}/OVMF_VARS.fd" ;;
+    esac
+fi
+firmware_vars_args=()
+if [[ -n "$firmware_vars_template" ]]; then
+    [[ -r "$firmware_vars_template" ]] || {
+        echo "找不到配套 OVMF 变量模板：$firmware_vars_template" >&2; exit 1;
+    }
+    firmware_vars="$build_dir/OVMF_VARS.fd"
+    if [[ ! -e "$firmware_vars" ]]; then
+        cp -- "$firmware_vars_template" "$firmware_vars"
+    fi
+    [[ -w "$firmware_vars" && -s "$firmware_vars" &&
+       "$(stat -c %s -- "$firmware_vars")" == "$(stat -c %s -- "$firmware_vars_template")" ]] || {
+        echo "OVMF 变量存储不可写或尺寸不匹配：$firmware_vars" >&2; exit 1;
+    }
+    firmware_vars_args=( -drive "if=pflash,format=raw,file=$firmware_vars" )
 fi
 
 # A non-interactive headless launch must not make QEMU's serial backend depend
@@ -471,16 +591,20 @@ qemu_args=(
     -cpu "$qemu_cpu_model"
     -smp "$cpu_count"
     -drive "if=pflash,format=raw,readonly=on,file=$firmware"
+    "${firmware_vars_args[@]}"
     -boot order=c
     # Interactive launches use QEMU stdout as the live COM1 stream; headless
     # non-PTY launches use the direct serial file selected above so polling
     # tools do not depend on a process-substitution pipe.
     -serial "$serial_device"
-    -no-reboot
-    -no-shutdown
     -d guest_errors
     -D "$build_dir/qemu.log"
 )
+
+if ((!keep_open)); then
+    # 有时限的诊断保留停止现场；常驻桌面遵循来宾的关机和重启请求。
+    qemu_args+=( -no-reboot -no-shutdown )
+fi
 
 if ((stdvga)); then
     # P14: deterministic QEMU Standard VGA.  A configured mode lets OVMF
@@ -502,7 +626,7 @@ if ((usb_storage)); then
     # both OVMF and System exercise the same U盘 filesystem and write path.
     qemu_args+=(
         -drive "if=none,id=vm-usb-stick,format=raw,file=$qemu_fat_image"
-        -device "qemu-xhci,id=vm-xhci,msix=on"
+        -device "qemu-xhci,id=vm-xhci,msix=on,p2=8,p3=8"
     )
     usb_storage_device="usb-storage,id=vm-usb-storage,drive=vm-usb-stick,bus=vm-xhci.0,port=1"
     if ((all_disks)); then usb_storage_device+=",bootindex=1"; fi
@@ -593,14 +717,14 @@ if ((usb_nested)); then
     # Keep the topology independent of the display backend so automated HMP
     # tests can inject input in headless QEMU as well as in the GTK window.
     qemu_args+=(
-        -device "qemu-xhci,id=vm-xhci,msix=on"
+        -device "qemu-xhci,id=vm-xhci,msix=on,p2=8,p3=8"
         -device "usb-hub,id=vm-hub1,bus=vm-xhci.0,port=1"
         -device "usb-hub,id=vm-hub2,bus=vm-xhci.0,port=1.1"
         -device "usb-mouse,id=vm-nested-mouse,bus=vm-xhci.0,port=1.1.1"
     )
 elif ((usb_storage == 0)); then
     qemu_args+=(
-        -device "qemu-xhci,id=vm-xhci,msix=on"
+        -device "qemu-xhci,id=vm-xhci,msix=on,p2=8,p3=8"
         -device "usb-kbd,bus=vm-xhci.0"
         -device "usb-mouse,bus=vm-xhci.0"
     )
@@ -614,15 +738,30 @@ else
 fi
 
 if ((debug)); then qemu_args+=( -gdb "tcp::${gdb_port}" -S ); fi
+if ((start_paused && !debug)); then qemu_args+=( -S ); fi
 
 for vfio_device in "${vfio_devices[@]}"; do
     vfio_device_short="${vfio_device#0000:}"
     vfio_primary_short="${vfio_primary#0000:}"
     vfio_device_options="vfio-pci,host=$vfio_device"
+    # Network boot is not used: leave the physical NIC to the guest driver,
+    # without exposing an optional vendor PXE/UEFI expansion ROM.
+    vfio_nic_short="${physical_nic#0000:}"
+    if [[ "${vfio_device_short,,}" == "${vfio_nic_short,,}" ]]; then
+        vfio_device_options+=",rombar=0"
+    fi
     if [[ -n "$vfio_primary" && "$vfio_device_short" == "$vfio_primary_short" ]]; then
         vfio_device_options+=",x-vga=on"
     fi
     qemu_args+=( -device "$vfio_device_options" )
+done
+
+# 仅交接音频设备，保留宿主 USB 控制器上的其他外设。
+((${#usb_audio_devices[@]} <= 2)) || { echo "当前最多直通两块 USB 声卡" >&2; exit 2; }
+audio_port=4
+for usb_audio in "${usb_audio_devices[@]}"; do
+    qemu_args+=( -device "usb-host,id=host-audio-$audio_port,bus=vm-xhci.0,port=$audio_port,vendorid=0x${usb_audio%:*},productid=0x${usb_audio#*:}" )
+    ((audio_port+=1))
 done
 
 if [[ -n "$qemu_trace" ]]; then
@@ -633,9 +772,10 @@ if [[ -n "$qemu_trace" ]]; then
     done
     qemu_args+=( -trace "file=$build_dir/qemu-trace.log" )
 fi
-# Keep the network present in normal boots as well as packet-capture boots.
+# The physical NIC is canonical; emulation is an explicit diagnostic mode.
 # `-net dump` was removed from newer QEMU builds, so the optional diagnostic
 # path adds a filter to this explicitly named user-mode NIC.
+if ((emulated_net)); then
 qemu_args+=(
     # Chrome reaches 127.0.0.1:7890 through SLIRP's host alias. Normal NAT
     # sockets are independent per connection, without a guestfwd subprocess
@@ -643,6 +783,10 @@ qemu_args+=(
     -netdev "user,id=vm-net,host=10.0.2.2"
     -device "e1000e,netdev=vm-net,mac=52:54:00:12:34:56"
 )
+else
+    # Suppress QEMU's implicit default NIC too. VFIO NICs remain unaffected.
+    qemu_args+=( -nic none )
+fi
 if [[ -n "$net_dump" ]]; then
     qemu_args+=(
         -object "filter-dump,id=vm-net-dump,netdev=vm-net,file=$net_dump"

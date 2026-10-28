@@ -23,9 +23,9 @@ enum vm_map_flags {
     VM_MAP_FIXED   = 1u << 2,
     VM_MAP_STACK   = 1u << 3,
     VM_MAP_GUARD   = 1u << 4,
-    /* Linux-compatible JIT mappings may temporarily use RWX permissions. */
+    /* Linux 兼容的 JIT 映射可临时使用 RWX 权限。 */
     VM_MAP_ALLOW_RWX = 1u << 5,
-    /* Allocate below 2 GiB; bounds are checked under the address-space lock. */
+    /* 在 2 GiB 以下分配；边界检查在地址空间锁保护下进行。 */
     VM_MAP_LOW32 = 1u << 6,
 };
 
@@ -39,10 +39,13 @@ enum vm_object_type {
 
 enum vm_object_flags {
     VM_OBJECT_FLAG_WINDOW_SURFACE = 1u << 0,
+    /* 内部私有后备对象：仅由同一 VM 空间内互不重叠的 VMA 切片持有内容。
+     * 不可通过 vm_map_object() 导出。 */
+    VM_OBJECT_FLAG_MAP_OWNED = 1u << 1,
 };
 
-/* File-backed VM objects consume this lower-level mapping contract.  VFS (or
- * another file provider) owns the concrete mapping and page-cache policy. */
+/* 文件后备 VM 对象使用此底层映射约定。具体映射和页缓存策略由 VFS
+ * 或其他文件提供方管理。 */
 typedef struct vm_file_ops {
     void (*retain)(void *mapping);
     void (*release)(void *mapping);
@@ -76,7 +79,7 @@ typedef struct vm_object {
     void *private_data;
     void (*private_release)(void *private_data);
 
-    /* Window-surface accounting stays on the object so aliases share it. */
+    /* 窗口表面的统计信息保存在对象上，因此别名映射可以共享统计数据。 */
     atomic_uint_fast64_t fault_count;
     atomic_uint_fast64_t populated_pages;
     atomic_uint_fast64_t prefaulted_pages;
@@ -112,7 +115,7 @@ typedef struct vm_space {
     uint32_t reserved;
 
     rwlock_t map_lock;
-    /* Diagnostic ownership, written only while map_lock is held. */
+    /* 诊断用所有权信息，仅在持有 map_lock 时写入。 */
     uint64_t map_lock_started;
     uint64_t map_lock_caller;
     uint64_t map_lock_tid;
@@ -123,7 +126,7 @@ typedef struct vm_space {
 
     cpumask_t active_cpus;
     atomic_uint_fast64_t tlb_generation;
-    /* Invalidates faults that began before MADV_DONTNEED discarded backing. */
+    /* 使 MADV_DONTNEED 丢弃后备页之前开始的缺页处理失效。 */
     atomic_uint_fast64_t advice_generation;
 
     atomic_uint_fast64_t rss_pages;
@@ -156,7 +159,7 @@ kstatus_t vm_object_create_shared(size_t size, vm_object_t **out);
 
 kstatus_t vm_map_object(vm_space_t *mm, vm_object_t *object, vaddr_t *inout_addr,
                         uint64_t offset, size_t size, uint32_t prot, uint32_t flags);
-/* Atomically replace overlapping VMAs; requires VM_MAP_FIXED. */
+/* 原子替换重叠的 VMA；必须设置 VM_MAP_FIXED。 */
 kstatus_t vm_map_object_replace(vm_space_t *mm, vm_object_t *object,
                                 vaddr_t *inout_addr, uint64_t offset, size_t size,
                                 uint32_t prot, uint32_t flags);
@@ -168,16 +171,15 @@ bool vm_range_is_mapped(vm_space_t *mm, vaddr_t addr, size_t size);
 kstatus_t vm_sync(vm_space_t *mm, vaddr_t addr, size_t size, uint32_t flags);
 kstatus_t vm_advise(vm_space_t *mm, vaddr_t addr, size_t size, uint32_t advice);
 kstatus_t vm_handle_fault(vm_space_t *mm, const vm_fault_info_t *fault);
-/* Populate an already mapped, page-aligned range without entering user mode. */
+/* 在不进入用户态的情况下，为已映射且按页对齐的范围填充页面。 */
 kstatus_t vm_populate_range(vm_space_t *mm, vaddr_t start, size_t length);
-/* Hold a resident anonymous/shared user page across unmap. Write pins resolve
- * COW before acquiring the reference. Release once with vm_unpin_user_page. */
+/* 在 unmap 期间保持匿名/共享用户页常驻。写入固定会先处理 COW，再获取引用。
+ * 最后调用 vm_unpin_user_page 释放一次。 */
 kstatus_t vm_pin_user_page(vm_space_t *mm, vaddr_t address, bool writable,
                            page_t **out);
 void vm_unpin_user_page(page_t *page);
-/* Resolve the current thread's user page fault.  The architecture layer only
- * supplies CR2, the CPU error code, and whether the entry came from user or
- * uaccess code; VM owns address-space and permission policy. */
+/* 处理当前线程的用户页错误。架构层只提供 CR2、CPU 错误码，以及错误来自用户态
+ * 还是 uaccess 代码；地址空间和权限策略由 VM 管理。 */
 bool vm_handle_current_fault(vaddr_t address, uint32_t cpu_error,
                              bool from_user, bool from_uaccess);
 
@@ -201,14 +203,13 @@ void vm_object_get(vm_object_t *object);
 void vm_object_put(vm_object_t *object);
 
 /*
- * Resolve one page of a VM_OBJECT_SHARED into the kernel physical direct map.
+ * 将 VM_OBJECT_SHARED 中的一个页面解析到内核物理直接映射中。
  *
- * offset may point anywhere inside the requested page. When create is true,
- * a missing shared page is allocated zero-filled just like a user mapping's
- * first page fault.
+ * offset 可以指向请求页面内的任意位置。create 为 true 时，如果共享页不存在，
+ * 就会像用户映射首次缺页一样分配一个清零页面。
  *
- * The returned address is the beginning of the requested 4K object page.
- * Its lifetime is owned by the vm_object; callers must keep the object alive.
+ * 返回地址指向所请求 4K 对象页的起始位置。该页的生命周期由 vm_object 管理；
+ * 调用方必须确保对象保持有效。
  */
 kstatus_t vm_object_shared_page_direct(vm_object_t *object,
                                        uint64_t offset,
@@ -220,7 +221,7 @@ uint64_t vm_object_populated_pages(const vm_object_t *object);
 uint64_t vm_object_prefaulted_pages(const vm_object_t *object);
 uint64_t vm_object_fault_around_pages(const vm_object_t *object);
 
-/* Page-fault telemetry is emitted once per measurement window, never per PF. */
+/* 缺页遥测数据每个测量窗口仅输出一次，不会按每次 PF 输出。 */
 void vm_fault_telemetry_reset(void);
 void vm_fault_telemetry_report(void);
 kstatus_t vm_space_clone_cow(vm_space_t *source, vm_space_t **out);

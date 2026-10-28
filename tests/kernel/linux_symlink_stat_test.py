@@ -21,6 +21,7 @@ program = r'''
 #define LINUX_MAX_PATH 256
 static bool followed;
 static int resolution_error, metadata_error, stats;
+static bool vfs_path_needs_resolution(const char *path) { (void)path;return true; }
 static kstatus_t vfs_resolve_path_kernel(const char *path,bool follow,bool missing,char *out) {
  assert(!missing && !strcmp(path,"/tmp/link"));followed=follow;
  if(resolution_error)return resolution_error;

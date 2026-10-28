@@ -15,7 +15,7 @@
 #include <kernel/fat32.h>
 #include "filesystem_root_internal.h"
 
-/* REFACTOR_P3_FILESYSTEM_ROOT_OWNER: UEFI-selected root and volume mounts. */
+/* REFACTOR_P3_FILESYSTEM_ROOT_OWNER：UEFI 选择的根卷和卷挂载。 */
 
 #define FILESYSTEM_CANDIDATE_LIMIT 64U
 #define FILESYSTEM_VOLUME_LIMIT    32U
@@ -70,18 +70,18 @@ typedef struct {
 
 static filesystem_candidate_t g_candidates[FILESYSTEM_CANDIDATE_LIMIT];
 static UINT32 g_candidate_count;
-/* Allocate only mounted volumes; each embeds a large FAT open-file table.
- * Published volume addresses stay stable for the lifetime of their VFS mount. */
+/* 仅为已挂载卷分配对象；每个对象都包含大型 FAT 打开文件表。
+ * 卷发布后的地址在其 VFS 挂载生命周期内保持稳定。 */
 static filesystem_volume_t *g_volumes[FILESYSTEM_VOLUME_LIMIT];
-/* Transient read-only probe; retained only if cleanup needs a retry. */
+/* 临时只读探测；仅在清理需要重试时保留。 */
 static filesystem_volume_t *g_probe_volume;
 static BOOLEAN g_usb_discovered;
 static BOOLEAN g_nvme_discovered;
 static BOOLEAN g_root_mounted;
 static UINT32 g_root_candidate = UINT32_MAX;
 
-/* Keep failure-only storage diagnostics available when normal serial logging
- * is compiled out.  The QEMU regression image captures COM1 for this path. */
+/* 即使编译时关闭常规串口日志，也保留仅在失败时输出的存储诊断。
+ * QEMU 回归映像会捕获此路径的 COM1 输出。 */
 static void filesystem_diag_putc(char value) {
     uint16_t status_port = 0x3FDU;
     uint16_t data_port = 0x3F8U;
@@ -235,10 +235,8 @@ static kstatus_t filesystem_nvme_submit(filesystem_slice_t *slice,
     }
 
     if (bio_opcode != BIO_OP_FLUSH) {
-        /* VFS file faults already provide a page-aligned direct-map page.
-         * DMA it in place instead of allocating and copying through a
-         * temporary DMA32 page for every 4 KiB file read.  Stack, slab, and
-         * block-cache buffers still use the safe bounce path below. */
+        /* VFS 文件缺页已提供按页对齐的直接映射页面。直接对其执行 DMA，避免每次 4 KiB 文件读取都
+         * 分配并复制到临时 DMA32 页面。栈、slab 和块缓存缓冲区仍走下方的安全 bounce 路径。 */
         uint64_t physical = direct_to_phys(buffer).value;
         if (physical != UINT64_MAX &&
             (physical & (PAGE_SIZE - 1ULL)) == 0U) {
@@ -270,8 +268,7 @@ static kstatus_t filesystem_nvme_submit(filesystem_slice_t *slice,
                 goto done;
             }
             if (opcode == IO_WRITE) {
-                /* Every byte submitted to DMA is overwritten before io_submit;
-                 * the unused allocation tail is never part of the transfer. */
+                /* 提交给 DMA 的每个字节都会在 io_submit 前覆写；分配尾部未使用部分不会参与传输。 */
                 filesystem_copy(page_memory, buffer, (UINTN)sector_count * 512U);
             }
         }
@@ -434,10 +431,10 @@ static void filesystem_prepare_block_device(filesystem_slice_t *slice,
 static BOOLEAN filesystem_has_required_files(OS_FAT32 *filesystem) {
     os_file_info_t info = {0};
     if (filesystem == 0 ||
-        !fat32_stat_path(filesystem, "/init", &info) ||
+        !fat32_stat_path(filesystem, "/EFI/OS/init", &info) ||
         info.type != OS_FILE_TYPE_REGULAR) return 0;
     info = (os_file_info_t){0};
-    return fat32_stat_path(filesystem, "/init-runtime", &info) &&
+    return fat32_stat_path(filesystem, "/EFI/OS/init-runtime", &info) &&
            info.type == OS_FILE_TYPE_REGULAR;
 }
 
@@ -447,7 +444,7 @@ static BOOLEAN filesystem_release_probe(void) {
     if (filesystem->Mounted) {
         if (!fat32_destroy(filesystem)) return 0;
     } else if (filesystem->Cache.Initialized) {
-        /* Initialization can fail after creating its block cache. */
+        /* 初始化可能在创建块缓存后失败。 */
         if (!block_cache_destroy(&filesystem->Cache)) return 0;
     }
     kfree(g_probe_volume);
@@ -462,8 +459,7 @@ static BOOLEAN filesystem_probe_candidate(filesystem_candidate_t *candidate) {
     filesystem_prepare_slice(candidate, &g_probe_volume->slice);
     filesystem_prepare_block_device(&g_probe_volume->slice,
                                     &g_probe_volume->block_device);
-    /* init/stat never mutate the disk. Do not flush a device for a read-only
-     * probe, or allow an accidental write through this temporary view. */
+    /* init/stat 不会修改磁盘。只读探测时不刷新设备，也不允许通过此临时视图意外写入。 */
     g_probe_volume->block_device.Write = 0;
     g_probe_volume->block_device.Flush = 0;
     BOOLEAN initialized = fat32_init(&g_probe_volume->filesystem,
@@ -995,7 +991,7 @@ BOOLEAN filesystem_mount_all_volumes(const OS_BOOT_INFO *boot_info,
         return 0U;
     }
     if (!filesystem_ensure_mount_directory()) {
-        /* A read-only root may still expose mount children through VFS. */
+        /* 只读根卷仍可通过 VFS 暴露挂载点下的子目录。 */
         kernel_serial_write("OS_VOLUME_MOUNT_ROOT_DIR_CONTINUE\r\n");
     }
     (void)filesystem_mount_all_secondary();
