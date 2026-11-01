@@ -12,6 +12,7 @@
 #define BATCH 1025
 static uint64_t root[CHUNKS];
 static uint64_t root_meta[CHUNKS] __attribute__((aligned(4096)));
+static uint64_t pcp_ptes[FM_PCP_CAPACITY] __attribute__((aligned(4096)));
 static uint64_t *metadata_va;
 static uint64_t hwm;
 static int map_page(void *ctx, size_t index, uint64_t pa) {
@@ -26,7 +27,13 @@ static void unmap_page(void *ctx, size_t index) {
          MAP_FIXED|MAP_PRIVATE|MAP_ANONYMOUS,-1,0);
 }
 static int store(void *ctx,uint64_t p) {(void)ctx;hwm=p;return 0;}
+static void pcp_slot_changed(void *ctx,size_t slot,uint64_t va,uint64_t pte) {
+    (void)ctx;(void)slot;(void)va;(void)pte;
+}
+static void invalidate_page(void *ctx,uint64_t va) {(void)ctx;(void)va;}
 static int single_run(int reboot) {
+    /* A reboot installs a fresh, empty PCP page-table window. */
+    memset(pcp_ptes, 0, sizeof(pcp_ptes));
     fm_manager manager;
     fm_config c={0};
     c.root_physical_frames=root;
@@ -35,10 +42,14 @@ static int single_run(int reboot) {
     c.root_metadata_entries=CHUNKS;
     c.metadata_4k_va=metadata_va;
     c.metadata_4k_pages_reserved=CHUNKS;
+    c.pcp_leaf_ptes=pcp_ptes;
+    c.pcp_virtual_base=UINT64_C(0x700000000000);
     c.saved_high_water_pages=hwm;
     c.hooks.map_meta_page=map_page;
     c.hooks.unmap_meta_page=unmap_page;
     c.hooks.store_high_water=store;
+    c.hooks.pcp_slot_changed=pcp_slot_changed;
+    c.hooks.invalidate_page=invalidate_page;
     if(fm_init(&manager,&c)!=FM_OK) return 1;
     fm_stats s;
     fm_get_stats(&manager,&s);
