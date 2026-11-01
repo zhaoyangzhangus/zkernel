@@ -11,6 +11,8 @@ typedef struct fm_sim {
     uint64_t *root_metadata;
     uint64_t *metadata_4k_va;
     size_t metadata_reserved;
+    uint64_t *pcp_leaf_ptes;
+    void *pcp_virtual_va;
     fm_persist persist;
     int fail_next_map;
     int fail_next_persist;
