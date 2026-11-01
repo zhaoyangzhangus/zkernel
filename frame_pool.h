@@ -154,7 +154,9 @@ void fm_get_stats(fm_manager *mgr, fm_stats *out);
 
 /* 2 MiB allocation uses the root TOP. 4 KiB allocation uses PCP only;
  * arbitrary N is supported, with global transfers performed in 512-frame batches.
- * Returned entries are ready-to-use PDE/PTE words.
+ * Returned entries are ready-to-use PDE/PTE words. When a cached PCP VA is
+ * accessed, x86 hardware may set PTE Accessed/Dirty bits (FM_X86_AD); direct
+ * PTE transfer preserves those hardware-maintained bits.
  * Extract physical addresses using fm_phys_2m()/fm_phys_4k().
  * Allocations don't require contiguous physical addresses.
  * A failed allocation NEVER changes the out_entries buffer. */
