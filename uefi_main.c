@@ -13,6 +13,8 @@
 #define META_VA_BASE UINT64_C(0xffff900000000000)
 #define MAP_VA_BASE (META_VA_BASE + FM_2M_SIZE)
 #define MAP_PT_PAGES 3u
+#define PCP_PT_PAGES 2u
+#define PCP_VA_BASE (META_VA_BASE + (1u + MAP_PT_PAGES) * FM_2M_SIZE)
 #define N_TRIALS 7
 #define MAX_BATCH 1025u
 
@@ -27,6 +29,7 @@ static uint64_t *g_metadata_pt;
 /* Three contiguous PT pages in identity-mapped loader RAM. Their PTEs map
  * three consecutive 2MiB virtual regions from MAP_VA_BASE onward. */
 static uint64_t *g_map_ptes;
+static uint64_t *g_pcp_ptes;
 static fm_manager g_manager;
 static uint64_t g_root_pa[ROOT_COUNT];
 static uint64_t g_root_meta[ROOT_COUNT] __attribute__((aligned(4096)));
@@ -110,6 +113,13 @@ static void print_u64(uint64_t x) {
     out[k]=0;
     print(out);
 }
+static void print_hex_u64(uint64_t x) {
+    static const char digits[] = "0123456789abcdef";
+    char out[16];
+    for (unsigned i = 0; i < 16; ++i)
+        out[15 - i] = digits[(x >> (i * 4)) & 0xfu];
+    for (unsigned i = 0; i < 16; ++i) serial_char(out[i]);
+}
 static void check(int cond, const char *what) {
     if (cond) {
         ++g_passed;
@@ -128,7 +138,8 @@ static EFI_STATUS alloc_pages(size_t pages, EFI_PHYSICAL_ADDRESS *out) {
 /* OVMF may protect its own paging-structure pages as read-only, including
  * the active PML4 at CR3. NEVER write to the firmware PML4 in place.
  *
- * Reserve seven new loader pages (PML4, PDPT, PD, metadata PT, 3 map PTs), clone the firmware
+ * Reserve nine new loader pages (PML4, PDPT, PD, metadata PT, 3 target PTs,
+ * and 2 PCP PTs), clone the firmware
  * top-level page table, and install an isolated subtree for the metadata VA.
  * For this QEMU test, META_PAGES <= 512, all metadata VAs are within one PT.
  * The mapped-frame test uses three additional adjacent leaf PT pages.
@@ -153,6 +164,7 @@ static int init_private_metadata_page_tables(void) {
     /* PML4 index 288 corresponds to 0xffff900000000000. */
     const size_t pml4_index = (size_t)((META_VA_BASE >> 39) & 511u);
     if (META_PAGES > 512 || MAP_PT_PAGES * 512u < MAX_BATCH ||
+        PCP_PT_PAGES * 512u != FM_PCP_CAPACITY ||
         (META_VA_BASE & (FM_2M_SIZE-1)) != 0)
         return -1;
 
@@ -168,29 +180,38 @@ static int init_private_metadata_page_tables(void) {
      * under this QEMU 512MiB firmware configuration. */
     EFI_PHYSICAL_ADDRESS pa = UINT64_C(0xffffffff);
     EFI_ALLOC_PAGES fn=(EFI_ALLOC_PAGES)g_bs->slot[BS_ALLOCATE_PAGES];
-    if (EFI_ERROR(fn(EFI_ALLOCATE_MAX_ADDRESS, EFI_LOADER_DATA, 4 + MAP_PT_PAGES, &pa)) ||
-        pa >= UINT64_C(0x100000000) - (4 + MAP_PT_PAGES) * 4096)
+    if (EFI_ERROR(fn(EFI_ALLOCATE_MAX_ADDRESS, EFI_LOADER_DATA,
+                     4 + MAP_PT_PAGES + PCP_PT_PAGES, &pa)) ||
+        pa >= UINT64_C(0x100000000) -
+              (4 + MAP_PT_PAGES + PCP_PT_PAGES) * 4096)
         return -1;
     uint64_t *pml4 = (uint64_t *)(uintptr_t)pa;
     uint64_t *pdpt = (uint64_t *)(uintptr_t)(pa + 4096);
     uint64_t *pd   = (uint64_t *)(uintptr_t)(pa + 8192);
     uint64_t *pt   = (uint64_t *)(uintptr_t)(pa + 12288);
     uint64_t *map_ptes = (uint64_t *)(uintptr_t)(pa + 16384);
+    uint64_t *pcp_ptes = (uint64_t *)(uintptr_t)
+        (pa + (4 + MAP_PT_PAGES) * 4096);
     memcpy(pml4, firmware_pml4, 4096);
     memset(pdpt, 0, 4096);
     memset(pd, 0, 4096);
     memset(pt, 0, 4096);
     memset(map_ptes, 0, MAP_PT_PAGES * 4096);
+    memset(pcp_ptes, 0, PCP_PT_PAGES * 4096);
     /* This high VA has PDPT/PD/PT indices all zero. */
     pml4[pml4_index] = (pa + 4096) | UINT64_C(3);
     pdpt[0] = (pa + 8192) | UINT64_C(3);
     pd[0] = (pa + 12288) | UINT64_C(3);
-    /* 2MiB virtual region 0 holds metadata. Regions 1..3 map frames. */
+    /* Region 0 is metadata; 1..3 are target mappings; 4..5 are PCP VA. */
     for (unsigned i = 0; i < MAP_PT_PAGES; ++i)
         pd[1 + i] = (pa + 16384 + (uint64_t)i * 4096) | UINT64_C(3);
+    for (unsigned i = 0; i < PCP_PT_PAGES; ++i)
+        pd[1 + MAP_PT_PAGES + i] =
+            (pa + (4 + MAP_PT_PAGES + i) * 4096) | UINT64_C(3);
 
     g_metadata_pt = pt;
     g_map_ptes = map_ptes;
+    g_pcp_ptes = pcp_ptes;
     g_private_cr3 = pa;
     write_cr3(pa);
     if ((read_cr3_raw() & PHYS_ADDR_MASK) != g_private_cr3)
@@ -214,6 +235,18 @@ static void unmap_meta(void *ctx, size_t idx) {
     if ((read_cr3_raw() & PHYS_ADDR_MASK) != g_private_cr3) return;
     uint64_t va=META_VA_BASE+(uint64_t)idx*4096;
     g_metadata_pt[idx] = 0;
+    invlpg(va);
+}
+static void pcp_slot_changed(void *ctx, size_t slot, uint64_t va, uint64_t pte) {
+    (void)ctx;
+    (void)pte;
+    if (!g_pcp_ptes || slot >= FM_PCP_CAPACITY ||
+        va != PCP_VA_BASE + (uint64_t)slot * FM_4K_SIZE)
+        return;
+    invlpg(va);
+}
+static void invalidate_page(void *ctx, uint64_t va) {
+    (void)ctx;
     invlpg(va);
 }
 
@@ -376,6 +409,38 @@ static void test_correctness(void) {
               "root 2MiB free");
     }
 }
+/* The PCP itself is a 4 MiB virtual mapping whose leaf PTEs are the cache.
+ * Free maps a frame at its PCP VA; allocation clears that PCP mapping. */
+static void test_pcp_virtual_mapping(void) {
+    uint64_t entry;
+    check(fm_alloc_4k(&g_manager, 1, &entry) == FM_OK,
+          "PCP virtual test allocate one frame");
+    if (g_failed) return;
+    uint64_t pa = fm_phys_4k(entry);
+    check(fm_free_4k(&g_manager, 1, &pa) == FM_OK,
+          "PCP virtual test cache frame");
+    size_t slot = (g_manager.pcp.head + g_manager.pcp.count - 1) % FM_PCP_CAPACITY;
+    check(g_pcp_ptes[slot] == entry,
+          "PCP leaf PTE directly stores cached frame");
+    volatile uint64_t *pcp_va = (volatile uint64_t *)(uintptr_t)
+        (PCP_VA_BASE + slot * FM_4K_SIZE);
+    volatile uint64_t *physical_alias = (volatile uint64_t *)(uintptr_t)pa;
+    uint64_t old = *physical_alias;
+    uint64_t pattern = UINT64_C(0x9ac5f007afebc012) ^ pa;
+    *pcp_va = pattern;
+    check(*physical_alias == pattern,
+          "PCP virtual slot aliases cached physical frame");
+    *pcp_va = old;
+    check(*physical_alias == old, "PCP virtual alias restores frame contents");
+    uint64_t again;
+    check(fm_alloc_4k(&g_manager, 1, &again) == FM_OK && again == entry,
+          "PCP allocation returns same PTE");
+    check(g_pcp_ptes[slot] == 0,
+          "PCP allocation clears cached leaf PTE");
+    check(fm_free_4k(&g_manager, 1, &pa) == FM_OK,
+          "PCP virtual test restores cached frame");
+}
+
 /* PCP transfers exactly 512 usable frames, crossing the 511-entry
  * metadata boundary. The main stack is not used for one-page requests. */
 static void test_pcp(void) {
@@ -444,17 +509,7 @@ static void test_pcp(void) {
  * physical frame is released to the pool. */
 static int unmap_return(size_t n) {
     if (n > MAX_BATCH) return FM_EINVAL;
-    /* Extract physical addresses from the ACTUAL installed leaf PTEs. */
-    for (size_t i = 0; i < n; ++i) {
-        uint64_t pte = g_map_ptes[i];
-        if (!(pte & FM_X86_P)) return FM_EINVAL;
-        g_pa[i] = fm_phys_4k(pte);
-    }
-    for (size_t i = 0; i < n; ++i) {
-        g_map_ptes[i] = 0;
-        invlpg(MAP_VA_BASE + (uint64_t)i * FM_4K_SIZE);
-    }
-    return fm_free_4k(&g_manager, n, g_pa);
+    return fm_free_unmap_4k(&g_manager, n, g_map_ptes, MAP_VA_BASE);
 }
 
 static int test_high_va_alias(size_t i) {
@@ -477,8 +532,8 @@ static void test_direct_map(void) {
     for (unsigned k = 0; k < sizeof(sizes)/sizeof(sizes[0]); ++k) {
         size_t n = sizes[k];
         fm_get_stats(&g_manager, &before);
-        check(fm_alloc_map_4k(&g_manager,n,g_map_ptes)==FM_OK,
-              "direct TOP-to-PTE allocation");
+        check(fm_alloc_map_4k_at(&g_manager,n,g_map_ptes,MAP_VA_BASE)==FM_OK,
+              "direct PCP-PTE-to-target-PTE allocation");
         if (g_failed) return;
         fm_get_stats(&g_manager, &after);
         check(before.free_4k >= n && after.free_4k == before.free_4k-n,
@@ -505,7 +560,7 @@ static void test_direct_map(void) {
     fm_stats before_failed;
     fm_get_stats(&g_manager,&before_failed);
     g_map_ptes[1] = UINT64_C(0x4000000000000000);
-    check(fm_alloc_map_4k(&g_manager,2,g_map_ptes)==FM_EINVAL,
+    check(fm_alloc_map_4k_at(&g_manager,2,g_map_ptes,MAP_VA_BASE)==FM_EINVAL,
           "occupied leaf PTE rejected atomically");
     g_map_ptes[1] = 0;
     fm_get_stats(&g_manager,&after);
@@ -519,22 +574,22 @@ static void test_direct_map(void) {
  * it is not a pure TOP pop microbenchmark. */
 static void benchmark_direct_map(unsigned n, unsigned iterations) {
     if (!n || n>MAX_BATCH || !iterations) return;
-    if (fm_alloc_map_4k(&g_manager,n,g_map_ptes)!=FM_OK) {
+    if (fm_alloc_map_4k_at(&g_manager,n,g_map_ptes,MAP_VA_BASE)!=FM_OK) {
         check(0,"direct-map benchmark initial allocation");return;
     }
-    for (unsigned i=0;i<n;++i) g_pa[i]=fm_phys_4k(g_map_ptes[i]);
-    /* The test will return/reacquire this same SET of physical frames. */
+    /* The same leaf PTEs move target-PT -> PCP-PT -> target-PT. */
     uint64_t samples[N_TRIALS];
     for (unsigned trial=0;trial<N_TRIALS;++trial) {
         uint64_t begin=tsc_begin();
         for (unsigned i=0;i<iterations;++i) {
-            /* Release virtual mappings BEFORE publishing physical frames. */
-            for (unsigned j=0;j<n;++j) {
-                g_map_ptes[j]=0;
-                invlpg(MAP_VA_BASE+(uint64_t)j*FM_4K_SIZE);
+            /* Clear target PTEs, invalidate, and move those exact PTEs into
+             * PCP virtual slots; allocation moves them back without a PA list. */
+            if (fm_free_unmap_4k(&g_manager,n,g_map_ptes,MAP_VA_BASE)!=FM_OK) {
+                g_failed=1;break;
             }
-            if (fm_free_4k(&g_manager,n,g_pa)!=FM_OK) {g_failed=1;break;}
-            if (fm_alloc_map_4k(&g_manager,n,g_map_ptes)!=FM_OK) {g_failed=1;break;}
+            if (fm_alloc_map_4k_at(&g_manager,n,g_map_ptes,MAP_VA_BASE)!=FM_OK) {
+                g_failed=1;break;
+            }
         }
         uint64_t end=tsc_end();
         samples[trial]=(end-begin)/iterations;
@@ -670,11 +725,15 @@ EFI_STATUS efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_table) {
     cfg.root_metadata_entries=ROOT_COUNT;
     cfg.metadata_4k_va=(uint64_t *)(uintptr_t)META_VA_BASE;
     cfg.metadata_4k_pages_reserved=META_PAGES;
+    cfg.pcp_leaf_ptes=g_pcp_ptes;
+    cfg.pcp_virtual_base=PCP_VA_BASE;
     cfg.saved_high_water_pages=stored;
     cfg.hooks.context=0;
     cfg.hooks.map_meta_page=map_meta;
     cfg.hooks.unmap_meta_page=unmap_meta;
     cfg.hooks.store_high_water=hwm_store;
+    cfg.hooks.pcp_slot_changed=pcp_slot_changed;
+    cfg.hooks.invalidate_page=invalidate_page;
     int rc=fm_init(&g_manager,&cfg);
     if (rc!=FM_OK) {print("[FAIL] fm_init ");print_u64((uint64_t)-rc);print("\n");g_failed=1;goto done;}
     fm_stats stats;
@@ -687,9 +746,11 @@ EFI_STATUS efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_table) {
 
     test_correctness();
     if (g_failed) goto done;
+    test_pcp_virtual_mapping();
+    if (g_failed) goto done;
     test_pcp();
     if (g_failed) goto done;
-    print("[test] PCP PASS (1024 capacity, 512-frame handoffs)\n");
+    print("[test] PCP PASS (1024 virtual PTE slots, 512-frame handoffs)\n");
     fm_get_stats(&g_manager, &stats);
     print("[pcp] size=");print_u64(FM_PCP_CAPACITY);
     print(" batch=");print_u64(FM_PCP_BATCH);
@@ -698,7 +759,8 @@ EFI_STATUS efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_table) {
     print(" refills=");print_u64(stats.pcp_refills);
     print(" drains=");print_u64(stats.pcp_drains);
     print(" backed-meta=");print_u64(stats.backed_4k_meta_pages);
-    print(" pages\n");
+    print(" pages pcp-va=0x");print_hex_u64(PCP_VA_BASE);
+    print("\n");
     test_direct_map();
     if (g_failed) goto done;
     print("[test] correctness PASS\n");
@@ -709,7 +771,7 @@ EFI_STATUS efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_table) {
     benchmark(511,10000);
     benchmark(512,10000);
     benchmark(1025,5000);
-    print("[bench] direct PTE map + INVLPG + free (real CR3 mapping)\n");
+    print("[bench] direct target-PT <-> PCP-PT transfer + INVLPG (real CR3 mappings)\n");
     benchmark_direct_map(1,50000);
     benchmark_direct_map(511,200);
     benchmark_direct_map(512,200);
