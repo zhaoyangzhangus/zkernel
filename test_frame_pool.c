@@ -136,10 +136,15 @@ static void test_pcp_virtual_mapping(void) {
     *pcp_va = pattern;
     CHECK(*(volatile uint64_t *)physical_alias == pattern);
     *pcp_va = old;
+    /* mmap() does not manage page-table A/D bits. Emulate the x86 hardware
+     * update caused by the PCP virtual write before transferring the PTE. */
+    r.sim.pcp_leaf_ptes[slot] |= FM_X86_AD;
     fm_sim_unmap_alias(physical_alias);
 
     uint64_t again;
-    CHECK(fm_alloc_4k(&r.mgr, 1, &again) == FM_OK && again == entry);
+    CHECK(fm_alloc_4k(&r.mgr, 1, &again) == FM_OK &&
+          (again & ~FM_X86_AD) == entry);
+    CHECK((again & FM_X86_AD) == FM_X86_AD);
     CHECK(r.sim.pcp_leaf_ptes[slot] == 0);
     CHECK(fm_free_4k(&r.mgr, 1, &pa) == FM_OK);
     fm_stats st;
