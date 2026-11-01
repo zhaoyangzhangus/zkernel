@@ -38,6 +38,9 @@ enum {
 #define FM_PCP_CAPACITY 1024u
 #define FM_X86_P UINT64_C(0x001)
 #define FM_X86_RW UINT64_C(0x002)
+#define FM_X86_A UINT64_C(0x020) /* hardware Accessed */
+#define FM_X86_D UINT64_C(0x040) /* hardware Dirty */
+#define FM_X86_AD (FM_X86_A | FM_X86_D)
 #define FM_X86_PS UINT64_C(0x080)
 #define FM_X86_NX (UINT64_C(1) << 63)
 #define FM_PTE_FLAGS (FM_X86_P | FM_X86_RW | FM_X86_NX)
