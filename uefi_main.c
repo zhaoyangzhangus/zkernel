@@ -440,7 +440,7 @@ static void test_pcp_virtual_mapping(void) {
           "PCP VA access sets hardware Accessed/Dirty bits");
     uint64_t again = 0;
     int alloc_rc = fm_alloc_4k(&g_manager, 1, &again);
-    check(alloc_rc == FM_OK && (again & ~FM_X86_AD) == entry,
+    check(alloc_rc == FM_OK && (again & ~FM_X86_AD) == (entry & ~FM_X86_AD),
           "PCP allocation preserves PTE except hardware A/D bits");
     if (alloc_rc == FM_OK)
         check((again & FM_X86_AD) == (pte_after_access & FM_X86_AD),
