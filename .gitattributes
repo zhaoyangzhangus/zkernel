@@ -1,8 +1,0 @@
-* text=auto
-GNUmakefile text eol=lf
-makefile text eol=lf
-*.sh text eol=lf
-*.py text eol=lf
-*.tsv text eol=lf
-*.mk text eol=lf
-*.ps1 text eol=lf

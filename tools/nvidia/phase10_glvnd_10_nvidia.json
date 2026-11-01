@@ -1,6 +1,0 @@
-{
-    "file_format_version" : "1.0.0",
-    "ICD" : {
-        "library_path" : "/usr/apps/cube/lib/libEGL_nvidia.so.0"
-    }
-}

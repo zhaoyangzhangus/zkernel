@@ -1,4 +1,0 @@
-# Native/WSL diagnostic variants are disposable build outputs too.
-build*/
-__pycache__/
-*.pyc
