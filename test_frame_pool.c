@@ -116,6 +116,40 @@ static void test_4k_boundary(void) {
     rig_close(&r);
 }
 
+/* PCP slots are actual virtual mappings backed by the PCP leaf page table.
+ * Verify that free maps the frame at a PCP VA and allocation removes that PTE. */
+static void test_pcp_virtual_mapping(void) {
+    rig r;
+    rig_new(&r, 8);
+    uint64_t entry;
+    CHECK(fm_alloc_4k(&r.mgr, 1, &entry) == FM_OK);
+    uint64_t pa = phys(entry);
+    CHECK(fm_free_4k(&r.mgr, 1, &pa) == FM_OK);
+    size_t slot = (r.mgr.pcp.head + r.mgr.pcp.count - 1) % FM_PCP_CAPACITY;
+    CHECK(r.sim.pcp_leaf_ptes[slot] == entry);
+    volatile uint64_t *pcp_va = (volatile uint64_t *)
+        ((uintptr_t)r.sim.pcp_virtual_va + slot * FM_4K_SIZE);
+    void *physical_alias = fm_sim_map_alias(&r.sim, pa);
+    CHECK(physical_alias != MAP_FAILED);
+    uint64_t old = *(volatile uint64_t *)physical_alias;
+    uint64_t pattern = UINT64_C(0x9ac5f007afebc012) ^ pa;
+    *pcp_va = pattern;
+    CHECK(*(volatile uint64_t *)physical_alias == pattern);
+    *pcp_va = old;
+    fm_sim_unmap_alias(physical_alias);
+
+    uint64_t again;
+    CHECK(fm_alloc_4k(&r.mgr, 1, &again) == FM_OK && again == entry);
+    CHECK(r.sim.pcp_leaf_ptes[slot] == 0);
+    CHECK(fm_free_4k(&r.mgr, 1, &pa) == FM_OK);
+    fm_stats st;
+    fm_get_stats(&r.mgr, &st);
+    CHECK(st.free_4k == st.total_4k_frames);
+    CHECK(!r.sim.fail_next_map);
+    printf("[OK] PCP virtual mapping: PTE-backed cache slot aliases frame; alloc clears slot\n");
+    rig_close(&r);
+}
+
 /* Main <-> PCP transfers are ALWAYS 512 USABLE PTEs; capacity is 1024.
  * Verify 511->512, 1023->1024, oldest-512 drain, direct PTE and backing. */
 static void test_pcp_handoff(void) {
@@ -195,9 +229,9 @@ static void test_pcp_handoff(void) {
     uint64_t leaf[7] = {0};
     CHECK(fm_alloc_map_4k(&r.mgr, 7, leaf) == FM_OK);
     for (size_t i=0;i<7;++i) CHECK(phys(leaf[i]) == all_pa[1023-i]);
-    uint64_t pa7[7];
-    for (size_t i=0;i<7;++i) { pa7[i]=phys(leaf[i]); leaf[i]=0; }
-    CHECK(fm_free_4k(&r.mgr, 7, pa7) == FM_OK);
+    CHECK(fm_free_unmap_4k(&r.mgr, 7, leaf,
+                            UINT64_C(0x700000100000)) == FM_OK);
+    for (size_t i=0;i<7;++i) CHECK(leaf[i] == 0);
     fm_get_stats(&r.mgr, &st);
     CHECK(st.pcp_free_4k == 512 && st.main_free_4k == 1021 && st.pcp_drains == 3);
     CHECK(fm_pcp_drain_4k(&r.mgr) == FM_OK);
@@ -493,6 +527,7 @@ static void benchmarks(void) {
 }
 int main(int argc, char **argv) {
     test_4k_boundary();
+    test_pcp_virtual_mapping();
     test_pcp_handoff();
     test_pcp_one_chunk_shortage();
     test_root_bulk();
