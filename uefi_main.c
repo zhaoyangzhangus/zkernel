@@ -432,9 +432,19 @@ static void test_pcp_virtual_mapping(void) {
           "PCP virtual slot aliases cached physical frame");
     *pcp_va = old;
     check(*physical_alias == old, "PCP virtual alias restores frame contents");
-    uint64_t again;
-    check(fm_alloc_4k(&g_manager, 1, &again) == FM_OK && again == entry,
-          "PCP allocation returns same PTE");
+    /* The CPU updates A/D bits in the live PCP leaf PTE when pcp_va is used.
+     * These hardware-maintained bits are part of the transferred PTE; they
+     * must not be mistaken for a changed physical frame or software flags. */
+    uint64_t pte_after_access = g_pcp_ptes[slot];
+    check((pte_after_access & FM_X86_AD) == FM_X86_AD,
+          "PCP VA access sets hardware Accessed/Dirty bits");
+    uint64_t again = 0;
+    int alloc_rc = fm_alloc_4k(&g_manager, 1, &again);
+    check(alloc_rc == FM_OK && (again & ~FM_X86_AD) == entry,
+          "PCP allocation preserves PTE except hardware A/D bits");
+    if (alloc_rc == FM_OK)
+        check((again & FM_X86_AD) == (pte_after_access & FM_X86_AD),
+              "PCP allocation preserves hardware A/D bits");
     check(g_pcp_ptes[slot] == 0,
           "PCP allocation clears cached leaf PTE");
     check(fm_free_4k(&g_manager, 1, &pa) == FM_OK,
