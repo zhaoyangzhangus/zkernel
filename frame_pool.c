@@ -28,15 +28,54 @@ static inline uint64_t pop_4k_locked(fm_manager *m) {
     return *m->top_4k_next;
 }
 
-static inline void push_4k_locked(fm_manager *m, uint64_t entry) {
-    if (m->top_4k_offset == FM_ENTRIES_PER_META) {
-        /* Skip metadata self-PTE (entry 0 of next mapped page). */
-        ++m->top_4k_next;
-        m->top_4k_offset = 1;
+/* Merge staged entries in their original push order, preserving LIFO
+ * semantics even when the metadata cursor spans 511-slot page boundaries.
+ * Called with exclusive access; the stage buffer is already capacity-bound. */
+static inline void flush_stage_locked(fm_manager *m) {
+    size_t done = 0;
+    while (done < m->staged_4k_count) {
+        if (m->top_4k_offset == FM_ENTRIES_PER_META) {
+            ++m->top_4k_next; /* skip next metadata page's entry zero */
+            m->top_4k_offset = 1;
+        }
+        size_t take = FM_ENTRIES_PER_META - m->top_4k_offset;
+        if (take > m->staged_4k_count - done)
+            take = m->staged_4k_count - done;
+        for (size_t i = 0; i < take; ++i)
+            m->top_4k_next[i] = m->staged_4k_entries[done + i];
+        m->top_4k_next += take;
+        m->top_4k_offset += (unsigned)take;
+        m->free_4k += take;
+        done += take;
     }
-    *m->top_4k_next++ = entry;
-    ++m->top_4k_offset;
-    ++m->free_4k;
+    m->staged_4k_count = 0;
+}
+
+static inline uint64_t pop_available_locked(fm_manager *m) {
+    if (m->staged_4k_count)
+        return m->staged_4k_entries[--m->staged_4k_count];
+    return pop_4k_locked(m);
+}
+
+static void take_available_locked(fm_manager *m, size_t n, uint64_t *dst) {
+    size_t written = 0;
+    while (m->staged_4k_count && written < n)
+        dst[written++] = m->staged_4k_entries[--m->staged_4k_count];
+    while (written < n) {
+        if (m->top_4k_offset == 1) {
+            --m->top_4k_next;
+            m->top_4k_offset = FM_ENTRIES_PER_META;
+        }
+        size_t take = m->top_4k_offset - 1;
+        if (take > n - written) take = n - written;
+        const uint64_t *src = m->top_4k_next - take;
+        for (size_t j = 0; j < take; ++j)
+            dst[written + j] = src[take - 1 - j];
+        m->top_4k_next -= take;
+        m->top_4k_offset -= (unsigned)take;
+        m->free_4k -= take;
+        written += take;
+    }
 }
 
 /* Append one transferred 2MiB frame's 511 ready-to-use PTEs. Metadata pages
@@ -165,7 +204,9 @@ void fm_get_stats(fm_manager *m, fm_stats *out) {
         .free_2m = m->root_free,
         .chunks_owned = m->chunks_owned,
         .total_4k_frames = m->chunks_owned * FM_4K_FRAMES_PER_CHUNK,
-        .free_4k = m->free_4k,
+        .free_4k = m->free_4k + m->staged_4k_count,
+        .staged_4k = m->staged_4k_count,
+        .main_free_4k = m->free_4k,
         .reserved_4k_meta_pages = m->chunks_capacity,
         .high_water_4k_pages = m->high_water_4k_pages,
         .boot_degraded = m->boot_degraded
@@ -214,8 +255,9 @@ int fm_alloc_4k(fm_manager *m, size_t n, uint64_t *out) {
     if (!m || !n || !out) return FM_EINVAL;
     fm_mutex_lock(&m->mutex);
 
-    if (n > m->free_4k) {
-        size_t need = n - m->free_4k;
+    size_t available = m->free_4k + m->staged_4k_count;
+    if (n > available) {
+        size_t need = n - available;
         size_t chunks = need / FM_4K_FRAMES_PER_CHUNK +
                         (need % FM_4K_FRAMES_PER_CHUNK != 0);
         /* Preflight: a failed allocation due to insufficient total resources
@@ -236,30 +278,10 @@ int fm_alloc_4k(fm_manager *m, size_t n, uint64_t *out) {
         }
     }
 
-    /* Single-frame hot path: two cursor adjustments and one read,
-     * with no /511, %511, slot lookup, or generic batch loop. */
-    if (n == 1) {
-        out[0] = pop_4k_locked(m);
-    } else {
-        /* Batch path: transfer segments inside each metadata page. */
-        size_t left = n, written = 0;
-        while (left) {
-            if (m->top_4k_offset == 1) {
-                --m->top_4k_next;
-                m->top_4k_offset = FM_ENTRIES_PER_META;
-            }
-            size_t take = m->top_4k_offset - 1;
-            if (take > left) take = left;
-            const uint64_t *from = m->top_4k_next - take;
-            for (size_t j = 0; j < take; ++j)
-                out[written + j] = from[take - 1 - j];
-            m->top_4k_next -= take;
-            m->top_4k_offset -= (unsigned)take;
-            m->free_4k -= take;
-            left -= take;
-            written += take;
-        }
-    }
+    if (n == 1)
+        out[0] = pop_available_locked(m);
+    else
+        take_available_locked(m, n, out);
     fm_mutex_unlock(&m->mutex);
     return FM_OK;
 }
@@ -280,8 +302,9 @@ int fm_alloc_map_4k(fm_manager *m, size_t n, uint64_t *dst) {
             return FM_EINVAL;
         }
     }
-    if (n > m->free_4k) {
-        size_t need = n - m->free_4k;
+    size_t available = m->free_4k + m->staged_4k_count;
+    if (n > available) {
+        size_t need = n - available;
         size_t chunks = need / FM_4K_FRAMES_PER_CHUNK +
                         (need % FM_4K_FRAMES_PER_CHUNK != 0);
         if (chunks > m->root_free ||
@@ -297,65 +320,47 @@ int fm_alloc_map_4k(fm_manager *m, size_t n, uint64_t *dst) {
             }
         }
     }
-    if (n == 1) {
-        /* Hot path: write the PTE directly; no /511, %511 or staging array. */
-        dst[0] = pop_4k_locked(m);
-    } else {
-        size_t remaining = n;
-        size_t position = 0;
-        while (remaining) {
-            if (m->top_4k_offset == 1) {
-                --m->top_4k_next;
-                m->top_4k_offset = FM_ENTRIES_PER_META;
-            }
-            size_t take = m->top_4k_offset - 1;
-            if (take > remaining) take = remaining;
-            const uint64_t *src = m->top_4k_next - take;
-            for (size_t j = 0; j < take; ++j)
-                dst[position + j] = src[take - 1 - j];
-            m->top_4k_next -= take;
-            m->top_4k_offset -= (unsigned)take;
-            m->free_4k -= take;
-            position += take;
-            remaining -= take;
-        }
-    }
+    if (n == 1)
+        dst[0] = pop_available_locked(m);
+    else
+        take_available_locked(m, n, dst);
     fm_mutex_unlock(&m->mutex);
     return FM_OK;
 }
 
 int fm_free_4k(fm_manager *m, size_t n, const uint64_t *pa) {
     if (!m || !n || !pa) return FM_EINVAL;
-    /* Validate entire input BEFORE touching the pool. */
+    /* Validate all input before publishing any physical frame. */
     for (size_t i = 0; i < n; ++i)
         if ((pa[i] & (FM_4K_SIZE - 1)) || (pa[i] & ~FM_PHYS_MASK_4K))
             return FM_EINVAL;
     fm_mutex_lock(&m->mutex);
     size_t capacity = m->chunks_owned * FM_4K_FRAMES_PER_CHUNK;
-    if (n > capacity - m->free_4k) {
+    if (n > capacity - m->free_4k - m->staged_4k_count) {
         fm_mutex_unlock(&m->mutex);
         return FM_ENOMEM;
     }
-    if (n == 1) {
-        push_4k_locked(m, pa[0] | FM_PTE_FLAGS);
-    } else {
-        size_t left = n, consumed = 0;
-        while (left) {
-            if (m->top_4k_offset == FM_ENTRIES_PER_META) {
-                ++m->top_4k_next;
-                m->top_4k_offset = 1;
-            }
-            size_t take = FM_ENTRIES_PER_META - m->top_4k_offset;
-            if (take > left) take = left;
-            for (size_t j = 0; j < take; ++j)
-                m->top_4k_next[j] = pa[consumed + j] | FM_PTE_FLAGS;
-            m->top_4k_next += take;
-            m->top_4k_offset += (unsigned)take;
-            m->free_4k += take;
-            consumed += take;
-            left -= take;
-        }
+    size_t consumed = 0;
+    while (consumed < n) {
+        size_t room = FM_FREE_STAGE_CAPACITY - m->staged_4k_count;
+        size_t take = n - consumed;
+        if (take > room) take = room;
+        for (size_t j = 0; j < take; ++j)
+            m->staged_4k_entries[m->staged_4k_count + j] =
+                pa[consumed + j] | FM_PTE_FLAGS;
+        m->staged_4k_count += take;
+        consumed += take;
+        if (m->staged_4k_count == FM_FREE_STAGE_CAPACITY)
+            flush_stage_locked(m);
     }
+    fm_mutex_unlock(&m->mutex);
+    return FM_OK;
+}
+
+int fm_flush_staged_4k(fm_manager *m) {
+    if (!m) return FM_EINVAL;
+    fm_mutex_lock(&m->mutex);
+    flush_stage_locked(m);
     fm_mutex_unlock(&m->mutex);
     return FM_OK;
 }

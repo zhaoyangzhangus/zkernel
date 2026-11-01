@@ -376,6 +376,53 @@ static void test_correctness(void) {
               "root 2MiB free");
     }
 }
+/* Stage 4K physical frames before returning them to metadata TOP.
+ * These UEFI tests run after the correctness test has grown the pool. */
+static void test_staging(void) {
+    fm_stats before, current;
+    fm_get_stats(&g_manager, &before);
+    check(before.staged_4k == 0, "staging starts empty");
+    if (g_failed) return;
+    check(fm_alloc_4k(&g_manager, 64, g_output) == FM_OK,
+          "staging 64-frame setup allocation");
+    if (g_failed) return;
+    for (unsigned i = 0; i < 64; ++i) g_pa[i] = fm_phys_4k(g_output[i]);
+    check(fm_free_4k(&g_manager, 63, g_pa) == FM_OK,
+          "staging holds first 63 frees");
+    fm_get_stats(&g_manager, &current);
+    check(current.staged_4k == 63 &&
+          current.main_free_4k == before.main_free_4k - 64 &&
+          current.free_4k == before.free_4k - 1,
+          "staging leaves metadata TOP unchanged before threshold");
+    check(fm_free_4k(&g_manager, 1, &g_pa[63]) == FM_OK,
+          "staging threshold flushes 64 entries");
+    fm_get_stats(&g_manager, &current);
+    check(current.staged_4k == 0 && current.free_4k == before.free_4k &&
+          current.main_free_4k == before.main_free_4k,
+          "staging batch flush restores full metadata TOP");
+    check(fm_alloc_4k(&g_manager, 64, g_output) == FM_OK,
+          "staging reacquire flushed batch");
+    for (unsigned i = 0; i < 64; ++i)
+        check(fm_phys_4k(g_output[i]) == g_pa[63 - i],
+              "staging batch retains strict LIFO");
+    check(fm_free_4k(&g_manager, 1, &g_pa[0]) == FM_OK,
+          "staging single free");
+    fm_get_stats(&g_manager, &current);
+    check(current.staged_4k == 1, "staging single frame remains pending");
+    check(fm_flush_staged_4k(&g_manager) == FM_OK,
+          "staging explicit flush");
+    fm_get_stats(&g_manager, &current);
+    check(current.staged_4k == 0, "staging explicit flush completed");
+    /* All frames except g_pa[0] are still allocated. */
+    check(fm_free_4k(&g_manager, 63, g_pa + 1) == FM_OK,
+          "staging test returns remaining allocated frames");
+    check(fm_flush_staged_4k(&g_manager) == FM_OK,
+          "staging test ends with flushed metadata TOP");
+    fm_get_stats(&g_manager, &current);
+    check(current.free_4k == before.free_4k && current.staged_4k == 0,
+          "staging test has no leaked frames");
+}
+
 /* These page tables are wired into the private CR3 at MAP_VA_BASE.
  * This test has exactly one CPU, so local INVLPG is sufficient. On zkernel
  * SMP, PTE removal must be followed by a cross-CPU shootdown BEFORE the
@@ -625,6 +672,9 @@ EFI_STATUS efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_table) {
 
     test_correctness();
     if (g_failed) goto done;
+    test_staging();
+    if (g_failed) goto done;
+    print("[test] staged-free PASS (64-entry batch flush)\n");
     test_direct_map();
     if (g_failed) goto done;
     print("[test] correctness PASS\n");

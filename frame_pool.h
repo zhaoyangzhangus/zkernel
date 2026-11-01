@@ -31,6 +31,8 @@ enum {
 #define FM_2M_SIZE UINT64_C(2097152)
 #define FM_ENTRIES_PER_META 512u
 #define FM_4K_FRAMES_PER_CHUNK 511u
+/* Fixed-size free staging stack; one cacheline-friendly small batch of PTEs. */
+#define FM_FREE_STAGE_CAPACITY 64u
 #define FM_X86_P UINT64_C(0x001)
 #define FM_X86_RW UINT64_C(0x002)
 #define FM_X86_PS UINT64_C(0x080)
@@ -79,7 +81,9 @@ typedef struct fm_manager {
     uint64_t *meta_4k;
     size_t chunks_capacity;
     size_t chunks_owned;
-    size_t free_4k;
+    size_t free_4k; /* free frames already returned to metadata TOP */
+    uint64_t staged_4k_entries[FM_FREE_STAGE_CAPACITY];
+    size_t staged_4k_count; /* freed, reusable, not yet merged into metadata TOP */
     /* TOP cursor: next free-stack insertion slot in contiguous metadata VA.
      * top_4k_offset is 1..512 (512 means one-past-last on a metadata page).
      * Index 0 is always reserved for the metadata page's own PTE.
@@ -95,7 +99,9 @@ typedef struct fm_stats {
     size_t free_2m;
     size_t chunks_owned;
     size_t total_4k_frames; /* 511 * chunks_owned */
-    size_t free_4k;
+    size_t free_4k; /* total usable: metadata TOP + staging */
+    size_t staged_4k;
+    size_t main_free_4k;
     size_t reserved_4k_meta_pages;
     uint64_t high_water_4k_pages;
     bool boot_degraded;
@@ -115,7 +121,7 @@ void fm_get_stats(fm_manager *mgr, fm_stats *out);
 int fm_alloc_2m(fm_manager *mgr, size_t count, uint64_t *out_entries);
 int fm_alloc_4k(fm_manager *mgr, size_t count, uint64_t *out_entries);
 
-/* Direct map allocation: pop ready-made 4 KiB PTEs from the TOP cursor
+/* Direct map allocation: use staged freed PTEs first, otherwise metadata TOP
  * straight into an already-allocated, writable leaf page-table array.
  * The caller must first create all intermediate paging levels, and map
  * those leaf page-table pages contiguously in its own address space.
@@ -129,11 +135,17 @@ int fm_alloc_4k(fm_manager *mgr, size_t count, uint64_t *out_entries);
  */
 int fm_alloc_map_4k(fm_manager *mgr, size_t count, uint64_t *leaf_ptes);
 
-/* Free uses PHYSICAL addresses, which are converted to default PDE/PTE entries.
- * Neither pool tracks allocated frames: ownership and avoiding double-free are
- * the responsibility of the caller. Invalid alignment is rejected atomically. */
+/* 4 KiB free is DEFERRED: physical frames go into a 64-entry local staging
+ * stack; a full stage is bulk-merged into the metadata TOP. Allocation
+ * prioritizes staged entries (LIFO), so immediate reuse does not force a
+ * premature flush. fm_get_stats().free_4k includes both pools.
+ * Caller MUST complete all relevant TLB invalidation/shootdown BEFORE free.
+ * Neither pool tracks allocated ownership: caller avoids double-free.
+ * Invalid alignment and out-of-space errors are rejected atomically. */
 int fm_free_2m(fm_manager *mgr, size_t count, const uint64_t *physical);
 int fm_free_4k(fm_manager *mgr, size_t count, const uint64_t *physical);
+/* Explicitly merge pending 4 KiB stage entries into the metadata TOP. */
+int fm_flush_staged_4k(fm_manager *mgr);
 
 /* Explicitly add one 2 MiB chunk to 4 KiB pool (511 frames + 1 meta page). */
 int fm_expand_4k(fm_manager *mgr);

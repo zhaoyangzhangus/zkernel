@@ -113,6 +113,68 @@ static void test_4k_boundary(void) {
     rig_close(&r);
 }
 
+/* A full 64-entry stage is merged in one batch.  Place the main TOP
+ * eleven entries before the 511-slot boundary to exercise wraparound. */
+static void test_staged_free(void) {
+    rig r;
+    rig_new(&r, 4);
+    CHECK(fm_expand_4k(&r.mgr) == FM_OK);
+    CHECK(fm_expand_4k(&r.mgr) == FM_OK);
+    uint64_t entries[522], addresses[522], again[64];
+    CHECK(fm_alloc_4k(&r.mgr, ARRAYSIZE(entries), entries) == FM_OK);
+    for (size_t i = 0; i < ARRAYSIZE(entries); ++i)
+        addresses[i] = phys(entries[i]);
+    fm_stats st;
+    fm_get_stats(&r.mgr, &st);
+    CHECK(st.free_4k == 500 && st.main_free_4k == 500 && st.staged_4k == 0);
+    CHECK(r.mgr.top_4k_offset == 501);
+
+    /* 63 releases do not touch the main metadata TOP. */
+    CHECK(fm_free_4k(&r.mgr, 63, addresses) == FM_OK);
+    fm_get_stats(&r.mgr, &st);
+    CHECK(st.staged_4k == 63 && st.main_free_4k == 500 && st.free_4k == 563);
+    CHECK(r.mgr.top_4k_offset == 501);
+    CHECK(fm_free_4k(&r.mgr, 1, &addresses[63]) == FM_OK);
+    fm_get_stats(&r.mgr, &st);
+    CHECK(st.staged_4k == 0 && st.main_free_4k == 564 && st.free_4k == 564);
+    CHECK(r.mgr.top_4k_offset == 54); /* 501 -> 512 -> next metadata page */
+
+    CHECK(fm_alloc_4k(&r.mgr, 64, again) == FM_OK);
+    for (size_t i = 0; i < 64; ++i)
+        CHECK(phys(again[i]) == addresses[63 - i]);
+
+    /* Direct mapping must consume the staged entries without flushing them. */
+    CHECK(fm_free_4k(&r.mgr, 7, addresses) == FM_OK);
+    fm_get_stats(&r.mgr, &st);
+    CHECK(st.staged_4k == 7 && st.main_free_4k == 500);
+    uint64_t leaf[7] = {0};
+    CHECK(fm_alloc_map_4k(&r.mgr, 7, leaf) == FM_OK);
+    for (size_t i = 0; i < 7; ++i) {
+        CHECK(phys(leaf[i]) == addresses[6 - i]);
+        leaf[i] = 0;
+    }
+    CHECK(fm_free_4k(&r.mgr, 7, addresses) == FM_OK);
+    CHECK(fm_flush_staged_4k(&r.mgr) == FM_OK);
+    fm_get_stats(&r.mgr, &st);
+    CHECK(st.staged_4k == 0 && st.main_free_4k == 507);
+    CHECK(fm_flush_staged_4k(&r.mgr) == FM_OK); /* idempotent */
+    uint64_t bad = addresses[64] + 1;
+    CHECK(fm_free_4k(&r.mgr, 1, &bad) == FM_EINVAL);
+    fm_get_stats(&r.mgr, &st);
+    CHECK(st.staged_4k == 0 && st.free_4k == 507);
+    CHECK(fm_free_4k(&r.mgr, ARRAYSIZE(entries) - 64,
+                     addresses + 64) == FM_OK);
+    /* Return the other 57 allocated pages from the first flushed batch. */
+    CHECK(fm_free_4k(&r.mgr, 57, addresses + 7) == FM_OK);
+    fm_get_stats(&r.mgr, &st);
+    CHECK(st.free_4k == 1022 && st.free_4k == st.main_free_4k + st.staged_4k);
+    CHECK(fm_flush_staged_4k(&r.mgr) == FM_OK);
+    fm_get_stats(&r.mgr, &st);
+    CHECK(st.main_free_4k == 1022 && st.staged_4k == 0);
+    printf("[OK] staged free: 63/64 threshold, cross-page flush, direct PTE, explicit flush\n");
+    rig_close(&r);
+}
+
 static void test_root_bulk(void) {
     rig r;
     rig_new(&r, 540);
@@ -373,6 +435,7 @@ static void benchmarks(void) {
 }
 int main(int argc, char **argv) {
     test_4k_boundary();
+    test_staged_free();
     test_root_bulk();
     test_fail_and_rollback();
     test_restart();
