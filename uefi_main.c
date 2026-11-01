@@ -33,6 +33,7 @@ static uint64_t g_root_meta[ROOT_COUNT] __attribute__((aligned(4096)));
 static uint64_t g_output[MAX_BATCH];
 static uint64_t g_pa[MAX_BATCH];
 static volatile uint64_t g_checksum;
+static uint64_t g_tsc_hz; /* calibrated guest TSC frequency, 0 if unknown */
 static int g_failed;
 static unsigned g_passed;
 static EFI_GUID g_guid = {0x2e7ab19c,0xab84,0x498d,{0x9a,0xb0,0x11,0x63,0x92,0xa1,0x58,0x27}};
@@ -265,6 +266,60 @@ static void sort_u64(uint64_t *x, unsigned n) {
         x[j]=v;
     }
 }
+/* Stall is specified in microseconds by UEFI Boot Services. Three
+ * independent 100 ms samples avoid assuming that a TSC tick is one ns.
+ * The conversion is only an estimate: virtualization, timer resolution,
+ * and TSC scaling can affect accuracy. */
+static void calibrate_tsc(void) {
+    EFI_STALL stall = (EFI_STALL)g_bs->slot[BS_STALL];
+    if (!stall) {
+        print("[bench] TSC calibration unavailable (no EFI Stall); ns omitted\n");
+        return;
+    }
+    uint64_t samples[3];
+    for (unsigned i = 0; i < 3; ++i) {
+        uint64_t start = tsc_begin();
+        EFI_STATUS status = stall(100000u);
+        uint64_t end = tsc_end();
+        if (EFI_ERROR(status) || end <= start || (end - start) > UINT64_MAX / 10u) {
+            print("[bench] TSC calibration failed; ns omitted\n");
+            return;
+        }
+        samples[i] = (end - start) * 10u;
+    }
+    sort_u64(samples, 3);
+    if (samples[1] < UINT64_C(1000000) || samples[1] > UINT64_C(100000000000)) {
+        print("[bench] TSC calibration out of range; ns omitted\n");
+        return;
+    }
+    g_tsc_hz = samples[1];
+    print("[bench] estimated TSC=");
+    print_u64((g_tsc_hz + 500000u) / 1000000u);
+    print(" MHz (EFI Stall, median 3 x 100 ms); ns values are estimates\n");
+}
+
+static void print_fixed_2(uint64_t hundredths) {
+    print_u64(hundredths / 100u);
+    print(".");
+    if (hundredths % 100u < 10u) print("0");
+    print_u64(hundredths % 100u);
+}
+
+/* Rounded to hundredths of a nanosecond. Timed rounds are small enough
+ * (well below 1e8 cycles) that the 64-bit fixed-point product cannot wrap. */
+static uint64_t cycles_to_ns_x100(uint64_t cycles, uint64_t pages) {
+    uint64_t denominator = g_tsc_hz * pages;
+    return (cycles * UINT64_C(100000000000) + denominator / 2u) / denominator;
+}
+static void print_time_estimate(uint64_t cycles, unsigned pages) {
+    if (!g_tsc_hz) return;
+    print(", ~");
+    print_fixed_2(cycles_to_ns_x100(cycles, 1));
+    print(" ns/round, ~");
+    print_fixed_2(cycles_to_ns_x100(cycles, pages));
+    print(" ns/page");
+}
+
 static void test_correctness(void) {
     uint64_t e, f, q;
     check(fm_alloc_4k(&g_manager,1,&e)==FM_OK,"single-page allocate");
@@ -430,7 +485,9 @@ static void benchmark_direct_map(unsigned n, unsigned iterations) {
     print_u64(cycles);print(" cycles/round, ");
     print_u64(per_100/100);print(".");
     if(per_100%100<10)print("0");
-    print_u64(per_100%100);print(" cycles/page\n");
+    print_u64(per_100%100);print(" cycles/page");
+    print_time_estimate(cycles, n);
+    print("\n");
     check(unmap_return(n)==FM_OK,"direct-map benchmark restores all frames");
 }
 
@@ -477,7 +534,9 @@ static void benchmark_legacy(unsigned iterations) {
     }
     sort_u64(samples,N_TRIALS);
     print("[bench] old 1 page   : ");
-    print_u64(samples[N_TRIALS/2]); print(" cycles/round\n");
+    print_u64(samples[N_TRIALS/2]); print(" cycles/round");
+    print_time_estimate(samples[N_TRIALS/2], 1);
+    print("\n");
     check(fm_free_4k(&g_manager,1,&pa)==FM_OK,"legacy benchmark restores pool");
 }
 
@@ -508,7 +567,9 @@ static void benchmark(unsigned n, unsigned iterations) {
     print_u64(per_100/100); print(".");
     if ((per_100%100)<10) print("0");
     print_u64(per_100%100);
-    print(" cycles/page\n");
+    print(" cycles/page");
+    print_time_estimate(cycles, n);
+    print("\n");
     check(fm_free_4k(&g_manager,n,g_pa)==FM_OK,"benchmark restores free frames");
 }
 EFI_STATUS efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_table) {
@@ -567,7 +628,8 @@ EFI_STATUS efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_table) {
     test_direct_map();
     if (g_failed) goto done;
     print("[test] correctness PASS\n");
-    print("[bench] TSC cycles per free+alloc round (7-trial median)\n");
+    calibrate_tsc();
+    print("[bench] TSC cycles and estimated time per free+alloc round (7-trial median)\n");
     benchmark(1,200000);
     benchmark_legacy(200000);
     benchmark(511,10000);
