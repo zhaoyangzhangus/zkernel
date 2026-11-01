@@ -1,0 +1,5 @@
+build/
+esp/EFI/BOOT/BOOTX64.EFI
+*.o
+*.obj
+*.log
