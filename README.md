@@ -38,6 +38,10 @@ make host-asan
 
 These checks use `mmap()` to emulate metadata virtual mapping on Linux. Only the UEFI/QEMU tests exercise the real CR3 page tables. CPU cycles from KVM and TCG should not be compared directly.
 
+## Benchmark units
+
+UEFI prints `cycles/round`, `cycles/page`, `~ns/round` and `~ns/page` for TOP and direct-map benchmarks. It also prints the old indexed single-page benchmark in cycles and estimated nanoseconds. One *round* includes both free and allocate, not just allocation. The nanoseconds are **estimates** converted using a guest TSC frequency calibrated against three 100 ms UEFI `Stall` calls (median sample), shown in MHz. The clock and measured time can be affected by KVM/TCG virtualization and firmware timer accuracy; for a real latency comparison use KVM on the same machine. If firmware does not offer a usable Stall timer, the logs keep the cycle counts and omit nanoseconds instead of inventing a frequency.
+
 ## Unmapping contract
 
 Before returning a mapped frame, clear its leaf PTE, complete the relevant local TLB invalidation and any required remote TLB shootdown, **then** return the physical frame to the free pool. The UEFI test uses a local `INVLPG` per virtual page because it is strictly single-core. Do not return a page while stale translations remain usable.
