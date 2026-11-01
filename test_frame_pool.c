@@ -143,7 +143,7 @@ static void test_pcp_virtual_mapping(void) {
 
     uint64_t again;
     CHECK(fm_alloc_4k(&r.mgr, 1, &again) == FM_OK &&
-          (again & ~FM_X86_AD) == entry);
+          (again & ~FM_X86_AD) == (entry & ~FM_X86_AD));
     CHECK((again & FM_X86_AD) == FM_X86_AD);
     CHECK(r.sim.pcp_leaf_ptes[slot] == 0);
     CHECK(fm_free_4k(&r.mgr, 1, &pa) == FM_OK);
