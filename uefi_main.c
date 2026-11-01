@@ -376,51 +376,66 @@ static void test_correctness(void) {
               "root 2MiB free");
     }
 }
-/* Stage 4K physical frames before returning them to metadata TOP.
- * These UEFI tests run after the correctness test has grown the pool. */
-static void test_staging(void) {
+/* PCP transfers exactly 512 usable frames, crossing the 511-entry
+ * metadata boundary. The main stack is not used for one-page requests. */
+static void test_pcp(void) {
     fm_stats before, current;
     fm_get_stats(&g_manager, &before);
-    check(before.staged_4k == 0, "staging starts empty");
+    check(before.backed_4k_meta_pages == before.chunks_owned &&
+          before.backed_4k_meta_end_va == META_VA_BASE +
+              before.chunks_owned * FM_4K_SIZE,
+          "metadata physical boundary matches mapped pages");
+    check(before.pcp_free_4k < FM_PCP_CAPACITY &&
+          before.free_4k == before.main_free_4k + before.pcp_free_4k,
+          "PCP occupancy and pool total consistent");
     if (g_failed) return;
-    check(fm_alloc_4k(&g_manager, 64, g_output) == FM_OK,
-          "staging 64-frame setup allocation");
+    static uint64_t saved[FM_PCP_CAPACITY];
+    unsigned old_cached = (unsigned)before.pcp_free_4k;
+    if (old_cached) {
+        check(fm_alloc_4k(&g_manager,old_cached,g_output)==FM_OK,
+              "empty PCP before controlled handoff test");
+        if (g_failed) return;
+        for (unsigned i=0;i<old_cached;++i) saved[i]=fm_phys_4k(g_output[i]);
+    }
+    fm_get_stats(&g_manager,&before);
+    check(before.pcp_free_4k==0,"controlled PCP starts empty");
+    check(fm_alloc_4k(&g_manager,512,g_output)==FM_OK,
+          "one global->PCP transfer is exactly 512 frames");
     if (g_failed) return;
-    for (unsigned i = 0; i < 64; ++i) g_pa[i] = fm_phys_4k(g_output[i]);
-    check(fm_free_4k(&g_manager, 63, g_pa) == FM_OK,
-          "staging holds first 63 frees");
-    fm_get_stats(&g_manager, &current);
-    check(current.staged_4k == 63 &&
-          current.main_free_4k == before.main_free_4k - 64 &&
-          current.free_4k == before.free_4k - 1,
-          "staging leaves metadata TOP unchanged before threshold");
-    check(fm_free_4k(&g_manager, 1, &g_pa[63]) == FM_OK,
-          "staging threshold flushes 64 entries");
-    fm_get_stats(&g_manager, &current);
-    check(current.staged_4k == 0 && current.free_4k == before.free_4k &&
-          current.main_free_4k == before.main_free_4k,
-          "staging batch flush restores full metadata TOP");
-    check(fm_alloc_4k(&g_manager, 64, g_output) == FM_OK,
-          "staging reacquire flushed batch");
-    for (unsigned i = 0; i < 64; ++i)
-        check(fm_phys_4k(g_output[i]) == g_pa[63 - i],
-              "staging batch retains strict LIFO");
-    check(fm_free_4k(&g_manager, 1, &g_pa[0]) == FM_OK,
-          "staging single free");
-    fm_get_stats(&g_manager, &current);
-    check(current.staged_4k == 1, "staging single frame remains pending");
-    check(fm_flush_staged_4k(&g_manager) == FM_OK,
-          "staging explicit flush");
-    fm_get_stats(&g_manager, &current);
-    check(current.staged_4k == 0, "staging explicit flush completed");
-    /* All frames except g_pa[0] are still allocated. */
-    check(fm_free_4k(&g_manager, 63, g_pa + 1) == FM_OK,
-          "staging test returns remaining allocated frames");
-    check(fm_flush_staged_4k(&g_manager) == FM_OK,
-          "staging test ends with flushed metadata TOP");
-    fm_get_stats(&g_manager, &current);
-    check(current.free_4k == before.free_4k && current.staged_4k == 0,
-          "staging test has no leaked frames");
+    for (unsigned i=0;i<512;++i)g_pa[i]=fm_phys_4k(g_output[i]);
+    fm_get_stats(&g_manager,&current);
+    check(current.pcp_refills==before.pcp_refills+1 &&
+          current.main_free_4k+512<=before.main_free_4k+1022 &&
+          current.pcp_free_4k==0,
+          "PCP refilled exactly 512 usable frames");
+    check(fm_free_4k(&g_manager,511,g_pa)==FM_OK,
+          "511 freed pages stay in PCP");
+    fm_get_stats(&g_manager,&current);
+    check(current.pcp_free_4k==511,"partial PCP stays local");
+    check(fm_pcp_drain_4k(&g_manager)==FM_OK,
+          "partial PCP drain is no-op");
+    fm_get_stats(&g_manager,&current);
+    check(current.pcp_free_4k==511,"no partial global handoff");
+    check(fm_free_4k(&g_manager,1,&g_pa[511])==FM_OK,
+          "512th freed page available for whole drain");
+    check(fm_pcp_drain_4k(&g_manager)==FM_OK,
+          "explicit 512-frame PCP drain");
+    fm_get_stats(&g_manager,&current);
+    check(current.pcp_free_4k==0 && current.pcp_drains==before.pcp_drains+1,
+          "PCP drained exactly 512 frames");
+    check(fm_alloc_4k(&g_manager,512,g_output)==FM_OK,
+          "global 512 refill recovers drained frames");
+    for (unsigned i=0;i<512;++i)
+        check(fm_phys_4k(g_output[i])==g_pa[511-i],
+              "512-frame PCP handoff preserves LIFO");
+    check(fm_free_4k(&g_manager,512,g_pa)==FM_OK,
+          "restore controlled 512-frame test");
+    if (old_cached) check(fm_free_4k(&g_manager,old_cached,saved)==FM_OK,
+                          "restore previous PCP cached frames");
+    fm_get_stats(&g_manager,&current);
+    check(current.free_4k==before.free_4k+old_cached &&
+          current.backed_4k_meta_pages==current.chunks_owned,
+          "PCP handoff test preserves total free pages and mapped boundary");
 }
 
 /* These page tables are wired into the private CR3 at MAP_VA_BASE.
@@ -580,7 +595,7 @@ static void benchmark_legacy(unsigned iterations) {
         g_checksum+=entry;
     }
     sort_u64(samples,N_TRIALS);
-    print("[bench] old 1 page   : ");
+    print("[bench] legacy global idx 1 page: ");
     print_u64(samples[N_TRIALS/2]); print(" cycles/round");
     print_time_estimate(samples[N_TRIALS/2], 1);
     print("\n");
@@ -609,7 +624,7 @@ static void benchmark(unsigned n, unsigned iterations) {
     sort_u64(samples,N_TRIALS);
     uint64_t cycles=samples[N_TRIALS/2];
     uint64_t per_100=cycles*100/n;
-    print("[bench] TOP "); print_u64(n); print(" page(s): ");
+    print("[bench] PCP "); print_u64(n); print(" page(s): ");
     print_u64(cycles); print(" cycles/round, ");
     print_u64(per_100/100); print(".");
     if ((per_100%100)<10) print("0");
@@ -672,9 +687,18 @@ EFI_STATUS efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_table) {
 
     test_correctness();
     if (g_failed) goto done;
-    test_staging();
+    test_pcp();
     if (g_failed) goto done;
-    print("[test] staged-free PASS (64-entry batch flush)\n");
+    print("[test] PCP PASS (1024 capacity, 512-frame handoffs)\n");
+    fm_get_stats(&g_manager, &stats);
+    print("[pcp] size=");print_u64(FM_PCP_CAPACITY);
+    print(" batch=");print_u64(FM_PCP_BATCH);
+    print(" cached=");print_u64(stats.pcp_free_4k);
+    print(" global=");print_u64(stats.main_free_4k);
+    print(" refills=");print_u64(stats.pcp_refills);
+    print(" drains=");print_u64(stats.pcp_drains);
+    print(" backed-meta=");print_u64(stats.backed_4k_meta_pages);
+    print(" pages\n");
     test_direct_map();
     if (g_failed) goto done;
     print("[test] correctness PASS\n");

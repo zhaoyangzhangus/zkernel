@@ -1,4 +1,4 @@
-# zkernel Frame Pool - standalone x86-64 UEFI/QEMU test
+# zkernel Frame Pool — standalone x86-64 UEFI/QEMU test
 
 This **isolated test branch** contains only the freestanding Frame Pool prototype and its tests. It does **not** replace the existing kernel memory allocator on `main`.
 
@@ -6,8 +6,11 @@ This **isolated test branch** contains only the freestanding Frame Pool prototyp
 
 - Root 2 MiB free-frame stack; the 4 KiB pool obtains whole 2 MiB physical frames by ownership transfer.
 - Each transferred 2 MiB frame uses its **first 4 KiB as metadata**, mapped at the next address in a *virtually contiguous* metadata area; the remaining **511 physical 4 KiB frames** are stored as prebuilt PTE values.
-- A TOP cursor handles any page count including 511, 512 and 1025; it crosses 511-entry metadata-page boundaries and skips the self-metadata entry.
-- **Deferred physical free:** the 4 KiB release path writes prebuilt PTEs into a 64-entry staging stack. Reaching 64 entries triggers one batch transfer to the main metadata TOP, correctly crossing a 511-entry metadata-page boundary. Recently freed frames are directly reusable from staging (LIFO) without a premature flush. Use `fm_flush_staged_4k()` to force a merge; `fm_get_stats().free_4k` counts the main stack and staged entries, with `main_free_4k` and `staged_4k` exposed separately. The staging buffer is per-manager, embedded, and does not allocate memory.
+- A global TOP cursor handles ONLY 512-frame handoffs to/from PCP; it crosses 511-slot metadata-page boundaries without exposing metadata slot zero to callers. External allocations still accept any count, including 1, 511, 512 and 1025, through PCP.
+- **PCP (future per-CPU Page Cache):** a standalone `fm_pcp` with 1024 entries, used for ALL ordinary single/bulk 4 KiB alloc/free operations. The current single-core UEFI test uses one PCP; the Linux regression build retains its mutex. The global free-frame stack is never used for ordinary one-page operations: PCP refills and drains transfer **exactly 512 allocatable frames** per operation. When PCP fills to 1024, its oldest 512 entries are drained to global, retaining the newest 512. An empty PCP refills by 512. Explicit `fm_pcp_drain_4k()` transfers one complete 512-frame batch only and does nothing for an underfilled batch. This is a policy on **transfer size**, not physical contiguity; the 512 frames can span metadata pages.
+- **511 vs 512:** every 2 MiB backing chunk stores one metadata page and only **511 allocatable 4 KiB physical frames**. PCP transfers **512 allocatable frames**, therefore an initially empty global pool needs at least two backed chunks to furnish one PCP refill. Metadata slot 0 never enters PCP. When total free frames are less than 512 outside PCP, they cannot be used until a later full batch is available.
+
+- **Mapped physical metadata boundary:** `meta_4k_backed_end` is the *exclusive virtual-address end* of metadata pages actually backed by physical memory. It starts at the metadata virtual base and advances by exactly 4 KiB only after each successful 2 MiB transfer and metadata mapping. `reserved_4k_meta_pages` is only virtual capacity; `backed_4k_meta_pages` and `backed_4k_meta_end_va` in `fm_stats` report the physically mapped region. The high-water mark is separate historical accounting and not an indication of currently backed pages. Main metadata writes are capacity-checked against mapped pages, and freeing cannot cause a write into reserved-but-unmapped virtual space.
 - `fm_alloc_map_4k()` writes prebuilt PTEs directly into a caller-supplied, writable, already allocated leaf PTE array; it does not allocate paging levels or invalidate TLB entries.
 - Normal allocation removes entries from the free stack. The manager does **not** maintain per-allocated-page descriptors, track lifetime or coalesce 4 KiB chunks back to 2 MiB.
 - Historical maximum pool size is persisted across boots using an OVMF EFI variable. The UEFI harness migrates the previous test variable if found.
@@ -41,7 +44,7 @@ These checks use `mmap()` to emulate metadata virtual mapping on Linux. Only the
 
 ## Benchmark units
 
-UEFI prints `cycles/round`, `cycles/page`, `~ns/round` and `~ns/page` for TOP and direct-map benchmarks. It also prints the old indexed single-page benchmark in cycles and estimated nanoseconds. One *round* includes both free and allocate, not just allocation. The nanoseconds are **estimates** converted using a guest TSC frequency calibrated against three 100 ms UEFI `Stall` calls (median sample), shown in MHz. The clock and measured time can be affected by KVM/TCG virtualization and firmware timer accuracy; for a real latency comparison use KVM on the same machine. If firmware does not offer a usable Stall timer, the logs keep the cycle counts and omit nanoseconds instead of inventing a frequency.
+UEFI labels the ordinary path `PCP` (and the historical comparison `legacy global idx`); the old global indexed comparison is not an equivalent cached allocation path. It prints `cycles/round`, `cycles/page`, `~ns/round` and `~ns/page` for TOP and direct-map benchmarks. It also prints the old indexed single-page benchmark in cycles and estimated nanoseconds. One *round* includes both free and allocate, not just allocation. The nanoseconds are **estimates** converted using a guest TSC frequency calibrated against three 100 ms UEFI `Stall` calls (median sample), shown in MHz. The clock and measured time can be affected by KVM/TCG virtualization and firmware timer accuracy; for a real latency comparison use KVM on the same machine. If firmware does not offer a usable Stall timer, the logs keep the cycle counts and omit nanoseconds instead of inventing a frequency.
 
 ## Unmapping contract
 
@@ -51,7 +54,7 @@ The prebuilt PTE flags are `P|RW|NX` for kernel data. User pages, executable map
 
 ## Contents
 
-- `frame_pool.c/.h`: free-frame stacks, TOP cursor, direct-to-PTE allocation.
+- `frame_pool.c/.h`: free-frame stacks, PCP 1024 cache and 512-frame global handoffs, direct-to-PTE allocation.
 - `uefi_main.c`, `uefi_min.h`, `uefi_shim.h`: freestanding firmware entry point, real page-table tests, no-lock adapter, RDTSC/RDTSCP benchmarks.
 - `run_qemu.sh`: QEMU/OVMF dual-boot harness with clean logs.
 - `host_smoke.c`, `sim_host.c/.h`, `persist.c/.h`, `test_frame_pool.c`: native and sanitizer correctness tests.

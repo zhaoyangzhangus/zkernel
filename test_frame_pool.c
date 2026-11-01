@@ -53,19 +53,27 @@ static uint64_t phys(uint64_t pte) { return fm_phys_4k(pte); }
 static void test_4k_boundary(void) {
     rig r;
     rig_new(&r, 20);
-    fm_stats s;
-    fm_get_stats(&r.mgr, &s);
-    CHECK(s.chunks_owned == 0 && s.free_2m == 20);
-
+    fm_stats st;
+    fm_get_stats(&r.mgr, &st);
+    CHECK(st.chunks_owned == 0 && st.free_2m == 20);
+    CHECK(st.backed_4k_meta_pages == 0 &&
+          st.backed_4k_meta_end_va == (uintptr_t)r.sim.metadata_4k_va);
     uint64_t a;
     CHECK(fm_alloc_4k(&r.mgr, 1, &a) == FM_OK);
-    CHECK((a & FM_PTE_FLAGS) == FM_PTE_FLAGS);
-    fm_get_stats(&r.mgr, &s);
-    CHECK(s.chunks_owned == 1 && s.free_4k == 510 && s.free_2m == 19);
+    fm_get_stats(&r.mgr, &st);
+    /* A 512-FRAME PCP refill requires two 511-frame metadata chunks. */
+    CHECK(st.chunks_owned == 2 && st.free_2m == 18);
+    CHECK(st.pcp_refills == 1 && st.pcp_free_4k == 511);
+    CHECK(st.main_free_4k == 510 && st.free_4k == 1021);
+    CHECK(st.backed_4k_meta_pages == 2 &&
+          st.backed_4k_meta_end_va ==
+              (uintptr_t)(r.sim.metadata_4k_va + 2 * FM_ENTRIES_PER_META));
     uint64_t meta0 = fm_4k_metadata_phys(&r.mgr, 0);
-    CHECK(meta0 % FM_2M_SIZE == 0);
-    CHECK(phys(a) == meta0 + 511 * FM_4K_SIZE); /* newest PTE first */
+    uint64_t meta1 = fm_4k_metadata_phys(&r.mgr, 1);
+    CHECK(meta0 % FM_2M_SIZE == 0 && meta1 % FM_2M_SIZE == 0);
+    CHECK(phys(a) == meta1 + 511 * FM_4K_SIZE);
     CHECK(r.sim.metadata_4k_va[0] == (meta0 | FM_PTE_FLAGS));
+    CHECK(r.sim.metadata_4k_va[512] == (meta1 | FM_PTE_FLAGS));
     void *alias = fm_sim_map_alias(&r.sim, meta0);
     CHECK(alias != MAP_FAILED);
     CHECK(((uint64_t *)alias)[0] == r.sim.metadata_4k_va[0]);
@@ -74,25 +82,22 @@ static void test_4k_boundary(void) {
 
     uint64_t b[510];
     CHECK(fm_alloc_4k(&r.mgr, ARRAYSIZE(b), b) == FM_OK);
-    fm_get_stats(&r.mgr, &s);
-    CHECK(s.free_4k == 0);
     for (size_t i = 0; i < ARRAYSIZE(b); ++i)
-        CHECK(phys(b[i]) == meta0 + (510 - i) * FM_4K_SIZE);
-
+        CHECK(phys(b[i]) == meta1 + (510 - i) * FM_4K_SIZE);
+    fm_get_stats(&r.mgr, &st);
+    CHECK(st.pcp_free_4k == 1 && st.main_free_4k == 510);
     uint64_t c[512];
     CHECK(fm_alloc_4k(&r.mgr, ARRAYSIZE(c), c) == FM_OK);
-    fm_get_stats(&r.mgr, &s);
-    CHECK(s.chunks_owned == 3 && s.free_4k == 510 && s.free_2m == 17);
-    CHECK(fm_4k_metadata_phys(&r.mgr, 1) != fm_4k_metadata_phys(&r.mgr, 2));
-    CHECK((uint8_t *)r.sim.metadata_4k_va + FM_4K_SIZE ==
-          (uint8_t *)&r.sim.metadata_4k_va[512]);
-
+    fm_get_stats(&r.mgr, &st);
+    CHECK(st.chunks_owned == 3 && st.free_4k == 510 && st.pcp_free_4k == 1);
+    CHECK(st.pcp_refills == 2);
+    CHECK(fm_4k_metadata_phys(&r.mgr, 2) != meta1);
     uint64_t d[1025];
     CHECK(fm_alloc_4k(&r.mgr, ARRAYSIZE(d), d) == FM_OK);
-    fm_get_stats(&r.mgr, &s);
-    CHECK(s.chunks_owned == 5 && s.free_4k == 507);
-    CHECK(s.total_4k_frames == 5 * 511);
-    CHECK(s.high_water_4k_pages == 5 * 511);
+    fm_get_stats(&r.mgr, &st);
+    CHECK(st.chunks_owned == 5 && st.free_4k == 507);
+    CHECK(st.total_4k_frames == 5 * 511);
+    CHECK(st.high_water_4k_pages == 5 * 511);
 
     uint64_t freed[4] = {phys(a), phys(c[0]), phys(b[15]), phys(d[27])};
     CHECK(fm_free_4k(&r.mgr, 4, freed) == FM_OK);
@@ -101,77 +106,127 @@ static void test_4k_boundary(void) {
     for (int i = 0; i < 4; ++i)
         CHECK(phys(again[i]) == freed[3-i]);
     CHECK(fm_free_4k(&r.mgr, 4, freed) == FM_OK);
-    /* The caller is responsible for not double-freeing. */
     uint64_t bad_phys[2] = {phys(a), phys(b[0]) + 1};
-    fm_get_stats(&r.mgr, &s);
-    size_t old_free = s.free_4k;
+    fm_get_stats(&r.mgr, &st);
+    size_t old_free = st.free_4k;
     CHECK(fm_free_4k(&r.mgr, 2, bad_phys) == FM_EINVAL);
-    fm_get_stats(&r.mgr, &s);
-    CHECK(s.free_4k == old_free);
-
-    printf("[OK] 4K: 1 / 510 / 512 / 1025, metadata alias, LIFO, alignment\n");
+    fm_get_stats(&r.mgr, &st);
+    CHECK(st.free_4k == old_free);
+    printf("[OK] 4K PCP: 1 / 510 / 512 / 1025, metadata alias, LIFO, 512-only refills\n");
     rig_close(&r);
 }
 
-/* A full 64-entry stage is merged in one batch.  Place the main TOP
- * eleven entries before the 511-slot boundary to exercise wraparound. */
-static void test_staged_free(void) {
+/* Main <-> PCP transfers are ALWAYS 512 USABLE PTEs; capacity is 1024.
+ * Verify 511->512, 1023->1024, oldest-512 drain, direct PTE and backing. */
+static void test_pcp_handoff(void) {
     rig r;
-    rig_new(&r, 4);
+    rig_new(&r, 6);
     CHECK(fm_expand_4k(&r.mgr) == FM_OK);
-    CHECK(fm_expand_4k(&r.mgr) == FM_OK);
-    uint64_t entries[522], addresses[522], again[64];
-    CHECK(fm_alloc_4k(&r.mgr, ARRAYSIZE(entries), entries) == FM_OK);
-    for (size_t i = 0; i < ARRAYSIZE(entries); ++i)
-        addresses[i] = phys(entries[i]);
     fm_stats st;
     fm_get_stats(&r.mgr, &st);
-    CHECK(st.free_4k == 500 && st.main_free_4k == 500 && st.staged_4k == 0);
-    CHECK(r.mgr.top_4k_offset == 501);
-
-    /* 63 releases do not touch the main metadata TOP. */
-    CHECK(fm_free_4k(&r.mgr, 63, addresses) == FM_OK);
+    CHECK(st.backed_4k_meta_pages == 1 && st.main_free_4k == 511);
+    CHECK(st.backed_4k_meta_end_va ==
+          (uintptr_t)(r.sim.metadata_4k_va + FM_ENTRIES_PER_META));
+    /* Strict 512-frame transfer cannot pull from a lone 511-frame chunk:
+     * the first refill must grow another physical metadata chunk. */
+    uint64_t first;
+    CHECK(fm_alloc_4k(&r.mgr, 1, &first) == FM_OK);
     fm_get_stats(&r.mgr, &st);
-    CHECK(st.staged_4k == 63 && st.main_free_4k == 500 && st.free_4k == 563);
-    CHECK(r.mgr.top_4k_offset == 501);
-    CHECK(fm_free_4k(&r.mgr, 1, &addresses[63]) == FM_OK);
-    fm_get_stats(&r.mgr, &st);
-    CHECK(st.staged_4k == 0 && st.main_free_4k == 564 && st.free_4k == 564);
-    CHECK(r.mgr.top_4k_offset == 54); /* 501 -> 512 -> next metadata page */
+    CHECK(st.chunks_owned == 2 && st.pcp_refills == 1 && st.pcp_free_4k == 511);
+    CHECK(st.main_free_4k == 510);
 
-    CHECK(fm_alloc_4k(&r.mgr, 64, again) == FM_OK);
-    for (size_t i = 0; i < 64; ++i)
-        CHECK(phys(again[i]) == addresses[63 - i]);
-
-    /* Direct mapping must consume the staged entries without flushing them. */
-    CHECK(fm_free_4k(&r.mgr, 7, addresses) == FM_OK);
+    uint64_t pre[511], pre_pa[511];
+    CHECK(fm_alloc_4k(&r.mgr, 511, pre) == FM_OK);
+    for (size_t i = 0; i < 511; ++i) pre_pa[i] = phys(pre[i]);
     fm_get_stats(&r.mgr, &st);
-    CHECK(st.staged_4k == 7 && st.main_free_4k == 500);
+    CHECK(st.pcp_free_4k == 0 && st.main_free_4k == 510);
+
+    /* 511 partial releases don't touch the global pool. */
+    CHECK(fm_free_4k(&r.mgr, 511, pre_pa) == FM_OK);
+    fm_get_stats(&r.mgr, &st);
+    CHECK(st.pcp_free_4k == 511 && st.main_free_4k == 510);
+    CHECK(fm_pcp_drain_4k(&r.mgr) == FM_OK);
+    fm_get_stats(&r.mgr, &st);
+    CHECK(st.pcp_free_4k == 511 && st.main_free_4k == 510 && st.pcp_drains == 0);
+
+    /* The 512th released frame allows an explicit whole batch transfer. */
+    uint64_t first_pa = phys(first);
+    CHECK(fm_free_4k(&r.mgr, 1, &first_pa) == FM_OK);
+    fm_get_stats(&r.mgr, &st);
+    CHECK(st.pcp_free_4k == 512 && st.main_free_4k == 510);
+    CHECK(fm_pcp_drain_4k(&r.mgr) == FM_OK);
+    fm_get_stats(&r.mgr, &st);
+    CHECK(st.pcp_free_4k == 0 && st.main_free_4k == 1022 && st.pcp_drains == 1);
+
+    /* Refill must consume precisely 512 frames, with LIFO intact. */
+    uint64_t alloc[512], pa[512];
+    CHECK(fm_alloc_4k(&r.mgr, 512, alloc) == FM_OK);
+    for (size_t i = 0; i < 512; ++i) pa[i] = phys(alloc[i]);
+    CHECK(pa[0] == first_pa);
+    for (size_t i = 1; i < 512; ++i) CHECK(pa[i] == pre_pa[511-i]);
+    fm_get_stats(&r.mgr, &st);
+    CHECK(st.pcp_free_4k == 0 && st.main_free_4k == 510 && st.pcp_refills == 2);
+    CHECK(fm_free_4k(&r.mgr, 512, pa) == FM_OK);
+    CHECK(fm_pcp_drain_4k(&r.mgr) == FM_OK);
+    fm_get_stats(&r.mgr, &st);
+    CHECK(st.pcp_free_4k == 0 && st.main_free_4k == 1022 && st.pcp_drains == 2);
+
+    /* Allocate 1024 distinct frames from global in 2 x 512 batches.
+     * Their release fills PCP to the limit; it drains EXACTLY 512 oldest,
+     * retaining 512 newest and leaving no allocated frames. */
+    uint64_t all[1024], all_pa[1024];
+    CHECK(fm_alloc_4k(&r.mgr, 1024, all) == FM_OK);
+    for (size_t i=0;i<1024;++i) all_pa[i] = phys(all[i]);
+    fm_get_stats(&r.mgr,&st);
+    CHECK(st.chunks_owned == 3 && st.pcp_free_4k == 0 &&
+          st.main_free_4k == 509 && st.pcp_refills == 4);
+    CHECK(fm_free_4k(&r.mgr, 1023, all_pa) == FM_OK);
+    fm_get_stats(&r.mgr,&st);
+    CHECK(st.pcp_free_4k == 1023 && st.main_free_4k == 509 && st.pcp_drains == 2);
+    CHECK(fm_free_4k(&r.mgr, 1, &all_pa[1023]) == FM_OK);
+    fm_get_stats(&r.mgr,&st);
+    CHECK(st.pcp_free_4k == 512 && st.main_free_4k == 1021 && st.pcp_drains == 3);
+    CHECK(st.free_4k == 1533 && st.total_4k_frames == 1533);
+    CHECK(st.backed_4k_meta_pages == st.chunks_owned &&
+          st.backed_4k_meta_end_va ==
+            (uintptr_t)(r.sim.metadata_4k_va + st.chunks_owned * FM_ENTRIES_PER_META));
+
+    /* Direct leaf PTE allocation uses PCP only, no global access. */
     uint64_t leaf[7] = {0};
     CHECK(fm_alloc_map_4k(&r.mgr, 7, leaf) == FM_OK);
-    for (size_t i = 0; i < 7; ++i) {
-        CHECK(phys(leaf[i]) == addresses[6 - i]);
-        leaf[i] = 0;
-    }
-    CHECK(fm_free_4k(&r.mgr, 7, addresses) == FM_OK);
-    CHECK(fm_flush_staged_4k(&r.mgr) == FM_OK);
+    for (size_t i=0;i<7;++i) CHECK(phys(leaf[i]) == all_pa[1023-i]);
+    uint64_t pa7[7];
+    for (size_t i=0;i<7;++i) { pa7[i]=phys(leaf[i]); leaf[i]=0; }
+    CHECK(fm_free_4k(&r.mgr, 7, pa7) == FM_OK);
     fm_get_stats(&r.mgr, &st);
-    CHECK(st.staged_4k == 0 && st.main_free_4k == 507);
-    CHECK(fm_flush_staged_4k(&r.mgr) == FM_OK); /* idempotent */
-    uint64_t bad = addresses[64] + 1;
+    CHECK(st.pcp_free_4k == 512 && st.main_free_4k == 1021 && st.pcp_drains == 3);
+    CHECK(fm_pcp_drain_4k(&r.mgr) == FM_OK);
+    fm_get_stats(&r.mgr, &st);
+    CHECK(st.pcp_free_4k == 0 && st.main_free_4k == 1533 && st.pcp_drains == 4);
+    uint64_t bad = pa[0] + 1;
     CHECK(fm_free_4k(&r.mgr, 1, &bad) == FM_EINVAL);
+    printf("[OK] PCP: 1024 limit, 512-only transfers, LIFO, direct PTE, mapped metadata\n");
+    rig_close(&r);
+}
+
+/* One 2 MiB chunk yields only 511 usable frames, which cannot satisfy
+ * a strict 512-frame global-to-PCP refill. Failure must be atomic. */
+static void test_pcp_one_chunk_shortage(void) {
+    rig r;
+    rig_new(&r, 1);
+    CHECK(fm_expand_4k(&r.mgr) == FM_OK);
+    uint64_t sentinel = UINT64_C(0xfeedface12345678);
+    CHECK(fm_alloc_4k(&r.mgr, 1, &sentinel) == FM_ENOMEM);
+    CHECK(sentinel == UINT64_C(0xfeedface12345678));
+    fm_stats st;
     fm_get_stats(&r.mgr, &st);
-    CHECK(st.staged_4k == 0 && st.free_4k == 507);
-    CHECK(fm_free_4k(&r.mgr, ARRAYSIZE(entries) - 64,
-                     addresses + 64) == FM_OK);
-    /* Return the other 57 allocated pages from the first flushed batch. */
-    CHECK(fm_free_4k(&r.mgr, 57, addresses + 7) == FM_OK);
-    fm_get_stats(&r.mgr, &st);
-    CHECK(st.free_4k == 1022 && st.free_4k == st.main_free_4k + st.staged_4k);
-    CHECK(fm_flush_staged_4k(&r.mgr) == FM_OK);
-    fm_get_stats(&r.mgr, &st);
-    CHECK(st.main_free_4k == 1022 && st.staged_4k == 0);
-    printf("[OK] staged free: 63/64 threshold, cross-page flush, direct PTE, explicit flush\n");
+    CHECK(st.main_free_4k == 511 && st.pcp_free_4k == 0 &&
+          st.pcp_refills == 0 && st.chunks_owned == 1 &&
+          st.backed_4k_meta_pages == 1);
+    CHECK(fm_pcp_drain_4k(&r.mgr) == FM_OK);
+    fm_get_stats(&r.mgr,&st);
+    CHECK(st.pcp_drains == 0);
+    printf("[OK] PCP: one 511-frame chunk cannot refill 512; atomic ENOMEM\n");
     rig_close(&r);
 }
 
@@ -209,18 +264,22 @@ static void test_fail_and_rollback(void) {
     CHECK(sentinel == UINT64_C(0xfacefeeddeadbeef));
     fm_stats s;
     fm_get_stats(&r.mgr, &s);
-    CHECK(s.free_2m == 8 && s.chunks_owned == 0);
+    CHECK(s.free_2m == 8 && s.chunks_owned == 0 &&
+          s.backed_4k_meta_pages == 0 &&
+          s.backed_4k_meta_end_va == (uintptr_t)r.sim.metadata_4k_va);
 
     r.sim.fail_next_persist = 1;
     CHECK(fm_alloc_4k(&r.mgr, 1, &sentinel) == FM_EPERSIST);
     fm_get_stats(&r.mgr, &s);
-    CHECK(s.free_2m == 8 && s.chunks_owned == 0);
+    CHECK(s.free_2m == 8 && s.chunks_owned == 0 &&
+          s.backed_4k_meta_pages == 0 &&
+          s.backed_4k_meta_end_va == (uintptr_t)r.sim.metadata_4k_va);
     CHECK(r.sim.persist.high_water_pages == 0);
 
     CHECK(fm_alloc_4k(&r.mgr, 1, &sentinel) == FM_OK);
     CHECK(sentinel != UINT64_C(0xfacefeeddeadbeef));
     fm_get_stats(&r.mgr, &s);
-    CHECK(s.free_2m == 7 && s.chunks_owned == 1);
+    CHECK(s.free_2m == 6 && s.chunks_owned == 2);
     printf("[OK] errors: OOM, mapping rollback, HWM write rollback\n");
     rig_close(&r);
 }
@@ -232,34 +291,33 @@ static void test_restart(void) {
     CHECK(fm_alloc_4k(&r.mgr, 1025, pages) == FM_OK);
     fm_stats s;
     fm_get_stats(&r.mgr, &s);
-    CHECK(s.high_water_4k_pages == 1533 && s.chunks_owned == 3);
+    CHECK(s.high_water_4k_pages == 2044 && s.chunks_owned == 4);
     uint64_t old_meta = fm_4k_metadata_phys(&r.mgr, 0);
     rig_stop(&r);
 
     /* Simulate reboot with a DIFFERENT physical frame selection order. */
     CHECK(fm_sim_open(&r.sim, 12, r.path) == 0);
-    CHECK(r.sim.persist.high_water_pages == 1533);
+    CHECK(r.sim.persist.high_water_pages == 2044);
     uint64_t tmp = r.sim.root_physical[0];
     r.sim.root_physical[0] = r.sim.root_physical[11];
     r.sim.root_physical[11] = tmp;
     fm_config config = fm_sim_config(&r.sim);
     CHECK(fm_init(&r.mgr, &config) == FM_OK);
     fm_get_stats(&r.mgr, &s);
-    CHECK(s.chunks_owned == 3 && s.total_4k_frames == 1533 &&
-          s.free_4k == 1533 && s.free_2m == 9 && !s.boot_degraded);
+    CHECK(s.chunks_owned == 4 && s.total_4k_frames == 2044 &&
+          s.free_4k == 2044 && s.free_2m == 8 && !s.boot_degraded);
     CHECK(fm_4k_metadata_phys(&r.mgr, 0) != old_meta);
-    uint64_t all[1533];
-    CHECK(fm_alloc_4k(&r.mgr, 1533, all) == FM_OK);
-    CHECK(fm_alloc_4k(&r.mgr, 1, all) == FM_OK);
+    uint64_t all[2044];
+    CHECK(fm_alloc_4k(&r.mgr, 2044, all) == FM_OK);
     fm_get_stats(&r.mgr, &s);
-    CHECK(s.high_water_4k_pages == 2044 && s.chunks_owned == 4);
+    CHECK(s.high_water_4k_pages == 2555 && s.chunks_owned == 5);
     rig_stop(&r);
 
     /* Reboot with LESS memory than recorded historical maximum. */
     rig_start(&r, 2);
     fm_get_stats(&r.mgr, &s);
     CHECK(s.boot_degraded && s.chunks_owned == 2 &&
-          s.high_water_4k_pages == 2044 && s.free_2m == 0);
+          s.high_water_4k_pages == 2555 && s.free_2m == 0);
     printf("[OK] restart: HWM persists, rebases physical frames, degraded boot\n");
     rig_close(&r);
 }
@@ -435,7 +493,8 @@ static void benchmarks(void) {
 }
 int main(int argc, char **argv) {
     test_4k_boundary();
-    test_staged_free();
+    test_pcp_handoff();
+    test_pcp_one_chunk_shortage();
     test_root_bulk();
     test_fail_and_rollback();
     test_restart();

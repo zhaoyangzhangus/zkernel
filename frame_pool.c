@@ -8,74 +8,107 @@
 #define fm_mutex_destroy pthread_mutex_destroy
 #endif
 
-/* Dense 4K free stack: each mapped metadata page has 511 ordinary slots
- * (entries 1..511); entry 0 is its own physical metadata-page PTE.
- * The TOP cursor points to the NEXT insertion slot in a contiguous VA range.
- * offset 1..512 is the position within its current metadata page; offset 512
- * denotes one-past-last, so neither single-item path needs /511 or %511.
- * A cursor may point at the next page's header only when offset == 512;
- * that header is NEVER dereferenced by a push or pop.
- * Caller must exclude concurrent access in SMP/preemptive configurations. */
-static inline uint64_t pop_4k_locked(fm_manager *m) {
-    if (m->top_4k_offset == 1) {
-        /* Previous page ended at the current page's entry 0. */
-        --m->top_4k_next;
-        m->top_4k_offset = FM_ENTRIES_PER_META;
-    }
-    --m->top_4k_next;
-    --m->top_4k_offset;
-    --m->free_4k;
-    return *m->top_4k_next;
-}
+static int grow_locked(fm_manager *m);
 
-/* Merge staged entries in their original push order, preserving LIFO
- * semantics even when the metadata cursor spans 511-slot page boundaries.
- * Called with exclusive access; the stage buffer is already capacity-bound. */
-static inline void flush_stage_locked(fm_manager *m) {
+/* The global TOP operates ONLY in 512-FRAME transfers to/from PCP.
+ * The metadata pages still have only 511 usable entries each; the self-PTE
+ * at slot zero stays untouched, even when a transfer crosses a page boundary.
+ * No single-page public allocation is allowed to access this global cursor. */
+static inline void global_push_512_locked(fm_manager *m, const uint64_t *entries) {
     size_t done = 0;
-    while (done < m->staged_4k_count) {
+    while (done < FM_PCP_BATCH) {
         if (m->top_4k_offset == FM_ENTRIES_PER_META) {
-            ++m->top_4k_next; /* skip next metadata page's entry zero */
+            ++m->top_4k_next; /* skip next metadata header */
             m->top_4k_offset = 1;
         }
         size_t take = FM_ENTRIES_PER_META - m->top_4k_offset;
-        if (take > m->staged_4k_count - done)
-            take = m->staged_4k_count - done;
+        if (take > FM_PCP_BATCH - done) take = FM_PCP_BATCH - done;
         for (size_t i = 0; i < take; ++i)
-            m->top_4k_next[i] = m->staged_4k_entries[done + i];
+            m->top_4k_next[i] = entries[done + i];
         m->top_4k_next += take;
         m->top_4k_offset += (unsigned)take;
         m->free_4k += take;
         done += take;
     }
-    m->staged_4k_count = 0;
 }
 
-static inline uint64_t pop_available_locked(fm_manager *m) {
-    if (m->staged_4k_count)
-        return m->staged_4k_entries[--m->staged_4k_count];
-    return pop_4k_locked(m);
-}
-
-static void take_available_locked(fm_manager *m, size_t n, uint64_t *dst) {
-    size_t written = 0;
-    while (m->staged_4k_count && written < n)
-        dst[written++] = m->staged_4k_entries[--m->staged_4k_count];
-    while (written < n) {
+static inline void global_pop_512_locked(fm_manager *m, uint64_t *entries) {
+    size_t done = 0;
+    while (done < FM_PCP_BATCH) {
         if (m->top_4k_offset == 1) {
-            --m->top_4k_next;
+            --m->top_4k_next; /* skip previous metadata header */
             m->top_4k_offset = FM_ENTRIES_PER_META;
         }
         size_t take = m->top_4k_offset - 1;
-        if (take > n - written) take = n - written;
-        const uint64_t *src = m->top_4k_next - take;
-        for (size_t j = 0; j < take; ++j)
-            dst[written + j] = src[take - 1 - j];
+        if (take > FM_PCP_BATCH - done) take = FM_PCP_BATCH - done;
+        const uint64_t *from = m->top_4k_next - take;
+        for (size_t i = 0; i < take; ++i)
+            entries[FM_PCP_BATCH - 1 - done - i] = from[take - 1 - i];
         m->top_4k_next -= take;
         m->top_4k_offset -= (unsigned)take;
         m->free_4k -= take;
-        written += take;
+        done += take;
     }
+}
+
+/* Return the OLDEST 512 entries so that the PCP preserves its newest
+ * 512 entries and keeps the most recently freed pages hot. */
+static inline void pcp_drain_512_locked(fm_manager *m) {
+    fm_pcp *pcp = &m->pcp;
+    if (pcp->count < FM_PCP_BATCH) return;
+    global_push_512_locked(m, pcp->entries);
+    size_t left = pcp->count - FM_PCP_BATCH;
+    for (size_t i = 0; i < left; ++i)
+        pcp->entries[i] = pcp->entries[FM_PCP_BATCH + i];
+    pcp->count = left;
+    ++pcp->drains;
+}
+
+static inline void pcp_refill_512_locked(fm_manager *m) {
+    /* Caller ensures 512 global entries available. PCP is empty. */
+    global_pop_512_locked(m, m->pcp.entries);
+    m->pcp.count = FM_PCP_BATCH;
+    ++m->pcp.refills;
+}
+
+static inline uint64_t pcp_pop_one_locked(fm_manager *m) {
+    if (m->pcp.count == 0) pcp_refill_512_locked(m);
+    return m->pcp.entries[--m->pcp.count];
+}
+
+static inline void pcp_pop_many_locked(fm_manager *m, size_t n, uint64_t *dst) {
+    size_t done = 0;
+    while (done < n) {
+        if (!m->pcp.count) pcp_refill_512_locked(m);
+        size_t take = m->pcp.count;
+        if (take > n - done) take = n - done;
+        for (size_t i = 0; i < take; ++i)
+            dst[done + i] = m->pcp.entries[m->pcp.count - i - 1];
+        m->pcp.count -= take;
+        done += take;
+    }
+}
+
+/* A request is satisfied entirely through PCP. Verify that the main pool
+ * can supply the required number of COMPLETE 512-frame refill operations.
+ * Note that each newly mapped metadata chunk contributes only 511 frames. */
+static int pcp_prepare_allocation_locked(fm_manager *m, size_t n) {
+    if (n <= m->pcp.count) return FM_OK;
+    size_t need = n - m->pcp.count;
+    size_t batches = need / FM_PCP_BATCH + (need % FM_PCP_BATCH != 0);
+    if (batches > SIZE_MAX / FM_PCP_BATCH) return FM_ENOMEM;
+    size_t required = batches * FM_PCP_BATCH;
+    if (required <= m->free_4k) return FM_OK;
+    size_t deficit = required - m->free_4k;
+    size_t chunks = deficit / FM_4K_FRAMES_PER_CHUNK +
+                    (deficit % FM_4K_FRAMES_PER_CHUNK != 0);
+    if (chunks > m->root_free || chunks > m->chunks_capacity - m->chunks_owned)
+        return FM_ENOMEM;
+    for (size_t i = 0; i < chunks; ++i) {
+        int rc = grow_locked(m);
+        if (rc != FM_OK) return rc;
+    }
+    return FM_OK;
 }
 
 /* Append one transferred 2MiB frame's 511 ready-to-use PTEs. Metadata pages
@@ -137,6 +170,7 @@ static int grow_locked(fm_manager *m) {
     /* New metadata page is mapped. Make it available before writing to the
      * potentially cross-page logical stack slots. */
     m->chunks_owned = new_chunks;
+    m->meta_4k_backed_end = new_meta + FM_ENTRIES_PER_META;
     fill_4k(m, parent_pa);
     if (new_total > m->high_water_4k_pages)
         m->high_water_4k_pages = new_total;
@@ -164,6 +198,7 @@ int fm_init(fm_manager *m, const fm_config *c) {
     m->meta_4k = c->metadata_4k_va;
     m->top_4k_next = m->meta_4k + 1;
     m->top_4k_offset = 1;
+    m->meta_4k_backed_end = m->meta_4k;
     m->chunks_capacity = c->metadata_4k_pages_reserved;
     m->high_water_4k_pages = c->saved_high_water_pages;
 
@@ -204,10 +239,15 @@ void fm_get_stats(fm_manager *m, fm_stats *out) {
         .free_2m = m->root_free,
         .chunks_owned = m->chunks_owned,
         .total_4k_frames = m->chunks_owned * FM_4K_FRAMES_PER_CHUNK,
-        .free_4k = m->free_4k + m->staged_4k_count,
-        .staged_4k = m->staged_4k_count,
+        .free_4k = m->free_4k + m->pcp.count,
+        .pcp_free_4k = m->pcp.count,
+        .pcp_refills = m->pcp.refills,
+        .pcp_drains = m->pcp.drains,
         .main_free_4k = m->free_4k,
         .reserved_4k_meta_pages = m->chunks_capacity,
+        .backed_4k_meta_pages = (size_t)(m->meta_4k_backed_end - m->meta_4k) /
+                                FM_ENTRIES_PER_META,
+        .backed_4k_meta_end_va = (uintptr_t)m->meta_4k_backed_end,
         .high_water_4k_pages = m->high_water_4k_pages,
         .boot_degraded = m->boot_degraded
     };
@@ -254,44 +294,17 @@ int fm_expand_4k(fm_manager *m) {
 int fm_alloc_4k(fm_manager *m, size_t n, uint64_t *out) {
     if (!m || !n || !out) return FM_EINVAL;
     fm_mutex_lock(&m->mutex);
-
-    size_t available = m->free_4k + m->staged_4k_count;
-    if (n > available) {
-        size_t need = n - available;
-        size_t chunks = need / FM_4K_FRAMES_PER_CHUNK +
-                        (need % FM_4K_FRAMES_PER_CHUNK != 0);
-        /* Preflight: a failed allocation due to insufficient total resources
-         * does not even cause partial expansion. */
-        if (chunks > m->root_free ||
-            chunks > m->chunks_capacity - m->chunks_owned) {
-            fm_mutex_unlock(&m->mutex);
-            return FM_ENOMEM;
-        }
-        for (size_t i = 0; i < chunks; ++i) {
-            int rc = grow_locked(m);
-            if (rc != FM_OK) {
-                /* Completed prior expansions remain in the free pool. No
-                 * requested frames are allocated, and out is untouched. */
-                fm_mutex_unlock(&m->mutex);
-                return rc;
-            }
-        }
+    int rc = pcp_prepare_allocation_locked(m, n);
+    if (rc == FM_OK) {
+        if (n == 1) out[0] = pcp_pop_one_locked(m);
+        else pcp_pop_many_locked(m, n, out);
     }
-
-    if (n == 1)
-        out[0] = pop_available_locked(m);
-    else
-        take_available_locked(m, n, out);
     fm_mutex_unlock(&m->mutex);
-    return FM_OK;
+    return rc;
 }
 
-/* Map directly from the metadata TOP cursor into caller-owned leaf PTEs.
- * This shares the same expansion and locking rules as fm_alloc_4k(), but
- * never creates a separate allocated-frame list.  dst[i] must be empty.
- * Checking the whole destination before removing any frames guarantees
- * that EBUSY-style failures leave the destination and free stack untouched.
- */
+/* Write caller-owned leaf PTEs directly from the PCP (no staging list).
+ * As with fm_alloc_4k, the global pool is accessed only in 512-frame refills. */
 int fm_alloc_map_4k(fm_manager *m, size_t n, uint64_t *dst) {
     if (!m || !n || !dst || n > SIZE_MAX / sizeof(*dst))
         return FM_EINVAL;
@@ -302,65 +315,47 @@ int fm_alloc_map_4k(fm_manager *m, size_t n, uint64_t *dst) {
             return FM_EINVAL;
         }
     }
-    size_t available = m->free_4k + m->staged_4k_count;
-    if (n > available) {
-        size_t need = n - available;
-        size_t chunks = need / FM_4K_FRAMES_PER_CHUNK +
-                        (need % FM_4K_FRAMES_PER_CHUNK != 0);
-        if (chunks > m->root_free ||
-            chunks > m->chunks_capacity - m->chunks_owned) {
-            fm_mutex_unlock(&m->mutex);
-            return FM_ENOMEM;
-        }
-        for (size_t i = 0; i < chunks; ++i) {
-            int rc = grow_locked(m);
-            if (rc != FM_OK) {
-                fm_mutex_unlock(&m->mutex);
-                return rc;
-            }
-        }
+    int rc = pcp_prepare_allocation_locked(m, n);
+    if (rc == FM_OK) {
+        if (n == 1) dst[0] = pcp_pop_one_locked(m);
+        else pcp_pop_many_locked(m, n, dst);
     }
-    if (n == 1)
-        dst[0] = pop_available_locked(m);
-    else
-        take_available_locked(m, n, dst);
     fm_mutex_unlock(&m->mutex);
-    return FM_OK;
+    return rc;
 }
 
 int fm_free_4k(fm_manager *m, size_t n, const uint64_t *pa) {
     if (!m || !n || !pa) return FM_EINVAL;
-    /* Validate all input before publishing any physical frame. */
+    /* Validate entire batch before any page becomes reusable. */
     for (size_t i = 0; i < n; ++i)
         if ((pa[i] & (FM_4K_SIZE - 1)) || (pa[i] & ~FM_PHYS_MASK_4K))
             return FM_EINVAL;
     fm_mutex_lock(&m->mutex);
     size_t capacity = m->chunks_owned * FM_4K_FRAMES_PER_CHUNK;
-    if (n > capacity - m->free_4k - m->staged_4k_count) {
+    if (n > capacity - m->free_4k - m->pcp.count) {
         fm_mutex_unlock(&m->mutex);
         return FM_ENOMEM;
     }
-    size_t consumed = 0;
-    while (consumed < n) {
-        size_t room = FM_FREE_STAGE_CAPACITY - m->staged_4k_count;
-        size_t take = n - consumed;
-        if (take > room) take = room;
-        for (size_t j = 0; j < take; ++j)
-            m->staged_4k_entries[m->staged_4k_count + j] =
-                pa[consumed + j] | FM_PTE_FLAGS;
-        m->staged_4k_count += take;
-        consumed += take;
-        if (m->staged_4k_count == FM_FREE_STAGE_CAPACITY)
-            flush_stage_locked(m);
+    size_t done = 0;
+    while (done < n) {
+        /* No caller touches global directly; PCP exports precisely 512. */
+        if (m->pcp.count == FM_PCP_CAPACITY) pcp_drain_512_locked(m);
+        size_t take = FM_PCP_CAPACITY - m->pcp.count;
+        if (take > n - done) take = n - done;
+        for (size_t i = 0; i < take; ++i)
+            m->pcp.entries[m->pcp.count + i] = pa[done + i] | FM_PTE_FLAGS;
+        m->pcp.count += take;
+        done += take;
+        if (m->pcp.count == FM_PCP_CAPACITY) pcp_drain_512_locked(m);
     }
     fm_mutex_unlock(&m->mutex);
     return FM_OK;
 }
 
-int fm_flush_staged_4k(fm_manager *m) {
+int fm_pcp_drain_4k(fm_manager *m) {
     if (!m) return FM_EINVAL;
     fm_mutex_lock(&m->mutex);
-    flush_stage_locked(m);
+    if (m->pcp.count >= FM_PCP_BATCH) pcp_drain_512_locked(m);
     fm_mutex_unlock(&m->mutex);
     return FM_OK;
 }
@@ -368,7 +363,8 @@ int fm_flush_staged_4k(fm_manager *m) {
 uint64_t fm_4k_metadata_phys(fm_manager *m, size_t index) {
     if (!m) return UINT64_MAX;
     fm_mutex_lock(&m->mutex);
-    uint64_t p = index < m->chunks_owned
+    uint64_t p = index < (size_t)(m->meta_4k_backed_end - m->meta_4k) /
+                         FM_ENTRIES_PER_META
         ? fm_phys_4k(m->meta_4k[index * FM_ENTRIES_PER_META])
         : UINT64_MAX;
     fm_mutex_unlock(&m->mutex);

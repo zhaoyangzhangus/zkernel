@@ -31,8 +31,11 @@ enum {
 #define FM_2M_SIZE UINT64_C(2097152)
 #define FM_ENTRIES_PER_META 512u
 #define FM_4K_FRAMES_PER_CHUNK 511u
-/* Fixed-size free staging stack; one cacheline-friendly small batch of PTEs. */
-#define FM_FREE_STAGE_CAPACITY 64u
+/* Global pool <-> PCP transfers always contain 512 ALLOCATABLE frames.
+ * Each 2 MiB physical frame provides 511 frames because one 4 KiB page
+ * backs its metadata. Thus a PCP transfer may cross metadata-page boundaries. */
+#define FM_PCP_BATCH 512u
+#define FM_PCP_CAPACITY 1024u
 #define FM_X86_P UINT64_C(0x001)
 #define FM_X86_RW UINT64_C(0x002)
 #define FM_X86_PS UINT64_C(0x080)
@@ -72,6 +75,15 @@ typedef struct fm_config {
     fm_hooks hooks;
 } fm_config;
 
+/* A separately owned PCP (per-CPU page cache) state. The UEFI test uses
+ * one instance; a future SMP kernel will give each CPU an independent PCP. */
+typedef struct fm_pcp {
+    uint64_t entries[FM_PCP_CAPACITY];
+    size_t count;
+    size_t refills; /* number of 512-frame global -> PCP transfers */
+    size_t drains;  /* number of 512-frame PCP -> global transfers */
+} fm_pcp;
+
 typedef struct fm_manager {
     fm_mutex_t mutex;
     uint64_t *root_meta;
@@ -81,9 +93,11 @@ typedef struct fm_manager {
     uint64_t *meta_4k;
     size_t chunks_capacity;
     size_t chunks_owned;
+    /* End of the VIRTUAL metadata range actually mapped to physical pages.
+     * Reserved capacity beyond this pointer MUST NOT be dereferenced. */
+    uint64_t *meta_4k_backed_end;
     size_t free_4k; /* free frames already returned to metadata TOP */
-    uint64_t staged_4k_entries[FM_FREE_STAGE_CAPACITY];
-    size_t staged_4k_count; /* freed, reusable, not yet merged into metadata TOP */
+    fm_pcp pcp; /* single test-instance; future per-CPU ownership */
     /* TOP cursor: next free-stack insertion slot in contiguous metadata VA.
      * top_4k_offset is 1..512 (512 means one-past-last on a metadata page).
      * Index 0 is always reserved for the metadata page's own PTE.
@@ -100,9 +114,13 @@ typedef struct fm_stats {
     size_t chunks_owned;
     size_t total_4k_frames; /* 511 * chunks_owned */
     size_t free_4k; /* total usable: metadata TOP + staging */
-    size_t staged_4k;
+    size_t pcp_free_4k;
+    size_t pcp_refills;
+    size_t pcp_drains;
     size_t main_free_4k;
     size_t reserved_4k_meta_pages;
+    size_t backed_4k_meta_pages; /* physically mapped metadata pages */
+    uintptr_t backed_4k_meta_end_va; /* one-past physically backed boundary */
     uint64_t high_water_4k_pages;
     bool boot_degraded;
 } fm_stats;
@@ -121,8 +139,8 @@ void fm_get_stats(fm_manager *mgr, fm_stats *out);
 int fm_alloc_2m(fm_manager *mgr, size_t count, uint64_t *out_entries);
 int fm_alloc_4k(fm_manager *mgr, size_t count, uint64_t *out_entries);
 
-/* Direct map allocation: use staged freed PTEs first, otherwise metadata TOP
- * straight into an already-allocated, writable leaf page-table array.
+/* Direct map allocation: pop from the PCP, which refills from global in
+ * 512-frame batches, into an already-allocated, writable leaf PTE array.
  * The caller must first create all intermediate paging levels, and map
  * those leaf page-table pages contiguously in its own address space.
  * The destination entries must ALL be zero (unmapped); any occupied slot
@@ -135,17 +153,18 @@ int fm_alloc_4k(fm_manager *mgr, size_t count, uint64_t *out_entries);
  */
 int fm_alloc_map_4k(fm_manager *mgr, size_t count, uint64_t *leaf_ptes);
 
-/* 4 KiB free is DEFERRED: physical frames go into a 64-entry local staging
- * stack; a full stage is bulk-merged into the metadata TOP. Allocation
- * prioritizes staged entries (LIFO), so immediate reuse does not force a
- * premature flush. fm_get_stats().free_4k includes both pools.
- * Caller MUST complete all relevant TLB invalidation/shootdown BEFORE free.
- * Neither pool tracks allocated ownership: caller avoids double-free.
- * Invalid alignment and out-of-space errors are rejected atomically. */
+/* A PCP holds at most 1024 ready-to-use PTEs; ordinary allocation and
+ * free ONLY touch PCP. A PCP refill pulls exactly 512 usable PTEs from
+ * the global metadata stack. A full PCP returns its oldest 512 usable PTEs,
+ * keeping the newest 512 cached for immediate LIFO reuse. Metadata entry 0
+ * is NEVER allocated or included in a PCP transfer. Global metadata pages
+ * can provide 511 usable frames each, so 512-frame handoffs may cross them.
+ * Caller MUST complete the required TLB shootdown before freeing a frame.
+ * As before, allocated pages are not tracked and double free is forbidden. */
 int fm_free_2m(fm_manager *mgr, size_t count, const uint64_t *physical);
 int fm_free_4k(fm_manager *mgr, size_t count, const uint64_t *physical);
-/* Explicitly merge pending 4 KiB stage entries into the metadata TOP. */
-int fm_flush_staged_4k(fm_manager *mgr);
+/* Explicitly drain exactly ONE 512-frame batch if available; never partial. */
+int fm_pcp_drain_4k(fm_manager *mgr);
 
 /* Explicitly add one 2 MiB chunk to 4 KiB pool (511 frames + 1 meta page). */
 int fm_expand_4k(fm_manager *mgr);
