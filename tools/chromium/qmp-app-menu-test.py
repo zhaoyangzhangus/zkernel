@@ -12,9 +12,9 @@ import tempfile
 import time
 
 def menu_is_painted(width, pixels):
-    # White menus over white pages can have very little pixel difference.
-    # Identify the full white panel and its text, not the old broken black
-    # alpha border. A small tooltip/blank surface cannot meet this area gate.
+    # 白色页面上的白色菜单可能只有很小的像素差异。
+    # 应识别完整的白色面板及其文字，而不是旧缺陷产生的黑色 alpha 边缘。
+    # 小型提示框/空白表面无法满足此面积门槛。
     ink = white = panel = 0
     for y in range(200, 650, 5):
         for x in range(600, 900, 10):
@@ -25,8 +25,8 @@ def menu_is_painted(width, pixels):
     return ink > 20 and white > panel * .7
 
 def menu_has_black_border(width, pixels):
-    # Inspected normal menu over a bright page: the old alpha bug produced
-    # an almost solid black strip for the full height, not a soft shadow.
+    # 检查明亮页面上的普通菜单：旧 alpha 缺陷会产生贯穿整个高度的近乎纯黑条带，而不是
+    # 柔和阴影。
     samples = [max(pixels[(y*width+x)*3:(y*width+x)*3+3])
                for y in range(200,650,5) for x in range(538,550,3)]
     return sum(value < 20 for value in samples) > len(samples)*.9
@@ -85,7 +85,7 @@ with tempfile.TemporaryDirectory(prefix='system-app-menu-') as directory:
             assert image.readline().strip() == b'255'
             assert width >= 950 and height >= 1000
             pixels = image.read()
-        # Exclude the pointer, toolbar and page scrollbar.
+        # 排除指针、工具栏和页面滚动条。
         painted = menu_is_painted(width,pixels)
         if painted and menu_has_black_border(width,pixels):
             capture('black-border-failure')
@@ -100,9 +100,8 @@ with tempfile.TemporaryDirectory(prefix='system-app-menu-') as directory:
         while time.monotonic()-start-paused < 5:
             current, painted = frame()
             changed = sum(abs(a-b)>20 for a,b in zip(reference,current))
-            # The full-panel gate below requires a nearly opaque menu.
-            # Its fade-in can take much longer than the first visible paint;
-            # do not label animation completion as first-response latency.
+            # 下方的完整面板门槛要求菜单近乎不透明。
+            # 淡入动画可能远晚于首次可见绘制，因此不能将动画完成时间标记为首次响应延迟。
             if stage == 'open' and changed > 2000 and first_visual_change_ms is None:
                 first_visual_change_ms = (time.monotonic()-start-paused)*1000
             if predicate(changed,painted):

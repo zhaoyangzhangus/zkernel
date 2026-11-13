@@ -2,7 +2,7 @@
 
 _Static_assert(sizeof(size_t) == sizeof(void *), "kernel string length ABI");
 
-/* Freestanding kernel replacements for compiler-emitted byte operations. */
+/* 内核对编译器生成的字节操作提供的独立实现。 */
 void *memset(void *destination, int value, size_t length) {
     unsigned char *bytes = (unsigned char *)destination;
     unsigned char byte = (unsigned char)value;
@@ -11,8 +11,8 @@ void *memset(void *destination, int value, size_t length) {
         unsigned long long words = length / 8U;
         const unsigned long long pattern =
             (unsigned long long)byte * 0x0101010101010101ULL;
-        /* Integer string instructions do not touch the kernel's FPU state.
-         * Only complete words are accessed; the tail stays inside length. */
+        /* 整数型字符串指令不会触碰内核的 FPU 状态。
+         * 仅访问完整字，尾部数据始终位于 length 范围内。 */
         __asm__ volatile("cld; rep stosq"
                          : "+D"(bytes), "+c"(words)
                          : "a"(pattern)
@@ -24,20 +24,18 @@ void *memset(void *destination, int value, size_t length) {
     return destination;
 }
 
-/* Forward overlap is safe: each complete word is loaded before it is
- * stored, and a lower destination cannot overwrite a future source word.
- * This helper carries no memcpy non-overlap contract. */
+/* 目标位于源地址之前时可以前向复制；此辅助函数不附加 memcpy 的不重叠约束。 */
 static void copy_forward(void *destination, const void *source, size_t length) {
     unsigned char *out = (unsigned char *)destination;
     const unsigned char *in = (const unsigned char *)source;
 #if defined(__x86_64__)
     if (length >= 64U) {
-        unsigned long long words = length / 8U;
-        __asm__ volatile("cld; rep movsq"
-                         : "+D"(out), "+S"(in), "+c"(words)
+        /* 按字节计数，任意对齐和尾部统一由字符串指令处理，不触碰 SIMD 状态。 */
+        __asm__ volatile("cld; rep movsb"
+                         : "+D"(out), "+S"(in), "+c"(length)
                          :
                          : "memory", "cc");
-        length %= 8U;
+        return;
     }
 #endif
     for (size_t index = 0U; index < length; ++index) out[index] = in[index];
@@ -60,10 +58,9 @@ void *memmove(void *destination, const void *source, size_t length) {
     if (to < from) {
         copy_forward(destination, source, length);
     } else {
-        /* Load the whole trailing word before storing it: even a one-byte
-         * overlap cannot destroy source bytes needed by the next word.
-         * Fixed-size copies tolerate alignment/aliasing without setting DF
-         * or touching SIMD state; the remaining prefix is byte-sized. */
+        /* 存储前先加载完整的尾部字：即使只重叠一个字节，也不会破坏下一个字所需的源数据。
+         * 固定大小的复制可处理未对齐和别名缓冲区，无需设置 DF 或触碰 SIMD 状态；
+         * 剩余前缀按字节处理。 */
         if (length >= 64U) {
             while (length >= sizeof(uint64_t)) {
                 uint64_t word;
@@ -82,9 +79,9 @@ void *memmove(void *destination, const void *source, size_t length) {
 int memcmp(const void *left, const void *right, size_t length) {
     const unsigned char *a = (const unsigned char *)left;
     const unsigned char *b = (const unsigned char *)right;
-    /* Skip equal complete words without reading beyond the requested range.
-     * Copies permit unaligned/aliased buffers; mismatches still use byte order
-     * rather than the host integer ordering. */
+    /* 跳过相同的完整字，且不读取请求范围之外的数据。
+     * 复制操作允许缓冲区未对齐或彼此别名；遇到不匹配时仍按字节顺序比较，
+     * 不采用主机整数的排序方式。 */
     while (length >= sizeof(uint64_t)) {
         uint64_t word_a, word_b;
         __builtin_memcpy(&word_a, a, sizeof(word_a));

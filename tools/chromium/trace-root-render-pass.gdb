@@ -13,10 +13,10 @@ except RuntimeError as error:
 end
 target remote /tmp/system-keys.sock
 python
-# Four entry addresses, read-only metadata. Offsets/vector size layout were
-# checked against this guarded ELF's DirectRenderer::DrawFrame disassembly.
-# The current libc++ vector stores begin + element COUNT, not begin + end.
-# Times include debugger stops and are stage diagnostics, not CPU benchmarks.
+# 四个入口地址，只读元数据。偏移和 vector 大小布局已根据此受保护 ELF 中
+# DirectRenderer::DrawFrame 的反汇编进行核对。
+# 当前 libc++ vector 保存的是 begin + 元素数量，而不是 begin + end。
+# 时间包含调试器暂停，仅用于阶段诊断，不是 CPU 基准。
 started=None
 browser=None
 calls=0
@@ -33,8 +33,8 @@ def register(name):return int(gdb.parse_and_eval('$'+name))
 def read_user(address,size):
     if not 0<address<0x800000000000 or not 1<=size<=64 or address+size>0x800000000000:
         raise gdb.GdbError('Out-of-bounds render metadata read')
-    # QEMU debugger memory reads can use a different vCPU's user CR3. Resolve
-    # the stopped thread's process mapping instead; never fault in a guest page.
+    # QEMU 调试器的内存读取可能使用另一 vCPU 的用户态 CR3。改为解析暂停线程
+    # 所属进程的映射；绝不触发客户机页面缺页。
     process=current()['process'].dereference()
     table=int(process['vm'].dereference()['root_table']['value'])
     result=bytearray()

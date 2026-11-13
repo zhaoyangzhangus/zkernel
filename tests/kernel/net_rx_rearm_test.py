@@ -40,7 +40,7 @@ static void rtl8126_rearm_interrupts(void *s) {
 }
 static bool e1000_poll(void) {
     ++polls;
-    /* Simulate a coalesced IRQ at the end of the receive worker. */
+    /* 模拟接收工作线程结束时合并到达的 IRQ。 */
     if(inject)g_e1000.rtl_rx_ring[g_e1000.rtl_rx_next].options1=0;
     return false;
 }

@@ -5,11 +5,11 @@ import tempfile
 
 root = Path(__file__).resolve().parents[2]
 source = (root / 'kernel/graphics/render.c').read_text()
-functions = source[source.index('static bool compositor_corner_pixel('):
-                   source.index('void compositor_surface_locked(')]
+functions = source[source.index('static void compositor_window_corners('):
+                   source.index('typedef struct compositor_surface_job')]
 compositor = (root / 'kernel/graphics/compositor.c').read_text()
 begin = compositor.index('static void compositor_render_region_bounded(')
-banding = compositor[begin:compositor.index('void compositor_render_snapshot(', begin)]
+banding = compositor[begin:compositor.index('static void compositor_render_snapshot(', begin)]
 code = r'''
 #include <assert.h>
 #include <stdint.h>
@@ -25,7 +25,7 @@ static uint32_t pixels[64*64],initial[64*64],foreground;
 static struct {volatile uint32_t *composite_framebuffer;uint32_t display_width,display_height,display_stride;} g_window_server={pixels,64,64,64};
 static struct {Rect damage_bounds;uint32_t theme;} g_compositor_snapshot;
 typedef struct {unsigned unused;} compositor_render_span_t;
-/* Force bands in this small pixel fixture without changing production code. */
+/* 在此小型像素测试夹具中强制生成条带，不修改生产代码。 */
 #define WINDOW_COMPOSITOR_ATOMIC_PIXELS 64U
 static const compositor_window_view_t *render_window;
 static unsigned corner_checks,pumps,control_paints;
@@ -34,21 +34,29 @@ static bool window_control_has_caption(const void *document){(void)document;retu
 static bool window_standard_caption(uint32_t flags){return flags&OS_WINDOW_STANDARD_CAPTION_CONTROLS;}
 static uint32_t window_outer_width(uint32_t width,uint32_t flags){return width+(window_client_decorations(flags)?0:2);}
 static uint32_t window_outer_height(uint32_t height,uint32_t flags){return height+(window_client_decorations(flags)?0:6);}
-static bool compositor_damage_inside_surface_interior(const compositor_window_view_t *w){(void)w;return false;}
-static void paint(const compositor_window_view_t *w){
+static bool compositor_damage_inside_surface_interior(Rect clip,const compositor_window_view_t *w){(void)clip;(void)w;return false;}
+static void paint(Rect clip,const compositor_window_view_t *w){
  for(unsigned y=0;y<64;++y)for(unsigned x=0;x<64;++x)
   if((int)x>=w->x&&(int)y>=w->y&&(int64_t)x<(int64_t)w->x+window_outer_width(w->width,w->flags)&&
    (int64_t)y<(int64_t)w->y+window_outer_height(w->height,w->flags)&&
-   (int)x>=g_compositor_snapshot.damage_bounds.x0&&(int)x<g_compositor_snapshot.damage_bounds.x1&&
-   (int)y>=g_compositor_snapshot.damage_bounds.y0&&(int)y<g_compositor_snapshot.damage_bounds.y1)pixels[y*64+x]=foreground;
+   (int)x>=clip.x0&&(int)x<clip.x1&&
+   (int)y>=clip.y0&&(int)y<clip.y1)pixels[y*64+x]=foreground;
 }
-static void compositor_titlebar_locked(const compositor_window_view_t *w,uint32_t color){(void)color;paint(w);}
-static void compositor_surface_locked(const compositor_window_view_t *w){paint(w);}
-static void compositor_control_tree(const compositor_window_view_t *w){assert(w->controls);++control_paints;paint(w);}
-static void compositor_standard_caption_locked(const compositor_window_view_t *w){paint(w);}
-''' + functions.replace('    int64_t px =', '    ++corner_checks;\n    int64_t px =', 1) + r'''
-static void compositor_region_locked(const compositor_render_span_t *span) {
- (void)span;compositor_draw_window_locked(render_window);
+static void compositor_titlebar_locked(Rect clip,const compositor_window_view_t *w,uint32_t color){(void)color;paint(clip,w);}
+static void compositor_surface_locked(Rect clip,const compositor_window_view_t *w){paint(clip,w);}
+static void compositor_control_tree(Rect clip,const compositor_window_view_t *w){assert(w->controls);++control_paints;paint(clip,w);}
+static void compositor_standard_caption_locked(Rect clip,const compositor_window_view_t *w){paint(clip,w);}
+/* 只统计真实绘制函数的查询，参考像素计算仍直接使用原始实现。 */
+static unsigned decoration_queries,theme_queries;
+static bool counted_decorations(uint32_t flags){++decoration_queries;return window_client_decorations(flags);}
+static uint32_t counted_theme(uint32_t color,uint32_t theme){++theme_queries;return os_theme_resolve(color,theme);}
+#define window_client_decorations counted_decorations
+#define os_theme_resolve counted_theme
+''' + functions.replace('uint32_t alpha = chrome_corner_coverage[y][x];', '++corner_checks; uint32_t alpha = chrome_corner_coverage[y][x];') + r'''
+#undef window_client_decorations
+#undef os_theme_resolve
+static void compositor_region_locked(Rect clip,const compositor_render_span_t *span) {(void)clip;
+ (void)span;compositor_draw_window_locked(clip,render_window);
 }
 static void window_server_pump_publication_motion(void) {++pumps;}
 ''' + banding + r'''
@@ -90,10 +98,10 @@ int main(void){
   g_compositor_snapshot.theme=(round%3)|((round%4)<<8);
   foreground=(round*0x53917)&0xFFFFFF;
   for(unsigned i=0;i<4096;++i)pixels[i]=initial[i]=(i*0x72954)&0xFFFFFF;
-  compositor_draw_window_locked(&w);
+  compositor_draw_window_locked(g_compositor_snapshot.damage_bounds,&w);
   uint32_t unbanded[4096];memcpy(unbanded,pixels,sizeof(pixels));
   memcpy(pixels,initial,sizeof(pixels));render_window=&w;
-  compositor_render_region_bounded(0,true);
+  compositor_render_region_bounded(g_compositor_snapshot.damage_bounds,0,true);
   assert(!memcmp(unbanded,pixels,sizeof(pixels)));
   for(unsigned y=0;y<64;++y)for(unsigned x=0;x<64;++x){
    uint32_t expected=initial[y*64+x];
@@ -114,19 +122,58 @@ int main(void){
    assert(pixels[y*64+x]==expected);
   }
  }
+ /* 四个完整圆角只在捕获和恢复各判断一次装饰；仅服务器边框恢复时解析一次颜色。 */
+ for(unsigned client=0;client<2;++client){
+  compositor_window_view_t w={.x=8,.y=8,.flags=client?OS_WINDOW_CLIENT_DECORATIONS:0};
+  uint32_t background[256];Rect clip={0,0,64,64};
+  decoration_queries=theme_queries=0;
+  compositor_window_corners(clip,&w,32,32,background,false);
+  assert(decoration_queries==1&&theme_queries==0);
+  compositor_window_corners(clip,&w,32,32,background,true);
+  assert(decoration_queries==2&&theme_queries==(client?0U:1U));
+ }
+ /* 一像素宽损坏条仅访问一个圆角的八个可见像素。 */
+ {
+  compositor_window_view_t w={.x=8,.y=8,.flags=OS_WINDOW_CLIENT_DECORATIONS};
+  uint32_t background[256];Rect clip={8,8,9,16};
+  corner_checks=0;
+  compositor_window_corners(clip,&w,32,32,background,false);
+  assert(corner_checks==8);
+  compositor_window_corners(clip,&w,32,32,background,true);
+  assert(corner_checks==16);
+ }
  compositor_window_view_t interior={.x=8,.y=8,.width=48,.height=48,
   .flags=OS_WINDOW_CLIENT_DECORATIONS};
  g_compositor_snapshot.damage_bounds=(Rect){16,16,48,48};
- corner_checks=0;compositor_draw_window_locked(&interior);
+ corner_checks=0;compositor_draw_window_locked(g_compositor_snapshot.damage_bounds,&interior);
  assert(!corner_checks&&pumps&&control_paints);
- puts("Real corner renderer + production banding: 1000 whole-vs-banded pixel comparisons; interior repaint performs zero corner pixel checks passed");
+ puts("Real corner renderer + production banding: 1000 whole-vs-banded pixel comparisons; interior repaint samples zero corner pixels; one-pixel damage strip samples only 8 pixels per pass passed");
  puts("Compositor corners: exact 8x8 coverage, 1000 native/client/maximized windows, four symmetric corners, saved underlying pixels, frame drawn before final mask, offscreen/damage clipping and no app mask required passed");
 }
 '''
 with tempfile.TemporaryDirectory(prefix='liteos-corner-alpha-') as directory:
     binary = str(Path(directory) / 'test')
-    subprocess.run(['cc', '-O2', '-std=c11', '-Wall', '-Wextra', '-Werror',
+    command = ['cc', '-O2', '-std=c11', '-Wall', '-Wextra', '-Werror',
                     '-Wno-misleading-indentation', '-fsanitize=address,undefined',
                     '-fno-pie', '-no-pie', '-I' + str(root / 'include'),
-                    '-x', 'c', '-', '-o', binary], input=code, text=True, check=True)
+                    '-x', 'c', '-', '-o', binary]
+    subprocess.run(command, input=code, text=True, check=True)
     subprocess.run([binary], check=True)
+    # 同时验证重复查询与裁剪范围退化，不能只比较最终颜色。
+    for label, old, new in (
+        ('逐像素重复查询装饰', 'uint32_t alpha = chrome_corner_coverage[y][x];',
+         '(void)window_client_decorations(window->flags);\n'
+         'uint32_t alpha = chrome_corner_coverage[y][x];'),
+        ('窄损坏仍遍历整行圆角',
+         'for (int32_t px = visible.x0; px < visible.x1; ++px)',
+         'for (int32_t px = visible.x0; px < left + 8; ++px)'),
+        ('右下角未镜像', 'if ((corner & 1U) != 0U) x = 7U - x;',
+         '(void)x;'),
+    ):
+        broken = code.replace(old, new)
+        assert broken != code
+        subprocess.run(command, input=broken, text=True, check=True)
+        assert subprocess.run([binary], stderr=subprocess.DEVNULL,
+                              stdout=subprocess.DEVNULL).returncode != 0
+        print('反例被拒绝：', label)
+print('圆角绘制：装饰类型每次调用只查询一次，客户端及底层捕获不解析边框颜色，逐像素重复查询反例被拒绝')

@@ -13,8 +13,8 @@ except RuntimeError as error:
 end
 target remote /tmp/system-keys.sock
 python
-# Current-build symbol + ELF_PIE_BIAS. This is a hit diagnostic, not a timing
-# benchmark. No URLs, request headers or cached response contents are printed.
+# 当前构建的符号 + ELF_PIE_BIAS。本脚本用于诊断命中情况，不是计时基准。
+# 不会输出 URL、请求头或缓存的响应内容。
 class CacheRead(gdb.Breakpoint):
     def __init__(self):
         super().__init__('*0x4bacea40',gdb.BP_HARDWARE_BREAKPOINT,internal=True)

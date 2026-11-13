@@ -94,8 +94,8 @@ int64_t syscall_completion_wait(uint64_t handle, uint64_t timeout_ns,
     return status;
 }
 
-/* QEMU exposes the host's UTC wall clock through the PC RTC.  Seed the
- * realtime offset once; monotonic time must remain independent of it. */
+/* QEMU 通过 PC RTC 提供宿主机的 UTC 墙上时钟。只需初始化一次实时时钟偏移；
+ * 单调时钟必须与之保持独立。 */
 static atomic_int_fast64_t g_realtime_offset_ns;
 static atomic_uint g_realtime_init_state;
 

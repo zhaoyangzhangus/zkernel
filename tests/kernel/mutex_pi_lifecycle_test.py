@@ -121,7 +121,7 @@ int main(void) {
   assert(kmutex_unlock(&mutex)==K_OK);
   assert(!atomic_load(&high.exit_defer_count) && !mutex.exit_deferred);
  }
- /* Real two-mutex owner cycle must fail before invoking the wait hook. */
+ /* 真实的双互斥锁所有者循环必须在调用等待钩子前失败。 */
  kmutex_t first,second;kmutex_init(&first,true);kmutex_init(&second,true);
  current=&low;assert(kmutex_try_lock(&first)==K_OK);
  current=&high;assert(kmutex_try_lock(&second)==K_OK);
@@ -129,7 +129,7 @@ int main(void) {
  assert(kmutex_lock(&second,0)==K_EBUSY && waits==before);
  high.pi_blocked_on=0;assert(kmutex_unlock(&first)==K_OK);
  current=&high;assert(kmutex_unlock(&second)==K_OK);
- /* Distinct nested I/O guards retain the continuation through the last unlock. */
+ /* 不同的嵌套 I/O 保护必须一直保留续行状态，直到最后一次解锁。 */
  assert(kmutex_lock_uninterruptible(&first,0)==K_OK);
  assert(kmutex_lock_uninterruptible(&second,0)==K_OK);
  assert(atomic_load(&high.exit_defer_count)==2U);

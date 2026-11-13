@@ -19,8 +19,7 @@ clone = clone.replace('atomic_store_explicit(&(*out)->populated_pages,',
 insert = source[source.index('static anon_page_node_t *anon_page_index_insert(anon_store_t *store,',
                               source.index('static anon_page_node_t *anon_page_index_find(')):
                 source.index('kstatus_t anon_page_get(')]
-# Count real search comparisons in the old reinsertion path for an operation
-# count comparison. This instrumentation is confined to the host fixture.
+# 统计旧版重新插入路径中的实际搜索比较次数，用于比较操作数。此检测仅用于主机测试夹具。
 insert = insert.replace('parent = *link;', '++comparisons; parent = *link;')
 program = r'''
 #include <kernel/rbtree.h>
@@ -46,6 +45,8 @@ static long fail_at=-1;
 static bool persistent_failure=true;
 static unsigned attempts, live_nodes, held, comparisons;
 static unsigned locked_attempts;
+static void (*allocation_hook)(void);
+static unsigned hook_at;
 static unsigned count_adds,count_stores;
 static inline uint64_t count_add(atomic_uint_fast64_t *value,uint64_t count,memory_order order) {
     ++count_adds;return atomic_fetch_add_explicit(value,count,order);
@@ -56,11 +57,18 @@ static inline void count_store(atomic_uint_fast64_t *value,uint64_t count,memory
 static void *kmalloc(size_t n, unsigned flags) {
     (void)flags;
     locked_attempts += held != 0;
+    assert(!held);
     long attempt=(long)attempts++;
+    if (allocation_hook && (unsigned)attempt==hook_at) {
+        void (*hook)(void)=allocation_hook;allocation_hook=0;hook();
+    }
     if (fail_at>=0 && (persistent_failure?attempt>=fail_at:attempt==fail_at)) return 0;
     void *p=malloc(n); assert(p); ++live_nodes; return p;
 }
 static void kfree(void *p) { assert(p && live_nodes && !held); --live_nodes; free(p); }
+static void page_reference_put(page_t *page) {
+    assert(!held && atomic_fetch_sub(&page->refs,1)>0);
+}
 static void vm_store_lock(unsigned *lock) { assert(!*lock && !held); *lock=1; ++held; }
 static void vm_store_unlock(unsigned *lock) { assert(*lock && held==1); *lock=0; --held; }
 static kstatus_t vm_object_create_anon(size_t size, vm_object_t **out) {
@@ -121,6 +129,35 @@ static unsigned verify_mutated(rb_node_t *node,rb_node_t *parent,
     unsigned right=verify_mutated(node->right,node,previous,first,count);
     assert(left==right); return left+(rb_tree_color(node)==RB_TREE_BLACK);
 }
+
+static vm_object_t *hook_source;
+static page_t *hook_pages,added_page;
+static unsigned hook_count;
+static anon_page_node_t *added_node;
+static void grow_during_reservation(void) {
+    assert(!held);refs(hook_pages,hook_count,1);
+    anon_store_t *store=hook_source->u.anon.anon_root;
+    added_node=kmalloc(sizeof(*added_node),0);
+    added_node->index=UINT64_MAX;added_node->page=&added_page;
+    atomic_init(&added_page.refs,1);
+    vm_store_lock(&store->lock);
+    assert(anon_page_index_insert(store,added_node)==added_node);
+    atomic_store(&hook_source->populated_pages,hook_count+1);
+    vm_store_unlock(&store->lock);
+}
+static void discard_during_failed_reservation(void) {
+    assert(!held);refs(hook_pages,hook_count,1);
+    anon_store_t *store=hook_source->u.anon.anon_root;
+    vm_store_lock(&store->lock);
+    anon_page_node_t *node=store->pages;
+    store->pages=0;store->page_index.root=0;
+    atomic_store(&hook_source->populated_pages,0);
+    vm_store_unlock(&store->lock);
+    while(node) {
+        anon_page_node_t *next=node->next;
+        page_reference_put(node->page);kfree(node);node=next;
+    }
+}
 int main(void) {
     const unsigned n=100000;
     vm_object_t *source=0,*copy=0;
@@ -129,7 +166,7 @@ int main(void) {
     assert(!(copy->flags & VM_OBJECT_FLAG_MAP_OWNED));
     assert(count_stores==1 && !count_adds);
     vm_object_put(copy);
-    /* An emptied store can retain an older nonzero sizing sample. */
+    /* 清空后的存储区可能仍保留较早的非零大小采样值。 */
     atomic_store(&source->populated_pages,17);fail_at=0;attempts=0;
     assert(vm_object_clone_anon(source,&copy)==K_OK && copy && !held && !live_nodes);
     assert(!atomic_load(&copy->populated_pages) && attempts==1);
@@ -143,7 +180,7 @@ int main(void) {
         assert(anon_page_index_insert(store,node)==node);
     }
     atomic_store(&source->populated_pages,n);
-    /* Baseline: the formerly used full-list reinsertion algorithm. */
+    /* 基线：此前使用的完整列表重新插入算法。 */
     vm_object_t *baseline=0; assert(vm_object_create_anon(source->size,&baseline)==K_OK);
     anon_store_t *old=baseline->u.anon.anon_root;
     comparisons=attempts=0; clock_t started=clock();
@@ -167,7 +204,7 @@ int main(void) {
     assert(atomic_load(&copy->populated_pages)==n); refs(pages,n,2);
     unsigned count=0; anon_store_t *target=copy->u.anon.anon_root;
     verify(store->page_index.root,target->page_index.root,0,&count); assert(count==n);
-    /* Copied tree remains usable for later insert/erase independently. */
+    /* 复制出的树仍可独立执行后续插入/删除操作。 */
     anon_page_node_t *extra=kmalloc(sizeof(*extra),0); page_t extra_page;
     atomic_init(&extra_page.refs,1); extra->index=UINT64_MAX; extra->page=&extra_page;
     assert(anon_page_index_insert(target,extra)==extra);
@@ -175,7 +212,7 @@ int main(void) {
     assert(target->pages==extra); target->pages=extra->next;
     if(target->pages) target->pages->list_link=&target->pages;
     kfree(extra);
-    /* Rebalancing need not restore the old topology after erase. */
+    /* 删除后重新平衡不必恢复原有拓扑。 */
     count=0; uint64_t previous=0; bool first=true;
     assert(rb_tree_color(target->page_index.root)==RB_TREE_BLACK);
     verify_mutated(target->page_index.root,0,&previous,&first,&count);
@@ -188,42 +225,42 @@ int main(void) {
         assert(count_stores==1 && !count_adds);
     }
     fail_at=-1;
-    /* Simulate faults/discards between the relaxed sizing sample and lock
-     * acquisition. The locked tree, never the hint, defines clone contents. */
+    /* 模拟在宽松的大小采样与获取锁之间发生缺页/丢弃。复制内容由加锁后的树决定，绝不由提示值决定。 */
     const unsigned hints[]={0,1,n/2,n-1,n,n+17};
     for(unsigned h=0;h<sizeof(hints)/sizeof(*hints);++h){
         unsigned hint=hints[h];atomic_store(&source->populated_pages,hint);
         attempts=locked_attempts=count_stores=0;
         assert(vm_object_clone_anon(source,&copy)==K_OK && copy && !held);
         assert(atomic_load(&copy->populated_pages)==n && count_stores==1);
-        assert(attempts==(hint>n?hint:n));
-        assert(locked_attempts==(hint<n?n-hint:0));
+        unsigned reserved=hint;
+        while(reserved<n)reserved=reserved?reserved*2:1;
+        assert(attempts==reserved && !locked_attempts);
         count=0;target=copy->u.anon.anon_root;
         verify(store->page_index.root,target->page_index.root,0,&count);assert(count==n);
         refs(pages,n,2);vm_object_put(copy);refs(pages,n,1);assert(live_nodes==n);
     }
-    /* Deficit allocation can fail after some page refs were copied. */
+    /* 部分页引用复制完成后，补充分配仍可能失败。 */
     atomic_store(&source->populated_pages,2);
     for(unsigned f=2;f<6;++f){
         fail_at=f;attempts=locked_attempts=count_stores=0;copy=0;
         assert(vm_object_clone_anon(source,&copy)==K_ENOMEM && !copy && !held);
-        assert(live_nodes==n && locked_attempts==f-1 && count_stores==1);refs(pages,n,1);
+        assert(live_nodes==n && !locked_attempts && count_stores==1);refs(pages,n,1);
     }
     fail_at=-1;atomic_store(&source->populated_pages,n);
-    /* Optional reservation must not turn one transient allocation failure
-     * into fork failure. Existing reserved nodes remain usable. */
+    /* 可选预留不能因一次临时分配失败就导致 fork 失败。已有的预留节点仍可继续使用。 */
     persistent_failure=false;
     for(unsigned i=0;i<sizeof(failures)/sizeof(failures[0]);++i){
         fail_at=failures[i];attempts=locked_attempts=count_stores=0;
         assert(vm_object_clone_anon(source,&copy)==K_OK && copy && !held);
-        assert(attempts==n+1 && locked_attempts==n-(unsigned)fail_at);
+        unsigned prepared=(unsigned)fail_at*2U;
+        if(prepared<n)prepared=n;
+        assert(attempts==prepared+1 && !locked_attempts);
         assert(atomic_load(&copy->populated_pages)==n && count_stores==1);
         count=0;target=copy->u.anon.anon_root;
         verify(store->page_index.root,target->page_index.root,0,&count);assert(count==n);
         refs(pages,n,2);vm_object_put(copy);refs(pages,n,1);assert(live_nodes==n);
     }
-    /* Concurrent discards can leave the sizing hint larger than the tree.
-     * Permanent OOM after all needed nodes are reserved must still succeed. */
+    /* 并发丢弃可能使大小提示值大于树的实际大小。所需节点全部预留后，即使之后永久内存不足也必须成功。 */
     persistent_failure=true;atomic_store(&source->populated_pages,n+17);
     fail_at=n;attempts=locked_attempts=count_stores=0;
     assert(vm_object_clone_anon(source,&copy)==K_OK && copy && !held);
@@ -231,11 +268,31 @@ int main(void) {
     count=0;target=copy->u.anon.anon_root;
     verify(store->page_index.root,target->page_index.root,0,&count);assert(count==n);
     refs(pages,n,2);vm_object_put(copy);refs(pages,n,1);assert(live_nodes==n);
-    fail_at=-1;atomic_store(&source->populated_pages,n);
+
+    fail_at=-1;atomic_store(&source->populated_pages,1);
+    hook_source=source;hook_pages=pages;hook_count=n;
+    allocation_hook=grow_during_reservation;hook_at=1;attempts=locked_attempts=0;
+    assert(vm_object_clone_anon(source,&copy)==K_OK && !allocation_hook && !held);
+    assert(!locked_attempts && atomic_load(&copy->populated_pages)==n+1);
+    target=copy->u.anon.anon_root;count=0;
+    verify(store->page_index.root,target->page_index.root,0,&count);assert(count==n+1);
+    refs(pages,n,2);assert(atomic_load(&added_page.refs)==2);
+    vm_object_put(copy);refs(pages,n,1);assert(atomic_load(&added_page.refs)==1);
+    vm_store_lock(&store->lock);rb_tree_erase(&store->page_index,&added_node->index_node);
+    *added_node->list_link=added_node->next;
+    if(added_node->next)added_node->next->list_link=added_node->list_link;
+    atomic_store(&source->populated_pages,n);vm_store_unlock(&store->lock);
+    page_reference_put(&added_page);kfree(added_node);assert(live_nodes==n);
+    /* 锁外补充分配失败时，源树已被并发清空也应成功，不能访问退役节点。 */
+    atomic_store(&source->populated_pages,1);fail_at=1;attempts=locked_attempts=0;
+    allocation_hook=discard_during_failed_reservation;hook_at=1;
+    assert(vm_object_clone_anon(source,&copy)==K_OK && !allocation_hook && !held);
+    assert(!locked_attempts && !live_nodes && !atomic_load(&copy->populated_pages));
+    refs(pages,n,0);vm_object_put(copy);fail_at=-1;
     printf("100000 pages: reinsertion %u comparisons %.2fms; topology clone 0 comparisons %.2fms\n",
            searches,before,after);
     vm_object_put(source); refs(pages,n,0); assert(!live_nodes); free(pages);
-    puts("anon index clone: 100000 off-lock node reservations, six sizing hints/transient failures, persistent OOM rollback, surplus/empty-tree recovery and exact topology/ref ownership passed");
+    puts("anon index clone: 100000 off-lock node reservations and deficit retries, six sizing hints/transient failures, persistent OOM rollback, surplus/empty-tree recovery, growth/discard during deficit allocation and exact topology/ref ownership passed");
 }
 '''
 with tempfile.TemporaryDirectory(prefix='liteos-anon-index-clone-') as directory:
@@ -245,8 +302,8 @@ with tempfile.TemporaryDirectory(prefix='liteos-anon-index-clone-') as directory
                     '-I', str(root / 'include'), '-x', 'c', '-', '-o',
                     str(path / 'test')], input=program, text=True, check=True)
     subprocess.run([str(path / 'test')], check=True)
-    negative = program.replace('if (copy != 0) *spare = copy->next;\n    else copy = kmalloc(sizeof(*copy), 0);',
-                               'copy = kmalloc(sizeof(*copy), 0);')
+    negative = program.replace('if (copy == 0) return K_ENOMEM;\n    *spare = copy->next;',
+                               'if (copy != 0) *spare = copy->next;\n    else copy = kmalloc(sizeof(*copy), 0);\n    if (copy == 0) return K_ENOMEM;')
     assert negative != program
     subprocess.run(['cc', '-O2', '-std=c11', '-Wall', '-Wextra', '-Werror', *flags,
                     '-I', str(root / 'include'), '-x', 'c', '-', '-o',
@@ -254,7 +311,7 @@ with tempfile.TemporaryDirectory(prefix='liteos-anon-index-clone-') as directory
     result = subprocess.run([str(path / 'test')], capture_output=True, text=True,
                             preexec_fn=lambda: resource.setrlimit(resource.RLIMIT_CORE, (0, 0)))
     assert result.returncode != 0 and 'Assertion' in result.stderr
-    print('Negative control rejected: clone allocates every index node under source lock')
+    print('Negative control rejected: clone deficit allocates an index node under source lock')
     negative = program.replace('if (node == 0) break;',
                                'if (node == 0) { status=K_ENOMEM; goto cleanup; }')
     negative = negative.replace('    while (spare != 0) {', 'cleanup:\n    while (spare != 0) {')

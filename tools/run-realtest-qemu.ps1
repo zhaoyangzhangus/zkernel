@@ -261,9 +261,8 @@ try {
                 $nextHmpConnect = $now.AddMilliseconds(250)
             }
         }
-        # Exercise the interrupt-IN path as soon as enumeration completes.
-        # Repeated harmless key taps make this independent of boot timing;
-        # QEMU drops taps sent before the USB keyboard is configured.
+        # 枚举完成后立即测试中断 IN 路径。
+        # 反复发送无害的按键操作，使测试不依赖启动时间；USB 键盘配置完成前发送的按键会被 QEMU 丢弃。
         if (($InputTest -or $FileManagerTest) -and
             $hmpWriter -ne $null -and
             -not $keyboardProbeObserved -and $now -ge $nextKeyboardProbe) {
@@ -317,7 +316,7 @@ try {
         if ($InputTest -and -not $marker) {
             if (-not $inputInjected -and
                 $observedLog -match 'OS_DESKTOP_CACHE_OK') {
-                # Super+3 opens the third dock application (Notepad).
+                # Super+3 打开 Dock 上的第三个应用（记事本）。
                 $hmpWriter.WriteLine('sendkey meta_l-3 20')
                 $inputInjected = $true
             }
@@ -343,7 +342,7 @@ try {
                 $hmpWriter -ne $null -and
                 $keyboardProbeObserved -and
                 $observedLog -match 'OS_DESKTOP_CACHE_OK') {
-                # Super+1 opens the first dock application (File Manager).
+                # Super+1 打开 Dock 上的第一个应用（文件管理器）。
                 $hmpWriter.WriteLine('sendkey meta_l-1 20')
                 $fileManagerLaunchInjected = $true
             }
@@ -354,8 +353,7 @@ try {
             if ($fileManagerNavigationInjected -and
                 $fileManagerKeyIndex -lt $fileManagerKeys.Count -and
                 $hmpWriter -ne $null -and $now -ge $nextFileManagerKey) {
-                # Leave a gap between key holds so each navigation event is
-                # delivered independently by the USB keyboard path.
+                # 在按键保持期间留出间隔，确保 USB 键盘路径分别传递每个导航事件。
                 $key = $fileManagerKeys[$fileManagerKeyIndex]
                 $hmpWriter.WriteLine("sendkey $key 20")
                 ++$fileManagerKeyIndex
@@ -370,7 +368,7 @@ try {
         }
         if ($marker) { break }
         if ($qemuProcess.HasExited) { break }
-        # Keep the check non-blocking; the caller owns any pacing policy.
+        # 保持检查非阻塞；节奏控制由调用方负责。
         [void]$qemuProcess.WaitForExit(0)
     }
     if (-not $InputTest -and -not $FileManagerTest -and -not $marker -and

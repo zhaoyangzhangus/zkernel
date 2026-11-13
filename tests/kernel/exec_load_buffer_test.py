@@ -31,6 +31,7 @@ static unsigned allocations,live,reads,writes,mode,stop;
 static size_t allowed,capacity,peak;
 static unsigned char image[3*1024*1024],output[sizeof(image)+4096];
 static uint64_t start,completed;
+static uint32_t expected_access=ELF_PF_WRITE;
 static void *kmalloc(size_t n,unsigned flags){
  assert(!flags&&n&&n<=ELF_EXEC_LOAD_CHUNK_SIZE&&!live);++allocations;
  if(n>allowed)return NULL;
@@ -46,7 +47,10 @@ static unsigned fault_access(unsigned flags){return flags;}
 static uint64_t exec_load_start(void){return 0;}
 static void exec_load_finish(uint64_t t,unsigned phase,uint64_t n,int status){(void)t;(void)phase;(void)n;(void)status;}
 static int map_exec_range(vm_space_t *s,void *v,uint64_t off,vaddr_t address,size_t n,unsigned prot,bool backed){
- assert(s&&!v&&!off&&n&&(prot&ELF_PF_WRITE)&&!backed&&address<=start);return K_OK;
+ assert(s&&n);
+ if(expected_access==ELF_PF_WRITE)assert(!v&&!off&&(prot&ELF_PF_WRITE)&&!backed&&address<=start);
+ else assert(prot==expected_access && backed==(v!=NULL));
+ return K_OK;
 }
 static int vfs_seek(file_t *f,int64_t off,unsigned whence,uint64_t *out){
  assert(off>=0&&whence==OS_FILE_SEEK_SET);if(mode==1)return K_EIO;
@@ -69,12 +73,13 @@ static int write_address_space(vm_space_t *s,uint64_t address,const void *buf,si
  memcpy(output+address-start,buf,n);completed+=n;return K_OK;
 }
 static int read_vfs_range(file_t *f,uint64_t p,void *buf,size_t n){
- (void)f;(void)p;(void)buf;(void)n;assert(false);return K_EIO;
+ assert(f && p+n<=sizeof(image));++reads;
+ if(mode==2)return K_EIO;
+ memcpy(buf,image+p,n);return K_OK;
 }
-static int x86_translate_page(uint64_t root,uint64_t address,paddr_t *p,void *flags){
- (void)root;(void)address;(void)p;(void)flags;assert(false);return K_EIO;
+static int write_address_space_access(vm_space_t *s,uint64_t address,const void *buf,size_t n,uint32_t access){
+ assert(access==fault_access(expected_access));return write_address_space(s,address,buf,n);
 }
-static int vm_handle_fault(vm_space_t *s,const vm_fault_info_t *f){(void)s;(void)f;assert(false);return K_EIO;}
 '''
 main = r'''
 int main(void){
@@ -102,6 +107,26 @@ int main(void){
    if(sizes[n])assert(reads==(sizes[n]+capacity-1)/capacity);
   }else assert(status==K_EIO);
   if(!sizes[n])assert(!allocations&&!reads&&!writes&&status==K_OK);
+  ++cases;
+ }
+ /* 只读/执行尾页只读取末尾片段；完整文件页保持按需映射，不改变段权限。 */
+ for(unsigned access=1;access<=5;access+=4)
+ for(unsigned length=0;length<=8193;length+=127)
+ for(unsigned failure=0;failure<2;++failure) {
+  expected_access=access;mode=failure?2:0;stop=0;
+  allocations=live=reads=writes=0;capacity=peak=0;completed=0;
+  memset(output,0x75,sizeof(output));start=0x40000d;
+  vm_space_t space={0};file_t file={&space,0};
+  elf64_program_header_t p={ELF_PT_LOAD,access,start,length+4096,length,13};
+  uint64_t tail_start=(start+length)&~(PAGE_SIZE-1);
+  if(tail_start<start)tail_start=start;
+  size_t tail=length-(tail_start-start);
+  int status=map_load_segment_from_vfs(&space,&p,0,&file);
+  assert(!allocations && !live && reads==(unsigned)(tail!=0));
+  assert(status==(failure&&tail?K_EIO:K_OK));
+  assert(writes==(unsigned)(tail && !failure));
+  if(writes)assert(!memcmp(output+tail_start-start,image+13+tail_start-start,tail));
+  for(size_t i=0;i<tail_start-start;++i)assert(output[i]==0x75);
   ++cases;
  }
  printf("ELF buffer: %u sizes/OOM/seek/read/short/invalid-count/write cases; bounded retries, exact content, BSS tail and cleanup PASS\n",cases);

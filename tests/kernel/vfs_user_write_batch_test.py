@@ -5,7 +5,7 @@ import tempfile
 
 root = Path(__file__).resolve().parents[2]
 source = (root / 'kernel/fs/vfs/file_io.c').read_text()
-helpers = source[source.index('static kstatus_t vfs_write_transaction_begin('):
+helpers = source[source.index('static kstatus_t vfs_file_write_begin('):
                  source.index('kstatus_t vfs_truncate_node(')]
 write = source[source.index('static kstatus_t vfs_write_chunk('):
                source.index('kstatus_t vfs_write_kernel(')]

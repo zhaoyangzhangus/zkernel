@@ -8,7 +8,7 @@ source = (root / 'kernel/graphics/launcher.c').read_text()
 start = source.index('static bool desktop_launch_worker_ready(')
 code = source[start:source.index('static void __attribute__((noreturn)) desktop_launch_worker_main(', start)]
 metadata_start = source.index('const char *window_shell_program_path(')
-metadata = source[metadata_start:source.index('bool window_shell_title_matches(', metadata_start)]
+metadata = source[metadata_start:source.index('static bool desktop_process_name_matches(', metadata_start)]
 internal = (root / 'kernel/graphics/internal.h').read_text()
 enum_start = internal.rindex('enum {', 0, internal.index('DESKTOP_APP_NONE'))
 app_enum = internal[enum_start:internal.index('};', enum_start) + 2]
@@ -53,24 +53,25 @@ static void *producer(void *opaque){
 }
 int main(void){
  const char *paths[]={0,"/usr/apps/fileman/fileman","/usr/apps/gshell/gshell","/usr/apps/notepad/notepad",
-  "/usr/apps/settings/settings","/usr/apps/taskmgr/taskmgr","/usr/apps/chrome/chrome-start","/usr/apps/imageview/imageview"};
- const char *titles[]={0,"FILEMAN","SHELL","NOTEPAD","NETWORK","TASK MANAGER","CHROME","IMAGEVIEW"};
+  "/usr/apps/settings/settings","/usr/apps/taskmgr/taskmgr","/usr/apps/chrome/chrome-start","/usr/apps/imageview/imageview",
+  "/usr/apps/settings/wallpaper"};
+ const char *titles[]={0,"FILEMAN","SHELL","NOTEPAD","NETWORK","TASK MANAGER","CHROME","IMAGEVIEW","更换壁纸"};
  for(unsigned app=0;app<100000;++app){
   const char *path=window_shell_program_path(app),*title=window_shell_app_title(app);
-  if(app>=1&&app<=7){assert(path&&title&&!strcmp(path,paths[app])&&!strcmp(title,titles[app]));}
+  if(app>=1&&app<=DESKTOP_APP_WALLPAPER){assert(path&&title&&!strcmp(path,paths[app])&&!strcmp(title,titles[app]));}
   else assert(!path&&!title);
  }
  assert(!window_shell_program_path(UINT32_MAX) && !window_shell_app_title(UINT32_MAX));
  unsigned out=99;
  assert(!desktop_launch_enqueue(1) && !desktop_launch_worker_ready(0));
  atomic_store(&g_window_server.desktop_launch_worker_started,true);
- assert(!desktop_launch_enqueue(0) && !desktop_launch_enqueue(8));
+ assert(!desktop_launch_enqueue(0) && !desktop_launch_enqueue(DESKTOP_APP_WALLPAPER+1U));
  assert(!desktop_launch_dequeue(0) && !desktop_launch_dequeue(&out) && out==99);
  unsigned model[8],head=0,count=0,expected_wakes=0,rng=7;
  for(unsigned i=0;i<200000;++i){
   rng=rng*1664525U+1013904223U;
   if(rng&256U){
-   unsigned app=1+(rng>>16)%7;
+   unsigned app=1+(rng>>16)%DESKTOP_APP_WALLPAPER;
    bool accepted=desktop_launch_enqueue(app);
    assert(accepted==(count<8));
    if(accepted){if(!count)++expected_wakes;model[(head+count)%8]=app;++count;}

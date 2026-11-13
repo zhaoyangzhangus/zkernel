@@ -1,4 +1,4 @@
-/* REFACTOR_P8_E1000_RUNTIME_OWNER */
+/* REFACTOR_P8_E1000_RUNTIME_OWNER：E1000 运行时处理。 */
 
 #include <arch/x86_64/cpu.h>
 #include <arch/x86_64/paging.h>
@@ -30,11 +30,11 @@ static bool e1000_build_tcp_reset_reply(const e1000_rx_packet_t *packet,
     reply->valid = true;
     reply->window = 0U;
     if ((packet->flags & NET_TCP_FLAG_ACK) != 0U) {
-        /* RFC 9293: reset an ACK-bearing segment at its acknowledged seq. */
+        /* RFC 9293：对带 ACK 的报文段复位时，序列号设为其确认号。 */
         reply->flags = NET_TCP_FLAG_RST;
         reply->sequence = packet->acknowledgement;
     } else {
-        /* A reset to a non-ACK segment acknowledges its sequence space. */
+        /* 对不带 ACK 的报文段执行复位时，需确认其序列号空间。 */
         reply->flags = NET_TCP_FLAG_RST | NET_TCP_FLAG_ACK;
         reply->acknowledgement = packet->sequence + packet->payload_length;
         if ((packet->flags & NET_TCP_FLAG_SYN) != 0U)
@@ -47,10 +47,9 @@ static bool e1000_build_tcp_reset_reply(const e1000_rx_packet_t *packet,
 
 static bool e1000_tcp_self_test_peer_reply(const e1000_state_t *state,
                                           const e1000_rx_packet_t *packet) {
-    /* PHY loopback returns our SYN-ACK to the synthetic peer. Its ACK has
-     * already been injected by e1000_tcp_loopback_peer_ack[6]; there is no
-     * peer socket to receive this SYN-ACK, and resetting it kills the test's
-     * real accepted socket. Never suppress resets on the live network. */
+    /* PHY 回环会将我们的 SYN-ACK 返回给模拟对端。其 ACK 已由
+     * e1000_tcp_loopback_peer_ack[6] 注入；没有对端套接字接收此 SYN-ACK，复位该连接
+     * 会破坏测试实际接受的套接字。绝不能在真实网络中抑制复位。 */
     return state->phy_loopback && state->tcp_loopback_peer_enabled &&
            state->tcp_loopback_synack_seen && packet->payload_length == 0U &&
            packet->flags == (NET_TCP_FLAG_SYN | NET_TCP_FLAG_ACK);
@@ -119,8 +118,8 @@ static bool e1000_send_tcp_reply(e1000_state_t *state,
                reply->sequence, reply->acknowledgement, reply->flags,
                reply->window, 0, 0U, &frame_length);
     if (status == K_OK) status = net_device_send(&state->device, frame, frame_length);
-    /* Failed ACK output must reach the transport's retry owner for either
-     * family; a local TX queue being full is not successful delivery. */
+    /* 两种协议族的 ACK 输出失败都必须交给传输层重试所有者；本地 TX 队列已满不代表
+     * 数据成功发送。 */
     if (ipv6) {
         socket_tcp_ack_output_ipv6(packet->destination_address6, packet->destination_port,
             packet->source_address6, packet->source_port, reply->flags, status);
@@ -210,8 +209,7 @@ bool e1000_dispatch_software_queues(e1000_state_t *state) {
                     }
                 } else {
                     socket_tcp_reply_t reply = {0};
-                    /* ACK is independent of payload/PSH/FIN. Complete the
-                     * local send before applying receive-window policy. */
+                    /* ACK 与负载/PSH/FIN 无关。应用接收窗口策略前，先完成本地发送。 */
                     if ((packet->flags & NET_TCP_FLAG_ACK) != 0U) {
                         (void)socket_inject_tcp_ack_ipv4_window(
                             packet->source_address, packet->source_port,
@@ -408,14 +406,12 @@ bool e1000_process_rx_frame(e1000_state_t *state, const uint8_t *buffer,
 #endif
             /* 鍙湁閰嶇疆浜嗘湰鏈?IPv4 涓旂洰鏍囧湴鍧€鍛戒腑鏃舵墠鍥炲 ARP銆?*/
             if (!e1000_arp_reply(state, &arp_view)) received = true;
-            /* Neighbor resolution uses the bounded local retry clock. Never
-             * advance the transport clock to flush it: that consumes network
-             * retry budget and moves unrelated flights' deadlines forward. */
+            /* 邻居解析使用有界的本地重试时钟。绝不能推进传输时钟来刷新解析；这会消耗
+             * 网络重试次数，并提前其他无关传输的截止时间。 */
             socket_tcp_poll(x86_read_tsc());
     } else if (length != 0U &&
             net_udp_parse_ipv4(buffer, length, &view) == K_OK) {
-            /* Only metadata is staged here. Queue admission copies the DMA
-             * payload before the caller can recycle its RX descriptor. */
+            /* 此处只暂存元数据。请求进入队列时会复制 DMA 负载，之后调用方才能回收其 RX 描述符。 */
             memset(&packet, 0, offsetof(e1000_rx_packet_t, payload));
             packet.family = OS_AF_INET4;
             packet.protocol = SOCKET_PROTOCOL_UDP;

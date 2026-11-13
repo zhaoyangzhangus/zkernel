@@ -94,8 +94,8 @@ if (@(Get-ChildItem -LiteralPath $vendorSourceRoot -Recurse -Force -Directory -F
     Fail-Gate 'vendor source contains repository metadata'
 }
 
-# Recompute the expected source selection directly from the immutable upstream
-# source-list files and compare it byte-for-byte with the generated report.
+# 直接根据不可变的上游源文件清单重新计算预期的源码选择，
+# 并逐字节与生成的报告进行比较。
 $sourceLists = @(
     [PSCustomObject]@{ Component = 'rm'; ListPath = (Join-Path $vendorSourceRoot 'src\nvidia\srcs.mk') },
     [PSCustomObject]@{ Component = 'modeset'; ListPath = (Join-Path $vendorSourceRoot 'src\nvidia-modeset\srcs.mk') }
@@ -246,8 +246,8 @@ for ($i = $unresolvedStart + 1; $i -lt $nmFailureStart; $i++) {
 $nmFailureRows = @($unresolvedLines | Select-Object -Skip ($nmFailureStart + 1) | Where-Object { $_ -and $_[0] -ne '#' })
 if ($nmFailureRows.Count -ne 0) { Fail-Gate 'nm failures are present' }
 
-# Independently recompute symbol definitions and undefined references from the
-# compiled objects. This proves that unresolved_symbols.txt is exhaustive.
+# 从已编译对象中独立重新计算符号定义和未定义引用，
+# 以确认 unresolved_symbols.txt 已完整列出所有项目。
 $definitions = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
 $actualUnresolved = New-Object 'System.Collections.Generic.Dictionary[string,object]' ([System.StringComparer]::Ordinal)
 $actualTypes = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([System.StringComparer]::Ordinal)

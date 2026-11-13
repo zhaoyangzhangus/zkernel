@@ -132,8 +132,7 @@ static bool nv_port_rwlock_read_ready(void *context) {
             atomic_load_explicit(&lock->writers_waiting,
                                  memory_order_acquire) != 0U ||
             state >= NV_PORT_RW_WRITER - 1U) return false;
-        /* Another reader's CAS is contention, not a condition to sleep on:
-         * it may leave no writer that would subsequently wake this reader. */
+        /* 其他读取者的 CAS 竞争不是可休眠的条件：后续可能没有写入者来唤醒当前读取者。 */
         if (atomic_compare_exchange_weak_explicit(
                 &lock->state, &state, state + 1U,
                 memory_order_acquire, memory_order_relaxed)) return true;
@@ -153,8 +152,7 @@ void nv_port_rwlock_read_lock(nv_port_rwlock_t *lock) {
 #ifdef NV_PORT_HOST_TEST
     while (!nv_port_rwlock_read_ready(lock)) thrd_yield();
 #else
-    /* The predicate acquires the lock under wait publication protection,
-     * including a release racing with subscription. Never spin out a holder. */
+    /* 谓词会在等待发布保护下获取锁，也能处理释放操作与订阅并发的情况。绝不能因自旋而抢占锁持有者。 */
     while (wait_on_queue(&lock->readers_waitq, nv_port_rwlock_read_ready,
                           lock, UINT64_MAX) != K_OK) {}
 #endif
@@ -191,9 +189,8 @@ void nv_port_rwlock_write_unlock(nv_port_rwlock_t *lock) {
     if (lock == 0) return;
     atomic_store_explicit(&lock->state, 0U, memory_order_release);
 #ifndef NV_PORT_HOST_TEST
-    /* Always notify both classes. A waiting writer can be between its count
-     * increment and subscription; skipping readers based on that count
-     * could strand them when the writer has already acquired/released. */
+    /* 始终通知这两类等待者。等待中的写入者可能处于计数递增与订阅之间；若根据该计数跳过读取者，
+     * 写入者已经获取并释放锁时，读取者可能会一直无法唤醒。 */
     wake_one(&lock->writers_waitq);
     wake_all(&lock->readers_waitq);
 #endif

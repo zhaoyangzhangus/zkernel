@@ -100,7 +100,7 @@ static void register_request(io_request_t *request,process_t *process) {
  assert(list_empty(&request->object.signal_waiters.waiters));
  assert(request->object.signal_waiters.waiters.next==&request->object.signal_waiters.waiters);
  assert(!atomic_load(&request->object.signal_waiters.lock.state) && !atomic_load(&request->object.signal_waiters.sequence));
- /* Registration must acquire its own reference, preserving this initial one. */
+ /* 注册必须获取自己的引用，并保留初始引用。 */
  assert(io_request_register_user(request)==K_OK);
  assert(atomic_load(&request->object.refs.value)==2);
 }
@@ -224,8 +224,8 @@ static void verify_staging_lifetime(void){
   if(mode==1)io_complete(r,K_OK,bytes);else assert(io_cancel(r)==K_OK);
   assert(io_request_is_terminal(r) && r->private_data==c);
   assert(atomic_load(&r->object.refs.value)==2 && atomic_load(&freed_staging)==before);
-  /* The actual submission validator must remain safe even after cancellation.
-   * No device operation runs: the request has already reached its terminal state. */
+  /* 即使请求已取消，真实提交验证器也必须保持安全。
+   * 不会执行设备操作：请求已经进入终态。 */
   assert(io_submit(r)==(mode==1?K_OK:K_ECANCELED));
   for(unsigned i=0;i<count;++i)for(unsigned j=0;j<17;++j){
    assert(r->vecs[i].base==c->buffers[i] && r->vecs[i].length==17);
@@ -367,7 +367,7 @@ with tempfile.TemporaryDirectory(prefix='liteos-io-registry-') as directory:
         return subprocess.run([binary],capture_output=True,text=True,timeout=30)
     result=run(code);assert result.returncode==0,result.stderr;print(result.stdout.strip())
     negative=code.replace('request_id & (IO_REGISTRY_BUCKETS - 1U)', '0')
-    # Keep the unused parameter explicit under -Werror.
+    # 显式保留未使用参数，确保 -Werror 下也能通过。
     negative=negative.replace('return &g_io_registry[0];', '(void)request_id; return &g_io_registry[0];')
     result=run(negative);assert result.returncode!=0,result.stderr
     print('Negative control rejected: all requests collapse into one full-scan bucket')

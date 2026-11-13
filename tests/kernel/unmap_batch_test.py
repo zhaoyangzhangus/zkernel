@@ -92,8 +92,8 @@ int main(void) {
     reset(64,true);
     assert(x86_unmap_user_page_batch((paddr_t){4096},expected,64,&removed)==K_OK);
     assert(removed==64 && flushes==1 && releases==4 && !locks);
-    /* One surviving leaf at the far end makes rescanning the same table
-       for each removed page expensive, even though only one PT was touched. */
+    /* 末尾仍有一个叶节点时，即使只修改了一个 PT，对每个移除页面重复扫描同一张表也
+     * 会造成较大开销。 */
     reset(64,false);tables[4][511]=0x200000|PTE_PRESENT|PTE_USER;
     assert(x86_unmap_user_page_batch((paddr_t){4096},expected,64,&removed)==K_OK);
     assert(removed==64 && flushes==1 && !releases && !locks);
@@ -104,8 +104,7 @@ int main(void) {
     tables[4][511]=tables[5][511]=0x200000|PTE_PRESENT|PTE_USER;
     assert(x86_unmap_user_page_batch((paddr_t){4096},expected,64,&removed)==K_OK);
     assert(removed==64 && !releases && empty_checks<=1026);
-    /* The final address in a PT/PD group may be an unmapped hole. It must
-       not suppress reclamation of ancestors emptied by an earlier group. */
+    /* PT/PD 组的最后一个地址可能是未映射空洞。它不能阻止回收先前组中已清空的上级表。 */
     for (unsigned shift=21;shift<=39;shift+=9) {
         reset(1,false);
         uint64_t trailing_hole[]={0,1ULL<<shift};

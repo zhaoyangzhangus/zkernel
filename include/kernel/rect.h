@@ -15,9 +15,24 @@ static inline bool rect_is_empty(Rect rect) {
     return rect.x0 >= rect.x1 || rect.y0 >= rect.y1;
 }
 
+/* 窗口外框可越过 32 位坐标范围，比较前不得收窄；空区域和仅贴边均不相交。 */
+static inline bool rect_intersects_bounds(Rect rect, int64_t left, int64_t top,
+    int64_t right, int64_t bottom) {
+    return !rect_is_empty(rect) && left < right && top < bottom &&
+           left < rect.x1 && right > rect.x0 &&
+           top < rect.y1 && bottom > rect.y0;
+}
+
 static inline bool rect_intersects(Rect a, Rect b) {
-    return a.x0 < b.x1 && b.x0 < a.x1 &&
-           a.y0 < b.y1 && b.y0 < a.y1;
+    return rect_intersects_bounds(a, b.x0, b.y0, b.x1, b.y1);
+}
+
+/* 非空矩形完全位于宽坐标范围内；贴合边界有效，空或反向范围无效。 */
+static inline bool rect_inside_bounds(Rect rect, int64_t left, int64_t top,
+    int64_t right, int64_t bottom) {
+    return !rect_is_empty(rect) && left < right && top < bottom &&
+           (int64_t)rect.x0 >= left && (int64_t)rect.y0 >= top &&
+           (int64_t)rect.x1 <= right && (int64_t)rect.y1 <= bottom;
 }
 
 /* 将宽坐标收窄至 Rect 前先执行裁剪。失败时输出保持不变；显示范围必须落在 Rect

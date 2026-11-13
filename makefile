@@ -4,15 +4,14 @@ LD = $(TOOLPREFIX)gcc
 AR = $(TOOLPREFIX)ar
 OBJCOPY = $(TOOLPREFIX)objcopy
 OBJDUMP = $(TOOLPREFIX)objdump
-# These programs run in the build environment rather than in System.  Keep
-# them on the native or WSL host so `make test` and build-id do not need Wine.
+# 这些程序运行在构建环境中，而不是 System 内。将它们留在本机或 WSL 主机上，
+# 这样 `make test` 和 build-id 就不需要 Wine。
 HOSTCC ?= gcc
 
-# The original Windows build used a dedicated x86_64-elf toolchain for the
-# dynamic ELF user images.  On Linux the native GNU ELF tools produce the same
-# freestanding output, so prefer the dedicated toolchain when installed and
-# otherwise use the distro target prefix (or the unprefixed tools as a last
-# resort).  An explicit command-line/environment value always wins.
+# 原有的 Windows 构建使用专用的 x86_64-elf 工具链生成动态 ELF 用户映像。
+# 在 Linux 上，本机 GNU ELF 工具也能生成相同的 freestanding 产物，因此优先使用
+# 已安装的专用工具链；否则使用发行版目标前缀，最后才使用无前缀工具。
+# 命令行或环境变量中的显式设置始终优先。
 ifeq ($(origin ELFTOOLPREFIX),undefined)
 ifeq ($(OS),Windows_NT)
 ELFTOOLPREFIX = x86_64-elf-
@@ -37,8 +36,8 @@ OS_PHASE10 ?= 0
 OS_PHASE13 ?= 0
 OS_XHCI_DIAGNOSTIC_BOT ?= 0
 OS_AUTOSTART_CHROME ?= 0
-# Match run-qemu.sh: plain incremental builds must retain the normal desktop.
-# Headless/self-test consumers can still opt out explicitly with =0.
+# 与 run-qemu.sh 保持一致：普通增量构建必须保留常规桌面。
+# 无头或自检调用方仍可显式设为 =0 关闭。
 OS_INTERACTIVE_DESKTOP ?= 1
 OS_NVIDIA ?= $(if $(wildcard $(BUILD)/nvidia/driver/driver.o),1,0)
 KERNEL_EXTRA_CFLAGS ?=
@@ -49,9 +48,9 @@ QEMU_TEST_CPU ?= 4
 ifeq ($(DEBUG),1)
 DEBUG_CFLAGS = -O0 -g3 -fno-omit-frame-pointer
 else ifeq ($(DEBUG),2)
-# Keep source-level symbols for the interactive debugger while retaining the
-# release optimisation level. The graphical shell redraws the full framebuffer
-# after pointer/key events, so -O1 makes input look like a stalled guest.
+# 保留源码级符号供交互式调试器使用，同时维持发布版优化级别。
+# 图形 shell 在指针或按键事件后会重绘整个帧缓冲区，因此 -O1 会让输入看起来像
+# 客户机卡住了。
 DEBUG_CFLAGS = -O2 -g3 -fno-omit-frame-pointer
 else
 DEBUG_CFLAGS = -O2
@@ -93,9 +92,8 @@ USER_LIBC_SOURCES = user/libc/memory.c user/libc/syscall.c \
                     user/libc/posix_compat.c
 USER_LIBC_ASM_SOURCES = user/libc/setjmp.S user/libc/signal_restorer.S
 USER_LIBC_ASM_SOURCES += user/libc/posix_compat.S
-# The freestanding CRT calls the application's main().  Keep that object out
-# of both shared and static libraries: the shared object must not carry an
-# unresolved application symbol, and legacy PE services do not define main().
+# freestanding CRT 会调用应用程序的 main()。不要将该对象放入共享库或静态库：
+# 共享对象不能带有未解析的应用程序符号，而且旧版 PE 服务没有定义 main()。
 DYNAMIC_LIBC_SOURCES = $(USER_LIBC_SOURCES)
 USER_LIBC_OBJECTS = $(patsubst user/libc/%.c,$(BUILD)/user/libc-%.o,$(USER_LIBC_SOURCES))
 USER_LIBC_ASM_OBJECTS = $(patsubst user/libc/%.S,$(BUILD)/user/libc-asm-%.o,$(USER_LIBC_ASM_SOURCES))
@@ -113,11 +111,10 @@ ELF_COMMON_CFLAGS = $(DEBUG_CFLAGS) -Wall -Wextra -Werror -ffreestanding -fno-bu
                     -I$(BLEND2D_DIR) -DOS_REALTEST=$(OS_REALTEST) \
                     -DOS_DEBUG_SERIAL=$(OS_DEBUG_SERIAL) -MMD -MP
 ELF_RUNTIME_CFLAGS = $(ELF_COMMON_CFLAGS) -fPIC
-# Keep executable data references position independent as well.  Native
-# Debian GCC emits R_X86_64_COPY for external data under -fPIE, while the
-# freestanding System loader intentionally handles GOT/PLT relocations and
-# does not provide a host ABI copy-relocation path.  -fPIC produces the same
-# PIE-compatible code without making the image depend on that ABI detail.
+# 可执行文件中的数据引用也必须保持位置无关。Debian 原生 GCC 在 -fPIE 下会为外部
+# 数据生成 R_X86_64_COPY，而 freestanding System 加载器会有意处理 GOT/PLT 重定位，
+# 不提供主机 ABI 的复制重定位路径。-fPIC 可生成同样兼容 PIE 的代码，
+# 同时避免映像依赖这一 ABI 细节。
 ELF_APP_CFLAGS = $(ELF_COMMON_CFLAGS) -fPIC
 ELF_LINK_FLAGS = --build-id=none
 ELF_RUNTIME_DIR = $(BUILD)/elf
@@ -179,9 +176,8 @@ ifeq ($(OS_PHASE13),1)
 PHASE13_KERNEL_OBJECT = $(BUILD)/kernel/linux-phase13-test.o
 endif
 
-# Every kernel object embeds the serial-debug switch.  Keep the stamp as a
-# shared prerequisite so changing OS_DEBUG_SERIAL cannot leave a mixed
-# image with only entry.o rebuilt.
+# 每个内核对象都会嵌入串口调试开关。将此戳文件设为共享前置依赖，
+# 这样修改 OS_DEBUG_SERIAL 后，不会只重建 entry.o 而留下混合映像。
 KERNEL_DEBUG_STAMP_TARGETS = $(wildcard $(BUILD)/kernel/*.o)
 $(KERNEL_DEBUG_STAMP_TARGETS): $(DEBUG_SERIAL_STAMP)
 $(FRAME_TRACE_KERNEL_OBJECTS): $(FRAME_TRACE_STAMP)
@@ -192,10 +188,9 @@ ifneq ($(FRAME_TRACE_STAMP_VALUE),$(OS_ENABLE_FRAME_TRACE))
 $(FRAME_TRACE_STAMP): FORCE
 endif
 
-# GNU objcopy's binary backend derives symbols from its input pathname and
-# replaces every non-alphanumeric separator with an underscore.  Keep the
-# spelling in one place so embedded user-program blobs work with an alternate
-# BUILD directory as well as the default build/ directory.
+# GNU objcopy 的 binary 后端会根据输入路径生成符号，并将所有非字母数字分隔符
+# 替换为下划线。将符号拼写集中定义，使嵌入的用户程序二进制在默认 build/ 目录
+# 和其他 BUILD 目录下都能正常工作。
 binary_input_symbol = $(subst -,_,$(subst .,_,$(subst /,_,$(1))))
 LOADER_OBJECTS = $(BUILD)/loader/main.o $(BUILD)/loader/elf.o $(BUILD)/loader/sha256.o \
                  $(BUILD)/loader/memory_map.o
@@ -229,11 +224,9 @@ USER_WGET_LDFLAGS = -nostdlib -Wl,--entry,wget_entry -Wl,--subsystem,0 \
                      -Wl,--image-base,0x400000 -Wl,--section-alignment,0x1000 \
                      -Wl,--file-alignment,0x1000 -Wl,--disable-auto-import
 
-# OpenSSL is built as freestanding static libraries for the Wget user image.
-# Keep this configuration independent from USER_CFLAGS: OpenSSL needs the
-# SysV ABI and SSE for its C floating-point parameter helpers, while the rest
-# of the legacy user image deliberately disables SSE. The kernel saves the
-# user FPU state on context switches.
+# OpenSSL 为 Wget 用户映像构建为 freestanding 静态库。
+# 此配置必须独立于 USER_CFLAGS：OpenSSL 的 C 浮点参数辅助函数需要 SysV ABI 和 SSE，
+# 而旧版用户映像的其余部分会有意禁用 SSE。内核会在上下文切换时保存用户态 FPU 状态。
 OPENSSL_DIR = third_party/openssl
 include $(OPENSSL_DIR)/sources.mk
 OPENSSL_CRYPTO_SOURCES = $(addprefix $(OPENSSL_DIR)/,$(OPENSSL_CRYPTO_SOURCE_FILES))
@@ -266,16 +259,14 @@ OPENSSL_CFLAGS = -O2 -ffreestanding -fno-builtin \
                  -DMODULESDIR=\"/lib/ossl-modules\" \
                  -DNDEBUG -MMD -MP
 
-# Blend2D is compiled for the ELF user runtime with its reference rasterizer.
-# The x86_64-elf toolchain intentionally has no libstdc++ headers, therefore
-# the small C++ language-library compatibility layer is kept beside the
-# vendored source and the final shared object links only against System libc.
+# Blend2D 为 ELF 用户态运行环境及其参考光栅器进行编译。
+# x86_64-elf 工具链有意不包含 libstdc++ 头文件，因此小型 C++ 语言库兼容层
+# 与引入的第三方源码放在一起，最终共享对象只链接 System libc。
 BLEND2D_DIR = third_party/blend2d
 include $(BLEND2D_DIR)/sources.mk
-# System currently uses the reference Blend2D pipeline: its native VM ABI does
-# not provide the executable-memory contract required by AsmJit.  Keep JIT an
-# explicit opt-in for host experiments instead of making every desktop launch
-# enter the unsupported JIT initialization path.
+# System 当前使用 Blend2D 参考流水线：其原生 VM ABI 不提供 AsmJit 所需的
+# 可执行内存契约。JIT 仅作为主机实验的显式选项，避免每次启动桌面都进入
+# 尚不支持的 JIT 初始化路径。
 BLEND2D_ENABLE_JIT ?= 0
 ASMJIT_DIR = $(BLEND2D_DIR)/3rdparty/asmjit
 include $(BLEND2D_DIR)/asmjit-sources.mk
@@ -328,10 +319,9 @@ BLEND2D_CXXFLAGS = -O2 -Wall -Wextra -Werror -Wno-unused-function \
                    -I$(BLEND2D_DIR)/platform/include \
                    -I$(BLEND2D_DIR) -I$(ASMJIT_DIR) -Iinclude \
                    -Iuser/libc/include -MMD -MP
-# The native Linux compiler defines __linux__, but these sources are being
-# compiled against System' guest sys/stat.h, not the host libc ABI.  Prevent
-# Blend2D from selecting Linux-only st_mtim/stat feature branches; the
-# System ABI intentionally exposes the portable st_mtime field instead.
+# Linux 原生编译器会定义 __linux__，但这些源码使用的是 System 客户机的 sys/stat.h，
+# 而非主机 libc ABI。阻止 Blend2D 选择 Linux 专用的 st_mtim/stat 分支；
+# System ABI 有意只公开可移植的 st_mtime 字段。
 BLEND2D_CXXFLAGS += -U__linux__
 ifeq ($(BLEND2D_ENABLE_JIT),1)
 BLEND2D_CXXFLAGS += -DASMJIT_STATIC -DASMJIT_NO_FOREIGN -DASMJIT_NO_STDCXX \
@@ -340,8 +330,8 @@ else
 BLEND2D_CXXFLAGS += -DBL_BUILD_NO_JIT
 endif
 
-# The MinGW compiler predefines Windows compatibility macros. Clear all of
-# them so OpenSSL selects the System POSIX-shaped ABI instead of the host CRT.
+# MinGW 编译器会预定义 Windows 兼容宏。清除这些宏，使 OpenSSL 选择 System 的
+# POSIX 形式 ABI，而不是主机 CRT。
 USER_NETD_PE = $(BUILD)/user/netd.pe
 USER_NETD_ELF = $(BUILD)/user/netd.elf
 USER_NETD_LDFLAGS = -nostdlib -Wl,--entry,netd_entry -Wl,--subsystem,0 \
@@ -600,8 +590,7 @@ $(ELF_RUNTIME_DIR)/$(1).elf: makefile $(ELF_RUNTIME_DIR)/libc-crt-start.o \
 endef
 
 $(eval $(call DYNAMIC_TEXT_APP_RULE,gshell,user/desktop/gshell/main.c))
-# The launcher has no window/text renderer. Do not load the graphics library
-# merely to select arguments and exec the browser.
+# 启动器没有窗口或文本渲染器。不要仅为了选择参数并 exec 浏览器而加载图形库。
 $(ELF_RUNTIME_DIR)/chrome-start.o: user/runtime/chrome_start.c | $(ELF_RUNTIME_DIR)
 	$(ELFCC) $(ELF_APP_CFLAGS) -c $< -o $@
 
@@ -1030,7 +1019,7 @@ $(BUILD)/kernel/linux-phase11-test.o: kernel/process/linux_phase11_test.c \
 		include/kernel/linux_abi.h include/kernel/elf_loader.h | $(BUILD)/kernel
 	$(CC) $(KERNEL_CFLAGS) -c $< -o $@
 
-$(BUILD)/kernel/linux-phase12-test.o: kernel/process/linux_phase12_test.c \
+$(BUILD)/kernel/linux-phase12-test.o: kernel/graphics/linux_phase12_test.c \
 		include/kernel/linux_abi.h include/kernel/elf_loader.h \
 		include/kernel/window_server.h include/uapi/linux_abi.h | $(BUILD)/kernel
 	$(CC) $(KERNEL_CFLAGS) -c $< -o $@
@@ -1610,10 +1599,6 @@ $(BUILD)/kernel/graphics-input-pump.o: kernel/graphics/input_pump.c \
 		kernel/graphics/internal.h | $(BUILD)/kernel
 	$(CC) $(KERNEL_CFLAGS) -c $< -o $@
 
-$(BUILD)/kernel/graphics-present.o: kernel/graphics/present.c \
-		kernel/graphics/internal.h | $(BUILD)/kernel
-	$(CC) $(KERNEL_CFLAGS) -c $< -o $@
-
 $(BUILD)/kernel/graphics-present-cursor.o: kernel/graphics/present_cursor.c \
 		kernel/graphics/internal.h | $(BUILD)/kernel
 	$(CC) $(KERNEL_CFLAGS) -c $< -o $@
@@ -1701,6 +1686,10 @@ $(BUILD)/kernel/graphics-render-plan.o: kernel/graphics/render_plan.c \
 
 $(BUILD)/kernel/graphics-damage-plan.o: kernel/graphics/damage_plan.c \
 		kernel/graphics/internal.h | $(BUILD)/kernel
+	$(CC) $(KERNEL_CFLAGS) -c $< -o $@
+
+$(BUILD)/kernel/graphics-parallel.o: kernel/graphics/parallel.c \
+        kernel/graphics/internal.h | $(BUILD)/kernel
 	$(CC) $(KERNEL_CFLAGS) -c $< -o $@
 
 $(BUILD)/kernel/graphics-compose-cpu.o: kernel/graphics/compose_cpu.c \
@@ -1931,7 +1920,6 @@ $(KERNEL_PE): $(BUILD)/kernel/entry.o $(BUILD)/kernel/runtime-init.o \
                                     $(BUILD)/kernel/graphics-input-drag.o \
                                     $(BUILD)/kernel/graphics-input-events.o \
                                     $(BUILD)/kernel/graphics-input-pump.o \
-                                    $(BUILD)/kernel/graphics-present.o \
                                     $(BUILD)/kernel/graphics-present-cursor.o \
                                     $(BUILD)/kernel/graphics-shell.o \
                                     $(BUILD)/kernel/graphics-desktop-interaction.o \
@@ -1955,6 +1943,7 @@ $(KERNEL_PE): $(BUILD)/kernel/entry.o $(BUILD)/kernel/runtime-init.o \
                                     $(BUILD)/kernel/graphics-render-plan.o \
                                     $(BUILD)/kernel/graphics-damage-plan.o \
                                      $(BUILD)/kernel/graphics-compose-cpu.o \
+                                     $(BUILD)/kernel/graphics-parallel.o \
                                      $(BUILD)/kernel/graphics-server.o \
                                      $(BUILD)/kernel/graphics-damage.o \
                                     $(BUILD)/kernel/net-core.o \
@@ -2105,8 +2094,7 @@ ifeq ($(OS_PHASE13),1)
 PHASE13_TEST_IMAGE = $(BUILD)/esp/usr/apps/linux-events-test/linux-events-test
 endif
 
-# Refresh diagnostic images already installed by an explicit test build;
-# fresh desktop images do not acquire extra test applications.
+# 更新显式测试构建中已安装的诊断映像；全新桌面映像不会额外加入测试应用。
 # 兼容旧诊断副本：先在新归属重建，清理脚本随后才允许删除旧文件。
 EXISTING_DIAGNOSTIC_IMAGES = $(foreach app,fat-fsync-probe linux-events-test,\
     $(if $(wildcard $(BUILD)/esp/sbin/$(app) $(BUILD)/esp/usr/apps/$(app)/$(app)),\
@@ -2204,8 +2192,8 @@ endif
 clean:
 	rm -rf $(BUILD)
 
-# Invalidate existing ELF objects made before the wide-character ABI guard
-# existed. Newly compiled objects also track it through their .d files.
+# 使宽字符 ABI 保护机制引入前生成的 ELF 对象失效。新编译的对象也会通过 .d 文件
+# 跟踪该保护机制。
 $(wildcard $(ELF_RUNTIME_DIR)/*.o): user/runtime/elf_abi.h
 
 # 让头文件修改自动使相关 Loader/Kernel 对象失效，避免 ABI 结构体错位。

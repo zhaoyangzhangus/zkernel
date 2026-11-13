@@ -1,3 +1,4 @@
+#include <kernel/pixel_blend.h>
 #include <kernel/display.h>
 #include <kernel/sched.h>
 #include "internal.h"
@@ -11,6 +12,15 @@ void window_present_cursor_reset_locked(void) {
     g_window_server.presented_pointer_valid = false;
 }
 
+/* 仅由合成工作线程在输出成功后调用；坐标与形状必须属于同一次已显示提交。 */
+void window_present_cursor_record(uint32_t pointer_x, uint32_t pointer_y,
+                                  uint32_t shape) {
+    g_window_server.presented_pointer_x = pointer_x;
+    g_window_server.presented_pointer_y = pointer_y;
+    g_window_server.presented_cursor_shape = shape;
+    g_window_server.presented_pointer_valid = true;
+}
+
 bool window_present_self_test(void) {
     return WINDOW_CURSOR_WIDTH != 0U &&
            WINDOW_CURSOR_HEIGHT != 0U &&
@@ -19,35 +29,17 @@ bool window_present_self_test(void) {
            g_linux_cursor_argb[0] == 0U;
 }
 
-static uint32_t cursor_blend_xrgb(uint32_t background, uint32_t cursor) {
-    uint32_t alpha = cursor >> 24;
-    uint32_t color = cursor & 0x00FFFFFFU;
-    uint32_t inverse;
 
-    if (alpha == 0U) return background;
-    if (alpha >= 255U) return color;
-
-    inverse = 255U - alpha;
-    return (((((background >> 16) & 0xFFU) * inverse +
-              ((color >> 16) & 0xFFU) * alpha + 127U) / 255U) << 16) |
-           (((((background >> 8) & 0xFFU) * inverse +
-              ((color >> 8) & 0xFFU) * alpha + 127U) / 255U) << 8) |
-           (((background & 0xFFU) * inverse +
-             (color & 0xFFU) * alpha + 127U) / 255U);
-}
 
 /* 包围盒只裁剪一次；恢复背景按行复制，混合光标逐像素直接写最终输出。 */
 static void cursor_publish_box(volatile uint32_t *destination,
     int64_t origin_x, int64_t origin_y, bool draw_cursor, uint32_t shape) {
-    int64_t left = origin_x < 0 ? 0 : origin_x;
-    int64_t top = origin_y < 0 ? 0 : origin_y;
-    int64_t right = origin_x + (int64_t)WINDOW_CURSOR_WIDTH;
-    int64_t bottom = origin_y + (int64_t)WINDOW_CURSOR_HEIGHT;
-    if (right > (int64_t)g_window_server.display_width)
-        right = g_window_server.display_width;
-    if (bottom > (int64_t)g_window_server.display_height)
-        bottom = g_window_server.display_height;
-    if (left >= right || top >= bottom) return;
+    Rect bounds;
+    if (!rect_clip_to_extent(origin_x, origin_y,
+            origin_x + WINDOW_CURSOR_WIDTH, origin_y + WINDOW_CURSOR_HEIGHT,
+            g_window_server.display_width, g_window_server.display_height, &bounds)) return;
+    int64_t left = bounds.x0, top = bounds.y0;
+    int64_t right = bounds.x1, bottom = bounds.y1;
 
     uint32_t pixels = (uint32_t)(right - left);
     for (int64_t y = top; y < bottom; ++y) {
@@ -67,7 +59,7 @@ static void cursor_publish_box(volatile uint32_t *destination,
             uint32_t background = g_window_server.composite_framebuffer[offset];
             uint32_t cursor = window_cursor_pixel(shape, first_column + column, cursor_row);
             display_core_publish_xrgb8888_pixel(destination + offset,
-                cursor_blend_xrgb(background, cursor));
+                control_blend_cursor_xrgb(background, cursor));
         }
     }
 }
@@ -76,7 +68,7 @@ static void cursor_publish_box(volatile uint32_t *destination,
  * 将保留画面与光标直接混合到最终输出目标。保留画面不含光标且不被改写，
  * 无需读取 WC 显存，也不依赖隐藏页面或翻页。
  */
-bool window_present_cursor_into_buffer(volatile uint32_t *destination,
+static bool window_present_cursor_into_buffer(volatile uint32_t *destination,
                                        uint32_t pointer_x,
                                        uint32_t pointer_y, uint32_t shape) {
     int64_t origin_x;
@@ -97,6 +89,18 @@ bool window_present_cursor_into_buffer(volatile uint32_t *destination,
     return true;
 }
 
+/* 仅合成器所有者读取；处理中途输入后重新取范围，不能跨鼠标移动复用。 */
+bool window_present_cursor_bounds(Rect *bounds) {
+    if (!g_window_server.presented_pointer_valid) return false;
+    int64_t left = (int64_t)g_window_server.presented_pointer_x -
+        window_cursor_hotspot_x(g_window_server.presented_cursor_shape);
+    int64_t top = (int64_t)g_window_server.presented_pointer_y -
+        window_cursor_hotspot_y(g_window_server.presented_cursor_shape);
+    return rect_clip_to_extent(left, top, left + WINDOW_CURSOR_WIDTH,
+        top + WINDOW_CURSOR_HEIGHT, g_window_server.display_width,
+        g_window_server.display_height, bounds);
+}
+
 /* 先发布包围盒的新背景与光标，后面的场景复制只写包围盒之外。
  * 场景由单一合成线程拥有；让出 CPU 后的鼠标移动也用该完整场景重新发布新包围盒。 */
 void window_present_cursor_prepare_rect(const Rect *rect) {
@@ -105,13 +109,8 @@ void window_present_cursor_prepare_rect(const Rect *rect) {
         compositor_present_cursor_direct(false);
         return;
     }
-    int64_t left = (int64_t)g_window_server.presented_pointer_x -
-        window_cursor_hotspot_x(g_window_server.presented_cursor_shape);
-    int64_t top = (int64_t)g_window_server.presented_pointer_y -
-        window_cursor_hotspot_y(g_window_server.presented_cursor_shape);
-    if (left >= rect->x1 || top >= rect->y1 ||
-        left + WINDOW_CURSOR_WIDTH <= rect->x0 ||
-        top + WINDOW_CURSOR_HEIGHT <= rect->y0) return;
+    Rect bounds;
+    if (!window_present_cursor_bounds(&bounds) || !rect_intersects(*rect, bounds)) return;
     (void)window_present_cursor_into_buffer(g_window_server.framebuffer,
         g_window_server.presented_pointer_x, g_window_server.presented_pointer_y,
         g_window_server.presented_cursor_shape);
@@ -124,40 +123,22 @@ bool window_present_cursor_publish_span(
     const uint32_t *source,
     uint32_t x,
     uint32_t y,
-    uint32_t pixels) {
-    int64_t origin_x;
-    int64_t origin_y;
-    int64_t span_left;
-    int64_t span_right;
-    int64_t cursor_left;
-    int64_t cursor_right;
-    int64_t overlap_left;
-    int64_t overlap_right;
-
+    uint32_t pixels,
+    const Rect *cursor_bounds) {
     if (destination == 0 || source == 0 || pixels == 0U ||
-        !g_window_server.presented_pointer_valid ||
+        cursor_bounds == 0 || rect_is_empty(*cursor_bounds) ||
         y >= g_window_server.display_height ||
         x > g_window_server.display_width ||
         pixels > g_window_server.display_width - x) {
         return false;
     }
 
-    origin_x =
-        (int64_t)g_window_server.presented_pointer_x -
-        window_cursor_hotspot_x(g_window_server.presented_cursor_shape);
-    origin_y =
-        (int64_t)g_window_server.presented_pointer_y -
-        window_cursor_hotspot_y(g_window_server.presented_cursor_shape);
-    span_left = x;
-    span_right = (int64_t)x + pixels;
-    cursor_left = origin_x;
-    cursor_right = origin_x + WINDOW_CURSOR_WIDTH;
-
-    overlap_left = span_left > cursor_left ? span_left : cursor_left;
-    overlap_right = span_right < cursor_right ? span_right : cursor_right;
+    /* 复用本次发布已准备的包围盒，不在每条扫描线上重新读取光标状态和热点。 */
+    const int64_t span_left = x, span_right = (int64_t)x + pixels;
+    const int64_t overlap_left = span_left > cursor_bounds->x0 ? span_left : cursor_bounds->x0;
+    const int64_t overlap_right = span_right < cursor_bounds->x1 ? span_right : cursor_bounds->x1;
     if (overlap_left >= overlap_right ||
-        y < (uint32_t)(origin_y < 0 ? 0 : origin_y) ||
-        (int64_t)y >= origin_y + WINDOW_CURSOR_HEIGHT) {
+        (int64_t)y < cursor_bounds->y0 || (int64_t)y >= cursor_bounds->y1) {
         return false;
     }
 
@@ -184,26 +165,6 @@ bool window_present_cursor_publish_span(
 }
 
 void compositor_present_cursor_direct(bool force) {
-    int64_t left;
-    int64_t top;
-    int64_t right;
-    int64_t bottom;
-
-    if (!window_present_cursor_overlay(force,
-                                       &left,
-                                       &top,
-                                       &right,
-                                       &bottom)) {
-        return;
-    }
-
-}
-
-bool window_present_cursor_overlay(bool force,
-                                   int64_t *out_left,
-                                   int64_t *out_top,
-                                   int64_t *out_right,
-                                   int64_t *out_bottom) {
     uint32_t pointer_x;
     uint32_t pointer_y;
     uint32_t shape;
@@ -215,7 +176,7 @@ bool window_present_cursor_overlay(bool force,
     /* 原生 GB205 扫描输出会在提交帧副本中包含光标；绝不能将未启用的固件 GOP 映射作为直接
      * 叠加目标写入。 */
     if (display_core_has_native_scanout(0U)) {
-        return false;
+        return;
     }
 
     if (g_window_server.framebuffer == 0 ||
@@ -224,7 +185,7 @@ bool window_present_cursor_overlay(bool force,
             g_window_server.framebuffer ||
         g_window_server.display_width == 0U ||
         g_window_server.display_height == 0U) {
-        return false;
+        return;
     }
 
     window_lock();
@@ -238,7 +199,7 @@ bool window_present_cursor_overlay(bool force,
         g_window_server.presented_pointer_x == pointer_x &&
         g_window_server.presented_pointer_y == pointer_y &&
         g_window_server.presented_cursor_shape == shape) {
-        return false;
+        return;
     }
 
     sched_preempt_disable();
@@ -265,20 +226,7 @@ bool window_present_cursor_overlay(bool force,
 
     __asm__ volatile ("sfence" : : : "memory");
 
-    g_window_server.presented_pointer_x = pointer_x;
-    g_window_server.presented_pointer_y = pointer_y;
-    g_window_server.presented_cursor_shape = shape;
-    g_window_server.presented_pointer_valid = true;
-
-    if (out_left != 0) *out_left = new_origin_x;
-    if (out_top != 0) *out_top = new_origin_y;
-    if (out_right != 0) {
-        *out_right = new_origin_x + (int64_t)WINDOW_CURSOR_WIDTH;
-    }
-    if (out_bottom != 0) {
-        *out_bottom = new_origin_y + (int64_t)WINDOW_CURSOR_HEIGHT;
-    }
+    window_present_cursor_record(pointer_x, pointer_y, shape);
 
     sched_preempt_enable();
-    return true;
 }

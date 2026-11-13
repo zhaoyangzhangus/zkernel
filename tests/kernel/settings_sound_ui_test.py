@@ -8,11 +8,7 @@ b=s.index('\n}',a)
 s=s[:a]+'    return settings_host_call(number,arg0);'+s[b:]
 s=s.replace('#include <uapi/all.h>','#include <uapi/all.h>\n#include <uapi/control_validation.h>\nstatic int64_t settings_host_call(uint64_t,uint64_t);')
 s=s.replace('int main(void)', 'int settings_program_main(void)')
-s=s.replace('#include "',' #include "')
-# 保留相对头文件的原始解析位置。
-s=s.replace(' #include "../../runtime/', '#include "'+str(root/'user/runtime')+'/')
-for h in ['network_tree.h','system_info.h','sound.h']:
- s=s.replace(' #include "'+h+'"','#include "'+str(root/'user/desktop/settings'/h)+'"')
+# 编译 stdin 时显式保留源文件的相对头文件搜索目录，不逐个枚举应用头文件。
 s=r'''#include <assert.h>
 #include <stdio.h>
 '''+s+r'''
@@ -68,5 +64,5 @@ int main(void){
 '''
 with tempfile.TemporaryDirectory() as d:
  exe=str(Path(d)/'test')
- subprocess.run(['cc','-O2','-Wall','-Wextra','-Werror','-Wno-unused-function','-ffunction-sections','-fdata-sections','-Wl,--gc-sections','-I'+str(root/'include'),'-x','c','-','-o',exe],input=s,text=True,check=True)
+ subprocess.run(['cc','-O2','-Wall','-Wextra','-Werror','-Wno-unused-function','-ffunction-sections','-fdata-sections','-Wl,--gc-sections','-I'+str(root/'include'),'-iquote',str(root/'user/desktop/settings'),'-x','c','-','-o',exe],input=s,text=True,check=True)
  subprocess.run([exe],check=True)

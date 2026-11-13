@@ -25,6 +25,7 @@ fixture=r'''
 typedef struct thread { unsigned refs; _Atomic(waiter_t *) blocked_waiter; } thread_t;
 static spinlock_t g_timeout_lock;
 static list_head_t g_timeout_waiters;
+static atomic_uint_fast64_t g_timeout_next_deadline;
 static atomic_uint g_wait_init_state;
 static unsigned depth,gets,puts_count,wakes,destroys,lock_calls;
 static bool exit_at_unlock;
@@ -58,7 +59,7 @@ int main(void) {
   atomic_init(&thread.blocked_waiter,&waiter);
   wait_queue_t queues[32];wait_subscription_t subscriptions[32];
   spinlock_init(&g_timeout_lock);list_init(&g_timeout_waiters);
-  atomic_store(&g_wait_init_state,2);atomic_init(&waiter.state,state);
+  atomic_store(&g_wait_init_state,2);atomic_store(&g_timeout_next_deadline,10);atomic_init(&waiter.state,state);
   unsigned count=sizes[si];waiter.subscriptions=subscriptions;waiter.subscription_count=count;
   waiter.deadline_tsc=10;list_init(&waiter.timeout_node);
   wait_insert_tail(&g_timeout_waiters,&waiter.timeout_node);

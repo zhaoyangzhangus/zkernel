@@ -351,7 +351,7 @@ char *getenv(const char *name) {
 }
 
 char *secure_getenv(const char *name) {
-    /* System has no set-user-ID transition or privilege-changing exec path. */
+    /* System 没有 set-user-ID 状态转换或更改权限的 exec 路径。 */
     return getenv(name);
 }
 

@@ -1,4 +1,4 @@
-/* Phase 10 Linux personality EGL/device/context acceptance runner. */
+/* 第 10 阶段 Linux personality EGL/设备/上下文验收运行程序。 */
 #include <arch/x86_64/cpu.h>
 #include <kernel/console.h>
 #include <kernel/elf_loader.h>

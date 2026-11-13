@@ -14,13 +14,12 @@ previous=r'''void timer_poll(uint64_t now_tsc) {
         if (timer == 0 || atomic_load_explicit(&timer->canceled, memory_order_acquire)) {
             continue;
         }
-        /* fired is persistent readiness, not a consumable token. All pollers
-         * serialize on the global lock, and only polling publishes fired;
-         * completed one-shot timers need no further locks/notifications. */
+        /* fired 表示持久就绪状态，而不是可消费令牌。所有轮询器都由全局锁串行化，且
+         * 只有轮询过程会发布 fired；单次计时器完成后不再需要锁/通知。 */
         if (timer->period_tsc == 0U &&
             atomic_load_explicit(&timer->fired, memory_order_acquire)) continue;
-        /* Creation and deadline updates also serialize on the global lock.
-         * Future deadlines need no per-object lock on every timer tick. */
+        /* 创建和更新期限也由全局锁串行化。尚未到期的计时器无需在每个时钟节拍都获取
+         * 对象锁。 */
         if (!timer_deadline_reached(now_tsc, timer->deadline_tsc)) continue;
         timer_lock(timer);
         atomic_store_explicit(&timer->fired, true, memory_order_release);

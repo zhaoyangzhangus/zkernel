@@ -1,4 +1,4 @@
-# Inspect submitted H.264 references without changing decoder state.
+# 检查已提交的 H.264 参考帧，不改变解码器状态。
 set pagination off
 set confirm off
 python

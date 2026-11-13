@@ -4,10 +4,8 @@ param()
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-# This build is deliberately separate from the normal kernel makefile.  The
-# upstream NVKMS source list is the authority for the modeset implementation;
-# this script only compiles those sources for the System ELF toolchain.  The
-# Linux nvidia-drm/kbuild wrapper is not part of this target.
+# 此构建有意与常规内核 makefile 分开。上游 NVKMS 源文件清单是模式设置实现的权威来源；
+# 此脚本只使用 System ELF 工具链编译这些源文件。Linux nvidia-drm/kbuild 包装器不属于此目标。
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $vendorRoot = Join-Path $repoRoot 'third_party\nvidia\595.84'
 $vendorSourceRoot = Join-Path $vendorRoot 'open-gpu-kernel-modules'
@@ -65,12 +63,10 @@ foreach ($required in @('version=595.84', 'tag=595.84',
 $gcc = (Get-Command x86_64-elf-gcc -ErrorAction Stop).Source
 $gxx = (Get-Command x86_64-elf-g++ -ErrorAction Stop).Source
 
-# The Windows ELF toolchain also exposes prefixed launcher names in its
-# top-level bin directory.  On this host Windows application-control rules
-# can reject those launcher paths even though the target tools are present.
-# Prefer the target bin directory for binutils and tell GCC where its
-# assembler lives; this keeps the build deterministic without changing any
-# vendor input.
+# Windows ELF 工具链也会在顶层 bin 目录中提供带前缀的启动器名称。
+# 在此宿主机上，Windows 应用控制规则可能会拒绝这些启动器路径，即使目标工具实际存在。
+# 优先使用目标 bin 目录中的 binutils，并告诉 GCC 汇编器的位置；这样可以保持构建确定性，
+# 同时不更改任何供应商输入。
 $toolchainBin = Split-Path -Parent $gcc
 $toolchainRoot = Split-Path -Parent $toolchainBin
 $targetToolchainBin = Join-Path $toolchainRoot 'x86_64-elf\bin'
@@ -101,16 +97,14 @@ $objcopy = if (Test-Path -LiteralPath $targetObjcopy -PathType Leaf) {
 }
 $gccVersion = (& $gcc --version 2>&1 | Select-Object -First 1).ToString()
 $gxxVersion = (& $gxx --version 2>&1 | Select-Object -First 1).ToString()
-# The bundled xz accepts the compression options used by the upstream
-# Makefile but does not expose a version switch; the executable path is part
-# of the signature instead.
+# 捆绑的 xz 支持上游 Makefile 使用的压缩选项，但没有版本查询选项；因此将可执行文件路径
+# 纳入签名。
 $xzVersion = 'w64devkit-xz'
 
 New-Item -ItemType Directory -Path $objectRoot -Force | Out-Null
 
-# Keep this include set synchronized with the official Phase 1 source
-# inventory.  All paths are read-only vendor inputs; generated headers are
-# limited to a target-local version header below.
+# 让此包含路径集合与官方 Phase 1 源清单保持同步。所有路径都指向只读供应商输入；生成的
+# 头文件仅限于下方目标本地的版本头文件。
 $includeRelative = @(
     'src\common\sdk\nvidia\inc',
     'src\common\sdk\nvidia\inc\hw',
@@ -153,9 +147,8 @@ $missingIncludeRelative = New-Object 'System.Collections.Generic.List[string]'
 foreach ($relative in $includeRelative) {
     $full = Join-Path $vendorSourceRoot $relative
     if (-not (Test-Path -LiteralPath $full -PathType Container)) {
-        # The upstream Linux build creates a few optional/generated include
-        # directories only for configurations not present in this imported
-        # source snapshot.  They are recorded, but never fabricated here.
+        # 上游 Linux 构建只会为此导入源码快照中不存在的配置创建少量可选/生成包含目录。
+        # 此处会记录这些目录，但绝不伪造它们。
         [void]$missingIncludeRelative.Add($relative)
         continue
     }
@@ -170,9 +163,8 @@ $defines = @(
     '-DSOFTFLOAT_FAST_DIV32TO16', '-DSOFTFLOAT_FAST_DIV64TO32',
     '-DNVT_USE_NVKMS', '-DNV_SMG_IN_NVKMS', '-DNV_PUSH_IN_KERNEL',
     '-DNV_XZ_CUSTOM_MEM_HOOKS', '-DNV_XZ_USE_NVTYPES', '-DXZ_DEC_SINGLE',
-    # System libc exposes the fixed-width types needed by the vendor headers;
-    # these aliases provide the fast-width spellings without editing libc or
-    # any NVIDIA source file.
+    # System libc 提供供应商头文件所需的定宽类型；这些别名提供快速宽度名称，不修改 libc
+    # 或任何 NVIDIA 源文件。
     '-Duint_least8_t=uint8_t', '-Duint_least16_t=uint16_t',
     '-Duint_least32_t=uint32_t', '-Duint_least64_t=uint64_t',
     '-Dint_least8_t=int8_t', '-Dint_least16_t=int16_t',
@@ -333,9 +325,9 @@ if (-not $allCompiled) {
 $objectLines = New-Object 'System.Collections.Generic.List[string]'
 foreach ($record in $records) { $objectLines.Add($record.Object) }
 
-# The official Makefile compresses and embeds five architecture shader blobs.
-# They are vendor inputs and are generated into build/ only; omitting them
-# would leave the real NVKMS core with unresolved firmware/shader data symbols.
+# 官方 Makefile 会压缩并嵌入五种架构的着色器数据块。
+# 它们是供应商输入，只生成到 build/ 中；若省略它们，真实 NVKMS 核心会有固件/着色器数据
+# 符号无法解析。
 function Quote-ProcessArgument([string]$Value) {
     return '"' + $Value.Replace('"', '\"') + '"'
 }
@@ -415,9 +407,8 @@ foreach ($shaderName in $shaderNames) {
 }
 foreach ($shaderObject in $shaderObjects) { $objectLines.Add($shaderObject) }
 
-# The upstream Makefile also generates the NVKMS identity string from the
-# final object set.  Keep the same exported symbol names in a target-local
-# translation unit; the string is metadata, not a readiness marker.
+# 上游 Makefile 还会根据最终对象集生成 NVKMS 身份字符串。在目标本地翻译单元中保留相同的
+# 导出符号名；该字符串是元数据，不是就绪标记。
 $identitySource = Join-Path $outputRoot 'nvkms-id.c'
 $identityObject = Join-Path $outputRoot 'nvkms-id.o'
 $identitySignature = $identityObject + '.sig'
@@ -452,10 +443,8 @@ $objectLines.Add($identityObject)
 $compileLog.Add(('identity=NV_KMS_ID;action={0};object={1}' -f
                  $identityAction, $identityObject))
 
-# The official core deliberately stops at the OS-interface boundary.  Compile
-# the System implementation as a target-local object and include it in the
-# relocatable NVKMS image; this keeps vendor sources immutable while making
-# every nvkms_* dependency visible to the same undefined-symbol report.
+# 官方核心有意停留在 OS 接口边界。将 System 实现编译为目标本地对象并纳入可重定位的 NVKMS
+# 镜像；这样可保持供应商源文件不可修改，同时让每个 nvkms_* 依赖都出现在同一份未定义符号报告中。
 $systemGlueSource = Join-Path $repoRoot 'kernel\drivers\display\nvidia\nv_nvkms_os.c'
 $systemGlueObject = Join-Path $outputRoot 'system\nv_nvkms_os.o'
 $systemGlueSignature = $systemGlueObject + '.sig'
@@ -470,9 +459,8 @@ foreach ($flag in $cFlags) { [void]$systemFlags.Add([string]$flag) }
 [void]$systemFlags.Add(('-I{0}' -f (Join-Path $repoRoot 'kernel\drivers\gpu\nvidia\rm\include')))
 [void]$systemFlags.Add('-DOS_KERNEL_BUILD')
 [void]$systemFlags.Add('-Werror')
-# The target uses the existing freestanding libc headers.  Its stdatomic
-# surface has atomic_ullong but not the optional fast-width alias used by the
-# kernel VM header; bind that alias locally for this compile only.
+# 目标使用现有的独立运行 libc 头文件。其中 stdatomic 接口提供 atomic_ullong，但没有内核
+# VM 头文件使用的可选快速宽度别名；仅在本次编译中于本地绑定该别名。
 [void]$systemFlags.Add('-Datomic_uint_fast64_t=atomic_ullong')
 $compileLog.Add(('system_os_glue_flags={0}' -f ($systemFlags -join ' ')))
 $systemSignatureText = @(

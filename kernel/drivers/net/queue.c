@@ -29,8 +29,8 @@ bool e1000_queue_push(e1000_software_queue_t *queue,
                                      packet != 0 ? packet->payload : 0);
 }
 
-/* Copy the parsed DMA payload straight into its owned queue slot. No DMA
- * pointer escapes this call: the driver may recycle the descriptor on return. */
+/* 将解析后的 DMA 负载直接复制到队列自有槽位。DMA 指针不会离开此调用；驱动返回后即可
+ * 回收描述符。 */
 bool e1000_queue_push_payload(e1000_software_queue_t *queue,
                               const e1000_rx_packet_t *packet,
                               const uint8_t *payload) {
@@ -90,8 +90,8 @@ bool e1000_packet_queue_self_test(void) {
                    "queue self-test payload capacity");
     if (queue == 0) return false;
     e1000_queue_init(queue);
-    /* Initialize every byte the bounded queue copy will read, but not the
-     * unused payload capacity. Verify data as well as FIFO counters below. */
+    /* 初始化有界队列复制操作会读取的所有字节，但不初始化未使用的负载空间。下方同时
+     * 验证数据和 FIFO 计数。 */
     memset(&expected, 0, offsetof(e1000_rx_packet_t, payload) +
                          E1000_SOFTWARE_QUEUE_DEPTH);
     for (uint32_t index = 0U; index < E1000_SOFTWARE_QUEUE_DEPTH; ++index) {

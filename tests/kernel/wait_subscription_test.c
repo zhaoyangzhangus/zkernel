@@ -75,8 +75,8 @@ static bool fake_is_signaled(const void *opaque) {
     fake_wait_object_t *object = (fake_wait_object_t *)opaque;
     atomic_fetch_add_explicit(&object->signal_checks, 1U, memory_order_relaxed);
     bool ready = atomic_load_explicit(&object->signaled, memory_order_acquire);
-    /* Simulate a local IRQ posting a notification inside a subsystem probe.
-     * Return the old state so sequence validation must prevent lost wakeup. */
+    /* 模拟本地 IRQ 在子系统探测期间发布通知。
+     * 返回旧状态，以验证序列校验必须防止丢失唤醒。 */
     if (atomic_exchange_explicit(&object->notify_on_check, false,
                                   memory_order_acq_rel)) {
         atomic_store_explicit(&object->signaled, true, memory_order_release);
@@ -415,7 +415,7 @@ static void test_thread_terminate_during_block_publication_is_not_lost(void) {
             if (job == 0) continue;
             bool done = host_wait_until_done(job, 200U);
             TEST_CHECK(done, "thread termination racing BLOCKED publication stranded the waiter");
-            /* Unstrand the negative-control fixture before joining it. */
+            /* 汇合线程前，先解除负对照测试夹具的阻塞状态。 */
             if (!done) {
                 TEST_CHECK(host_cancel_waiter(job), "could not rescue stranded test waiter");
                 TEST_CHECK(host_wait_until_done(job, 2000U), "rescued waiter did not finish");
@@ -497,8 +497,7 @@ static void test_small_wait_sets_and_large_allocation_stages(void) {
             }
         }
     }
-    // Five distinct queues allocate the shared scratch array and then the
-    // subscription array. Reject each remaining stage independently.
+    // 五个不同队列会先分配共享临时数组，再分配订阅数组。分别拒绝剩余的每个阶段。
     for (unsigned stage = 0U; stage < 2U; ++stage) {
         for (unsigned i = 0U; i < 5U; ++i) atomic_store(&values[i].signaled, false);
         unsigned calls = host_allocation_calls();
@@ -620,7 +619,7 @@ static void test_completion_token_and_blocking_lifecycle(void) {
 
 static void *notify_at_subscription_boundary(void *opaque) {
     fake_wait_object_t *object = opaque;
-    /* Bounded publisher wait also releases the predicate on setup failure. */
+    /* 有界发布者等待在初始化失败时也会释放条件锁。 */
     for (unsigned i = 0U; i < 2000U &&
          !atomic_load_explicit(&object->predicate_entered, memory_order_acquire); ++i) {
         const struct timespec pause = {0, 1000000L};
@@ -672,11 +671,11 @@ static void test_notification_during_subscription_publication(void) {
 }
 
 static void test_large_ready_and_poll_wait_skip_subscription_allocation(void) {
-    const size_t counts[] = { 5U, 8U, 16U };
+    const size_t counts[] = { 5U, 8U, 16U, 17U, 1024U };
     for (size_t c = 0U; c < sizeof(counts)/sizeof(counts[0]); ++c) {
         for (unsigned mode = 0U; mode < 3U; ++mode) {
-            fake_wait_object_t objects[16];
-            void *inputs[16];
+            fake_wait_object_t objects[1024];
+            void *inputs[1024];
             for (size_t i = 0U; i < counts[c]; ++i) {
                 fake_wait_object_init(&objects[i]);
                 objects[i].wait_value = (int64_t)i + 100;
@@ -684,9 +683,8 @@ static void test_large_ready_and_poll_wait_skip_subscription_allocation(void) {
                 inputs[i] = &objects[i];
             }
             unsigned calls = host_allocation_calls();
-            /* The scratch array allocates once; subscription storage must
-             * not allocate when ready, or when a poll has already expired. */
-            host_fail_allocation_after(1U);
+            /* 就绪和零超时查询不分配队列数组或订阅存储。 */
+            host_fail_next_allocation();
             host_wait_job_t *job = host_wait_job_start(inputs, counts[c], mode != 0U,
                                                        mode == 2U ? 0U : UINT64_MAX);
             TEST_CHECK(job != 0, "ready/poll job creation failed");
@@ -703,7 +701,7 @@ static void test_large_ready_and_poll_wait_skip_subscription_allocation(void) {
             }
             host_wait_job_join(job);
             host_clear_allocation_failure();
-            TEST_CHECK(host_allocation_calls() == calls+1U, "ready/poll allocated subscriptions");
+            TEST_CHECK(host_allocation_calls() == calls, "ready/poll allocated queue or subscription storage");
             for (size_t i = 0U; i < counts[c]; ++i) {
                 TEST_CHECK(atomic_load(&objects[i].header.refs.value) == 1U &&
                            list_empty(&objects[i].header.signal_waiters.waiters),
@@ -773,7 +771,46 @@ static void test_internal_wait_defers_termination(void) {
     if (g_failures == 0U) puts("WAIT_INTERNAL_DEFERRED_TERMINATION_PASS");
 }
 
+static void test_bounded_wake_real_waiters(void) {
+    const uint32_t limits[] = { 0U, 1U, 15U, 16U, 17U, 33U, UINT32_MAX };
+    for (size_t pass = 0U; pass < sizeof(limits)/sizeof(limits[0]); ++pass) {
+        fake_wait_object_t object;
+        fake_wait_object_init(&object);
+        void *inputs[] = { &object };
+        host_wait_job_t *jobs[33];
+        for (size_t i = 0U; i < 33U; ++i) {
+            jobs[i] = host_wait_job_start(inputs, 1U, false, UINT64_MAX);
+            TEST_CHECK(jobs[i] != 0, "bounded wake job creation failed");
+            if (jobs[i] == 0) abort();
+            bool sleeping = host_wait_until_sleeping(jobs[i], 2000U);
+            TEST_CHECK(sleeping, "bounded wake waiter did not subscribe");
+            if (!sleeping) abort();
+        }
+        atomic_store(&object.signaled, true);
+        uint32_t expected = limits[pass] < 33U ? limits[pass] : 33U;
+        TEST_CHECK(wake_n(&object.header.signal_waiters, limits[pass]) == expected,
+                   "bounded wake returned wrong count");
+        for (size_t i = 0U; i < 33U; ++i) {
+            bool done = host_wait_until_done(jobs[i], i < expected ? 2000U : 2U);
+            TEST_CHECK(done == (i < expected), "bounded wake lost FIFO or exceeded limit");
+        }
+        object_notify_signaled(&object);
+        for (size_t i = 0U; i < 33U; ++i) {
+            bool done = host_wait_until_done(jobs[i], 2000U);
+            TEST_CHECK(done, "remaining bounded waiter did not wake");
+            if (!done) abort();
+            TEST_CHECK(host_wait_job_status(jobs[i]) == K_OK, "bounded waiter result changed");
+            host_wait_job_join(jobs[i]);
+        }
+        TEST_CHECK(atomic_load(&object.header.refs.value) == 1U &&
+                   list_empty(&object.header.signal_waiters.waiters),
+                   "bounded wake leaked refs or subscriptions");
+    }
+    if (g_failures == 0U) puts("WAIT_BOUNDED_WAKE_231_THREADS_PASS");
+}
+
 int main(void) {
+    test_bounded_wake_real_waiters();
     test_internal_wait_defers_termination();
     test_local_notification_inside_readiness_callback();
     test_large_ready_and_poll_wait_skip_subscription_allocation();

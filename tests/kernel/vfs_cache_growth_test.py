@@ -57,7 +57,7 @@ int main(void) {
  }
  assert(allocations==2 && !live && cache.growth_retry_at==1536);
  verify(&cache,entries,1280);
- /* Demand + read-ahead can cross a threshold by two; odd counts must grow. */
+ /* 按需读取和预读可能一次跨过两个阈值；奇数计数时也必须扩容。 */
  for(unsigned i=1280;i<65536;i+=2) {
   entries[i].index=i; vfs_page_cache_insert(&cache,entries+i);
   if(i+1<65536) {
@@ -71,14 +71,13 @@ int main(void) {
  assert(visits<=4); printf("65536 cached pages: lookup visits=%u, buckets=%u\n",visits,cache.bucket_count);
  unsigned before=allocations; vfs_page_cache_grow(&cache); assert(allocations==before);
  kfree(cache.expanded_buckets); free(entries); assert(!live);
- /* Crossing the very first threshold with paired insertions from an odd base. */
+ /* 从奇数基数开始成对插入，跨过第一个阈值。 */
  cache=(vfs_page_cache_t){0}; entries=calloc(1025,sizeof(*entries)); assert(entries);
  for(unsigned i=0;i<1025;++i) { entries[i].index=i; vfs_page_cache_insert(&cache,entries+i); }
  vfs_page_cache_grow(&cache); assert(cache.bucket_count==512);
  verify(&cache,entries,1025); kfree(cache.expanded_buckets); free(entries);
- /* Simulate repeated OOM while a file accumulates resident pages. Recovery
-  * must select the same capacity as uninterrupted growth in one allocation
-  * and one walk, including recovery beyond the maximum index capacity. */
+ /* 模拟文件累积驻留页时反复发生 OOM。恢复后选出的容量必须与不中断扩容时一致，且只
+  * 需一次分配和一次遍历；也覆盖超过索引最大容量后的恢复。 */
  const unsigned recover_at[]={4096,8192,32768,65536};
  for(unsigned scenario=0;scenario<4;++scenario) {
   cache=(vfs_page_cache_t){0};
@@ -105,8 +104,7 @@ int main(void) {
          count,cache.bucket_count,rehash_visits);
   kfree(cache.expanded_buckets);free(entries);assert(!live);
  }
- /* Recovery must also replace an already-expanded index without losing its
-  * ownership or modifying it on failed allocation. */
+ /* 恢复时也必须替换已扩展的索引；分配失败时不得丢失所有权或修改索引。 */
  const unsigned initial_counts[]={1024,4096};
  for(unsigned scenario=0;scenario<2;++scenario) {
   cache=(vfs_page_cache_t){0};
@@ -137,7 +135,7 @@ int main(void) {
   for(unsigned i=0;i<8;++i)vfs_page_cache_grow(&cache);
   assert(allocations==before && !rehash_visits); /* Retry throttle is retained. */
   verify(&cache,entries,count);
-  /* Reach the retry threshold with real insertions, not synthetic counters. */
+  /* 通过真实插入达到重试阈值，而不是使用模拟计数器。 */
   vfs_cached_page_t extra[256]={0};
   for(unsigned i=0;i<256;++i) {
    extra[i].index=count+i;vfs_page_cache_insert(&cache,extra+i);

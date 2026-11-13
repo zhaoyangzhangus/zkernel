@@ -62,8 +62,7 @@ def capture(label):
                          'format': 'png'})
 
 def desktop_roi(width, pixels):
-    # Right next to the expected normal window edge; a full-width "normal"
-    # window (the actual old restore bug) must fail this check.
+    # 紧邻预期的普通窗口边缘；全宽的“普通”窗口（旧的实际恢复缺陷）必须无法通过此检查。
     return b''.join(pixels[(y*width+960)*3:(y*width+1200)*3]
                     for y in range(200, 700))
 
@@ -140,8 +139,8 @@ with tempfile.TemporaryDirectory(prefix='system-window-state-') as directory:
                              'hold-time': 100})
         wait_header(True)
         entered = wait_changed(True, label+'-entered')
-        # Coverage alone changes before Chrome's fullscreen transition ends.
-        # Do not inject the next accelerator into its transition guard.
+        # Chrome 的全屏转换尚未结束时，覆盖率信息本身就会先发生变化。
+        # 不要在转换保护期间注入下一个快捷键。
         time.sleep(2)
         capture(label+'-entered')
         command('send-key', {'keys': [{'type': 'qcode', 'data': 'f11'}],
@@ -193,8 +192,7 @@ with tempfile.TemporaryDirectory(prefix='system-window-state-') as directory:
                 raise RuntimeError('Dock restore failed to repaint the original Chrome geometry')
             capture(f'{cycle}-dock-restored')
             result['dock_restore_ms'] = (time.monotonic()-started)*1000
-            # Retained old pixels alone are insufficient: verify the restored
-            # compositor and keyboard can paint an actual address-field focus.
+            # 仅保留旧像素还不够：确认恢复后的合成器和键盘能够绘制真实的地址栏焦点状态。
             move(920, 400)
             click()
             time.sleep(.15)

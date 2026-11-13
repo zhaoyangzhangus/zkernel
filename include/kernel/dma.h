@@ -38,11 +38,10 @@ kstatus_t dma_map_pages(struct device *dev, page_t **pages, uint32_t page_count,
                         enum dma_direction dir, dma_mapping_t *out);
 /* 尝试解除映射；失败时映射仍归调用者所有，不能释放后备页。 */
 /*
- * Move a live DMA mapping to another dma_mapping_t object without
- * changing its IOVA, page pins, IOMMU mapping or device reference.
+ * 将有效的 DMA 映射转移到另一个 dma_mapping_t 对象，不改变其 IOVA、页面固定状态、IOMMU 映射
+ * 或设备引用。
  *
- * dma_mapping_t has address identity while registered in DMA Core;
- * callers must use this primitive instead of copying a live mapping.
+ * dma_mapping_t 在 DMA Core 注册期间具有地址标识；调用方必须使用此原语转移映射，不能复制有效映射。
  */
 kstatus_t dma_mapping_move(
     dma_mapping_t *destination,

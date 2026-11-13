@@ -1,4 +1,4 @@
-/* Dedicated Linux/glibc NVIDIA frontend probe for Phase 8. */
+/* 阶段 8 专用的 Linux/glibc NVIDIA 前端探测程序。 */
 #include <stdint.h>
 #include <string.h>
 #include <sys/mman.h>
@@ -7,9 +7,8 @@
 
 #include <uapi/nvidia_frontend.h>
 
-/* Keep the probe buildable from the pinned glibc development package even
- * when the host does not have the separate linux-libc-dev headers.  These
- * are the stable x86-64 Linux values used by open(2). */
+/* 即使主机没有单独的 linux-libc-dev 头文件，也要确保此探测程序能使用固定版本的
+ * glibc 开发包构建。这些是 open(2) 使用的稳定 x86-64 Linux 值。 */
 #define P8_O_RDWR 2
 #define P8_O_CLOEXEC 02000000
 

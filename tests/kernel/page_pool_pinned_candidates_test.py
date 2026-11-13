@@ -24,7 +24,7 @@ static unsigned read_flags(const page_t *page) {++reads;return page->flags;}
 static page_t *page_span_for_pfn(uint64_t pfn,uint64_t *span) {
     ++lookups;if(pfn<1000||pfn-1000>=2048||!present[pfn-1000])return 0;
     uint64_t index=pfn-1000,n=1;
-    /* Discontinuous metadata-span boundaries and missing-page holes. */
+    /* 不连续元数据跨度的边界以及缺失页面形成的空洞。 */
     while(n<*span&&index+n<2048&&present[index+n]&&(index+n)%17)++n;
     *span=n;return &pages[index];
 }
@@ -40,8 +40,8 @@ static void check(unsigned order,uint64_t candidates) {
     unsigned slots=(unsigned)__builtin_popcountll(candidates);
     assert(reads<=(slots<<order));
     if(!candidates)assert(!reads&&!lookups);
-    /* Drain's resulting free mask and whole-group reclaim decision match
-     * the previous all-slot scan, even with pins in occupied slots. */
+    /* 即使占用槽位中存在固定页面，排空后得到的空闲掩码和整组回收判定也必须与旧的
+     * 全槽扫描一致。 */
     assert((candidates&~actual)==(candidates&~expected));
     assert((candidates==UINT64_MAX&&actual==0)==
            (candidates==UINT64_MAX&&expected==0));

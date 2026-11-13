@@ -99,7 +99,7 @@ int main(void) {
         }
     }
     prepare(4096);unsigned old=old_rebuild();assert(old>4096*10);check(4096);
-    /* Reuse list nodes after removal and insertion, not just fresh zeroed nodes. */
+    /* 在移除和插入后重用链表节点，而不只是使用刚清零的新节点。 */
     list_del(&areas[0].ordered_node);list_add_before(space.area_list.next,&areas[0].ordered_node);check(4096);
     printf("Fused VMA rebuild: every size 0..8192, parent/order/color/equal-black-height/height/augmentation/list/payload invariants; exactly N count reads + N construction reads, zero separate tree traversal; old 4096-node rebuild used %u search comparisons, new zero passed\n",old);
 }

@@ -1,6 +1,7 @@
 """Production native minimize/dock restore, ownership and event queue semantics."""
 from pathlib import Path
 import subprocess
+import resource
 import tempfile
 
 root = Path(__file__).resolve().parents[2]
@@ -43,7 +44,7 @@ program = r'''
 typedef int kstatus_t;
 typedef struct process {int id;} process_t;
 typedef struct window_server_window {
- uint32_t identifier,flags;
+ uint32_t identifier,flags,desktop_app;
  bool minimized,dirty,client_show_inactive,client_pointer_capture,client_button_capture;
  uint32_t control_hover,control_pressed,control_text_ctrl;bool control_text_drag;Rect control_hover_damage;
  uint64_t animation_start;bool animation_seen;
@@ -56,7 +57,7 @@ static struct {
  uint32_t focused_identifier,dragging_identifier,title_pressed_identifier;
  struct {uint32_t count;window_server_window_t *children[3];} scene;int event_waitq;
 } g_window_server;
-static int locked,marks,wakes,notifies,drag_clears,title_clears,rehits;
+static int locked,marks,wakes,notifies,drag_clears,title_clears,rehits,global_wakes;
 static void window_input_refresh_pointer_locked(void){assert(locked);++rehits;}
 static bool ready=true;
 static void window_lock(void){assert(!locked);locked=1;}
@@ -64,7 +65,7 @@ static void window_unlock(void){assert(locked);locked=0;}
 static bool window_server_kernel_ready(void){return ready;}
 static bool window_server_owner_locked(process_t *p,window_server_window_t *w){assert(locked);return w->owner==p && w->identifier!=0;}
 static void window_mark_window_locked(window_server_window_t *w){assert(locked);if(w)++marks;}
-static void window_animation_restore_locked(window_server_window_t *w){assert(locked&&w&&w->minimized);}
+static void window_animation_restore_locked(window_server_window_t *w){assert(locked&&w);}
 static void window_animation_depart_locked(window_server_window_t *w,bool minimize){assert(locked&&w&&!w->minimized&&minimize);}
 static void window_input_clear_drag_locked(void){assert(locked);++drag_clears;g_window_server.dragging_identifier=0;}
 static void window_clear_title_capture_locked(void){assert(locked);++title_clears;g_window_server.title_pressed_identifier=0;}
@@ -73,8 +74,7 @@ static void window_scene_focus_locked(window_server_window_t *w){assert(locked);
 static void window_event_schedule_wake_locked(window_server_window_t *w){assert(locked && w);++wakes;}
 static void window_server_notify_worker(void){assert(!locked);++notifies;}
 static const char *window_shell_app_title(uint32_t app){return app==DESKTOP_APP_CHROME?"Chrome":0;}
-static bool desktop_window_matches_app_locked(window_server_window_t *w,uint32_t app,const char *title){assert(locked && title);return app==DESKTOP_APP_CHROME && w->owner->id==1;}
-static int wake_all(void *queue){assert(!locked && queue);return 0;}
+static int wake_all(void *queue){assert(!locked && queue);++global_wakes;return 0;}
 ''' + '\n'.join((
     function('kernel/graphics/input_events.c', 'static bool window_event_discard_motion_locked('),
     function('kernel/graphics/input_events.c', 'static os_window_event_t *window_event_reserve_locked('),
@@ -91,8 +91,8 @@ int main(void){
  _Static_assert(offsetof(os_window_event_t,minimized)==8,"payload ABI");
  process_t owner={1},other={2};
  window_server_window_t normal={.identifier=1,.flags=OS_WINDOW_VISIBLE,.owner=&other};
- window_server_window_t chrome={.identifier=2,.flags=OS_WINDOW_VISIBLE,.owner=&owner,.x=10,.y=10,.width=945,.height=1060};
- window_server_window_t popup={.identifier=3,.flags=OS_WINDOW_VISIBLE,.owner=&other,.client_show_inactive=true};
+ window_server_window_t chrome={.desktop_app=DESKTOP_APP_CHROME,.identifier=2,.flags=OS_WINDOW_VISIBLE,.owner=&owner,.x=10,.y=10,.width=945,.height=1060};
+ window_server_window_t popup={.desktop_app=DESKTOP_APP_CHROME,.identifier=3,.flags=OS_WINDOW_VISIBLE,.owner=&other,.client_show_inactive=true};
  g_window_server.scene.count=3;g_window_server.scene.children[0]=&normal;g_window_server.scene.children[1]=&chrome;g_window_server.scene.children[2]=&popup;
  g_window_server.focused_identifier=2;g_window_server.dragging_identifier=2;g_window_server.title_pressed_identifier=2;
  /* 最小化打断按压后，恢复时不得继续显示旧控件的按压或悬停状态。 */
@@ -122,7 +122,7 @@ int main(void){
  assert(window_server_set_minimized_owned(&owner,&chrome,1)==0);
  assert(window_server_set_minimized_owned(&owner,&chrome,0)==0);
  assert(!chrome.minimized && chrome.event_count==4 && rehits==4);
- // Queue saturation keeps the newest state and zeroes reused input payload.
+ // 队列饱和时保留最新状态，并将重用的输入负载清零。
  memset(&chrome.events[chrome.event_write],0xaa,sizeof(os_window_event_t));
  uint32_t slot=chrome.event_write,read=chrome.event_read;
  assert(window_server_set_minimized_owned(&owner,&chrome,1)==0);
@@ -149,15 +149,69 @@ int main(void){
  assert(linux_window_ioctl(&other,&chrome,LINUX_WINDOW_IOCTL_COMMIT,&command,sizeof(command))==K_EPERM);
  assert(!chrome.minimized);
  assert(!desktop_restore_minimized_app(99));
+ /* 只剩同应用弹层时不能恢复它；隐藏主窗口和同进程其他应用也不能冒充候选。 */
+ g_window_server.scene.count=3;
+ g_window_server.scene.children[0]=NULL;
+ g_window_server.scene.children[1]=&normal;
+ g_window_server.scene.children[2]=&popup;
+ normal.owner=&owner;normal.desktop_app=1;
+ uint32_t focused=g_window_server.focused_identifier;
+ int prior_marks=marks,prior_hits=rehits;
+ assert(!desktop_restore_minimized_app(DESKTOP_APP_CHROME));
+ assert(g_window_server.focused_identifier==focused&&marks==prior_marks&&rehits==prior_hits);
+ normal.desktop_app=DESKTOP_APP_CHROME;normal.flags=0;
+ assert(!desktop_restore_minimized_app(DESKTOP_APP_CHROME));
+ normal.flags=OS_WINDOW_VISIBLE;normal.minimized=true;
+ assert(desktop_restore_minimized_app(DESKTOP_APP_CHROME));
+ assert(!normal.minimized&&g_window_server.focused_identifier==normal.identifier);
+ assert(!popup.dirty&&!popup.event_count);
+ /* 已在最前且聚焦的窗口，重复点击不能制造重绘、重新命中或唤醒。 */
+ g_window_server.scene.children[1]=&popup;
+ g_window_server.scene.children[2]=&normal;
+ normal.dirty=false;
+ int saved_marks=marks,saved_hits=rehits,saved_wakes=global_wakes;
+ uint32_t saved_events=normal.event_count;
+ for(unsigned i=0;i<10000;++i)assert(desktop_restore_minimized_app(DESKTOP_APP_CHROME));
+ assert(!normal.dirty&&marks==saved_marks&&rehits==saved_hits&&global_wakes==saved_wakes);
+ assert(normal.event_count==saved_events&&!locked);
+ /* 层级、焦点或最小化任一发生变化，仍须恢复和重绘。 */
+ g_window_server.scene.children[1]=&normal;
+ g_window_server.scene.children[2]=&popup;
+ assert(desktop_restore_minimized_app(DESKTOP_APP_CHROME));
+ assert(normal.dirty&&marks>saved_marks&&rehits==saved_hits+1&&global_wakes==saved_wakes+1);
+ g_window_server.scene.children[1]=&popup;g_window_server.scene.children[2]=&normal;
+ normal.dirty=false;g_window_server.focused_identifier=0;
+ assert(desktop_restore_minimized_app(DESKTOP_APP_CHROME)&&normal.dirty);
+ assert(g_window_server.focused_identifier==normal.identifier);
+ normal.minimized=true;normal.dirty=false;
+ saved_events=normal.event_count;
+ assert(desktop_restore_minimized_app(DESKTOP_APP_CHROME)&&normal.dirty&&!normal.minimized);
+ assert(normal.event_count==saved_events+1);
  assert(locked==0 && marks>0);
 }
 '''
 with tempfile.TemporaryDirectory(prefix='liteos-minimize-') as directory:
     path = Path(directory)
-    (path/'test.c').write_text(program)
-    subprocess.run(['cc', '-std=c11', '-Wall', '-Wextra', '-Werror',
-                    '-fsanitize=address,undefined', '-fno-omit-frame-pointer',
-                    '-I', str(root/'include'), str(path/'test.c'),
-                    '-o', str(path/'test')], check=True)
-    subprocess.run([str(path/'test')], check=True)
-print('Native minimize: ownership, focus/capture, retained geometry, dock restore, queue saturation and stable ABI passed')
+    command=['cc', '-std=c11', '-Wall', '-Wextra', '-Werror',
+             '-fsanitize=address,undefined', '-fno-omit-frame-pointer',
+             '-fno-pie','-no-pie','-I',str(root/'include'),
+             '-x','c','-','-o',str(path/'test')]
+    def run(code):
+        subprocess.run(command,input=code,text=True,check=True)
+        return subprocess.run([str(path/'test')],capture_output=True,text=True,
+            timeout=20,preexec_fn=lambda:resource.setrlimit(resource.RLIMIT_CORE,(0,0)))
+    result=run(program)
+    assert result.returncode==0,result.stderr
+    for label,old in (
+        ('重复点击仍整窗重绘', 'if (!window->minimized &&\n        g_window_server.scene.children[g_window_server.scene.count - 1U] == window &&'),
+        ('恢复了同应用弹出窗口','candidate->client_show_inactive || '),
+        ('错误恢复其他应用',' || candidate->desktop_app != app'),
+        ('错误恢复隐藏窗口','(candidate->flags & OS_WINDOW_VISIBLE) == 0U ||'),
+    ):
+        broken=program.replace(old,old.replace('if (','if (false && ',1) if old.startswith('if (') else '')
+        assert broken!=program
+        result=run(broken)
+        assert result.returncode!=0 and 'Assertion' in result.stderr,result.stderr
+        print('反例被拒绝：',label)
+print('Native minimize: ownership, focus/capture, retained geometry, dock restore, inactive popups, hidden/foreign apps, queue saturation and stable ABI passed')
+print('Dock restore: 10000 focused/front-window requests cause zero redraws, pointer re-hits or global wakes; stacking/focus/minimize changes retain restoration passed')

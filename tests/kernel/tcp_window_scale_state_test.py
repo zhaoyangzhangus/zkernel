@@ -51,24 +51,26 @@ for signature in ('static void socket_receive_notify_peer(', 'static size_t sock
                   'static kstatus_t socket_recv_ipv4_impl(', 'static kstatus_t socket_recv_ipv6_impl('):
     parts.append(function('kernel/net/socket_io.c', signature))
 for family in ('4', '6'):
-    start = runtime.index('packet.protocol == SOCKET_PROTOCOL_TCP && packet.family == OS_AF_INET'+family)
-    syn = runtime.index('} else if ((packet.flags & NET_TCP_FLAG_SYN) != 0U &&', start)
+    start = runtime.index('packet->protocol == SOCKET_PROTOCOL_TCP && packet->family == OS_AF_INET'+family)
+    syn = runtime.index('} else if ((packet->flags & NET_TCP_FLAG_SYN) != 0U &&', start)
     opening = runtime.index('{', syn)
     end = opening+1
     depth = 1
     while depth:
         depth += (runtime[end] == '{')-(runtime[end] == '}')
         end += 1
-    parts.append('static kstatus_t dispatch_syn'+family+'(e1000_state_t *state, e1000_rx_packet_t packet){\n'
+    parts.append('static kstatus_t dispatch_syn'+family+'(e1000_state_t *state, e1000_rx_packet_t input_packet){\n'
+                 'e1000_rx_packet_t *packet=&input_packet;\n'
                  'kstatus_t status;\n'+runtime[opening+1:end-1]+'\nreturn status;\n}')
-    start = runtime.index('} else if ((packet.flags & NET_TCP_FLAG_SYN) != 0U ||', start)
+    start = runtime.index('} else if ((packet->flags & NET_TCP_FLAG_SYN) != 0U ||', start)
     opening = runtime.index('{', start)
     end = opening+1
     depth = 1
     while depth:
         depth += (runtime[end] == '{')-(runtime[end] == '}')
         end += 1
-    parts.append('static kstatus_t dispatch'+family+'(e1000_state_t *state, e1000_rx_packet_t packet){\n'
+    parts.append('static kstatus_t dispatch'+family+'(e1000_state_t *state, e1000_rx_packet_t input_packet){\n'
+                 'e1000_rx_packet_t *packet=&input_packet;\n'
                  'kstatus_t status;\n'+runtime[opening+1:end-1]+'\nreturn status;\n}')
     parse = runtime.index('net_tcp_parse_ipv'+family+'(buffer, length,')
     start = runtime.index('memset(&packet,', parse)
@@ -169,9 +171,8 @@ void socket_tcp_keepalive_activity_locked(socket_private_t *p,uint64_t n){assert
 uint32_t wake_all(wait_queue_t *q){assert((q==&target.waitq || q==&listener.waitq) && !held);return 0;}
 void object_notify_changed(void *p){assert((p==&target || p==&listener) && !held);}
 void object_notify_signaled(void *p){object_notify_changed(p);}
-/* Preserve the real external wait boundary. Flattening all test mocks and
- * both receive implementations into one TU lets GCC IPA miscompile the
- * guard assertion (GDB shows q == &target.waitq and held == 0 at failure). */
+/* 保留真实的外部等待边界。将所有测试模拟和两个接收实现展平到一个 TU 后，GCC IPA
+ * 会错误编译保护断言（GDB 显示失败时 q == &target.waitq 且 held == 0）。 */
 __attribute__((noinline,noipa))
 kstatus_t wait_on_queue(wait_queue_t *q,bool (*ready)(void *),void *ctx,uint64_t timeout){
  (void)timeout;assert(q==&target.waitq && !held);
@@ -255,7 +256,7 @@ int main(void){
   assert(emitted==before+1 && last.window==window);
   assert(last.peer_window_scale_present==(cap>32768));
   if(cap>32768)assert(last.peer_window_scale==priv->tcp_receive_scale);
-  /* Invalid ACK must neither complete nor commit options. */
+  /* 无效 ACK 既不能完成操作，也不能提交选项。 */
   assert(feed(family,UINT32_MAX,1,NET_TCP_FLAG_SYN|NET_TCP_FLAG_ACK,scale)==K_EAGAIN);
   assert(!priv->tcp_scale_seen && priv->tcp_state==SOCKET_TCP_SYN_SENT);
   assert(feed(family,UINT32_MAX,0,NET_TCP_FLAG_SYN|NET_TCP_FLAG_ACK,scale)==K_OK);
@@ -273,14 +274,14 @@ int main(void){
    if(negotiated)assert(free_bytes-(uint32_t)w*quantum<quantum);
    else assert(w==(free_bytes>65535?65535:free_bytes));
   }
-  /* Ordinary ACK windows are scaled once, never narrowed to uint16_t. */
+  /* 普通 ACK 窗口只缩放一次，绝不能窄化为 uint16_t。 */
   assert(ack(family,0,0,65535)==K_OK);
   assert(priv->tcp_peer_window==(65535U<<(negotiated?scale:0)));
   assert(feed(family,UINT32_MAX,0,NET_TCP_FLAG_SYN|NET_TCP_FLAG_ACK,14)==K_OK);
   assert(priv->tcp_peer_scale==(negotiated?scale:0));
   assert(socket_tcp_syn_scale_ipv4(1,50000,2,443,UINT32_MAX,0)==-1);
-  /* Actual read path: peek keeps credit, consumption reopens a full ring.
-   * Read beyond the old fixed 32KiB limit in one operation. */
+  /* 实际读取路径：peek 保留额度，读取消费数据后重新开放整个环形缓冲区。
+   * 单次读取超过旧的固定 32 KiB 限制。 */
   unsigned char *in=malloc(cap),*out=malloc(cap);assert(in && out);
   for(unsigned i=0;i<cap;++i)in[i]=(unsigned char)(i*17+i/251);
   priv->stream_read=priv->stream_write=cap-13;
@@ -320,7 +321,7 @@ int main(void){
   conn4.socket=conn6.socket=NULL;listening_mode=true;oom=fail;
   memset(&listener_private,0,sizeof(listener_private));listener_private.listening=true;
   listener_private.tcp_keepidle=7200;listen_binding.socket=&listener;
-  /* Source addresses are needed by the peer packet builder before child creation. */
+  /* 对端数据包构造器需要在创建子项之前获得源地址。 */
   priv->local_address6[0]=priv->peer_address6[0]=0x20;
   priv->local_address6[15]=1;priv->peer_address6[15]=2;
   assert(feed(family,UINT32_MAX,0,NET_TCP_FLAG_SYN,scale)==K_OK);oom=false;
@@ -330,7 +331,7 @@ int main(void){
   assert(last.window==(cap>65535?65535:cap));
   assert(listener_refs==1 && atomic_load(&listener_private.accept_count)==1);
   assert(listener_private.accept_queue[0]==&target && priv->tcp_keepidle==7200);
-  /* A retransmitted SYN cannot change an already published negotiation. */
+  /* 重传的 SYN 不能更改已发布的协商结果。 */
   assert(feed(family,UINT32_MAX,0,NET_TCP_FLAG_SYN,14)==K_OK);
   assert(priv->tcp_peer_scale==(negotiated?scale:0));
   assert(feed(family,1,0,NET_TCP_FLAG_SYN,14)==K_EAGAIN);

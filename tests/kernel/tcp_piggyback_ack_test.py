@@ -100,7 +100,8 @@ static bool e1000_send_tcp_reply{'' if family=='4' else '6'}(
     e1000_state_t* state,packet_t* packet,socket_tcp_reply_t* reply) {{
     (void)state;(void)packet; assert(reply->valid); ++replies; return true;
 }}
-static int dispatch{family}(packet_t packet) {{
+static int dispatch{family}(packet_t input_packet) {{
+    packet_t *packet=&input_packet;
     e1000_state_t storage={{0}},*state=&storage; int status=K_OK;
 {blocks[index]}
     return status;
@@ -131,7 +132,7 @@ int main(void) {
             assert(!sender.tcp_send_deadline_tsc && sender.tcp_send_unacknowledged==1000);
             assert(ack_calls==1 && rx_calls==1 && replies==1 && notifications==1);
             assert(event_count==2 && events[0]=='A' && events[1]=='R');
-            /* Duplicate acknowledgements must not notify twice. */
+            /* 重复确认不得重复发送通知。 */
             event_count=0;
             assert(dispatch[family](packet)==(rx_full?K_EAGAIN:K_OK));
             assert(notifications==1);
@@ -142,13 +143,13 @@ int main(void) {
         assert(dispatch[family](packet)==K_OK);
         assert(sender.tcp_send_pending && sender.tcp_send_length==50 && sender.tcp_send_unacknowledged==950);
         assert(notifications==1 && ack_calls==1 && rx_calls==1 && replies==1);
-        /* An ACK beyond SND.NXT cannot confirm bytes never transmitted. */
+        /* 超出 SND.NXT 的 ACK 不能确认尚未发送的字节。 */
         reset();
         packet.acknowledgement=1001;
         assert(dispatch[family](packet)==K_OK);
         assert(sender.tcp_send_pending && sender.tcp_send_length==100);
         assert(sender.tcp_send_unacknowledged==900 && !notifications);
-        /* A numerically large ACK can be valid partial progress across wrap. */
+        /* 数值很大的 ACK 在序列号回绕后也可能代表有效的部分推进。 */
         reset();
         sender.tcp_send_next_sequence=32;
         sender.tcp_send_unacknowledged=UINT32_MAX-67;

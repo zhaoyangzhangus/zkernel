@@ -63,8 +63,7 @@ int main(void) {
     assert(dispatch(&f,41,&event,15)==-22&&calls==5);
     no_stack=true;assert(dispatch(&f,41,&event,16)==-12&&calls==5);
     no_stack=false;vendor_status=7;assert(dispatch(&f,41,&event,16)==-5&&calls==6&&frees==6);
-    /* Every shared path must retain packet status and release exactly one
-     * temporary stack, even when RM itself rejects the request. */
+    /* 即使 RM 自身拒绝请求，共享路径也必须保留数据包状态，并且只释放一个临时栈。 */
     for(unsigned i=0;i<10000;++i) {
         f.control=(i&1)!=0;
         vendor_status=i%3?0:7;

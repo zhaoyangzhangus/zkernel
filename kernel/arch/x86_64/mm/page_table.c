@@ -492,11 +492,13 @@ bool x86_page_range_has_present_pages(paddr_t root, vaddr_t start,
     return present;
 }
 
-static kstatus_t page_table_next_present_locked(const uint64_t *table,
+static kstatus_t page_table_next_present_locked(uint64_t *table,
                                                 uint32_t level,
                                                 uint64_t table_base,
                                                 uint64_t start, uint64_t end,
-                                                vaddr_t *address) {
+                                                vaddr_t *address,
+                                                uint64_t **slot_out,
+                                                uint32_t *level_out) {
     if (table == 0 || level == 0U || start >= end) return K_EIO;
     const uint64_t span = 1ULL << (12U + (level - 1U) * 9U);
     uint64_t first = start <= table_base ? 0U : (start - table_base) / span;
@@ -511,12 +513,14 @@ static kstatus_t page_table_next_present_locked(const uint64_t *table,
         const uint64_t limit = end < base + span ? end : base + span;
         if (level == 1U || (entry & PTE_LARGE) != 0U) {
             *address = (vaddr_t)begin;
+            if (slot_out != 0) *slot_out = &table[index];
+            if (level_out != 0) *level_out = level;
             return K_OK;
         }
         uint64_t *child = table_from_physical(entry);
         if (child == 0) return K_EIO;
         kstatus_t status = page_table_next_present_locked(
-            child, level - 1U, base, begin, limit, address);
+            child, level - 1U, base, begin, limit, address, slot_out, level_out);
         if (status != K_ENOENT) return status;
     }
     return K_ENOENT;
@@ -533,9 +537,27 @@ kstatus_t x86_next_present_page(paddr_t root, vaddr_t start, uint64_t end,
     table_lock(root, start);
     uint64_t *pml4 = table_from_physical(root.value);
     kstatus_t status = pml4 == 0 ? K_EIO :
-        page_table_next_present_locked(pml4, 4U, 0U, start, end, address);
+        page_table_next_present_locked(pml4, 4U, 0U, start, end, address, 0, 0);
     table_unlock();
     return status;
+}
+
+static kstatus_t page_table_protect_user_entry_locked(uint64_t *slot,
+    uint32_t flags, enum x86_cache_mode cache_mode, bool *changed) {
+    uint64_t old = *slot;
+    if ((old & PTE_PRESENT) == 0) return K_ENOENT;
+    if ((old & (PTE_USER | PTE_GLOBAL)) != PTE_USER) {
+        return K_EINVAL;
+    }
+    uint64_t entry = (old & (PTE_ADDRESS_MASK | PTE_ACCESSED | PTE_DIRTY)) |
+        PTE_PRESENT | PTE_USER | x86_pte_cache_bits(cache_mode, false);
+    if ((flags & X86_PAGE_WRITE) != 0) entry |= PTE_WRITE;
+    if ((flags & X86_PAGE_EXEC) == 0) entry |= PTE_NO_EXECUTE;
+    if (entry != old) {
+        *slot = entry;
+        *changed = true;
+    }
+    return K_OK;
 }
 
 /* 仅延迟用户态、非全局映射的权限变更；调用方不会用此路径替换物理页或释放映射。
@@ -564,21 +586,37 @@ kstatus_t x86_protect_user_page_deferred(paddr_t root, vaddr_t address,
         table = table_from_physical(entry);
         if (table == 0) { table_unlock(); return K_EIO; }
     }
-    uint64_t old = table[indices[3]];
-    if ((old & PTE_PRESENT) == 0) { table_unlock(); return K_ENOENT; }
-    if ((old & (PTE_USER | PTE_GLOBAL)) != PTE_USER) {
-        table_unlock(); return K_EINVAL;
+    kstatus_t status = page_table_protect_user_entry_locked(
+        &table[indices[3]], flags, cache_mode, changed);
+    table_unlock();
+    return status;
+}
+
+/* 查找和修改共用一次页表遍历。只处理普通用户页；大页保持旧逐页路径的跳过语义。 */
+kstatus_t x86_protect_next_user_page_deferred(paddr_t root, vaddr_t start,
+    uint64_t end, uint32_t flags, enum x86_cache_mode cache_mode,
+    vaddr_t *address, bool *changed) {
+    if (changed == 0) return K_EINVAL;
+    *changed = false;
+    if (address == 0 || root.value == 0 || (uint64_t)start >= end ||
+        ((uint64_t)start & (PAGE_SIZE - 1ULL)) != 0U ||
+        (end & (PAGE_SIZE - 1ULL)) != 0U ||
+        !x86_is_canonical((uint64_t)start) || end > X86_64_USER_TOP + 1ULL ||
+        (flags & (X86_PAGE_USER | X86_PAGE_GLOBAL)) != X86_PAGE_USER) {
+        return K_EINVAL;
     }
-    uint64_t entry = (old & (PTE_ADDRESS_MASK | PTE_ACCESSED | PTE_DIRTY)) |
-        PTE_PRESENT | PTE_USER | x86_pte_cache_bits(cache_mode, false);
-    if ((flags & X86_PAGE_WRITE) != 0) entry |= PTE_WRITE;
-    if ((flags & X86_PAGE_EXEC) == 0) entry |= PTE_NO_EXECUTE;
-    if (entry != old) {
-        table[indices[3]] = entry;
-        *changed = true;
+    table_lock(root, start);
+    uint64_t *table = table_from_physical(root.value);
+    uint64_t *slot = 0;
+    uint32_t level = 0U;
+    kstatus_t status = table == 0 ? K_EIO :
+        page_table_next_present_locked(table, 4U, 0U, start, end, address,
+                                        &slot, &level);
+    if (status == K_OK && level == 1U) {
+        status = page_table_protect_user_entry_locked(slot, flags, cache_mode, changed);
     }
     table_unlock();
-    return K_OK;
+    return status;
 }
 
 kstatus_t x86_protect_page(paddr_t root, vaddr_t virtual_address, uint32_t flags,

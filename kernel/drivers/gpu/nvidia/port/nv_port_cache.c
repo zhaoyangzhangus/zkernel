@@ -58,7 +58,7 @@ void nv_port_cache_flush(const void *address, size_t length) {
 }
 
 void nv_port_cache_invalidate(const void *address, size_t length) {
-    /* x86 CLFLUSH is write-back plus invalidate and is ordered by MFENCE. */
+    /* x86 CLFLUSH 会执行回写并失效，且由 MFENCE 保证顺序。 */
     nv_port_cache_flush(address, length);
 }
 

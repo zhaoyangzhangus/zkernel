@@ -41,7 +41,7 @@ static void *worker(void *unused) {
     return NULL;
 }
 int main(void) {
-    /* Exact initial reports and summary points; retain other diagnostics. */
+    /* 检查初始报告和汇总点的精确数量，同时保留其他诊断信息。 */
     for(unsigned i=0;i<33;++i)nvabi_log_unsupported("nv_post_event","test");
     assert(atomic_load(&reports)==10 && !strcmp(last_chunk,"32"));
     nvabi_log_unsupported("different_callback","test");

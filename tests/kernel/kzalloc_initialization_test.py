@@ -129,7 +129,7 @@ int main(void) {
    ++cases;
   }
  }
- /* Free poison corruption must still be detected before zeroing it away. */
+ /* 空闲毒值在被清零之前仍必须能检测出已损坏。 */
  mode=0;prepare(0,17);slot[KMEM_PAYLOAD_OFFSET+9]^=1;
  unsigned before=errors;assert(kzalloc(17,0));assert(errors==before+1);
  for(caller_preempt=0;caller_preempt<4;++caller_preempt)
@@ -149,8 +149,8 @@ int main(void) {
  prepare(0,1);mode=2;available=false;assert(!kzalloc(1,0) && !preempt && !locked);
  fail_page=true;assert(!kzalloc(5000,0) && !preempt);fail_page=false;
  fail_direct=true;assert(!kzalloc(5000,0) && !preempt);fail_direct=false;
- /* Use the old loop as an independent size/order oracle. Fail the backing
-  * allocation deliberately, so upper boundary cases need no huge buffers. */
+ /* 使用旧循环作为独立的大小/阶数基准。故意让后备存储分配失败，因此上界用例不需要
+  * 巨型缓冲区。 */
  fail_page=true;
  unsigned order_cases=0;
  for(unsigned kind=0;kind<3;++kind) {

@@ -72,8 +72,8 @@ static void check_ring(socket_private_t *p,unsigned cap){
   assert(!memcmp(in,out,n));
   assert(p->stream_read==cursors[a] && p->stream_write==cursors[a]);
  }
- /* Retain a suffix past the old 32KiB boundary, including sequence and
-  * ring wrap. Closing its hole must publish one full, ordered buffer. */
+ /* 在旧的 32 KiB 边界之外保留后缀，包括序列号和环形缓冲区回绕。
+  * 缺口关闭后必须一次性发布完整且有序的缓冲区。 */
  p->stream_read=p->stream_write=cap-17;
  uint32_t base=UINT32_MAX-12345U;
  bool notify=true;

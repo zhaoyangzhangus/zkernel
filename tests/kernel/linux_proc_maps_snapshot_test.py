@@ -115,7 +115,7 @@ with tempfile.TemporaryDirectory() as directory:
     for debug in (0,1):
         result = run('maps'+str(debug), helper, builder, debug)
         assert result.returncode == 0, result.stderr
-    # Start from production's inline capacity, not a stale 64 KiB fixture.
+    # 使用生产代码的内嵌容量作为起点，而不是过期的 64 KiB 测试夹具。
     inline_capacity = int(next(line.split()[-1].rstrip('U') for line in linux.splitlines()
                                if line.startswith('#define LINUX_PROC_DATA_MAX ')))
     native_fixture = fixture[:fixture.index('int main(void) {')]

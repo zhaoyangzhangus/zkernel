@@ -13,12 +13,12 @@ code=code.replace('__asm__ volatile ("sti" : : : "memory");','local_flags=512;')
 code=code.replace('__asm__ volatile ("cli" : : : "memory");','local_flags=0;')
 code=code.replace('atomic_load_explicit(&guard->lock.state,\n                                       memory_order_relaxed)',
                   'checked_poll(&guard->lock.state, memory_order_relaxed)')
-# Guard routing is checked on every production entry, including shared upper half.
+# 检查所有生产入口中的保护路由，包括共享的高半地址区域。
 routes={'x86_sync_kernel_half':'kernel_root, UINT64_MAX','x86_map_page':'root, va',
         'x86_translate_page':'root, va','x86_unmap_page':'root, va',
         'x86_unmap_user_page_batch':'root, 0U','x86_page_range_has_present_pages':'root, begin',
         'x86_next_present_page':'root, start','x86_protect_user_page_deferred':'root, va',
-        'x86_protect_page':'root, va'}
+        'x86_protect_next_user_page_deferred':'root, start','x86_protect_page':'root, va'}
 for name,args in routes.items():
     start=source.index(' '+name+'(')
     brace=source.index('{',start);depth=1;finish=brace+1

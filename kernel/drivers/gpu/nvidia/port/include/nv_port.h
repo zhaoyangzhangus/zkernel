@@ -1,12 +1,10 @@
 #pragma once
 
 /*
- * System port contract for the NVIDIA OpenRM integration.
+ * NVIDIA OpenRM 集成使用的 System 移植层约定。
  *
- * This header is deliberately below the vendor ABI boundary.  NVIDIA symbol
- * names must not be added here; vendor_abi/ will translate those names later.
- * The port owns only operating-system primitives and never owns VRAM, GPU VA,
- * GMMU page tables, or GSP RPC messages.
+ * 此头文件特意位于厂商 ABI 边界之下。不得在此添加 NVIDIA 符号名；这些名称会由 vendor_abi/
+ * 转换。移植层只负责操作系统原语，不负责 VRAM、GPU VA、GMMU 页表或 GSP RPC 消息。
  */
 
 #include <kernel/base.h>
@@ -36,10 +34,8 @@ enum nv_port_mem_flags {
 };
 
 /*
- * CPU memory descriptor.  cpu_va is valid only when the requested cache mode
- * and physical layout have a direct CPU representation.  In particular, a
- * physical address is never derived from cpu_va and a CPU VA is never handed
- * to a DMA API.
+ * CPU 内存描述符。只有在请求的缓存模式和物理布局均可直接映射到 CPU 时，cpu_va 才有效。尤其是，
+ * 物理地址绝不能从 cpu_va 推导，CPU 虚拟地址也绝不能传递给 DMA API。
  */
 typedef struct nv_port_mem {
     void *cpu_va;
@@ -54,7 +50,7 @@ typedef struct nv_port_mem {
 
     bool contiguous;
 
-    /* Port-private lifetime state; callers must treat these fields as opaque. */
+    /* 移植层私有的生命周期状态；调用方必须将这些字段视为不透明数据。 */
     page_t **page_objects;
     uint32_t allocation_order;
     uint32_t allocation_block_pages;
@@ -265,7 +261,7 @@ typedef struct nv_port_work {
 void nv_port_work_init(nv_port_work_t *work, nv_port_work_fn_t function,
                        void *argument);
 kstatus_t nv_port_work_queue(nv_port_work_t *work);
-/* Hard-IRQ callers may only use the non-blocking deferred enqueue path. */
+/* 硬 IRQ 调用方只能使用非阻塞的延迟入队路径。 */
 kstatus_t nv_port_work_queue_irq(nv_port_work_t *work);
 kstatus_t nv_port_work_cancel(nv_port_work_t *work);
 kstatus_t nv_port_work_drain(nv_port_work_t *work, uint64_t timeout_ns);

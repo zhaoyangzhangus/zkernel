@@ -16,8 +16,8 @@ typedef struct pthread_attr {
     int detach_state;
 } pthread_attr_t;
 
-/* glibc's x86-64 opaque mutex/condition attributes are one 32-bit word.
- * Chromium is built against that ABI and calls these System implementations. */
+/* glibc 的 x86-64 不透明互斥锁/条件变量属性均为一个 32 位字。Chromium 按该 ABI 构建，并调用
+ * System 的这些实现。 */
 typedef struct pthread_mutexattr {
     uint32_t value;
 } pthread_mutexattr_t;

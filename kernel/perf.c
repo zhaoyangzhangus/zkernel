@@ -3,7 +3,7 @@
 #include <kernel/perf.h>
 #include <kernel/telemetry.h>
 
-/* The public header maps normal calls to the location-aware entry point. */
+/* 公共头文件会将普通调用映射到带位置信息的入口。 */
 #undef kernel_perf_emit_scope
 #undef kernel_perf_emit_value
 #undef kernel_perf_emit_report

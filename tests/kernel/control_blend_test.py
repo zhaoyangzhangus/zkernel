@@ -5,12 +5,12 @@ import subprocess
 import tempfile
 
 root = Path(__file__).resolve().parents[2]
-header = (root/'include/kernel/control_raster.h').read_text()
+header = (root/'include/kernel/pixel_blend.h').read_text()
 program = r'''
 #include <assert.h>
 #include <stdint.h>
 #include <stdio.h>
-#include <kernel/control_raster.h>
+#include <kernel/pixel_blend.h>
 static uint32_t reference(uint32_t under, uint32_t source) {
  uint32_t alpha=source>>24U, out=under&0xff000000U;
  for(unsigned channel=0;channel<3;++channel) {
@@ -18,6 +18,17 @@ static uint32_t reference(uint32_t under, uint32_t source) {
   uint32_t value=(((source>>shift)&255U)*alpha+
       ((under>>shift)&255U)*(255U-alpha)+127U)/255U;
   out|=value<<shift;
+ }
+ return out;
+}
+static uint32_t premultiplied_reference(uint32_t under,uint32_t color) {
+ unsigned alpha=color>>24U;
+ if(!alpha)return under;
+ if(alpha==255U)return color;
+ uint32_t out=0;
+ for(unsigned shift=0;shift<24;shift+=8) {
+  unsigned value=((color>>shift)&255U)+(((under>>shift)&255U)*(255U-alpha)+127U)/255U;
+  out|=(value>255U?255U:value)<<shift;
  }
  return out;
 }
@@ -31,16 +42,22 @@ int main(void) {
     uint32_t color=(alpha<<24U)|(source*0x010101U);
     uint32_t under=0x9a000000U|(dest*0x010101U);
     assert(control_blend_argb(under,color)==reference(under,color));
+  assert(pixel_blend_premultiplied(under,color)==premultiplied_reference(under,color));
+  assert(control_blend_cursor_xrgb(under,color)==
+      (color>>24U ? reference(under,color)&0x00ffffffU : under));
    }
  /* 各通道独立，覆盖来源与目标高字节不同、零和完全不透明的快捷路径。 */
  for(unsigned i=0;i<1000000;++i) {
   uint32_t under=next(),color=next();
   assert(control_blend_argb(under,color)==reference(under,color));
+  assert(pixel_blend_premultiplied(under,color)==premultiplied_reference(under,color));
+  assert(control_blend_cursor_xrgb(under,color)==
+      (color>>24U ? reference(under,color)&0x00ffffffU : under));
   assert(control_blend_argb(under,color&0xffffffU)==under);
   assert(control_blend_argb(under,color|0xff000000U)==
       ((under&0xff000000U)|(color&0xffffffU)));
  }
- puts("Control blend: 16777216 exhaustive channel cases, 1000000 independent ARGB pairs, preserved destination alpha and transparent/opaque paths PASS");
+ puts("Control blend: 16777216 exhaustive channel cases, 1000000 independent ARGB pairs, straight/premultiplied/cursor math, saturation and transparent/opaque paths PASS");
 }
 '''
 with tempfile.TemporaryDirectory(prefix='control-blend-') as directory:
@@ -50,7 +67,7 @@ with tempfile.TemporaryDirectory(prefix='control-blend-') as directory:
     (path/'test.c').write_text(program)
     binary=path/'test'
     def compile_header(text):
-        (path/'kernel/control_raster.h').write_text(text)
+        (path/'kernel/pixel_blend.h').write_text(text)
         subprocess.run(['cc','-std=c11','-O2','-Wall','-Wextra','-Werror',
                         '-fsanitize=address,undefined','-fno-pie','-no-pie',
                         '-I',str(path),'-I',str(root/'include'),str(path/'test.c'),
@@ -59,6 +76,7 @@ with tempfile.TemporaryDirectory(prefix='control-blend-') as directory:
     subprocess.run([str(binary)],check=True)
     for name,broken in {
         'wrong-half-rounding':header.replace('0x00800080U','0x007f007fU'),
+        'premultiplied-no-saturation':header.replace('rb |= overflow - (overflow >> 8U);','rb |= overflow;'),
         'source-alpha-leak':header.replace('result = under & 0xff000000U','result = color & 0xff000000U'),
     }.items():
         assert broken!=header

@@ -1,9 +1,8 @@
 /*
- * Prototype contract for the Phase 3 NVIDIA ABI boundary.
+ * 第 3 阶段 NVIDIA ABI 边界的原型约定。
  *
- * These declarations are intentionally imported from immutable NVIDIA 595.84
- * headers.  The compiler type-checks every RM unresolved symbol against the
- * definition supplied by vendor_abi (C or assembly).
+ * 这些声明特意从不可变的 NVIDIA 595.84 头文件中导入。编译器会将每个尚未解析的 RM
+ * 符号与 vendor_abi 提供的定义（C 或汇编）进行类型检查。
  */
 
 #include "nv.h"

@@ -188,7 +188,7 @@ kstatus_t nv_port_mmio_map_bar(const pci_device_t *device, uint32_t bar_index,
     if ((bar->flags & PCI_RESOURCE_MEMORY) == 0U || bar->length == 0U) {
         return K_ENOENT;
     }
-    /* BAR0 is register space; other framebuffer-like BARs may be WC/UC. */
+    /* BAR0 是寄存器空间；其他类似帧缓冲区的 BAR 可能采用 WC/UC 属性。 */
     if ((bar_index == 0U && cache_type != NV_PORT_CACHE_UC) ||
         (bar_index != 0U && cache_type == NV_PORT_CACHE_WB)) return K_EINVAL;
     return nv_port_mmio_map(paddr_make(bar->address), bar->length,

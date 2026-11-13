@@ -1,6 +1,6 @@
 #pragma once
 
-/* System allocator declarations; do not fall through to the host glibc. */
+/* System 分配器声明；不要回退到宿主 glibc。 */
 #include <libc/libc.h>
 #include <sys/cdefs.h>
 

@@ -32,7 +32,7 @@ static unsigned refill_calls,cache_calls,large_calls,init_calls,activations;
 static bool migrate;
 static uint32_t x86_current_cpu_index(void) {++reads;return current_cpu;}
 static void sched_preempt_disable(void) {
-    /* Inject the migration possible immediately before pinning the CPU. */
+    /* 在固定 CPU 之前，注入可能发生的 CPU 迁移。 */
     if(!depth&&migrate)current_cpu=3;
     ++depth;
 }

@@ -2,7 +2,7 @@
 
 #include <kernel/elf_loader.h>
 
-/* REFACTOR_P5_EXEC_INTERNAL: private ELF image model shared by loader tests. */
+/* REFACTOR_P5_EXEC_INTERNAL：由加载器测试共用的私有 ELF 镜像模型。 */
 
 #define ELF_CLASS_64          2U
 #define ELF_DATA_LSB          1U

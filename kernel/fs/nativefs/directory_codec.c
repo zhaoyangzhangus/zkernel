@@ -1,6 +1,6 @@
 #include "internal.h"
 
-/* REFACTOR_FS_FAT32_DIRECTORY_CODEC_OWNER: names and on-disk field encoding. */
+/* REFACTOR_FS_FAT32_DIRECTORY_CODEC_OWNER：名称和磁盘字段编码。 */
 
 #define FAT32_ATTRIBUTE_LFN 0x0FU
 

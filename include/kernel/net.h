@@ -40,7 +40,7 @@ void net_device_init(net_device_t *device, const char *name,
                      net_device_transmit_fn transmit, void *context);
 kstatus_t net_device_send(net_device_t *device, const void *frame, size_t length);
 
-/* Failure-only syscall progress snapshot used by the runtime self-test. */
+/* 运行时自检在失败时使用的系统调用进度快照。 */
 uint32_t syscall_socket_create_debug_progress(uint32_t cpu_index);
 
 typedef struct socket {

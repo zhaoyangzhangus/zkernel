@@ -34,8 +34,8 @@ while node != registry and node not in seen:
                 print('MENU_MAIN state=%d cpu=%d syscall_active=%d waiter=%#x saved_rsp=%#x' %
                       (int(thread['state']), int(thread['owner_cpu']), active,
                        int(thread['blocked_waiter']), stack))
-                # entry.S reserves an exact arch_trap_frame_t at stack top.
-                # It is meaningful here only while inside a user syscall.
+                # entry.S 会在栈顶预留精确大小的 arch_trap_frame_t。
+                # 只有处于用户系统调用期间时，此信息才有意义。
                 if active:
                     top = int(thread['kernel_stack_top'])
                     frame = cast(top-gdb.lookup_type('arch_trap_frame_t').sizeof,

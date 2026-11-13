@@ -34,7 +34,7 @@ static void *worker(void *arg){
  return 0;
 }
 int main(void){
- /* More than a full wire-ID cycle verifies natural 16-bit wrap. */
+ /* 超过一个完整线路 ID 周期，以验证自然的 16 位回绕。 */
  unsigned previous=make_packet(0);
  for(unsigned i=0;i<131072;++i){
   unsigned current=make_packet(i&1);

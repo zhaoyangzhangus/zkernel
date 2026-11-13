@@ -50,7 +50,7 @@ typedef struct {
  void *controls;
  char title[32];
  caption_text_t *caption;
- int event_waitq;
+ int present_waitq;
 } window_server_window_t;
 typedef struct {
  window_server_window_t *window;
@@ -118,7 +118,7 @@ static kstatus_t window_server_set(window_server_window_t *w,int x,int y,uint32_
  assert(!locked && w==&window && x==w->x && y==w->y && visible==1);++shows;w->flags|=OS_WINDOW_VISIBLE;return 0;
 }
 static kstatus_t wait_on_queue(int *queue,bool (*predicate)(void*),void *raw,uint64_t timeout){
- assert(!locked && queue==&window.event_waitq && timeout==5000000000ULL);++waits;
+ assert(!locked && queue==&window.present_waitq && timeout==5000000000ULL);++waits;
  assert(predicate(raw));return 0;
 }
 ''' + '\n'.join((
@@ -130,11 +130,19 @@ static kstatus_t wait_on_queue(int *queue,bool (*predicate)(void*),void *raw,uin
     function('kstatus_t window_server_present('),
 )) + r'''
 int main(void) {
+ // 栅栏尚未完成也必须因窗口移除立即解除等待，并保留原始错误码。
+ window_present_wait_context_t canceled={.window=&window,.sequence=99};
+ atomic_init(&window.registry_removed,false);
+ atomic_init(&window.compositor_presented_sequence,1);
+ assert(!window_present_sequence_ready(&canceled));
+ atomic_store(&window.registry_removed,true);
+ assert(window_present_sequence_ready(&canceled));
+ assert(window_present_wait_result(&window,K_OK)==K_ECANCELED);
+ assert(window_present_wait_result(&window,K_EIO)==K_EIO);
  process_t owner={1},other={2};
  window=(window_server_window_t){.owner=&owner,.identifier=7,.width=100,.height=100,
   .flags=OS_WINDOW_VISIBLE,.x=10,.y=10,.owner_address=4096,.buffer_size=40000};
- // Reproduce the old two-lock publication. A snapshot can acknowledge the
- // new sequence at the first unlock, before any submitted damage exists.
+ // 复现旧的双锁发布。首次解锁时，快照可能会确认新序列号，但此时尚未提交任何损坏区域。
  window_lock();window.present_sequence=1;window_unlock();
  assert(premature==1 && atomic_load(&window.compositor_presented_sequence)==1);
  window_lock();window_mark_surface_locked(&window,1,2,3,4);window_unlock();
@@ -190,9 +198,8 @@ int main(void) {
  assert(window_server_update(&owner,7,0,0,3,4,39U<<16U)==K_EINVAL);
  assert(window_server_update(&owner,7,0,0,3,4,129U<<16U)==K_EINVAL);
  assert(window_server_update(&owner,7,0,0,3,4,101U<<16U)==K_EINVAL);
- // A font-dependent caption changes the outer height, not client height.
- // Damage must include the OLD extent before flags change, or shrinking
- // leaves successive white bottom borders on the retained desktop.
+ // 与字体相关的标题栏会改变外部高度，而非客户区高度。
+ // 标志更改前，损坏区域必须包含旧范围，否则缩小时会在保留桌面上留下连续的白色底边。
  track_caption_damage=true;
  for(unsigned old=40;old<=100;++old)for(unsigned next=40;next<=100;++next){
   window.flags=21U|(old<<16);caption_marks=0;
@@ -201,9 +208,8 @@ int main(void) {
   else assert(caption_marks==2 && caption_damage[0]==old && caption_damage[1]==next);
  }
  track_caption_damage=false;
- // Use real frame geometry and actual window damage production code. Model
- // repaint only inside submitted damage; every old white pixel outside the
- // new footprint must become wallpaper, including clipped screen edges.
+ // 使用真实边框几何信息和窗口损坏区域的生产代码。只在已提交的损坏区域内模拟重绘；
+ // 新占用范围之外的旧白色像素都必须变回桌面背景，包括屏幕裁剪边缘。
  const unsigned captions[]={40,41,48,56,76,100,128};
  const int positions[][2]={{8,8},{-8,8},{8,-8},{50,8},{8,220},{-8,-8}};
  unsigned pixel_cases=0;
@@ -252,8 +258,7 @@ with tempfile.TemporaryDirectory(prefix='liteos-present-transaction-') as direct
     old_mark='window_mark_window_locked(window);\n            window->flags = next_flags;'
     mark_assert='else assert(caption_marks==2 && caption_damage[0]==old && caption_damage[1]==next);'
     assert old_mark in program and mark_assert in program
-    # Disable only the mark-count assertion so the independent pixel oracle,
-    # not the earlier structural check, must detect the original bottom trail.
+    # 只禁用标记数量断言，使独立像素基准而非前面的结构检查能够检测原有的底边残留。
     negative=program.replace(old_mark,'window->flags = next_flags;').replace(mark_assert,'else (void)0;')
     compile_program(negative)
     failed=subprocess.run([str(path/'test')],capture_output=True,text=True,timeout=10)

@@ -7,5 +7,5 @@ typedef struct kernel_init_core_hooks {
     void (*halt)(void);
 } kernel_init_core_hooks_t;
 
-/* Run the allocator/core memory gates before storage and scheduling. */
+/* 在存储和调度初始化前，运行分配器/核心内存检查。 */
 BOOLEAN kernel_init_core(const kernel_init_core_hooks_t *hooks);

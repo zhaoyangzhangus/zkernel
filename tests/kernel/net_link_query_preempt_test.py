@@ -56,8 +56,7 @@ static uint32_t e1000_read(const e1000_state_t *state,unsigned reg){
  assert(state==&g_e1000&&reg==E1000_REG_STATUS);
  assert(preempt_depth==expected_outer);
  assert(atomic_load(&g_e1000_lifecycle_lock)==1);
- /* Simulate a local worker displacing the read-only owner. The reset/RX
-  * contenders cannot release or unmap the owner's device. */
+ /* 模拟本地工作线程抢占只读所有者。reset/RX 竞争者不能释放或取消映射所有者的设备。 */
  assert(!e1000_lifecycle_try_lock());
  assert(preempt_depth==expected_outer);
  if(inject_contention){
@@ -83,7 +82,7 @@ int main(void){
  inject_contention=true;
  assert(e1000_link_up()&&!preempt_depth);
  assert(g_e1000.link_up&&g_e1000.device.link_up&&reads==1);
- /* Acknowledged request is retried after owner release, without a new IRQ. */
+ /* 所有者释放后会重试已确认的请求，无需新的 IRQ。 */
  e1000_retry_deferred_poll();assert(queue_attempts==1);
  assert(atomic_load(&g_e1000_poll_queued)&&!atomic_load(&g_e1000_poll_retry));
  inject_contention=false;e1000_deferred_poll(0);
@@ -97,11 +96,11 @@ int main(void){
  assert(e1000_lifecycle_try_lock());
  assert(!e1000_link_up()&&preempt_depth==1&&reads==3);
  e1000_lifecycle_unlock();
- /* Existing ring-DD retry still schedules fresh receive work. */
+ /* 现有的环形队列 DD 重试仍会安排新的接收任务。 */
  descriptor_t ring={.status=E1000_RX_STATUS_DD};g_e1000.rx_ring=&ring;
  g_e1000.backend=NET_BACKEND_E1000;e1000_deferred_poll(0);
  assert(queue_attempts==2&&atomic_load(&g_e1000_poll_queued));
- /* RTL ownership is inverted, and only the next descriptor counts. */
+ /* RTL 所有权规则相反，且只统计下一个描述符。 */
  descriptor_t rtl[2]={{.options1=0},{.options1=1U<<31}};
  g_e1000.backend=NET_BACKEND_RTL8126;g_e1000.rtl_rx_ring=rtl;
  g_e1000.rtl_rx_next=1;e1000_deferred_poll(0);

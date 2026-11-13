@@ -38,6 +38,7 @@ typedef struct {unsigned sched_class;} thread_t;
 #define SCHED_CLASS_IDLE 2U
 static thread_t *sched_current_thread(void){return NULL;}
 static bool sched_preempt_disabled(void){return false;}
+static bool sched_tick_should_preempt(void){return true;}
 static void schedule(void){assert(!"boot test must not yield");}
 typedef struct {
  void *context;uint64_t size;
@@ -50,7 +51,7 @@ static uint64_t current_position;
 static unsigned char disk[16384];
 static void vfs_backend_lock(vfs_backend_node_t *b){
  assert(!depth);depth=1;++locks;
- // Model truncate winning the lock before the first or second chunk.
+ // 模拟 truncate 在第一或第二个数据块前获得锁。
  if(mode==1 && locks==1)b->size=0;
  if(mode==2 && calls==1)b->size=current_position?current_position-1:0;
 }
@@ -59,7 +60,7 @@ static bool x86_user_range_valid(const void *p,size_t len){return p || !len;}
 static kstatus_t copy_to_user(void *dst,const void *src,size_t len){assert(!depth);memcpy(dst,src,len);return K_OK;}
 static kstatus_t read_backend(void *raw,uint64_t offset,void *dst,size_t len,uint64_t *out){
  vfs_backend_node_t *b=raw;assert(depth==1);++calls;
- // Memory backends reject an offset past EOF; invoking them there is the old bug.
+ // 内存后端会拒绝越过 EOF 的偏移；在此处调用后端就是旧缺陷。
  if(offset>b->size)return K_EINVAL;
  assert(offset<b->size); // EOF itself must not perform a redundant backend lookup.
  uint64_t got=b->size-offset;if(got>len)got=len;

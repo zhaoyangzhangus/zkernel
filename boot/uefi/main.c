@@ -87,7 +87,7 @@ static BOOLEAN build_handoff_page_tables(const OS_ELF_IMAGE *image, UINT64 *root
     mem_zero(g_handoff_kernel_pd, sizeof(g_handoff_kernel_pd));
     mem_zero(g_handoff_kernel_pt, sizeof(g_handoff_kernel_pt));
 
-    /* Physical UEFI allocations may land above 4 GiB on real machines. */
+    /* 实机上的 UEFI 物理分配可能位于 4 GiB 以上。 */
     for (UINTN table = 0; table < HANDOFF_PAGE_TABLE_COUNT; ++table) {
         g_handoff_pdpt[table] = page_table_address(g_handoff_pd[table]) | 0x03ULL;
         for (UINTN entry = 0; entry < 512U; ++entry) {
@@ -531,7 +531,7 @@ static BOOLEAN discover_boot_device(EFI_BOOT_SERVICES *bs, EFI_HANDLE device_han
                    node->SubType == EFI_DEVICE_PATH_SUBTYPE_PCI &&
                    info->BootDeviceTransport ==
                        OS_BOOT_DEVICE_TRANSPORT_UNKNOWN) {
-            /* Keep PCI-only paths distinguishable from USB aliases below. */
+            /* 保持仅 PCI 路径与下方的 USB 别名可区分。 */
             info->BootDeviceTransport = OS_BOOT_DEVICE_TRANSPORT_NVME;
         }
         if (node->Type == EFI_DEVICE_PATH_TYPE_MEDIA &&
@@ -719,7 +719,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
     boot_info->ApTrampolineBase = ap_trampoline;
     boot_info->ApTrampolineSize = 4096U;
 
-    /* Build the post-EBS address space while EFI services are still valid. */
+    /* EFI 服务仍有效时，构建 ExitBootServices 之后使用的地址空间。 */
     UINT64 handoff_cr3 = 0;
     OS_ELF_IMAGE handoff_image;
     handoff_image.PhysicalBase = boot_info->KernelPhysicalBase;

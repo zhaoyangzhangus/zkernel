@@ -32,7 +32,7 @@ int main(void) {
         !block_cache_read(&cache, 0, buffer)) return 1;
     memcpy(buffer, "cached", 6U);
     if (!block_cache_write(&cache, 0, buffer)) return 2;
-    /* A complete-block write miss must not issue a read before becoming dirty. */
+    /* 完整块写入未命中时，应先标脏，不得先发起读取。 */
     if (!block_cache_write(&cache, TEST_BLOCKS - 1U, buffer) ||
         read_count != 1U) return 5;
     for (UINT64 lba = 1; lba <= OS_BLOCK_CACHE_ENTRY_COUNT; ++lba) {

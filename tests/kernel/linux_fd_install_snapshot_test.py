@@ -46,7 +46,7 @@ static void spinlock_lock(spinlock_t *l) { assert(!held && !l->held);held=l->hel
 static void spinlock_unlock(spinlock_t *l) {
  assert(held && l->held);held=l->held=false;
  if(l==&current->linux_fds.lock && mutation) {
-  /* Model a closer acquiring the table after the allocator releases it. */
+  /* 模拟分配器释放表锁后，关闭方获取该表锁。 */
   unsigned count=mutation==1?1:8;
   for(unsigned i=0;i<count;++i)current->linux_fds.entries[i]=(linux_fd_entry_t){0};
   mutation=0;
@@ -97,8 +97,8 @@ int main(void) {
   assert(atomic_load(&description.references)==1 && atomic_load(&description.external_references)==1);
   unsigned empty=close==0?0:close==1?1:8;
   for(unsigned i=0;i<8;++i)assert(p.linux_fds.entries[i].kind==(i<empty?LINUX_FD_UNUSED:LINUX_FD_CONSOLE));
-  /* Snapshot diagnostics never change the already returned allocation result.
-   * A later call can reuse the newly closed slot normally. */
+  /* 快照诊断不得改变已经返回的分配结果。
+   * 后续调用可以正常重用刚关闭的槽位。 */
   if(close) {
    logs=0;unsigned previous_budget=g_linux_fd_exhaustion_logs;
    assert(linux_fd_install(&p,-1,NULL,NULL,LINUX_FD_CONSOLE,7)==0);

@@ -50,10 +50,11 @@ static BOOLEAN fat32_read_sector(const OS_FAT32 *fs,UINT64 lba,UINT8 *out) {
  assert(offset+fs->BytesPerSector<=sizeof(disk));
  memcpy(out,disk+offset,fs->BytesPerSector);return 1;
 }
-''' +entry+next_cluster+source[begin:end]+r'''
-static UINT32 reference(const OS_FAT32 *fs,UINT32 cluster) {
+''' +source[source.index('static BOOLEAN fat32_fat_entry_location('):entry_begin]+entry+next_cluster+source[begin:end]+r'''
+static UINT32 reference(const OS_FAT32 *fs,UINT32 cluster,UINT32 maximum) {
+ if(maximum==0)return 0;
  UINT32 length=1;
- while(length<16 && fat32_cluster_valid(fs,cluster+length)) {
+ while(length<maximum && fat32_cluster_valid(fs,cluster+length)) {
   UINT32 next;
   if(!fat32_read_next_cluster(fs,cluster+length-1,&next) ||
      next!=cluster+length)break;
@@ -86,7 +87,7 @@ int main(void) {
    store(starts[s]+stop,width,value);
    UINT64 first=fs.FatStartLba+(UINT64)starts[s]*width/bps;
    fail_lba=failed?first+failed-1:UINT64_MAX;
-   calls=0;unsigned expected=reference(&fs,starts[s]);
+   calls=0;unsigned expected=reference(&fs,starts[s],16);
    unsigned reference_calls=calls;
    calls=0;unsigned actual=fat32_extent_length(&fs,starts[s],16);
    assert(actual==expected && actual>=1 && actual<=16);
@@ -105,8 +106,34 @@ int main(void) {
   store(2+2*fs.FatSectors*bps/width,width,8);
   calls=0;assert(fat32_extent_length(&fs,2,16)==8 && calls==1);
   assert(fat32_extent_length(&fs,2,3)==3);
+  calls=0;assert(fat32_extent_length(&fs,2,1)==1 && calls==0);
   calls=0;assert(fat32_extent_length(&fs,2,0)==0 && calls==0);
  }
+
+ unsigned long_cases=0;
+ unsigned sectors[]={1,2,3,4,5,7,511,512,513,1024,2048,4095,4096};
+ unsigned limits[]={0,1,2,15,16,255,256,257,1024,4096,UINT32_MAX};
+ unsigned starts[]={2,3,127,128,129,255,256,257,4090,4097};
+ for(unsigned bits=16;bits<=32;bits+=16)
+ for(unsigned g=0;g<sizeof(sectors)/sizeof(*sectors);++g) {
+  unsigned width=bits/8,bps=sectors[g];
+  OS_FAT32 fs={.ClusterCount=4096,.FatType=bits,.FatCount=2,
+   .BytesPerSector=bps,.FatSectors=16384,.FatStartLba=(1ULL<<40)+123};
+  memset(disk,0,sizeof(disk));
+  for(unsigned c=2;c<=4097;++c)store(c,width,bits==32?0xa0000000U|(c+1):c+1);
+  for(unsigned a=0;a<sizeof(starts)/sizeof(*starts);++a)
+  for(unsigned b=0;b<sizeof(limits)/sizeof(*limits);++b)
+  for(unsigned failure=0;failure<3;++failure) {
+   UINT64 first=fs.FatStartLba+(UINT64)starts[a]*width/bps;
+   fail_lba=failure?first+failure-1:UINT64_MAX;
+   calls=0;UINT32 expected=reference(&fs,starts[a],limits[b]);
+   unsigned reference_calls=calls;calls=0;
+   UINT32 actual=fat32_extent_length(&fs,starts[a],limits[b]);
+   assert(actual==expected && actual<=limits[b]);
+   assert(calls<=reference_calls);++long_cases;
+  }
+ }
+ printf("FAT extent position: %u long/short/zero-limit, malformed-sector, 64-bit LBA, volume-edge and failed-read comparisons PASS\n",long_cases);
  printf("Standard FAT: %u FAT16/32 geometry, fragmentation, EOC/bad/reserved links, sector failure and volume-edge comparisons passed; contiguous probe 15 -> 1 sector reads\n",cases);
 }
 '''
@@ -115,7 +142,7 @@ with tempfile.TemporaryDirectory(prefix='liteos-fat-extent-') as directory:
  subprocess.run(['cc','-Wall','-Wextra','-Werror','-fsanitize=address,undefined',
                  '-fno-pie','-no-pie','-x','c','-','-o',binary],input=code,text=True,check=True)
  subprocess.run([binary],check=True)
- broken=code.replace('!loaded || loaded_lba != lba','1 || !loaded || loaded_lba != lba')
+ broken=code.replace('if (!loaded)', 'if (1 || !loaded)')
  assert broken!=code
  subprocess.run(['cc','-Wall','-Wextra','-Werror','-fsanitize=address,undefined',
                  '-fno-pie','-no-pie','-x','c','-','-o',binary],input=broken,text=True,check=True)
@@ -124,3 +151,20 @@ with tempfile.TemporaryDirectory(prefix='liteos-fat-extent-') as directory:
  assert result.returncode==-signal.SIGABRT and b'Assertion' in result.stderr
  print('Negative control rejected: repeated FAT sector reads')
 print('Standard FAT: bounded contiguous prefix, EOF, read failure, volume boundary and third-table compatibility passed')
+
+with tempfile.TemporaryDirectory(prefix='fat-extent-position-negative-') as directory:
+ binary=str(Path(directory)/'test')
+ for name,old,new in (
+  ('sector advance','++lba;','(void)lba;'),
+  ('offset reset','offset = 0U;','offset = entry_size;'),
+  ('fresh sector','loaded = 0;\n            }','loaded = 1;\n            }'),
+  ('one-cluster metadata I/O','if (maximum <= 1U) return maximum;', 'if (maximum == 0U) return 0U;'),
+ ):
+  broken=code.replace(old,new)
+  assert broken!=code
+  subprocess.run(['cc','-Wall','-Wextra','-Werror','-fsanitize=address,undefined',
+                  '-fno-pie','-no-pie','-x','c','-','-o',binary],input=broken,text=True,check=True)
+  result=subprocess.run([binary],capture_output=True,timeout=30,
+      preexec_fn=lambda:resource.setrlimit(resource.RLIMIT_CORE,(0,0)))
+  assert result.returncode==-signal.SIGABRT and b'Assertion' in result.stderr
+  print('Negative control rejected: '+name)

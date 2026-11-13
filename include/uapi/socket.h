@@ -110,7 +110,7 @@ typedef struct os_socket_shutdown {
     uint32_t reserved;
 } os_socket_shutdown_t;
 
-/* Additive options; existing native structure layouts and numbers stay fixed. */
+/* 仅添加选项；现有原生结构布局和编号保持不变。 */
 #define OS_SOCKET_OPTION_KEEPALIVE 9U
 #define OS_SOCKET_OPTION_KEEPIDLE 10U
 #define OS_SOCKET_OPTION_KEEPINTVL 11U

@@ -25,8 +25,8 @@ static bool observing;
 static uint64_t x86_read_tsc(void) {return clock_ticks++;}
 static uint64_t x86_timeout_ns_to_tsc(uint64_t n) {return n;}
 ''' + wait + r'''
-/* Interrupt the AP immediately after its release-store, before its next
- * instruction. The acquire-reader must already see all startup metadata. */
+/* 在 AP 执行 release-store 后、下一条指令之前立即触发中断。acquire 读取者此时必须
+ * 已能看到所有启动元数据。 */
 static void publish_store(atomic_uint *p,unsigned value,memory_order order) {
  atomic_store_explicit(p,value,order);
  if(!observing)return;

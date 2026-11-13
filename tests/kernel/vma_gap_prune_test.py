@@ -91,7 +91,7 @@ int main(void) {
         check(VM_USER_BASE+2048*PAGE_SIZE,2*PAGE_SIZE);assert(visits==1);
         check(VM_USER_BASE,PAGE_SIZE);assert(visits<=24);
         check(areas[4095].end,PAGE_SIZE);assert(visits==1);
-        /* Prefix/suffix deletion and resizing require fresh augmentation. */
+        /* 删除前缀/后缀以及调整大小后都需要重新计算增强信息。 */
         list_del(&areas[0].ordered_node);list_del(&areas[4095].ordered_node);
         areas[4094].end-=1;rebuild_area_tree(&space);(void)verify(space.areas.root);
         check(VM_USER_BASE,2*PAGE_SIZE);check(areas[4094].end,1);

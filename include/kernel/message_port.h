@@ -30,7 +30,7 @@ typedef struct message_port {
     uint32_t head;
     uint32_t tail;
     uint32_t count;
-    /* One allocation with capacity slots; only published message bytes read. */
+    /* 一次性分配 capacity 个槽位；只读取已发布消息中的有效字节。 */
     message_port_message_t messages[];
 } message_port_t;
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Deliberately restricted to the user's confirmed Lenovo K121, not a generic disk writer.
+# 有意限定为用户确认的 Lenovo K121，不作为通用磁盘写入工具。
 set -euo pipefail
 export PATH=/usr/sbin:/usr/bin:/sbin:/bin
 check_only=0
@@ -39,8 +39,7 @@ done
 [[ -z "$(find "$source_dir" -type f -size +4294967295c -print -quit)" ]] || {
     echo '存在超过 FAT32 限制的文件，拒绝部署。' >&2; exit 1;
 }
-# Hold the launcher's existing lock for the entire deployment, including
-# manifest creation. Opening read-only does not truncate or create anything.
+# 整个部署期间（包括创建清单）都持有启动器现有锁。只读打开不会截断或创建任何文件。
 exec {deploy_lock_fd}<"$project_dir/build/qemu-run.lock"
 flock -n "$deploy_lock_fd" || {
     echo 'QEMU 启动器仍占用统一构建目录，拒绝部署。' >&2; exit 1;
@@ -62,9 +61,12 @@ trap cleanup EXIT
 manifest="$(mktemp /tmp/system-usb-manifest.XXXXXX)"
 trap 'cleanup; rm -f -- "$manifest"' EXIT
 (cd "$source_dir" && find . -type f -print0 | sort -z | xargs -0 sha256sum) > "$manifest"
-systemctl stop system-usb-journal.service
+# 旧日志服务可能未安装；只有服务存在时才需要停止它。
+if [[ "$(systemctl show system-usb-journal.service --property=LoadState --value 2>/dev/null)" == loaded ]]; then
+    systemctl stop system-usb-journal.service
+fi
 if findmnt -rn -S "$partition" >/dev/null; then umount "$partition"; fi
-# Formatting is authorized; the exact stable USB identity was validated above.
+# 已获准格式化；上方已验证此 USB 设备的精确稳定身份。
 echo "清除 Lenovo K121：$device（不备份）"
 parted --script "$device" set 1 esp on
 mkfs.fat -F 32 -n SYSTEM "$partition"

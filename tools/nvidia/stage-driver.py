@@ -96,7 +96,7 @@ def main():
     subprocess.run(['python3', 'tools/nvidia/check_userspace_59584.py',
                     '--root', args.userspace, '--manifest', str(normalized),
                     '--package-root', args.package], check=True)
-    # Only manifest-approved files and aliases are copied, never an old ESP/kernel.
+    # 只复制清单批准的文件和别名，绝不复制旧的 ESP/内核。
     entries = [entry['target'] for entry in manifest['files']]
     entries += [entry['alias'] for entry in manifest['aliases']]
     for name in sorted(set(entries)):

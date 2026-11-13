@@ -105,8 +105,8 @@ int main(int argc, char **argv) {
     assert(cosine && cosine(0.0) == 1.0);
     assert(dlclose(library) == 0);
     puts("CHROME_GLIBC_DLOPEN_PASS");
-    /* The browser's image/audio kernels use compiler-rt complex helpers.
-     * Volatile inputs prevent replacing this check with folded constants. */
+    /* 浏览器的图像/音频计算内核会使用 compiler-rt 复数辅助函数。
+     * 使用 volatile 输入，避免此检查被常量折叠取代。 */
     volatile double real = 1.0, imaginary = 2.0, other_real = 3.0, other_imaginary = -4.0;
     double _Complex left = real + imaginary * I;
     double _Complex right = other_real + other_imaginary * I;
@@ -224,8 +224,7 @@ int main(int argc, char **argv) {
         char ready = 'L';
         assert(send(lock_channel[1], &ready, 1, 0) == 1);
         assert(fcntl(independent_fd, F_SETLKW, &file_lock) == 0);
-        /* POSIX locks belong to the process, not an open description:
-         * closing ANY alias of the inode releases all of that owner's locks. */
+        /* POSIX 锁属于进程，不属于打开描述：关闭该 inode 的任一别名，都会释放该所有者的全部锁。 */
         int alias = open(new_path, O_RDONLY);
         assert(alias >= 0 && close(alias) == 0);
         ready = 'U';
@@ -260,8 +259,7 @@ int main(int argc, char **argv) {
     volatile unsigned char *first = mmap(0, 4096, PROT_READ | PROT_WRITE,
                                          MAP_SHARED, shared_fd, 0);
     assert(first != MAP_FAILED);
-    /* Reproduce Chromium's packed pair: the upper half of the fd register
-     * holds a different descriptor, while its low half is the actual fd. */
+    /* 重现 Chromium 的打包对：fd 寄存器高半部保存另一个描述符，低半部才是真正的 fd。 */
     register unsigned long arg4 __asm__("r10") = MAP_SHARED;
     register unsigned long arg5 __asm__("r8") = (45UL << 32) | (unsigned int)shared_fd;
     register unsigned long arg6 __asm__("r9") = 0;
@@ -280,8 +278,8 @@ int main(int argc, char **argv) {
     first[1] = 0x42; assert(second[1] == 0x42);
     assert(munmap((void *)first, 4096) == 0 && munmap((void *)second, 4096) == 0);
     puts("CHROME_GLIBC_SHARED_MAP_PASS");
-    /* Chromium's Linux process channel uses sequenced UNIX sockets. Check
-     * the selected libc's real fork/descriptor/wait ABI, not native wrappers. */
+    /* Chromium 的 Linux 进程通道使用有序 UNIX 套接字。检查所选 libc 的真实 fork/描述符/等待 ABI，
+     * 而不是原生包装函数。 */
     int channel[2];
     assert(socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0, channel) == 0);
     pid_t child = fork();
@@ -330,8 +328,7 @@ int main(int argc, char **argv) {
     if (child == 0) {
         close(channel[0]);
         if (dup2(channel[1], 6) != 6) _exit(14);
-        /* dup2 clears CLOEXEC for the remapped IPC fd; its original alias
-         * must disappear when the real Linux execve replaces the image. */
+        /* dup2 会为重新映射的 IPC fd 清除 CLOEXEC；真实 Linux execve 替换映像时，其原始别名必须消失。 */
         execve(loader ? loader : argv[0], loader ? loader_args : child_args, environ);
         perror("CHROME_GLIBC_EXEC_FAIL");
         _exit(15);

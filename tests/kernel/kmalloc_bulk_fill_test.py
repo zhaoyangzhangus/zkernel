@@ -36,8 +36,8 @@ __attribute__((noinline)) static void old_fill(void *p, uint8_t value, size_t si
     while (size-- != 0) *bytes++ = value;
 }
 int main(void) {
-    /* Every byte, including each word boundary/tail, must still detect a
-     * corrupted free-slot poison value at every possible alignment. */
+    /* 每个字节（包括每个字边界和尾部）在所有可能的对齐位置上，都必须能检测出空闲
+     * 槽毒值已损坏。 */
     uint8_t check[2064];
     for (unsigned offset=0;offset<8;++offset) {
         for (unsigned length=0;length<=2048;++length) {
@@ -50,7 +50,7 @@ int main(void) {
             }
         }
     }
-    /* End exactly against a guard page: no word load may cross size. */
+    /* 缓冲区末端恰好贴着保护页：任何字读取都不得越过其长度。 */
     long page=sysconf(_SC_PAGESIZE);assert(page>2048);
     uint8_t *guard=mmap(0,2*(size_t)page,PROT_READ|PROT_WRITE,
                         MAP_PRIVATE|MAP_ANONYMOUS,-1,0);
@@ -93,7 +93,7 @@ int main(void) {
         free(memory);
     }
 #if !defined(__SANITIZE_ADDRESS__)
-    /* Compare without sanitizer overhead on only the reference C loop. */
+    /* 仅对参考 C 循环进行比较，以排除 sanitizer 开销。 */
     size_t size = 32 * 1024 * 1024;
     uint8_t *memory = malloc(size);
     assert(memory);

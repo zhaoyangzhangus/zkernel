@@ -80,7 +80,7 @@ int main(void) {
   }
   assert(probes==(unsigned)(early && failure!=2 && failure!=3));
   assert(userspace_start_device_init() && creates==1 && deferred==1);
-  /* Independent boot work runs while the late GPU task is still pending. */
+  /* 延迟的 GPU 任务仍在等待时，彼此独立的启动工作可以继续运行。 */
   phase=1;
   ok=userspace_finish_device_init();
   if(failure==4) {
@@ -94,8 +94,8 @@ int main(void) {
          probes==(unsigned)(failure!=2 && failure!=3) && destroys==old);
   if(failure!=2 && failure!=3) assert(sleeps==(unsigned)(early?2:3));
  }
- /* A waiter that entered before publication must pass the consumed token
-  * onward to other sleepers. Late callers must not consume that token. */
+ /* 发布前进入的等待者必须把已消费的令牌继续传递给其他休眠者。
+  * 后到的调用者不得消费该令牌。 */
  device_init_started=1;
  atomic_store(&device_init_complete,false);
  nv_port_completion_init(&device_init_event);
@@ -116,7 +116,7 @@ with tempfile.TemporaryDirectory(prefix='device-init-') as directory:
                     '-no-pie', str(path/'test.c'), '-o', str(path/'test')], check=True)
     subprocess.run([str(path/'test')], check=True, timeout=15)
 
-# Exercise the production wait entry with genuinely blocked concurrent callers.
+# 使用真正阻塞的并发调用者测试生产等待入口。
 wait_body = source[source.index('BOOLEAN userspace_wait_device_init(void)'):
                    source.index('void userspace_poll_device_init(void)')]
 concurrent_program = r'''

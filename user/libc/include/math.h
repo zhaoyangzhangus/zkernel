@@ -13,8 +13,7 @@
 #define NAN       (__builtin_nanf(""))
 #endif
 
-/* The ISO C headers do not require the historical BSD math constants, but
- * Chromium's bundled DSP code uses these names when building as C11. */
+/* ISO C 头文件不要求提供历史 BSD 数学常量，但 Chromium 内置的 DSP 代码以 C11 构建时会使用这些名称。 */
 #ifndef M_E
 #define M_E 2.71828182845904523536028747135266250
 #endif

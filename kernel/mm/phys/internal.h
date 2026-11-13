@@ -8,7 +8,7 @@
 #include <kernel/spinlock.h>
 #include <kernel/string.h>
 
-/* REFACTOR_P2_PHYS_INTERNAL: private contract for the physical MM Owners. */
+/* REFACTOR_P2_PHYS_INTERNAL：物理内存管理所有者的私有约定。 */
 
 #define PAGE_DB_MAX_SECTIONS 65536U
 #define PAGE_DB_MAX_RESERVED 32U

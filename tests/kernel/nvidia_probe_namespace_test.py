@@ -19,7 +19,7 @@ for phase, filename in probes.items():
     required = set(re.findall(r'OS_P\d+_[A-Z0-9_]+=?', gate))
     assert f'OS_P{phase}_PASS' in emitted if phase in (7, 8, 10) else 'OS_P9_LOADER_PASS' in emitted
     assert emitted & required, filename
-    # Gate output is checked as records, not substrings of stale LITEOS tags.
+    # 门禁输出按记录检查，而不是匹配过期 LITEOS 标签中的子串。
     assert ". (Join-Path $PSScriptRoot 'log-records.ps1')" in gate
     assert 'Test-LogRecord $realText $requiredMarker' in gate
     assert 'Require-Text $realText $requiredMarker' not in gate

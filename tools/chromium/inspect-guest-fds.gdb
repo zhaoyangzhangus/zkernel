@@ -36,8 +36,8 @@ while node != registry and node not in seen:
                     file_paths[path]=file_paths.get(path,0)+1
         print('pid=%d name=%s linux_fds=%d limit=%d kinds=%s' %
               (int(process['pid']),name,sum(counts.values()),high-low+1,counts))
-        # Unlinked temporary files may reuse a name with distinct vnodes.
-        # Grouping by path is not evidence that these descriptors are aliases.
+        # 已解除链接的临时文件可能重用名称，但对应不同 vnode。
+        # 按路径分组并不能证明这些描述符指向别名。
         print('  shared_memory_fds=%d distinct_file_paths=%d largest_path_groups=%s' %
               (sum(count for path,count in file_paths.items() if '.org.chromium.Chromium.' in path),
                len(file_paths),sorted(file_paths.items(),key=lambda item:item[1],reverse=True)[:5]))

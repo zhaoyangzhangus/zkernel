@@ -44,20 +44,9 @@ done:
 
 /* 整次写入的串行化与 vnode/后端锁分离：用户数据复制时可能获取这些内部锁。
  * 所有运行时 I/O 保护区都会延迟线程退出。 */
-static kstatus_t vfs_write_transaction_begin(vfs_backend_node_t *backend,
-                                             bool *locked) {
-    kstatus_t status = io_mutex_lock(&backend->write_mutex);
-    *locked = status == K_OK;
-    return status;
-}
-
-static void vfs_write_transaction_end(vfs_backend_node_t *backend, bool locked) {
-    if (locked) io_mutex_unlock_required(&backend->write_mutex);
-}
-
 static kstatus_t vfs_file_write_begin(file_t *file, vfs_backend_node_t *backend,
-                                      size_t length, bool *locked) {
-    kstatus_t status = vfs_write_transaction_begin(backend, locked);
+                                      size_t length) {
+    kstatus_t status = io_mutex_lock(&backend->write_mutex);
     if (status != K_OK) return status;
     uint64_t position = file->position;
     if ((file->flags & VFS_OPEN_APPEND) != 0U) {
@@ -66,7 +55,7 @@ static kstatus_t vfs_file_write_begin(file_t *file, vfs_backend_node_t *backend,
         vfs_vnode_unlock(file->vnode);
     }
     if (length > UINT64_MAX - position) {
-        vfs_write_transaction_end(backend, *locked);
+        io_mutex_unlock_required(&backend->write_mutex);
         return K_EOVERFLOW;
     }
     file->position = position;
@@ -81,8 +70,7 @@ kstatus_t vfs_truncate_node(vnode_t *vnode, uint64_t size) {
     backend = (vfs_backend_node_t *)vnode->fs_private;
     if (backend == 0 || backend->directory) return K_EISDIR;
     if (backend->truncate == 0) return K_EACCES;
-    bool locked;
-    status = vfs_write_transaction_begin(backend, &locked);
+    status = io_mutex_lock(&backend->write_mutex);
     if (status != K_OK) return status;
     /* 清空文件会丢弃所有脏字节。先回写这些页面会浪费 I/O，还可能先分配 RAM 后备存储
      * 再立即释放；内存紧张时甚至会因此无法执行 truncate(0)。后端截断成功前保留缓存内容
@@ -97,7 +85,7 @@ kstatus_t vfs_truncate_node(vnode_t *vnode, uint64_t size) {
             vfs_page_cache_flush_prefix(vnode, size);
         vfs_vnode_unlock(vnode);
         if (status != K_OK) {
-            vfs_write_transaction_end(backend, locked);
+            io_mutex_unlock_required(&backend->write_mutex);
             return status;
         }
     }
@@ -107,7 +95,7 @@ kstatus_t vfs_truncate_node(vnode_t *vnode, uint64_t size) {
     if (status == K_OK) {
         vfs_page_cache_resize(vnode, size);
     }
-    vfs_write_transaction_end(backend, locked);
+    io_mutex_unlock_required(&backend->write_mutex);
     return status;
 }
 
@@ -165,7 +153,8 @@ static void vfs_read_kernel_yield(void) {
     if (current == 0 || current->sched_class == SCHED_CLASS_IDLE) return;
     uint64_t flags;
     __asm__ volatile ("pushfq; popq %0" : "=r"(flags));
-    if ((flags & (1ULL << 9)) != 0U) schedule();
+    /* 批次边界只处理待决调度请求，避免无竞争的连续读取反复进入调度器。 */
+    if ((flags & (1ULL << 9)) != 0U && sched_tick_should_preempt()) schedule();
 }
 
 /* 两种读取 API 共用后端加锁、EOF 重新验证和计数边界检查。每个分块都要重新验证：
@@ -357,8 +346,7 @@ kstatus_t vfs_write(file_t *file, const void __user *buf, size_t len, uint64_t *
         if (temporary != fallback) kfree(temporary);
         return status;
     }
-    bool locked;
-    status = vfs_file_write_begin(file, backend, len, &locked);
+    status = vfs_file_write_begin(file, backend, len);
     if (status != K_OK) {
         vfs_file_position_unlock(file);
         if (temporary != fallback) kfree(temporary);
@@ -389,7 +377,7 @@ kstatus_t vfs_write(file_t *file, const void __user *buf, size_t len, uint64_t *
         if (written < chunk) break;
     }
     *bytes = total;
-    vfs_write_transaction_end(backend, locked);
+    io_mutex_unlock_required(&backend->write_mutex);
     vfs_file_position_unlock(file);
     if (temporary != fallback) kfree(temporary);
     return result;
@@ -407,8 +395,7 @@ kstatus_t vfs_write_kernel(file_t *file, const void *buf, size_t len,
     if (len == 0U) return K_OK;
     kstatus_t status = vfs_file_position_lock(file);
     if (status != K_OK) return status;
-    bool locked;
-    status = vfs_file_write_begin(file, backend, len, &locked);
+    status = vfs_file_write_begin(file, backend, len);
     if (status != K_OK) {
         vfs_file_position_unlock(file);
         return status;
@@ -432,7 +419,7 @@ kstatus_t vfs_write_kernel(file_t *file, const void *buf, size_t len,
         if (written < chunk) break;
     }
     *bytes = total;
-    vfs_write_transaction_end(backend, locked);
+    io_mutex_unlock_required(&backend->write_mutex);
     vfs_file_position_unlock(file);
     return result;
 }

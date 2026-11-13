@@ -43,7 +43,7 @@ static void rebuild_area_tree(vm_space_t *space) {
 }
 static void area_release(vm_area_t *area) {
  assert(!locks && area->acknowledged && list_empty(&area->ordered_node));
- // A retained failure index must not retain a freed VMA.
+ // 保留的失败索引不能继续指向已释放的 VMA。
  assert(current->areas.root!=area);
  ++releases;free(area);
 }
@@ -82,13 +82,13 @@ int main(void) {
    vm_area_t *area=area_from_list(node);assert(!area->acknowledged);++remaining;
   }
   assert(remaining==257-fail && space->areas.root==area_from_list(space->area_list.next));
-  // Repeated failure before the first retained VMA changes no index or refs.
+  // 在首个保留 VMA 之前反复失败，不得改变索引或引用计数。
   unchanged_root=space->areas.root;
   calls=releases=rebuilds=0;fail_at=1;vm_space_put(space);
   assert(calls==1 && !releases && !rebuilds && !root_frees && !space_frees);
   assert(atomic_load(&space->refs.value)==1 && !locks &&
          space->areas.root==unchanged_root);
-  // Retry retained state: releases exactly once and root is never freed early.
+  // 重试保留状态：只释放一次，且不能提前释放根节点。
   calls=releases=0;fail_at=0;vm_space_put(space);
   assert(calls==remaining && releases==remaining && root_frees==1 && space_frees==1);
  }

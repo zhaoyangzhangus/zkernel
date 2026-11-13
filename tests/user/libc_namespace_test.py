@@ -110,8 +110,8 @@ int main() {
             outputs.append(subprocess.check_output([
                 'cc', '-E', '-P', '-I', str(ROOT / 'user/libc/include'),
                 '-I', str(ROOT / 'include'), str(source)]))
-        # GCC emits a blank line for each consumed #pragma once. The forward
-        # adds one such line but must not change any declaration/token line.
+        # GCC 每消费一个 #pragma once 都会输出一个空行。前置包含会多出这样一行，
+        # 但不能改变任何声明行或词法单元行。
         lines = [tuple(line for line in output.splitlines() if line.strip())
                  for output in outputs]
         assert lines[0] == lines[1], header

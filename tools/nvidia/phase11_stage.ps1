@@ -67,8 +67,7 @@ Require-File $testBinaryPath 'Phase 11 triangle probe'
 $script:stageCopied = 0
 $script:stageSkipped = 0
 
-# Preserve the verified P10 userspace/firmware closure.  Only the P11 kernel and
-# probe are replaced in this stage.
+# 保留已验证的 P10 用户态与固件依赖闭包。本阶段只替换 P11 内核和探测程序。
 Copy-DirectoryContents $phase10Esp $espRoot
 Copy-FileIfChanged $testBinaryPath (Join-Path $espRoot 'tests\p11-triangle')
 Copy-FileIfChanged $phase11Kernel (Join-Path $espRoot 'EFI\OS\kernel.elf')

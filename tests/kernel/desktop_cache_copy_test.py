@@ -38,7 +38,7 @@ static void compositor_copy_wb_pixels(uint32_t *dst,const uint32_t *src,uint32_t
 static void display_core_publish_xrgb8888_span(volatile uint32_t *dst,const uint32_t *src,uint32_t n){
  assert(!expected_private);++device_calls;for(unsigned i=0;i<n;++i)dst[i]=src[i];
 }
-''' + function('kernel/graphics/compose_cpu.c', 'void compositor_surface_copy_destination(') + '\n' + function('kernel/graphics/shell.c', 'static void desktop_copy_cached_region(void)') + r'''
+''' + function('kernel/graphics/compose_cpu.c', 'void compositor_surface_copy_destination(') + '\n' + function('kernel/graphics/shell.c', 'static void desktop_copy_cached_region(') + r'''
 static uint32_t seed=103;
 static unsigned next(void){seed=seed*1664525U+1013904223U;return seed;}
 int main(void){
@@ -59,7 +59,7 @@ int main(void){
   g_window_server.display_width=9;g_window_server.display_height=7;
   g_window_server.display_stride=13;g_desktop_cache_stride=11;
   g_desktop_cache=source;g_compositor_snapshot.damage_bounds=rect;
-  desktop_copy_cached_region();
+  desktop_copy_cached_region(g_compositor_snapshot.damage_bounds);
   unsigned rows=0;
   for(int y=0;y<11;++y){
    bool copied_row=false;
@@ -73,8 +73,8 @@ int main(void){
   assert(wb_calls==(mode?rows:0)&&device_calls==(mode?0:rows));
   assert(!memcmp(&rect,&g_compositor_snapshot.damage_bounds,sizeof(rect)));
  }
- wb_calls=device_calls=0;g_desktop_cache=0;desktop_copy_cached_region();
- g_desktop_cache=source;g_window_server.composite_framebuffer=0;desktop_copy_cached_region();
+ wb_calls=device_calls=0;g_desktop_cache=0;desktop_copy_cached_region(g_compositor_snapshot.damage_bounds);
+ g_desktop_cache=source;g_window_server.composite_framebuffer=0;desktop_copy_cached_region(g_compositor_snapshot.damage_bounds);
  assert(!wb_calls&&!device_calls);
  puts("Desktop cache copy: 4018 clipped/padded pixel oracles, WB/device routing, unchanged bounds and null targets PASS");
 }

@@ -264,7 +264,7 @@ int main(void){
 }
 '''
 range_code=function(control,'static uint32_t control_find_button(')+function(control,'static void control_change(')+function(control,'static void control_range_pointer(')
-program=preamble+lookup+function(control,'static uint32_t control_target_index(')+geometry+range_code+hit+scene+pointer+function(control,'bool window_control_caption_hit_locked(')+bridge+title+mark+clear+common+function(router,'static bool window_toggle_maximize_locked(')+function(router,'void window_input_release_pointer_locked(')+function(router,'bool window_minimize_locked(')+function(window_source,'kstatus_t window_server_focus(')+tests
+program=preamble+lookup+function(control,'static uint32_t control_target_index(')+geometry+range_code+hit+scene+pointer+function(control,'bool window_control_caption_hit_locked(')+bridge+title+mark+clear+function(router,'bool window_input_request_desktop_launch_locked(')+common+function(router,'static bool window_toggle_maximize_locked(')+function(router,'void window_input_release_pointer_locked(')+function(router,'bool window_minimize_locked(')+function(window_source,'kstatus_t window_server_focus(')+tests
 with tempfile.TemporaryDirectory(prefix='pointer-scene-') as directory:
     path=Path(directory);(path/'test.c').write_text(program)
     args=['cc','-std=c11','-O1','-Wall','-Wextra','-Werror','-fsanitize=address,undefined','-fno-pie','-no-pie','-I',str(root/'include'),str(path/'test.c'),str(root/'kernel/graphics/window_geometry.c'),str(root/'kernel/graphics/control_tree.c'),'-o',str(path/'test')]

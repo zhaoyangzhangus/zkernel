@@ -8,7 +8,7 @@ import tempfile
 root = Path(__file__).resolve().parents[2]
 source = (root / 'kernel/syscall/linux.c').read_text()
 
-# Compare the zero-mask contract with the host's real Linux epoll first.
+# 首先将零掩码约定与宿主机真实 Linux epoll 进行比较。
 with select.epoll() as epoll:
     left, right = socket.socketpair()
     try:
@@ -144,7 +144,7 @@ with tempfile.TemporaryDirectory(prefix='epoll-zero-mask-') as directory:
         if expected:
             print(result.stdout.strip())
     run(code, True)
-    # Both halves matter: restoring the old guard or failing to rearm must fail.
+    # 两部分都很重要：恢复旧保护逻辑或未能重新布防都必须导致测试失败。
     assert '|| watch->disabled) return false;' in code
     run(code.replace('|| watch->disabled) return false;',
                      '|| watch->events == 0U) return false;', 1), False)

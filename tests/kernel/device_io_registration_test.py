@@ -168,7 +168,7 @@ static void begin_end_cases(void){
  atomic_store(&device.state,DEVICE_ACTIVE);
  assert(!device_io_end(NULL,&r) && !device_io_end(&device,NULL));
  assert(!device_io_end(&device,&r));
- /* Corrupt accounting must not underflow when removing a real linked node. */
+ /* 移除真实链表节点时，损坏的计数不能发生下溢。 */
  assert(device_io_begin(&device,&r));atomic_store(&device.io_inflight,0);
  assert(device_io_end(&device,&r));object_put(&device);
  assert(atomic_load(&device.io_inflight)==0);object_put(&r);
@@ -216,7 +216,7 @@ static void drain_cases(void){
  assert(atomic_load(&destroyed)==before+1);
  }
  io_request_t r;
- /* Normal queued cancellation still finalizes with no extra observer ref. */
+ /* 普通的排队取消仍应完成，且不额外保留观察者引用。 */
  io_request_init(&r,IO_FLUSH,&device,&process,NULL,0);object_get(&r);
  atomic_store(&r.state,IOREQ_QUEUED);assert(device_io_begin(&device,&r));r.complete=callback;
  r.cancel=driver_cancel;

@@ -561,7 +561,7 @@ bool xhci_handle_bt_transfer_event(
 
 
     /*
-    * HCI Event interrupt-IN。
+    * HCI 事件 interrupt-IN。
      */
     if(device->bt_event_endpoint !=
            0U &&
@@ -617,7 +617,7 @@ bool xhci_handle_bt_transfer_event(
 
 
     /*
-    * ACL bulk-IN。
+    * ACL 批量输入。
      */
     if(device->bt_acl_in_endpoint !=
            0U &&

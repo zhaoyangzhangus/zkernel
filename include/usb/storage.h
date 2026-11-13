@@ -6,7 +6,7 @@
 #include <kernel/block_device.h>
 
 /* USB 大容量存储：Bulk-Only Transport + SCSI transparent 子类。 */
-/* OS_USB_ROOT_PATCH_V1: boot-stage synchronous MSC attach. */
+/* OS_USB_ROOT_PATCH_V1：引导阶段同步连接 MSC。 */
 bool usb_msc_attach(uint8_t slot);
 bool usb_msc_schedule_attach(uint8_t slot);
 void usb_msc_detach(uint8_t slot);

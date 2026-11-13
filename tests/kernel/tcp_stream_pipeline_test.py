@@ -125,9 +125,9 @@ static void verify(unsigned start,unsigned length){
  assert(!held&&!refs);
 }
 int main(void){
- // A dropped window-open ACK must not permanently stall an otherwise idle
- // writer. A blocked write arms the timer once, not on each retry. Probes
- // neither consume sequence space nor spend the bounded loss retry budget.
+ // 窗口重新开放的 ACK 即使丢失，也不能永久阻塞原本空闲的写入方。
+ // 阻塞写入只设置一次计时器，而不是每次重试都重置。探测既不占用序列空间，
+ // 也不消耗有界的丢包重试预算。
  for(unsigned family=0;family<2;++family)for(unsigned wrap=0;wrap<2;++wrap){
   reset(family,wrap);uint64_t n=99;
   assert(!ack(base,0));
@@ -157,9 +157,8 @@ int main(void){
   socket_tcp_poll(++tick);assert(!state.tcp_persist_deadline_tsc);
   assert(socket_poll_state(&sock)&SOCKET_POLL_WRITE);
   assert(!socket_send_stream(&sock,&state,data,100,&n) && n==100);
-  // Already retained data is probed one byte at SND.UNA, without retiring
-  // it until an actual ACK arrives. Even an exhausted old RTO budget cannot
-  // kill the connection during intentional zero-window flow control.
+  // 对已保留的数据，从 SND.UNA 位置探测一个字节；收到真实 ACK 前不得释放它。
+  // 即使旧 RTO 预算已耗尽，主动零窗口流控期间也不能终止连接。
   assert(!ack(base,0));state.tcp_send_retransmits=SOCKET_TCP_MAX_RETRANSMITS;
   before=outputs;socket_tcp_poll(++tick);assert(outputs==before);
   for(unsigned i=0;i<10;++i){
@@ -172,13 +171,13 @@ int main(void){
   assert(outputs>before && !state.tcp_persist_deadline_tsc);
   assert(!state.tcp_send_retransmits && !state.tcp_local_retry_tsc);
   assert(state.tcp_send_deadline_tsc>tick);
-  // A probe ACK and a new write can race the older probe's failed return.
+  // 探测 ACK 与新写入可能和较早探测的失败返回发生竞争。
   assert(!ack(base,0));socket_tcp_poll(++tick);
   tick=state.tcp_persist_deadline_tsc;action=2;output_status=K_EIO;
   socket_tcp_poll(tick);verify(1,1559);
   assert(!atomic_load(&state.tcp_error) && nested_bytes==1460);
  }
- // No unbounded busy loop at TSC wrap or at an exact zero deadline.
+ // TSC 回绕或期限恰为零时，都不得出现无界忙循环。
  reset(0,false);state.tcp_peer_window=0;tick=UINT64_MAX-999999999ULL;
  uint64_t n;assert(socket_send_stream(&sock,&state,data,1,&n)==K_EAGAIN);
  assert(state.tcp_persist_deadline_tsc==1);
@@ -187,9 +186,8 @@ int main(void){
  state.tcp_fin_pending=true;assert(!ack(base,8192));socket_tcp_poll(++tick);
  assert(state.tcp_fin_sent && !state.tcp_persist_deadline_tsc);
  puts("TCP persistence: blocked writes, lost window updates, one-byte retained probes, capped backoff, no busy retry/loss timeout, reopened wake/retransmit, late-output ownership and TSC wrap PASS");
- // A probe's unused end-sequence snapshot is zero. Across sequence wrap,
- // zero can lie inside the live flight, so it must never be treated as an
- // ordinary failed output completion for that flight.
+ // 探测未使用的结束序列快照为零。序列号回绕时，零可能落在当前传输区间内，
+ // 因此绝不能把探测视为该区间的普通失败输出完成。
  reset(0,false);base=UINT32_MAX-49U;
  state.tcp_send_next_sequence=state.tcp_send_unacknowledged=base;
  assert(!socket_send_stream(&sock,&state,data,100,&n));assert(!ack(base,0));
@@ -197,9 +195,8 @@ int main(void){
  socket_tcp_poll(tick);assert(last_length==1 && !atomic_load(&state.tcp_error));
  verify(0,100);
  for(unsigned family=0;family<2;++family)for(unsigned wrap=0;wrap<2;++wrap){
-  // Drain an entire stream through repeated partial progress; no accepted
-  // byte may disappear or be assigned a second sequence. Include a tiny
-  // advertised window so admission and writable readiness stay in agreement.
+  // 通过反复部分推进排空整个数据流；已接收的字节不得丢失或重复分配序列号。
+  // 同时包含很小的通告窗口，确保接纳条件和可写就绪状态保持一致。
   const unsigned windows[]={8192,37};
   for(unsigned w=0;w<2;++w){
    reset(family,wrap);state.tcp_peer_window=windows[w];
@@ -228,7 +225,7 @@ int main(void){
   assert(!(socket_poll_state(&sock)&SOCKET_POLL_WRITE));
   assert(!ack(base+5556,8192));assert(!state.tcp_send_pending);
   for(unsigned i=0;i<5556;++i)assert(present[i]&&received[i]==data[i]);
-  // Successful append does not cover an earlier locally rejected prefix.
+  // 成功追加的数据不包含先前在本地被拒绝的前缀。
   reset(family,wrap);output_status=K_EAGAIN;
   assert(!socket_send_stream(&sock,&state,data,1000,&bytes) && bytes==1000);
   uint64_t retry=state.tcp_local_retry_tsc;deadline=state.tcp_send_deadline_tsc;
@@ -237,7 +234,7 @@ int main(void){
   verify(0,2000);assert(state.tcp_local_retry_tsc==retry && state.tcp_send_deadline_tsc==deadline);
   tick=retry;socket_tcp_poll(tick);assert(!state.tcp_local_retry_tsc);
   for(unsigned i=0;i<2000;++i)assert(present[i]&&received[i]==data[i]);
-  // Remaining peer window is measured after subtracting unacknowledged data.
+  // 对端剩余窗口应扣除尚未确认的数据后再计算。
   reset(family,wrap);assert(!socket_send_stream(&sock,&state,data,1000,&bytes));
   assert(!ack(base+500,800));verify(500,500);
   assert(!socket_send_stream(&sock,&state,data+1000,1000,&bytes) && bytes==300);verify(500,800);
@@ -246,22 +243,22 @@ int main(void){
   assert(socket_poll_state(&sock)&SOCKET_POLL_WRITE);
   assert(!socket_send_stream(&sock,&state,data+1300,1000,&bytes) && bytes==400);verify(500,1200);
   assert(!ack(base+500,0));assert(!(socket_poll_state(&sock)&SOCKET_POLL_WRITE));
-  // 65535 is a valid wire window, not an absent-window sentinel. In
-  // particular, a zero-window peer must be able to reopen to this value.
+  // 65535 是有效的线路窗口值，不是“窗口缺失”的哨兵。尤其是零窗口对端必须能
+  // 重新开放到该值。
   before=wakes;assert(!ack(base+500,UINT16_MAX));
   assert(state.tcp_peer_window==UINT16_MAX && wakes==before+1);
   assert(socket_poll_state(&sock)&SOCKET_POLL_WRITE);
   before=outputs;assert(!socket_send_stream(&sock,&state,data,0,&bytes) && !bytes && outputs==before);
   state.tcp_fin_pending=true;assert(!(socket_poll_state(&sock)&SOCKET_POLL_WRITE));
-  // ACK and a new append arrive before the older send returns successfully.
-  // A failure on that new span must retain its timer despite old success.
+  // 较早的发送成功返回前，ACK 和新的追加操作已经到达。
+  // 即使旧发送成功，新区间的失败仍须保留其计时器。
   reset(family,wrap);action=1;
   assert(!socket_send_stream(&sock,&state,data,4096,&bytes) && bytes==4096 && nested_bytes==1460);
   verify(1460,4096);assert(state.tcp_local_retry_tsc==tick+20000000ULL);
   tick+=20000000ULL;socket_tcp_poll(tick);verify(1460,4096);
   assert(!state.tcp_local_retry_tsc);
   for(unsigned i=0;i<5556;++i)assert(present[i]&&received[i]==data[i]);
-  // A fully ACKed old output cannot kill the later write on late EIO.
+  // 已完全确认的旧输出即使稍后返回 EIO，也不能终止后续写入。
   reset(family,wrap);action=2;output_status=K_EIO;
   assert(!socket_send_stream(&sock,&state,data,1460,&bytes) && bytes==1460);
   verify(1460,1460);assert(!atomic_load(&state.tcp_error));

@@ -6,10 +6,9 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-# When this script is launched through powershell.exe -File, a string array
-# is passed as one command-line value.  Real-test paths are rooted under the
-# repository and cannot contain a comma, so accept that form as well as a
-# native PowerShell array invocation.
+# 通过 powershell.exe -File 启动此脚本时，字符串数组会作为一个命令行值传入。
+# 实机测试路径位于仓库目录下，不能包含逗号，因此既接受这种形式，
+# 也接受原生 PowerShell 数组调用。
 if ($HardwareLog.Count -eq 1 -and $HardwareLog[0].Contains(',')) {
     $HardwareLog = @($HardwareLog[0] -split ',')
 }
@@ -91,9 +90,8 @@ if (@($vendorDiff | Where-Object { $_.Trim() }).Count -ne 0) {
     Fail-Gate "vendor source tree is modified: $($vendorDiff[0])"
 }
 
-# The previous Gate is represented by the recorded real-machine Phase 4
-# trace.  The trace is checked for all hardware facts used by P4; no fresh
-# full P3/P4 build is triggered here.
+# 前一阶段的 Gate 由记录下来的阶段 4 实机跟踪结果表示。系统会检查其中
+# 阶段 4 使用的全部硬件信息；此处不会重新执行完整的 P3/P4 构建。
 $priorLogsRoot = Join-Path $repoRoot 'build-realtest\real-hardware'
 $p4Evidence = @()
 if (Test-Path -LiteralPath $priorLogsRoot -PathType Container) {
@@ -310,10 +308,9 @@ foreach ($path in $usableLogs) {
     if ($text -match '(?i)fake|override|hard.?code|not_linked|probe_fail|GSP_BOOT_FAIL') {
         Fail-Gate "hardware log contains a fake/override/failure marker: $path"
     }
-    # The serial stream is the guest evidence and does not contain the host
-    # collector's run id.  The collector writes the authoritative run id and
-    # status beside that stream in realtest.result; bind the two files by
-    # directory instead of requiring host metadata inside guest output.
+    # 串口流是客户机侧证据，不包含主机收集器的运行 ID。收集器会将权威运行 ID
+    # 和状态写入同目录的 realtest.result；根据目录关联这两个文件，
+    # 不要求客户机输出中包含主机元数据。
     $resultPath = Join-Path (Split-Path -Parent $path) 'realtest.result'
     Require-File $resultPath 'real hardware result metadata'
     $resultText = Get-Content -LiteralPath $resultPath -Raw

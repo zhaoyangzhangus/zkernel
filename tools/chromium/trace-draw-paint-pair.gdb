@@ -13,8 +13,8 @@ except RuntimeError as error:
 end
 target remote /tmp/system-keys.sock
 python
-# Four addresses. Pair by owner and return stack, not by first stage timestamps:
-# DrawAndSwap may skip painting, then another invocation paints a later frame.
+# 使用四个地址。按所有者和返回栈配对，而不是按第一个阶段的时间戳：
+# DrawAndSwap 可能跳过绘制，之后的另一次调用才绘制后续帧。
 started=None
 browser=None
 calls=0

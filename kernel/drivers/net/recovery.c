@@ -13,7 +13,7 @@
 #define E1000_IMS_LSC   (1U << 2)
 #define E1000_IRQ_VECTOR 0x50U
 
-/* REFACTOR_P8_E1000_RECOVERY_OWNER: interrupt lifecycle and deferred recovery. */
+/* REFACTOR_P8_E1000_RECOVERY_OWNER：中断生命周期和延迟恢复。 */
 
 static void e1000_recovery_irq_handler(uint8_t vector,
                                        struct arch_trap_frame *frame,
@@ -25,7 +25,7 @@ static void e1000_recovery_irq_handler(uint8_t vector,
     (void)frame;
     if (context == 0 || !context->irq_bound || context->read == 0) return;
 
-    /* ICR is read-to-clear.  The ISR only acknowledges and queues bounded work. */
+    /* ICR 通过读取清除。ISR 只负责确认中断并将有界任务加入队列。 */
     causes = context->read(context->owner, E1000_REG_ICR);
     if (causes != 0U) (void)e1000_schedule_deferred_poll();
 }

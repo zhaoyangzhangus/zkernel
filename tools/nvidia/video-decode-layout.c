@@ -1,4 +1,4 @@
-/* Host-only diagnostic metadata. Never linked into the guest decoder. */
+/* 仅供主机端诊断使用的元数据。绝不链接进客户机解码器。 */
 #include <stddef.h>
 #include <stdio.h>
 #include <libavcodec/h264dec.h>

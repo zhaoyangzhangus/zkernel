@@ -142,7 +142,7 @@ with tempfile.TemporaryDirectory(prefix='video atomic link ') as directory:
     before=output.stat();contents=output.read_bytes();saved_receipt=receipt.read_bytes()
     assert not link()
     assert output.stat().st_ino==before.st_ino
-    # A distinct cache signature can still link to identical bytes.
+    # 不同的缓存签名仍可能对应完全相同的数据。
     assert link(['-Wl,--as-needed'])
     assert output.read_bytes()==contents and output.stat().st_ino==before.st_ino
     saved_receipt=receipt.read_bytes()

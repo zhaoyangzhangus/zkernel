@@ -187,14 +187,14 @@ static void desktop_draw_asset_icon_locked(
      * 缓存槽与应用包数量一致，新增桌面入口不再漏掉图标缓存。 */
     static struct {
         const uint8_t *source;
-        uint32_t left, top, width, height;
+        uint32_t source_x, source_y, width, height;
         uint32_t pixels[DESKTOP_ICON_IMAGE_WIDTH * DESKTOP_ICON_IMAGE_HEIGHT];
     } cache[sizeof(g_desktop_app_assets)/sizeof(g_desktop_app_assets[0])-1U];
     uint32_t *filtered = 0;
     if (width == DESKTOP_ICON_IMAGE_WIDTH && height == DESKTOP_ICON_IMAGE_HEIGHT) {
         for (uint32_t i = 0U; i < sizeof(cache)/sizeof(cache[0]); ++i) {
-            if (cache[i].source == asset->pixels && cache[i].left == source_left &&
-                cache[i].top == source_top && cache[i].width == source_width &&
+            if (cache[i].source == asset->pixels && cache[i].source_x == source_left &&
+                cache[i].source_y == source_top && cache[i].width == source_width &&
                 cache[i].height == source_height) {
                 filtered = cache[i].pixels;
                 break;
@@ -206,7 +206,7 @@ static void desktop_draw_asset_icon_locked(
                         asset->pixels, asset->stride, source_left, source_top,
                         source_width, source_height, width, height, column, row);
             cache[i].source = asset->pixels;
-            cache[i].left = source_left; cache[i].top = source_top;
+            cache[i].source_x = source_left; cache[i].source_y = source_top;
             cache[i].width = source_width; cache[i].height = source_height;
             filtered = cache[i].pixels;
             break;
@@ -612,14 +612,14 @@ bool desktop_shell_cache_ready(void) {
 /*
  * 仅恢复当前损坏的桌面矩形。
  */
-static void desktop_copy_cached_region(void) {
+static void desktop_copy_cached_region(Rect clip) {
     Rect bounds;
     volatile uint32_t *target = g_window_server.composite_framebuffer;
     if (g_desktop_cache == 0 || target == 0 ||
-        !rect_clip_to_extent(g_compositor_snapshot.damage_bounds.x0,
-            g_compositor_snapshot.damage_bounds.y0,
-            g_compositor_snapshot.damage_bounds.x1,
-            g_compositor_snapshot.damage_bounds.y1,
+        !rect_clip_to_extent(clip.x0,
+            clip.y0,
+            clip.x1,
+            clip.y1,
             g_window_server.display_width, g_window_server.display_height,
             &bounds)) {
         return;
@@ -643,11 +643,11 @@ static void desktop_copy_cached_region(void) {
 /*
  * 壁纸恢复后按不可变帧状态绘制图标；命中和绘制使用相同的位移规则。
  */
-static void desktop_draw_hover_locked(void) {
+static void desktop_draw_hover_locked(Rect clip) {
     uint32_t hovered =
         g_compositor_snapshot.desktop_hovered_app;
     desktop_render_context_t context = {
-        .bounds = g_compositor_snapshot.damage_bounds,
+        .bounds = clip,
         .hovered_app = hovered,
         .running_mask = g_compositor_snapshot.desktop.running_mask,
         .active_mask = g_compositor_snapshot.desktop.active_mask,
@@ -665,11 +665,11 @@ static void desktop_draw_hover_locked(void) {
 }
 
 
-static void desktop_clear_region_locked(void) {
-    uint32_t left = g_compositor_snapshot.damage_bounds.x0;
-    uint32_t right = g_compositor_snapshot.damage_bounds.x1;
-    uint32_t top = g_compositor_snapshot.damage_bounds.y0;
-    uint32_t bottom = g_compositor_snapshot.damage_bounds.y1;
+static void desktop_clear_region_locked(Rect clip) {
+    uint32_t left = clip.x0;
+    uint32_t right = clip.x1;
+    uint32_t top = clip.y0;
+    uint32_t bottom = clip.y1;
 
     if (g_window_server.composite_framebuffer == 0 ||
         left >= right ||
@@ -690,18 +690,18 @@ static void desktop_clear_region_locked(void) {
 /*
  * 桌面快速合成路径。
  */
-void desktop_draw_wallpaper_locked(void) {
+void desktop_draw_wallpaper_locked(Rect clip) {
     if (!g_compositor_snapshot.desktop_cache_ready) {
         /*
          * 图像由专用资源所有者加载。在资源就绪前，只显示确定性的纯色表面；不得回退到已移除的
          * 程序化桌面渲染器。
          */
-        desktop_clear_region_locked();
+        desktop_clear_region_locked(clip);
         return;
     }
 
-    desktop_copy_cached_region();
-    desktop_draw_hover_locked();
+    desktop_copy_cached_region(clip);
+    desktop_draw_hover_locked(clip);
 }
 
 

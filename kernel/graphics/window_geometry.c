@@ -1,7 +1,7 @@
 #include <kernel/window_geometry.h>
 #include <uapi/chrome_caption.h>
 
-/* REFACTOR_P7A_GEOMETRY_OWNER: one Rect/decoration/corner geometry source. */
+/* REFACTOR_P7A_GEOMETRY_OWNER：Rect、装饰和圆角几何信息的统一来源。 */
 
 
 bool window_client_decorations(uint32_t flags) {
@@ -166,11 +166,10 @@ bool window_title_button_rect(
 
 
 /*
- * Ring0 decoration hit testing.
+ * Ring0 装饰区域的命中测试。
  *
- * A title-control hit is consumed by the window server and must never become
- * client input or start a titlebar drag.
+ * 标题栏控件命中由窗口服务器处理，绝不能作为客户输入传递，也不能触发标题栏拖动。
  */
 /*
- * Flat controls: no shadow, no extra framebuffer and no alpha surface.
+ * 扁平控件：没有阴影、额外帧缓冲区或 alpha 表面。
  */

@@ -55,13 +55,13 @@ def difference(a, b):
     return sum(abs(x-y) > 20 for x, y in zip(a, b)) / len(a)
 
 def google_ntp_logo(width, height, pixels, offset_y=0):
-    # Explicitly scoped to the inspected normal 945x1060 default NTP.
-    # A blank body or a header-only update must not satisfy this gate.
+    # 明确限定为已检查的普通 945x1060 默认新标签页。
+    # 空白正文或只有页眉更新都不能满足此门禁。
     assert (width, height) == (1920, 1080)
     assert len(pixels) == width*height*3
     counts = [0, 0, 0, 0]
-    # The one-time --no-sandbox infobar belongs to the original tab, not
-    # newly created tabs. Cover both inspected vertical logo placements.
+    # 一次性 --no-sandbox 信息栏属于原始标签页，不属于新建标签页。
+    # 覆盖已检查的两种垂直 Logo 位置。
     for y in range(215+offset_y, 375+offset_y, 3):
         for x in range(340, 630, 3):
             r, g, b = pixels[(y*width+x)*3:(y*width+x)*3+3]
@@ -91,8 +91,8 @@ def capture_png(name):
 
 
 assert command('query-status')['running']
-# This gate assumes the inspected 945x1060 browser with one initial tab.
-# Do not use it for maximized or differently positioned browser windows.
+# 此门禁假定浏览器尺寸为已检查的 945x1060，且初始只有一个标签页。
+# 不要用于最大化或位置不同的浏览器窗口。
 relative(-2000, -1200)
 relative(509, args.tab_strip_y)
 results = []
@@ -133,12 +133,11 @@ with tempfile.TemporaryDirectory(prefix='system-tab-close-') as directory, Chord
         if args.verify_google_ntp:
             frame_state['ntp_logo'] = google_ntp_logo(width, height, pixels,
                                                      args.tab_strip_y-30)
-        # The first tab's lower background band excludes title/spinner and
-        # the second-tab close-button hover. Its active/inactive color change
-        # gives a response gate independent of shrinking-tab layout animation.
+        # 第一个标签页下方的背景条带排除了标题/加载指示器以及第二个标签页关闭按钮的悬停区。
+        # 其活动/非活动颜色变化可提供独立于标签缩小动画的响应门禁。
         activation,roi=tab_header_regions(width,height,pixels,args.tab_strip_y)
         frame_state['activation'] = activation
-        # Outside tab 1's title/spinner and the X/cursor hover at x=509.
+        # 选取第一个标签页标题/加载指示器之外，以及 x=509 关闭按钮/光标悬停区域之外的位置。
         frame_captures.append((time.monotonic()-started)*1000)
         return roi
     baseline = frame()
@@ -146,9 +145,8 @@ with tempfile.TemporaryDirectory(prefix='system-tab-close-') as directory, Chord
     capture_png('chrome-tab-close-baseline')
     for cycle in range(1, args.cycles+1):
         if args.focus_body:
-            # Use the inspected blank right margin, not (300,450): on Bing
-            # that point is a result link and creates an extra tab before
-            # Ctrl+T, invalidating the fixed second-tab X coordinate.
+            # 使用已检查的右侧空白边缘，而不是 (300,450)：在 Bing 页面该点是结果链接，会在
+            # Ctrl+T 前创建额外标签页，导致第二个标签页的固定 X 坐标失效。
             relative(411, 370)
             for down in (True, False):
                 command('input-send-event', {'events': [

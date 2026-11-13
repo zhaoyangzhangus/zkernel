@@ -51,7 +51,7 @@ static void check(size_t count) {
 }
 int main(void) {
  queue_pointer_sort(0,0);
- // Exhaust every duplicate-bearing sequence over three values through length 9.
+ // 对三个值组成、长度不超过 9 且包含重复项的所有序列进行穷举。
  for(size_t length=0;length<=9;++length) {
   unsigned combinations=1;for(size_t i=0;i<length;++i)combinations*=3;
   for(unsigned sequence=0;sequence<combinations;++sequence) {

@@ -117,8 +117,7 @@ void NV_API_CALL os_unmap_kernel_space(void *address, NvU64 length) {
     }
     if (nv_port_mmio_unmap(&record->mapping) != K_OK) {
         nvabi_log_invalid("os_unmap_kernel_space", "os-mmio-unmap");
-        /* The mapping remains owned by the port if unmap failed.  Preserve the
-         * record so a later teardown can retry instead of leaking silently. */
+        /* 取消映射失败时，映射仍由端口持有。保留记录以便后续拆除时重试，避免静默泄漏。 */
         nv_port_spin_lock(&g_nvabi_mmio_lock);
         record->next = g_nvabi_mmio_mappings;
         g_nvabi_mmio_mappings = record;

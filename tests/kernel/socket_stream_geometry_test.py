@@ -113,8 +113,8 @@ int main(void){
   assert(t && u && live==2 && allocated_bytes==196608);
   release(t,tcp,4);release(u,udp,5);assert(!live && !allocated_bytes);
  }
- /* Under fragmentation, a 64 KiB block still admits TCP without demanding
-  * the 128 KiB block previously wasted on an unused datagram queue. */
+ /* 内存碎片化时，64 KiB 块仍可满足 TCP，而无需申请此前浪费在未使用数据报队列上的
+  * 128 KiB 块。 */
  maximum_order=4;
  void *t=allocate_large(tcp,0,false);assert(t && allocated_bytes==65536);
  assert(!allocate_large(udp,0,false));release(t,tcp,4);

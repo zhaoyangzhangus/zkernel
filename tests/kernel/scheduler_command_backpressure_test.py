@@ -94,12 +94,12 @@ int main(void) {
         assert(atomic_load(&threads[c].object.refs.value)==1);
     }
     assert(atomic_load(&notifications)==40000);
-    /* The external owner can leave after try_get: the retained command pin
-     * must be handed to deferred release, not destroy the thread inline. */
+    /* try_get 后外部所有者可能退出：必须将保留的命令引用交给延迟释放，不能直接销毁
+     * 线程。 */
     reset();fill(0);release_foreign=true;
     assert(!scheduler_remote_command_try_push_once(0,1,&threads[0],2,0));
     assert(atomic_load(&threads[0].object.refs.value)==1&&deferred_refs[0]==1);
-    /* Retry after capacity returns transfers exactly one new pin. */
+    /* 容量恢复后重试，只转交一个新引用。 */
     release_foreign=false;
     atomic_store(&channels[1][0].overflow.head,atomic_load(&channels[1][0].overflow.tail));
     atomic_store(&channels[1][0].primary.head,atomic_load(&channels[1][0].primary.tail));

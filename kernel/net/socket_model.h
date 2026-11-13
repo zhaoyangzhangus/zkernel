@@ -194,9 +194,8 @@ enum {
     SOCKET_TCP_SYN_SENT = 3U,
 };
 
-/* Caller holds the socket lock. Keep the first deadline: repeated failures
- * must neither busy-retry nor postpone recovery indefinitely. The pending bit
- * permits a deadline of zero, including a TSC wrap through zero. */
+/* 调用方持有套接字锁。保留最初的截止时间：重复失败既不能触发忙等重试，也不能
+ * 无限推迟恢复。pending 位允许截止时间为零，包括 TSC 回绕到零的情况。 */
 static inline void socket_tcp_ack_retry_locked(socket_private_t *private,
     kstatus_t status, uint64_t now, uint64_t interval) {
     if (status != K_EAGAIN || private->tcp_ack_pending ||
@@ -207,9 +206,8 @@ static inline void socket_tcp_ack_retry_locked(socket_private_t *private,
     private->tcp_ack_retry_tsc = now + (interval != 0U ? interval : 1U);
 }
 
-/* Caller holds the socket lock. Publish after canceling every transport timer,
- * so lock-free receive/object predicates observe a consistent terminal state.
- * Buffered receive data remains available before the terminal error. */
+/* 调用方持有套接字锁。取消所有传输定时器后再发布状态，使无锁的接收/对象谓词
+ * 能观察到一致的终止状态。终止错误返回前，仍可读取缓冲区中的数据。 */
 static inline void socket_tcp_fail_locked(socket_private_t *private,
                                            kstatus_t error) {
     private->tcp_state = SOCKET_TCP_CLOSED;
@@ -244,12 +242,11 @@ typedef struct socket_async_send {
     uint16_t port;
     uint64_t user_key;
     uint64_t request_id;
-    /* Owned until the deferred worker completes; only length bytes exist. */
+    /* 由延迟工作线程持有至处理完成；仅 length 个字节有效。 */
     uint8_t payload[];
 } socket_async_send_t;
 
-/* socket.c owns the registry storage; protocol and transport use read-only
- * lookup views while holding the binding lock. */
+/* 注册表存储由 socket.c 持有；协议和传输层在持有绑定锁时使用只读查找视图。 */
 spinlock_t *socket_binding_lock(void);
 uint32_t socket_registry_capacity_locked(void);
 const socket_binding_t *socket_binding_at(uint32_t index);
@@ -261,8 +258,8 @@ socket_private_t *socket_private(socket_t *socket);
 const socket_private_t *socket_private_const(const socket_t *socket);
 void socket_zero(void *memory, size_t length);
 void socket_copy(void *destination, const void *source, size_t length);
-/* Caller holds the socket lock, bounds length by available data/space, and
- * provides an external buffer that does not alias private stream storage. */
+/* 调用方持有套接字锁，将 length 限制在可用数据或空间范围内，并提供不与私有流存储
+ * 重叠的外部缓冲区。 */
 uint32_t socket_stream_write_locked(socket_private_t *private,
                                     const void *buffer, size_t length);
 uint32_t socket_stream_read_locked(const socket_private_t *private,

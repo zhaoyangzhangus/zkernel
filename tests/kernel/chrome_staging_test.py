@@ -79,14 +79,13 @@ class ChromeStaging(unittest.TestCase):
             font.write_bytes(b'font'); license.write_bytes(b'license')
             shim = base / 'host-state-fixtures'
             shim.mkdir()
-            # Isolate host job-state queries, not the real Ninja/ELF/copy operations.
+            # 隔离宿主作业状态查询，不替代真实的 Ninja/ELF/复制操作。
             for name in ['pgrep', 'systemctl']:
                 path = shim / name
                 path.write_text('#!/bin/sh\nexit 1\n')
                 path.chmod(0o755)
-            # Launcher graph status has its own failure/success gate tests.
-            # Keep this resource/ELF publication fixture independent of the
-            # project's current native launcher build configuration.
+            # 启动器构建图状态另有成功/失败门禁测试。
+            # 让此资源/ELF 发布夹具独立于项目当前的原生启动器构建配置。
             (shim/'make').write_text('#!/bin/sh\nexit 0\n')
             (shim/'make').chmod(0o755)
             env = dict(os.environ, PATH=str(shim) + os.pathsep + os.environ['PATH'],
@@ -109,8 +108,8 @@ class ChromeStaging(unittest.TestCase):
             self.assertIn('CHROME_BINARY_STAGE=updated', first.stdout)
             targets = [bundle / name for name in
                        ['chrome', 'resources.pak', 'icudtl.dat', 'chrome_sandbox']]
-            targets += [esp / 'etc/fonts/NotoSansCJK-Regular.ttc',
-                        esp / 'etc/fonts/NotoSansCJK-LICENSE', build / 'chrome-staging.manifest']
+            targets += [esp / 'EFI/OS/fonts/NotoSansCJK-Regular.ttc',
+                        esp / 'EFI/OS/fonts/NotoSansCJK-LICENSE', build / 'chrome-staging.manifest']
             targets += [bundle / name for name in
                         ['locales/en-US.pak', 'resources/nested/.hidden', 'MEIPreload/manifest.json']]
             self.assertFalse((esp / 'sbin/chrome').exists())
@@ -119,7 +118,7 @@ class ChromeStaging(unittest.TestCase):
             alias_before = (alias.lstat().st_ino, alias.lstat().st_mtime_ns, os.readlink(alias))
             retained = bundle / 'resources/retained'
             retained.write_bytes(b'keep destination-only files')
-            # Include the destination-only file in the initial manifest.
+            # 在初始清单中包含仅存在于目标端的文件。
             self.assertEqual(run().returncode, 0)
             before = {p: (p.stat().st_ino, p.stat().st_mtime_ns, stage.sha(p)) for p in targets}
             second = run()

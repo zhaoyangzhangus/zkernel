@@ -41,9 +41,9 @@ while node != registry and node not in seen and len(seen) < 4096:
     node = int(process['global_node']['next'])
 if browser is None:
     raise RuntimeError('Browser PID not present')
-# The caller derives the list address from the exact running Chrome binary.
-# libc++ list nodes have previous, next, then the observer pointer. The
-# observer's Itanium ABI vtable has two destructor slots before this method.
+# 调用方根据正在运行的精确 Chrome 二进制计算链表地址。
+# libc++ 链表节点依次包含前驱、后继和 observer 指针。observer 的 Itanium ABI 虚表中，
+# 此方法前有两个析构函数槽位。
 head = int(os.environ['OS_OBSERVER_LIST'], 0)
 node = word(browser, head + 8)
 seen = set()

@@ -386,8 +386,8 @@ user_init_service:
     ud2
 #else
     /*
-     * Ring0 desktop owns interactive application launch. Keep this service
-     * slot blocked so init's six-service accounting remains unchanged.
+     * Ring0 桌面负责交互式应用启动。保持此服务槽位处于阻塞状态，
+     * 这样 init 的六项服务计数不会改变。
      */
     jmp .Linit_service_block
 #endif

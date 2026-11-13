@@ -17,6 +17,7 @@ code = r'''
 #include <kernel/wait.h>
 static spinlock_t g_timeout_lock;
 static list_head_t g_timeout_waiters;
+static atomic_uint_fast64_t g_timeout_next_deadline;
 static atomic_uint g_wait_init_state,attempts;
 static _Bool parallel;
 static _Bool counted_cas(atomic_uint *p,unsigned *expected,unsigned value,
@@ -30,6 +31,7 @@ static void *worker(void *unused) {
  (void)unused;wait_queue_t queue;wait_queue_init(&queue);
  assert(atomic_load(&g_wait_init_state)==2 && !atomic_load(&g_timeout_lock.state));
  assert(g_timeout_waiters.next==&g_timeout_waiters && g_timeout_waiters.prev==&g_timeout_waiters);
+ assert(atomic_load(&g_timeout_next_deadline)==UINT64_MAX);
  assert(queue.waiters.next==&queue.waiters && queue.waiters.prev==&queue.waiters);
  assert(!atomic_load(&queue.lock.state) && !atomic_load(&queue.sequence));
  return 0;

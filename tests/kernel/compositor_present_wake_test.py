@@ -27,7 +27,7 @@ typedef struct window {
  uint32_t compositor_presented_width,compositor_presented_height;
  bool compositor_presented_valid;
  atomic_uint_fast64_t compositor_presented_sequence;
- unsigned event_waitq,puts;
+ unsigned event_waitq,present_waitq,puts;
  uint64_t expected;
  uint64_t present_sequence;
 } window_server_window_t;
@@ -60,7 +60,7 @@ static int wake_all(unsigned *queue){
  window_server_window_t *found=0;
  for(unsigned i=0;i<g_compositor_snapshot.window_count;i++){
   window_server_window_t *w=g_compositor_snapshot.windows[i].reference;
-  if(w && &w->event_waitq==queue){found=w;break;}
+  if(w && &w->present_waitq==queue){found=w;break;}
  }
  assert(found&&found->puts==0);
  /* 首个唤醒之前，后续窗口的 ACK 也必须已在锁内统一发布。 */
@@ -90,35 +90,36 @@ int main(void){
    .reference=&windows[i],.section=&windows[i],.controls=&documents[i],.x=12,.y=20,
    .width=640,.height=480,.present_sequence=windows[i].expected};
  }
- /* A sparse snapshot reference must never be woken or released. */
+ /* 稀疏快照引用绝不能被唤醒或释放。 */
  g_compositor_snapshot.windows[4].reference=0;
  g_compositor_snapshot.windows[4].controls=0;documents[4]=0;
  compositor_snapshot_finish();
  assert(wakes==16&&puts==63&&reset&&!locked);
  for(unsigned i=0;i<WINDOW_SERVER_MAX_WINDOWS;i++){
-  assert(windows[i].event_waitq==(i!=4&&(i%4==0||i==63)));
+  assert(!windows[i].event_waitq);
+  assert(windows[i].present_waitq==(i!=4&&(i%4==0||i==63)));
   assert(g_compositor_snapshot.windows[i].reference==0);
   assert(g_compositor_snapshot.windows[i].section==0);
   assert(!g_compositor_snapshot.windows[i].controls&&!documents[i]);
   if(i!=4)assert(windows[i].compositor_presented_valid);
  }
  assert(!g_compositor_snapshot.window_count&&!g_compositor_snapshot.damage_count);
- /* Cursor-only/unchanged frame has geometry bookkeeping but zero wakes. */
+ /* 只有光标变化/画面未变时仍需更新几何信息，但唤醒次数为零。 */
  wakes=puts=0;windows[0].puts=0;reset=false;
  g_compositor_snapshot.window_count=1;
  g_compositor_snapshot.windows[0].reference=&windows[0];
  g_window_server.composing=true;
  compositor_snapshot_finish();
  assert(wakes==0&&puts==1&&reset);
- /* Comparison keeps existing uint64 sequence publication semantics. */
+ /* 比较逻辑保留现有 uint64 序列发布语义。 */
  windows[0].puts=0;windows[0].expected=0;
  atomic_store(&windows[0].compositor_presented_sequence,UINT64_MAX);
  g_compositor_snapshot.windows[0].reference=&windows[0];
  g_compositor_snapshot.windows[0].present_sequence=0;
  g_compositor_snapshot.window_count=1;g_window_server.composing=true;
  compositor_snapshot_finish();assert(wakes==1);
- /* A newer submitted frame is not complete merely because an older
-  * snapshot reached scanout. Publish only the sequence actually composed. */
+ /* 较新的提交帧不能仅因较旧快照已扫描输出就被视为完成。
+  * 只发布实际完成合成的序列号。 */
  wakes=puts=0;windows[0].puts=0;windows[0].expected=41;
  windows[0].present_sequence=42;
  atomic_store(&windows[0].compositor_presented_sequence,40);
@@ -134,8 +135,8 @@ int main(void){
  g_compositor_snapshot.window_count=1;g_window_server.composing=true;
  compositor_snapshot_finish();
  assert(wakes==2&&atomic_load(&windows[0].compositor_presented_sequence)==42);
- /* Busy, error and timeout publications preserve old geometry and ACK,
-  * restore damage, and still release every snapshot lifetime reference. */
+ /* 忙碌、错误和超时发布会保留旧几何信息及 ACK、恢复损坏区域，
+  * 并仍须释放所有快照生命周期引用。 */
  const int failures[]={-16,-5,-110};
  for(unsigned i=0;i<3;i++){
   windows[0].puts=0;

@@ -16,7 +16,7 @@
 
 struct job;
 
-/* Cold-path resource owners register independently; Process never names them. */
+/* 低频资源所有者独立注册；Process 不直接引用这些所有者。 */
 typedef void (*process_teardown_callback_t)(struct process *process);
 #define PROCESS_TEARDOWN_CALLBACK_MAX 8U
 #define PROCESS_CWD_CAPACITY 256U
@@ -40,8 +40,7 @@ typedef struct process {
     struct job *job;
     struct process *parent;
 
-    /* The parent relation and child list keep process objects alive across
-     * the interval between exit and waitpid. */
+    /* 父子关系和子进程列表会在进程退出至 waitpid 之间保持进程对象有效。 */
     spinlock_t parent_lock;
     spinlock_t children_lock;
     wait_queue_t child_waitq;
@@ -50,7 +49,7 @@ typedef struct process {
 
     spinlock_t thread_lock;
     list_head_t threads;
-    /* Borrowed monitor hint; read/write and detach invalidation use thread_lock. */
+    /* 借用的监视器提示；读写和分离失效操作使用 thread_lock。 */
     list_head_t *monitor_thread_cursor;
     /* 线程枚举缓存只在 thread_lock 内使用；线程成员变化时清空。 */
     list_head_t *enumeration_thread_cursor;
@@ -58,10 +57,10 @@ typedef struct process {
     list_head_t job_node;
     uint32_t thread_count;
     uint64_t retired_cpu_ns; /* Thread-lock protected completed CPU time. */
-    /* Linux presents the initial thread's TID as the process PID. */
+    /* Linux 将初始线程的 TID 作为进程 PID 暴露。 */
     uint64_t linux_thread_group_leader_tid;
 
-    /* Global monitor membership and stable user-visible metadata. */
+    /* 全局监视器成员关系和稳定的用户可见元数据。 */
     list_head_t global_node;
     /* 名称与当前目录都只在短暂持锁期间复制。 */
     spinlock_t info_lock;
@@ -72,9 +71,9 @@ typedef struct process {
     uint32_t exit_signal;
     uint64_t create_time_ns;
 
-    /* Linux PT_INTERP images use a separate syscall-number personality. */
+    /* Linux PT_INTERP 映像使用独立的系统调用编号 personality。 */
     uint32_t personality;
-    /* The native System dynamic loader runs before Linux ABI activation. */
+    /* 原生 System 动态加载器会在 Linux ABI 启用前运行。 */
     bool linux_loader_pending;
     char linux_root[256];
     char cwd[PROCESS_CWD_CAPACITY];
@@ -161,7 +160,7 @@ kstatus_t thread_register_user_stack(thread_t *thread, vaddr_t base,
                                      size_t size);
 kstatus_t thread_start(thread_t *thread);
 kstatus_t thread_terminate(thread_t *thread, int64_t status);
-/* Process-owned exit status publication followed by scheduler state change. */
+/* 发布由进程拥有的退出状态，然后更新调度器状态。 */
 bool process_publish_thread_exit(thread_t *thread, int64_t status);
 void thread_release_execution_ref(thread_t *thread);
 kstatus_t process_register_teardown_callback(

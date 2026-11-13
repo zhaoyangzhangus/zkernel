@@ -1,8 +1,8 @@
 #include "png_internal.h"
 #include <kernel/crc32.h>
 
-/* REFACTOR_P7A_PNG_CHUNK_OWNER: PNG container/chunk validation and IDAT
- * collection are kept out of the DEFLATE and pixel conversion unit. */
+/* REFACTOR_P7A_PNG_CHUNK_OWNER：PNG 容器和数据块校验、IDAT 收集逻辑与 DEFLATE
+ * 解压及像素转换单元分开。 */
 
 static uint16_t png_read_u16_be(const uint8_t *data) {
     return (uint16_t)(((uint16_t)data[0] << 8U) | data[1]);

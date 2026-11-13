@@ -27,8 +27,8 @@ int main(void) {
  for(unsigned b=0;b<2;++b)for(unsigned m=0;m<2;++m) {
   uint8_t data[1460];unsigned size=sizes[m];uint32_t expected=bases[b];
   unsigned delivered=0,rejected=0;
-  // Model the former caller: advance only for K_OK; future data has no
-  // retained ownership here. Receiving the gap later cannot recover it.
+  // 模拟旧调用方：只在 K_OK 时推进；这里没有保留未来数据的所有权。
+  // 之后收到缺口前的数据也无法恢复被丢弃的内容。
   for(unsigned packet=1;packet<16;++packet) {
    uint32_t seq=bases[b]+packet*size;size_t length=size;const void* bytes=data;
    kstatus_t status=socket_tcp_trim_overlap(&seq,expected,&bytes,&length,0);
@@ -39,7 +39,7 @@ int main(void) {
   assert(socket_tcp_trim_overlap(&seq,expected,&bytes,&length,0)==K_OK);
   expected=seq+(uint32_t)length;delivered+=(unsigned)length;
   assert(delivered==size && expected==bases[b]+size && rejected==15);
-  // All discarded segments must return before the complete stream exists.
+  // 完整数据流就绪前，所有被丢弃的数据段都必须已经返回。
   for(unsigned packet=1;packet<16;++packet) {
    seq=bases[b]+packet*size;length=size;bytes=data;
    assert(socket_tcp_trim_overlap(&seq,expected,&bytes,&length,0)==K_OK);

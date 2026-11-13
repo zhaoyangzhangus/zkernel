@@ -1,6 +1,6 @@
 set pagination off
 target remote /tmp/system-keys.sock
-# Current Chrome symbols; PIE bias 0x40000000. One hit per stage only.
+# 当前 Chrome 符号；PIE 偏移为 0x40000000。每个阶段只命中一次。
 hbreak *0x4cdd64c0
 commands
 silent

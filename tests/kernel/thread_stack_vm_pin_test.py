@@ -102,7 +102,7 @@ with tempfile.TemporaryDirectory(prefix='liteos-stack-vm-pin-') as directory:
     result=run(reap)
     assert result.returncode==0,result.stdout+result.stderr
     print(result.stdout.strip())
-    # Leave the ownership decrement equally absent to reproduce a borrowed snapshot.
+    # 同样省略所有权递减，以复现借用快照的情况。
     negative=reap.replace('if (space != 0) vm_space_get(space);','if (false) vm_space_get(space);')
     negative=negative.replace('            vm_space_put(space);','')
     result=run(negative)

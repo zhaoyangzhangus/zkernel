@@ -520,8 +520,8 @@ bool x86_acpi_reset(void) {
 }
 
 kstatus_t x86_acpi_poweroff(void) {
-    /* parse_dsdt_sleep reads _S5_: its two legacy-named fields are the
-     * PM1a/PM1b S5 types, not the S3/S4 sleep states. */
+    /* parse_dsdt_sleep 会读取 _S5_：其中两个沿用旧名称的字段表示 PM1a/PM1b 的
+     * S5 类型，不是 S3/S4 睡眠状态。 */
     if (!x86_acpi_sleep_supported() || g_platform.pm1_control_length < 2U ||
         g_platform.pm1a_control_block == 0U ||
         g_platform.sleep_type_s3 > 7U || g_platform.sleep_type_s4 > 7U)

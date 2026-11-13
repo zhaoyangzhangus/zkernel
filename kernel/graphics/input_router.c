@@ -24,6 +24,14 @@ void window_input_reset_desktop_state_locked(void) {
     g_window_server.desktop_focus_cycle_requested = false;
 }
 
+/* 调用方持有窗口锁；单槽保留先到的请求，后续点击或快捷键不能覆盖它。 */
+bool window_input_request_desktop_launch_locked(uint32_t app) {
+    if (app == DESKTOP_APP_NONE ||
+        g_window_server.desktop_pending_launch != DESKTOP_APP_NONE) return false;
+    g_window_server.desktop_pending_launch = app;
+    return true;
+}
+
 uint32_t window_input_take_desktop_launch_locked(void) {
     uint32_t app = g_window_server.desktop_pending_launch;
     g_window_server.desktop_pending_launch = DESKTOP_APP_NONE;
@@ -583,10 +591,7 @@ void route_input_locked(const input_event_t *event) {
                    shortcut_app != DESKTOP_APP_NONE) {
             deliver_input = false;
             if (event->value == INPUT_VALUE_PRESS) {
-                if (g_window_server.desktop_pending_launch ==
-                    DESKTOP_APP_NONE) {
-                    g_window_server.desktop_pending_launch = shortcut_app;
-                }
+                (void)window_input_request_desktop_launch_locked(shortcut_app);
                 desktop_mark_app_locked(shortcut_app);
             }
         } else if (!client_decorated && event->code == 0x2BU) {

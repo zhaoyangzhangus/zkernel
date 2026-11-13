@@ -7,6 +7,6 @@ typedef struct kernel_init_early_hooks {
     void (*halt)(void);
 } kernel_init_early_hooks_t;
 
-/* Validate loader state and bring up the CPU/early platform boundary. */
+/* 校验加载器状态，并初始化 CPU/早期平台边界。 */
 BOOLEAN kernel_init_early(OS_BOOT_INFO *info,
                           const kernel_init_early_hooks_t *hooks);

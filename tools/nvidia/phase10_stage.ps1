@@ -67,8 +67,7 @@ Require-File $testBinaryPath 'Phase 10 EGL/context probe'
 $script:stageCopied = 0
 $script:stageSkipped = 0
 
-# Copy the verified P9 closure first.  The P10 kernel and test are copied after
-# it so an inherited P9 tree can never overwrite the new phase image.
+# 先复制已验证的 P9 依赖闭包，然后再复制 P10 内核和测试，避免继承的 P9 目录覆盖新的阶段镜像。
 Copy-DirectoryContents $phase9Esp $espRoot
 Copy-FileIfChanged $testBinaryPath (Join-Path $espRoot 'tests\p10-egl-context')
 Copy-FileIfChanged $phase10Kernel (Join-Path $espRoot 'EFI\OS\kernel.elf')

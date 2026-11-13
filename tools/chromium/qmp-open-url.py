@@ -51,8 +51,8 @@ def capture_network_snapshot():
     if not endpoint.is_socket():
         command('human-monitor-command', {'command-line':
             'gdbserver unix:' + str(endpoint) + ',server=on,wait=off'})
-    # QEMU accepts only one QMP client. The inspector owns that connection
-    # while it verifies every executable byte and restores the guest state.
+    # QEMU 只接受一个 QMP 客户端。检查器在验证可执行文件的每个字节并恢复客户机状态期间
+    # 持有该连接。
     qmp.close()
     try:
         path = root / f'build/chrome-{args.label}-network.log'
@@ -66,14 +66,14 @@ def capture_network_snapshot():
             raise RuntimeError('Network inspection failed; see ' + str(path))
     finally:
         qmp = QMPClient()
-        # Cover GDB being killed by timeout before its own finally can run.
-        # Terminal guest states are never resumed or reset.
+        # 覆盖 GDB 超时被终止、来不及执行 finally 的情况。
+        # 绝不恢复或重置已终止状态的客户机。
         restore_run_state(qmp, state['running'])
 
 
 def key(*codes, hold=40):
-    # Complete the whole chord before typing the next character. send-key
-    # schedules members separately and can leave Ctrl/Shift held here.
+    # 输入下一个字符前先完整发送组合键。send-key 会分别调度组合键成员，可能导致 Ctrl/Shift
+    # 在此处仍处于按下状态。
     try:
         command('input-send-event', {'events': [
             {'type': 'key', 'data': {'down': True,
@@ -149,10 +149,9 @@ assert command('query-status')['running'], 'Guest already stopped; leave debugge
 key('ctrl', 'l', hold=100)
 for codes in keys:
     key(*codes)
-# Omnibox inline completion selects an untyped suffix (e.g. the previous
-# /search?q=... when navigating to the bare origin). Forward Delete removes
-# that selection and suppresses inline completion; at an unselected end it is
-# a no-op. Enter must navigate the requested URL, not the history completion.
+# 地址栏内联补全会选中尚未输入的后缀（例如导航到裸域名时，选中之前的 /search?q=...）。
+# 前向删除会移除此选中内容并禁用内联补全；光标已在末尾且没有选中内容时则无操作。
+# 按 Enter 必须导航到请求的 URL，而不是历史补全结果。
 key('delete')
 command('screendump', {'filename': str(root / f'build/chrome-{args.label}-typed.png'),
                       'format': 'png'})

@@ -47,7 +47,7 @@ void anon_page_release_retired(anon_page_node_t *p){assert(!held&&!p);}
 int main(void){
  vm_space_t space={0};list_init(&space.area_list);
  uint64_t anon=LINUX_MAP_PRIVATE|LINUX_MAP_ANONYMOUS;
- // Sparse reservations must not hide low addresses needed for thread stacks.
+ // 稀疏预留不能占用线程栈所需的低地址。
  for(unsigned i=0;i<16;++i){
   int64_t result=linux_mmap(&space,0,1ULL<<36,0,anon|LINUX_MAP_NORESERVE,-1,0);
   assert(result>=0x100000000LL);

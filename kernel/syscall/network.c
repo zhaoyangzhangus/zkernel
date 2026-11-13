@@ -259,8 +259,8 @@ int64_t syscall_net_get_status(uint64_t arguments_pointer, uint64_t unused1,
 }
 
 /*
- * NET_SUBSCRIBE(message_port): bind the system network daemon's waitable
- * message port to link-state changes. OS_INVALID_HANDLE unsubscribes.
+ * NET_SUBSCRIBE(message_port)：将系统网络守护进程的可等待消息端口绑定到链路状态变化。
+ * 使用 OS_INVALID_HANDLE 取消订阅。
  */
 int64_t syscall_net_subscribe(uint64_t port_handle, uint64_t unused1,
                                  uint64_t unused2, uint64_t unused3,

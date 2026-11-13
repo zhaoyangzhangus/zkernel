@@ -124,7 +124,7 @@ int main(void) {
     unsigned before_find=find_calls;
     assert(anon_page_get(&object,100,true,false,&out)==K_OK);
     assert(find_calls==before_find+1);
-    /* A nonempty tree must also publish a fresh index without a second find. */
+    /* 非空树也必须在不进行第二次查找的情况下发布新索引。 */
     before_find=find_calls;
     assert(anon_page_get(&object,101,true,false,&out)==K_OK);
     assert(find_calls==before_find+1 && object.populated_pages==2); clear();

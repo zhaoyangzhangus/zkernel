@@ -622,8 +622,7 @@ static bool enter_link_down(netd_context_t *context) {
         context->status.ipv4_prefix_length = 0U;
     }
     context->state = NETD_STATE_LINK_DOWN;
-    /* Cold PHY negotiation can finish after the initial status snapshot.
-     * Keep a bounded fallback even if a link notification is lost. */
+    /* 低频 PHY 协商可能在初始状态快照之后才完成。即使链路通知丢失，也保留有界回退处理。 */
     return arm_timer(context, NETD_DHCP_RETRY_NS);
 }
 

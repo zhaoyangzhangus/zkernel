@@ -157,7 +157,7 @@ int main(void) {
     puts("128 sparse/dense table layouts: copy, self/null cases, repeated/reentrant teardown, sparse-only unlocked releases and unused-kind description ownership passed");
 }
 '''
-# Do not shadow the C library puts() in the fixture.
+# 不要在测试夹具中遮蔽 C 库的 puts()。
 code = code.replace('puts', 'release_count').replace('FD_LIMIT_FROM_HEADER', str(fd_limit))
 checks = checks.replace('puts', 'release_count').replace('release_count("', 'puts("')
 with tempfile.TemporaryDirectory(prefix='liteos-fd-table-') as directory:

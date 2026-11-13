@@ -7,8 +7,27 @@
 static kstatus_t protect_resident_pages(vm_space_t *space,
                                         const vm_area_t *area, uint32_t prot,
                                         bool *deferred_changed) {
+    /* 私有文件的影子页决定逐页权限，其余映射在整个 VMA 内权限一致。
+     * 权限一致的用户映射可在同一次页表加锁中查找并修改常驻页。 */
+    bool per_page = area->private_object != 0 && area->object != 0 &&
+                    area->object->type == VM_OBJECT_FILE;
+    uint32_t uniform_flags = per_page ? 0U :
+        vm_area_page_flags(area, area->start, prot);
+    bool combined = (uniform_flags & (X86_PAGE_USER | X86_PAGE_GLOBAL)) ==
+                    X86_PAGE_USER;
     for (uint64_t va = area->start; va < area->end; va += PAGE_SIZE) {
         vaddr_t resident;
+        if (combined) {
+            bool changed = false;
+            kstatus_t status = x86_protect_next_user_page_deferred(
+                space->root_table, (vaddr_t)va, area->end, uniform_flags,
+                X86_CACHE_WB, &resident, &changed);
+            *deferred_changed |= changed;
+            if (status == K_ENOENT) return K_OK;
+            if (status != K_OK) return status;
+            va = resident;
+            continue;
+        }
         kstatus_t status = x86_next_present_page(
             space->root_table, (vaddr_t)va, area->end, &resident);
         if (status == K_ENOENT) return K_OK;
@@ -86,7 +105,10 @@ kstatus_t vm_sync(vm_space_t *space, vaddr_t address, size_t size,
         uint64_t first_page, page_count;
     } sync_request_t;
     sync_request_t *requests = 0;
-    sync_request_t **tail = &requests;
+    sync_request_t *last_request = 0;
+    sync_request_t *spares = 0;
+    size_t reserved = 0U;
+    bool retry = false;
     const uint32_t valid_flags = OS_VM_SYNC_ASYNC |
                                  OS_VM_SYNC_INVALIDATE |
                                  OS_VM_SYNC_SYNC;
@@ -101,10 +123,15 @@ kstatus_t vm_sync(vm_space_t *space, vaddr_t address, size_t size,
         return K_EINVAL;
     }
 
+retry_snapshot:
+    status = K_OK;
+    retry = false;
+    last_request = 0;
     map_lock(space);
     if (!range_fully_mapped(space, (uint64_t)address, end, &first_area, &last_area)) {
         map_unlock(space);
-        return K_ENOENT;
+        status = K_ENOENT;
+        goto release_spares;
     }
     list_head_t *range_end = last_area->ordered_node.next;
     for (list_head_t *item = &first_area->ordered_node;
@@ -142,19 +169,36 @@ kstatus_t vm_sync(vm_space_t *space, vaddr_t address, size_t size,
         page_count = (overlap_end - overlap_start) >> PAGE_SHIFT;
         ops = area->object->u.file.ops;
         if (page_count == 0U || ops == 0 || ops->sync == 0) continue;
-        sync_request_t *request = kmalloc(sizeof(*request), 0U);
+        uint64_t first_page = file_offset >> PAGE_SHIFT;
+        uint64_t page_end = first_page + page_count;
+        /* mprotect 等操作会拆分同一文件映射。仅与上一请求合并连续或重叠的文件页，
+         * 不扫描已有请求、不跨空洞回写。不同对象也可共用同一映射和操作表；
+         * 上一请求持有的对象引用足以固定回调及映射，不再重复分配和获取引用。 */
+        if (last_request != 0 && last_request->object->u.file.ops == ops &&
+            last_request->object->u.file.mapping == area->object->u.file.mapping) {
+            uint64_t previous_end = last_request->first_page + last_request->page_count;
+            if (first_page <= previous_end && last_request->first_page <= page_end) {
+                if (page_end < previous_end) page_end = previous_end;
+                if (first_page < last_request->first_page) last_request->first_page = first_page;
+                last_request->page_count = page_end - last_request->first_page;
+                continue;
+            }
+        }
+        sync_request_t *request = spares;
         if (request == 0) {
-            status = K_ENOMEM;
+            retry = true;
             break;
         }
+        spares = request->next;
         vm_object_get(area->object);
         *request = (sync_request_t){
             .object = area->object,
-            .first_page = file_offset >> PAGE_SHIFT,
+            .first_page = first_page,
             .page_count = page_count,
         };
-        *tail = request;
-        tail = &request->next;
+        if (last_request != 0) last_request->next = request;
+        else requests = request;
+        last_request = request;
     }
     map_unlock(space);
     /* 不再使用 VMA/链表指针。每个请求都会持有不可变的文件对象/映射，直到回调结束；
@@ -163,11 +207,42 @@ kstatus_t vm_sync(vm_space_t *space, vaddr_t address, size_t size,
         sync_request_t *request = requests;
         requests = request->next;
         vm_object_t *object = request->object;
-        if (status == K_OK) {
+        if (!retry && status == K_OK) {
             status = object->u.file.ops->sync(object->u.file.mapping,
                 request->first_page, request->page_count);
         }
         vm_object_put(object);
+        if (retry) {
+            request->next = spares;
+            spares = request;
+        } else {
+            kfree(request);
+        }
+    }
+    if (retry) {
+        /* 完整快照就绪前不下发 I/O。锁外倍增预留，并从当前 VMA 重建，
+         * 不携带可能已被其他线程拆分、替换或释放的链表指针。 */
+        size_t growth = reserved != 0U ? reserved : 1U;
+        if (growth > SIZE_MAX - reserved) {
+            status = K_EOVERFLOW;
+            goto release_spares;
+        }
+        for (size_t index = 0U; index < growth; ++index) {
+            sync_request_t *request = kmalloc(sizeof(*request), 0U);
+            if (request == 0) {
+                status = K_ENOMEM;
+                goto release_spares;
+            }
+            request->next = spares;
+            spares = request;
+        }
+        reserved += growth;
+        goto retry_snapshot;
+    }
+release_spares:
+    while (spares != 0) {
+        sync_request_t *request = spares;
+        spares = request->next;
         kfree(request);
     }
     return status;

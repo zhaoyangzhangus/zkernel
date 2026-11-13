@@ -37,7 +37,7 @@ int main(void) {
             check(a+x,b+y,n);check(a+x,a+y,n);
             for(unsigned i=0;i<n;++i) {
                 b[y+i]=255;check(a+x,b+y,n);check(b+y,a+x,n);
-                /* Opposite later difference must not change the result. */
+                /* 后面相反方向的差异不能改变结果。 */
                 if(i+1<n) {b[y+i+1]=0;check(a+x,b+y,n);b[y+i+1]=0x81;}
                 b[y+i]=0x81;
             }

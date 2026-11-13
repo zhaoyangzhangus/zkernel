@@ -21,8 +21,7 @@ assert '$(BUILD)/esp/lib/ld-linux-liteos.so.1' not in make
 assert 'DYNAMIC_LIBC_ELF = $(ELF_RUNTIME_DIR)/libsystemc.so.1' in make
 assert '--soname libsystemc.so.1' in make
 assert '$(BUILD)/esp/lib/libliteosc.so.1' not in make
-# Already-deployed libc interprets this TLS header: changing its numeric magic
-# is an ABI change, not a naming cleanup.
+# 已部署的 libc 会解析此 TLS 头部：修改其数字 magic 属于 ABI 变更，不能当作名称清理。
 assert re.search(r'#define\s+OS_RT_TLS_MAGIC\s+0x4C4954454F53544CULL', loader)
 fields = (
     ('header', 'Elf64_Ehdr', 'ident:e_ident type:e_type machine:e_machine version:e_version entry:e_entry program_header_offset:e_phoff section_header_offset:e_shoff flags:e_flags header_size:e_ehsize program_header_size:e_phentsize program_header_count:e_phnum section_header_size:e_shentsize section_header_count:e_shnum section_name_index:e_shstrndx'),
@@ -62,8 +61,8 @@ with tempfile.TemporaryDirectory(prefix='runtime-elf-') as directory:
     subprocess.run(['cc', '-std=c11', '-Wall', '-Wextra', '-Werror', '-I', str(ROOT),
                     str(source), '-o', str(binary)], check=True)
     subprocess.run([str(binary)], check=True)
-    # Compile actual loader dependency traversal with only file I/O replaced.
-    # This covers alias normalization, recursive cycles and capacity checks.
+    # 只替换文件 I/O，编译真实的加载器依赖遍历逻辑。
+    # 此测试覆盖别名规范化、递归循环和容量检查。
     def function(signature):
         start = loader.index(signature)
         end = loader.index('\n}', start) + 2
@@ -117,7 +116,7 @@ int main(void) {
         assert(load_needed(images, &count, &base, 0));
         assert(count == 2 && loads == 1 && base == 1);
         assert(strcmp(images[1].name, "libsystemc.so.1") == 0);
-        // A cached alias remains usable even with the image array full.
+        // 即使镜像数组已满，缓存的别名仍可使用。
         count = OS_RT_MAX_IMAGES;
         assert(load_needed(images, &count, &base, 0));
         assert(loads == 1 && base == 1);
@@ -145,7 +144,7 @@ int main(void) {
                     '-fsanitize=address,undefined', '-fno-omit-frame-pointer',
                     '-I', str(ROOT), str(source), '-o', str(binary)], check=True)
     subprocess.run([str(binary)], check=True)
-    # Execute the real kernel whitelist, not a reimplementation of its rules.
+    # 执行内核的真实白名单，而不是重新实现其规则。
     linux = (ROOT / 'kernel/syscall/linux.c').read_text()
     start = linux.index('static bool linux_string_equal(')
     end = linux.index('\nstatic int64_t linux_arch_prctl(', start)

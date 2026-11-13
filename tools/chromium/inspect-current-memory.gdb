@@ -25,8 +25,8 @@ def snapshot():
             yield pointer(node - displacement, kind)
             node = int(pointer(node, 'list_head_t')['next'])
 
-    # Unique vnode identity, not descriptor count: shared FDs and mappings
-    # must not multiply file backing. Include unlinked, mapped-only files.
+    # 依据唯一 vnode 身份统计，而不是描述符数量：共享 FD 和映射不能重复计算文件后备存储。
+    # 包括已解除链接、仅被映射的文件。
     nodes = {}
     capacity = int(gdb.parse_and_eval('*(unsigned int*)&g_vfs_node_capacity'))
     if not 0 < capacity <= 1048576:

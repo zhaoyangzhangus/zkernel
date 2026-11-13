@@ -1,6 +1,6 @@
 set pagination off
 target remote /tmp/system-keys.sock
-# Verified c012e8b51b31e1eb, guest PIE bias 0x40000000.
+# 已对 c012e8b51b31e1eb 进行验证，客户机 PIE 偏移为 0x40000000。
 hbreak *0x45514d50
 commands
 silent

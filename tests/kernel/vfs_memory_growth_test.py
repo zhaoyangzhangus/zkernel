@@ -27,7 +27,7 @@ static void *kmalloc(size_t n, int flags) {
 }
 static void *kzalloc(size_t n,int flags){void *p=kmalloc(n,flags);if(p)memset(p,0,n);return p;}
 static void kfree(void *p) { free(p); }
-/* malloc-only policy fixture: real in-place growth is tested separately. */
+/* 仅测试 malloc 策略的夹具：真实的原地扩展另行测试。 */
 static bool kmalloc_try_grow(void *p,size_t n){(void)p;(void)n;return false;}
 static unsigned stats_calls;
 static kstatus_t page_memory_get_stats(uint64_t *total, uint64_t *available) {
@@ -88,8 +88,8 @@ int main(void) {
     assert(vfs_memory_backend_truncate(&b, 0)==K_OK);
     assert(!b.data && !b.size && !b.data_capacity);
     assert(g_vfs_memory_allocation_failure.free_pages==524288);
-    // Snapshot oracle for self-sourced writes: overlap, exact end, growth,
-    // sparse holes, optional-capacity failure and complete allocation failure.
+    // 自引用写入的快照基准：覆盖重叠、精确末尾、扩展、稀疏空洞、可选容量分配失败以及
+    // 完全分配失败。
     unsigned cases=0;
     const unsigned sizes[]={17,255,4096};
     for(unsigned si=0;si<3;++si)for(unsigned src=0;src<3;++src)
@@ -122,9 +122,8 @@ int main(void) {
         }
         fail=0;free(expected);free(snapshot);free(b.data);++cases;
     }
-    // A caller may also supply valid bytes from spare allocation capacity.
-    // Only visible file bytes are migrated, so the source must stay in the
-    // retired allocation until consumed rather than being blindly rebased.
+    // 调用方也可能从剩余分配容量中提供有效字节。只迁移文件中可见的字节，因此在读取完
+    // 源数据前必须保留旧分配，不能盲目重定位指针。
     const unsigned spare_offsets[]={17,32,63};
     for(unsigned i=0;i<3;++i) {
         unsigned source_offset=spare_offsets[i],count=64-source_offset;
@@ -138,8 +137,8 @@ int main(void) {
         assert(b.size==80+count && bytes==count && allocations==before+1);
         assert(!memcmp(b.data,expected,b.size));free(b.data);++cases;
     }
-    // Spare-capacity sources can sit inside the hole that must be zeroed.
-    // No reallocation isolates the copy/zero ordering from retired ownership.
+    // 剩余容量中的源数据可能位于需要清零的空洞内。
+    // 不重新分配内存，以便单独测试复制/清零顺序和旧存储所有权。
     for(unsigned source_offset=0;source_offset<64;++source_offset)
     for(unsigned offset=18;offset<=50;offset+=16) {
         unsigned count=64-source_offset;

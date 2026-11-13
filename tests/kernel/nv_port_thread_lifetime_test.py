@@ -77,7 +77,7 @@ int main(void) {
   assert(nv_port_thread_destroy(&t)==K_EBUSY && !frees);
   atomic_store(&t.thread.state,THREAD_DEAD);
   assert(nv_port_thread_destroy(&t)==K_EBUSY && !frees);
-  /* DEAD and finished alone do not prove that another CPU left the stack. */
+  /* 仅凭 DEAD 和 finished 状态无法证明另一个 CPU 已离开该栈。 */
   t.thread.flags=THREAD_FLAG_EXECUTION_REAPING;
   atomic_store(&t.thread.object.refs.value,1);
   assert(!monitor_removes);

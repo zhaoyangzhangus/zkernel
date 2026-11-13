@@ -34,6 +34,29 @@ kstatus_t copy_from_user(void *destination, const void __user *source, size_t si
     return x86_copy_from_user_raw(destination, source, size);
 }
 
+/* 按页复制有界字符串；当前页中的终止符不应要求下一页也可访问。
+ * 目标可能包含终止符之后的当前页字节，失败时也可能已复制部分内容。 */
+kstatus_t copy_string_from_user(char *destination, const char __user *source,
+                                 size_t capacity) {
+    if (destination == 0 || source == 0 || capacity == 0U) return K_EINVAL;
+    for (size_t offset = 0U; offset < capacity;) {
+        uintptr_t address = (uintptr_t)source;
+        if (offset > UINTPTR_MAX - address) return K_EINVAL;
+        address += offset;
+        size_t chunk = PAGE_SIZE - (address & (PAGE_SIZE - 1U));
+        size_t remaining = capacity - offset;
+        if (chunk > remaining) chunk = remaining;
+        kstatus_t status = copy_from_user(destination + offset,
+                                           (const void __user *)address, chunk);
+        if (status != K_OK) return status;
+        for (size_t index = 0U; index < chunk; ++index) {
+            if (destination[offset + index] == '\0') return K_OK;
+        }
+        offset += chunk;
+    }
+    return K_ENAMETOOLONG;
+}
+
 kstatus_t copy_to_user(void __user *destination, const void *source, size_t size) {
     if (size == 0) return K_OK;
     if (source == 0 || !x86_user_range_valid(destination, size)) return K_EINVAL;

@@ -26,7 +26,7 @@ def function(source, signature):
 
 cache_helpers = pages[pages.index('static uint32_t vfs_page_cache_bucket('):
                       pages.index('static void vfs_page_cache_grow(')]
-# Insertion/growth are not involved; use the real bucket lookup and geometry.
+# 此处不涉及插入/扩展；使用真实的桶查找和几何参数。
 cache_helpers += function(pages, 'static vfs_cached_page_t *vfs_page_cache_lookup(')
 cache_helpers += pages[pages.index('static kstatus_t vfs_page_cache_flush_entry('):
                        pages.index('kstatus_t vfs_page_cache_sync(')]
@@ -34,10 +34,7 @@ cache_helpers += pages[pages.index('static void vfs_page_cache_zero_range('):
                        pages.index('void vfs_file_page_mark_dirty(')]
 ram = backend[backend.index('struct {\n    uint64_t failures;'):
               backend.index('kstatus_t vfs_fat32_backend_read(')]
-truncate = '\n'.join(function(io, signature) for signature in (
-    'static kstatus_t vfs_write_transaction_begin(',
-    'static void vfs_write_transaction_end(',
-    'kstatus_t vfs_truncate_node('))
+truncate = function(io, 'kstatus_t vfs_truncate_node(')
 program = r'''
 #include <assert.h>
 #include <stdbool.h>
@@ -186,9 +183,8 @@ int main(void){
    assert(writes==(retained && write_error?1:runs));
    if(status==K_OK){assert(b.size==sizes[s] && v.size==sizes[s]);}
    else assert(b.size==old_size && v.size==old_size);
-   /* Check actual retained bytes, not just backend call counts: dirty edge
-    * pages must persist their prefix before EOF changes. Failed writeback
-    * must leave the backing unchanged, and successful growth exposes zeros. */
+   /* 检查实际保留的字节，而不只是后端调用次数：EOF 变化前，边缘脏页必须先持久化其
+    * 前缀。写回失败时后备内容不得改变，扩展成功后应暴露零值。 */
    for(uint64_t j=0;j<b.size;++j){
     unsigned i=j/PAGE_SIZE;
     bool persisted=j<old_size && (uint64_t)i*PAGE_SIZE<sizes[s] &&
@@ -214,7 +210,7 @@ int main(void){
   assert(vfs_memory_backend_truncate(&b,0)==K_OK);
   assert(frees==allocations);++cases;
  }
- /* Lock/backend validation failures do not touch data or call writeback. */
+ /* 锁/后端验证失败时既不触碰数据，也不调用写回。 */
  boot=false;vfs_backend_node_t b={.truncate=truncate_backend};
  vnode_t v={{KOBJECT_TYPE_VNODE},&b,0,NULL};
  writes=truncates=0;lock_error=K_EIO;
@@ -240,16 +236,15 @@ with tempfile.TemporaryDirectory(prefix='vfs-truncate-discard-') as directory:
     assert result.returncode == 0, result.stderr
     print(result.stdout, end='')
     for name, old, new in (
-        # Entering the prefix helper with size zero is harmless now: it is
-        # explicitly a no-op. Inject actual writeback to test the regression,
-        # rather than requiring rejection of a behaviorally equivalent guard.
+        # 现在以零大小调用前缀辅助函数没有问题：它明确是空操作。注入真实写回以测试回归，
+        # 而不是要求拒绝行为等效的保护逻辑。
         ('discard unnecessarily flushes dirty pages', 'if (size != 0U) {',
          'if (size == 0U) {\n'
          '    vfs_vnode_lock(vnode);\n'
          '    status = vfs_page_cache_flush(vnode);\n'
          '    vfs_vnode_unlock(vnode);\n'
          '    if (status != K_OK) {\n'
-         '        vfs_write_transaction_end(backend, locked);\n'
+         '        io_mutex_unlock_required(&backend->write_mutex);\n'
          '        return status;\n'
          '    }\n'
          '}\nif (size != 0U) {'),

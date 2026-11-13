@@ -74,8 +74,8 @@ with tempfile.TemporaryDirectory(prefix='liteos-pool-slot-') as directory:
     subprocess.run([binary], check=True, timeout=60)
     for label, implementation, name in [('previous', previous, 'previous_slot'),
                                          ('production', function, 'pool_page_in_local_group')]:
-        # Emit the exact helper with runtime order and caller-provided metadata,
-        # not a constant-order fixture the compiler could simplify away.
+        # 生成使用运行时阶数和调用方元数据的真实辅助函数，而不是可能被编译器简化掉的
+        # 常量阶测试夹具。
         implementation = implementation.replace('static bool '+name+'(', 'bool '+name+'(')
         assembly = subprocess.run(['cc', '-std=c11', '-O2', '-S', '-x', 'c', '-', '-o', '-'],
                                   input=prefix+implementation, text=True,

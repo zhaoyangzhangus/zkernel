@@ -23,8 +23,8 @@ stage = module('vulkan_stage_helpers', 'stage-driver.py')
 check = module('vulkan_elf_check', 'check_userspace_59584.py')
 abi = module('vulkan_abi_check', 'vulkan_runtime_abi.py')
 
-# These compiler modules are loaded by NVIDIA via dlopen, not DT_NEEDED.
-# Keep them explicit roots so their own dependencies are validated as well.
+# NVIDIA 通过 dlopen 加载这些编译器模块，而非 DT_NEEDED。
+# 将它们明确列为根项，以便同时校验其自身依赖。
 NVIDIA_VULKAN_MODULES = ('libnvidia-glvkspirv.so.595.84',
                          'libnvidia-gpucomp.so.595.84',
                          'libnvidia-rtcore.so.595.84',
@@ -89,7 +89,7 @@ def main():
     catalog['libGLX_nvidia.so.0'] = package/'libGLX_nvidia.so.595.84'
     selected = vulkan_closure(catalog, package)
     abi.check(runtime, selected.values())
-    # Check relocation and symbol closure on a private tree before modifying ESP.
+    # 修改 ESP 之前，先在私有目录树中检查重定位和符号依赖闭包。
     with tempfile.TemporaryDirectory(prefix='.verify-', dir=out) as directory:
         temporary = Path(directory)
         for name, source in selected.items():

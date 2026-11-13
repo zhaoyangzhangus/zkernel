@@ -38,7 +38,7 @@ int main(void){
  netd_context_t c={.socket=4,.timer=8,.status={.ipv4_address=1}};
  assert(enter_link_down(&c));
  assert(armed==1 && cleared==1 && !c.socket && c.timer && !c.status.ipv4_address);
- /* Ten missed notifications must not lose the periodic retry. */
+ /* 连续错过十次通知后，周期性重试仍不得丢失。 */
  for(unsigned i=0;i<10;++i)assert(process_timer(&c));
  assert(armed==11 && !discover && !bound);
  hardware.flags=OS_NET_STATUS_LINK_UP;

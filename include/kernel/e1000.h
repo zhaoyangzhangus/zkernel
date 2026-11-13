@@ -3,7 +3,7 @@
 #include <kernel/base.h>
 
 /* 可选 Intel e1000 后端：QEMU 未提供网卡时不影响无网卡启动。 */
-/* Network facade for the QEMU e1000 and native Realtek RTL8126 backends. */
+/* 为 QEMU e1000 和原生 Realtek RTL8126 后端提供的网络外观接口。 */
 struct pci_device;
 kstatus_t e1000_active_adapter(const struct pci_device **device);
 bool e1000_hardware_present(void);
@@ -28,7 +28,7 @@ kstatus_t e1000_set_ipv6_address(const uint8_t address[16]);
 bool e1000_ipv6_address(uint8_t address[16]);
 bool e1000_poll(void);
 bool e1000_interrupt_ready(void);
-/* False also means mode unknown (busy/offline), never infer from !IRQ-ready. */
+/* false 也表示模式未知（忙或离线）；绝不能从 IRQ 未就绪推断模式。 */
 bool e1000_polling_required(void);
 bool e1000_schedule_deferred_poll(void);
 void e1000_retry_deferred_poll(void);

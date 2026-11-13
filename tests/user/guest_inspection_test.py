@@ -41,7 +41,7 @@ with tempfile.TemporaryDirectory(prefix='system-inspection-test-') as directory:
     assert reads == [(address, 65536), (address + 65536, 1)]
     rejects(inspection.verify_executable,
             SimpleNamespace(read_memory=lambda start, size: b'b' * size), segments)
-    # Catch a mismatch beyond the first transport chunk as well.
+    # 也要捕获首个传输块之后出现的不匹配。
     rejects(inspection.verify_executable,
             SimpleNamespace(read_memory=lambda start, size:
                             read_memory(start, size) if start == address else b'x'), segments)

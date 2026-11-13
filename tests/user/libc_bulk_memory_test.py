@@ -23,12 +23,11 @@ static void overlap_test(void) {
                                    (size_t)(distance<0?-distance:0);
                 size_t to=from+distance;
                 for(size_t i=0;i<4096;++i)page[i]=expected[i]=(unsigned char)(i*37+11);
-                /* Snapshot expected bytes rather than testing against an
-                 * equally overlapping implementation of the same algorithm. */
+                /* 先保存预期字节快照，避免拿同样存在重叠问题的算法实现作为对照。 */
                 for(size_t i=0;i<length;++i)expected[to+i]=(unsigned char)((from+i)*37+11);
                 assert(liteos_memmove(page+to,page+from,length)==page+to);
                 for(size_t i=0;i<4096;++i)assert(page[i]==expected[i]);
-                /* Forward-safe copies with exactly disjoint/touching bounds. */
+                /* 测试边界恰好分离或相接时可安全前向复制。 */
                 assert(liteos_memmove(page+from,page+from,length)==page+from);
             }
         }

@@ -70,8 +70,8 @@ def run(snapshot):
     kernel = ROOT / 'build/esp/EFI/OS/kernel.elf'
     segments = executable_segments(kernel)
     endpoint = ROOT / 'build/chrome-debug-gdb.sock'
-    # Do not reuse a shared .o: another inspector may replace it underneath
-    # GDB, and four independently cached objects can disagree on one type.
+    # 不要重用共享的 .o 文件：其他检查器可能会在 GDB 使用期间替换它，而且四个独立缓存的
+    # 对象可能对同一类型得出不同结果。
     with tempfile.TemporaryDirectory(prefix='system-inspection-') as directory:
         types = Path(directory) / 'types.o'
         subprocess.run(shlex.split(os.environ.get('CC', 'cc')) + [

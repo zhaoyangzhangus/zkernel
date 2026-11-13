@@ -86,7 +86,7 @@ static void iommu_write64(uint32_t offset, uint64_t value) {
 }
 
 static void iommu_lock(void) {
-    /* DMA can already pin its caller; this guard must nest with that one. */
+    /* DMA 可能已固定调用方，因此此保护机制必须能与其嵌套使用。 */
     sched_preempt_disable();
     spinlock_lock(&g_iommu_lock);
 }

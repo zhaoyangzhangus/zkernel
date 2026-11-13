@@ -84,7 +84,7 @@ int main(void) {
   if(count==8)assert(process_register_teardown_callback(c8)==K_ENOSPC);
   verify_snapshot();
  }
- // A callback may register another callback. The captured set is immutable.
+ // 回调可以注册另一个回调；已捕获的回调集合不可更改。
  clear_registry();assert(process_register_teardown_callback(c0)==K_OK);
  assert(process_register_teardown_callback(c1)==K_OK);
  process_teardown_callback_t out[8];unsigned n=process_snapshot_teardown_callbacks(out);assert(n==2);

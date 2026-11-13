@@ -59,8 +59,8 @@ static void erase_case(unsigned read,unsigned count,unsigned target,unsigned kin
 }
 int main(void) {
     assert(input_core_init() && input_core_self_test());
-    /* This is the previous bug: read==write made the old erase loop skip the
-     * entire full ring, retaining the oldest motion and discarding the tail. */
+    /* 这是先前的缺陷：read==write 会让旧擦除循环跳过整个满队列，留下最早的运动事件，
+     * 丢弃队尾事件。 */
     erase_case(0,INPUT_CORE_CAPACITY,0,INPUT_EVENT_RELATIVE);
     unsigned cases=1;
     for(unsigned read=0;read<INPUT_CORE_CAPACITY;++read) {
@@ -75,8 +75,8 @@ int main(void) {
         erase_case(INPUT_CORE_CAPACITY-1,count,target,INPUT_EVENT_RELATIVE); ++cases;
     }
     baseline=depth=0;
-    /* A pointer button transition is not disposable motion. Of two motion
-     * records, remove only the first and preserve every other byte/order. */
+    /* 指针按键状态变化不是可丢弃的运动事件。两个运动记录中只删除第一个，并保留其他
+     * 所有字节及顺序。 */
     seed(13,INPUT_CORE_CAPACITY,40,INPUT_EVENT_RELATIVE);
     g_input.events[(13+20)%INPUT_CORE_CAPACITY].type=INPUT_EVENT_POINTER;
     g_input.events[(13+20)%INPUT_CORE_CAPACITY].code=1;
@@ -98,7 +98,7 @@ int main(void) {
     assert(!moves && input_core_pending()==INPUT_CORE_CAPACITY && !input_core_dropped());
     input_event_t incoming=event(999); incoming.type=INPUT_EVENT_RELATIVE;
     assert(input_core_push(&incoming)==K_EAGAIN && input_core_dropped()==1);
-    /* Pushing a key into a full ring must discard motion, not another key. */
+    /* 向满队列写入按键时应丢弃运动事件，不能丢弃其他按键。 */
     seed(127,INPUT_CORE_CAPACITY,0,INPUT_EVENT_RELATIVE); incoming=event(999);
     assert(input_core_push(&incoming)==K_OK && input_core_pending()==INPUT_CORE_CAPACITY);
     for(unsigned i=1;i<INPUT_CORE_CAPACITY;++i) {

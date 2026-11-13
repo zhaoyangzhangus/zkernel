@@ -30,10 +30,15 @@ static shared_section_t section = {&object};
 static int failure=-1,create_error;
 static unsigned creates,marks,puts;
 static uint64_t size;
-static kstatus_t shared_section_create(uint64_t bytes,shared_section_t **out) {
+static kstatus_t shared_section_create_populated(uint64_t bytes,shared_section_t **out) {
     ++creates;size=bytes;
     if(create_error)return create_error;
-    object.pages=0;*out=&section;return K_OK;
+    object.pages=0;
+    for(uint64_t offset=0;offset<bytes;offset+=PAGE_SIZE){
+        if((int)object.pages==failure){object.pages=0;return K_ENOMEM;}
+        ++object.pages;
+    }
+    *out=&section;return K_OK;
 }
 static void vm_object_mark_window_surface(vm_object_t *o) {
     assert(o==&object);++marks;
@@ -41,13 +46,7 @@ static void vm_object_mark_window_surface(vm_object_t *o) {
 static void object_put(shared_section_t *s) {
     assert(s==&section);++puts;object.pages=0;
 }
-static kstatus_t vm_object_shared_page_direct(vm_object_t *o,uint64_t offset,
-                                             int write,uint8_t **out) {
-    assert(o==&object && write && offset==object.pages*PAGE_SIZE);
-    if((int)object.pages==failure)return K_ENOMEM;
-    ++object.pages;*out=(uint8_t*)&object;return K_OK;
-}
-''' + function('window_surface_allocate') + function('window_surface_create_backing') + r'''
+''' + function('window_surface_create_backing') + r'''
 int main(void) {
     shared_section_t *out=&section;
     assert(window_surface_create_backing(4096,2,0)==K_EINVAL);
@@ -63,7 +62,7 @@ int main(void) {
     for(int i=0;i<8;++i) {
         failure=i;unsigned before=puts;
         assert(window_surface_create_backing(4*PAGE_SIZE,2,&out)==K_ENOMEM);
-        assert(!out && object.pages==0 && puts==before+1 && size==8*PAGE_SIZE);
+        assert(!out && object.pages==0 && puts==before && !marks && size==8*PAGE_SIZE);
     }
     failure=-1;
     assert(window_surface_create_backing(4*PAGE_SIZE,2,&out)==K_OK);

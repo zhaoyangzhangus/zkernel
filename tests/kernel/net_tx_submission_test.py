@@ -5,11 +5,16 @@ import tempfile
 
 root = Path(__file__).resolve().parents[2]
 source = (root / 'kernel/drivers/net/core.c').read_text()
-start = source.index('kstatus_t e1000_transmit_status(')
-end = source.index('e1000_state_t *e1000_controller_state(', start)
 protocol = (root / 'kernel/drivers/net/protocol.c').read_text()
-callback = protocol[protocol.index('kstatus_t e1000_device_transmit('):
-                    protocol.index('static uint32_t e1000_ipv4_mask(')]
+
+def function(text, declaration):
+    # 按函数自身边界提取，避免相邻新增接口进入独立测试。
+    start = text.index(declaration)
+    return text[start:text.index('\n}', start) + 2]
+
+transmit = '\n'.join(function(source, declaration) for declaration in (
+    'kstatus_t e1000_transmit_status(', 'bool e1000_transmit('))
+callback = function(protocol, 'kstatus_t e1000_device_transmit(')
 code = r'''
 #include <kernel/base.h>
 #include <kernel/spinlock.h>
@@ -51,7 +56,7 @@ kstatus_t rtl8126_transmit_status(e1000_state_t *state,
     if (state->rtl_tx_ring[state->rtl_tx_next].options1 & (1U<<31)) return K_EAGAIN;
     return e1000_transmit_locked(state,frame,length)?K_OK:K_EIO;
 }
-''' + source[start:end] + callback + r'''
+''' + transmit + callback + r'''
 static void *worker(void *opaque) {
     uint8_t frame = 1;
     for (unsigned i = 0; i < 10000; ++i) {

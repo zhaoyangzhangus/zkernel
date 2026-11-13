@@ -10,7 +10,7 @@ def diagnostics(path, first, last, sink):
     source = (ROOT / path).read_text()
     assert 'LITEOS' not in source, path
     source = source[source.index(first):source.index(last)]
-    # Replace only the hardware sink, leaving the production formatters and locks.
+    # 只替换硬件输出端，保留生产环境的格式化器和锁。
     start = source.index('static ', source.index('ATOMIC_FLAG_INIT'))
     opening = source.index('{', start)
     depth = 1

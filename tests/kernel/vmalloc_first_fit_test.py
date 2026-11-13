@@ -51,19 +51,19 @@ int main(void) {
         memset(g_vmalloc_bitmap, filled ? 255 : 0, sizeof(g_vmalloc_bitmap));
         for (unsigned i = 0; i < sizeof(counts)/sizeof(*counts); ++i) compare(counts[i]);
     }
-    /* Every possible word-edge alignment, exact fits and too-short runs. */
+    /* 覆盖所有可能的字边界对齐、刚好容纳和长度不足的连续区间。 */
     for (uint32_t offset = 0; offset < 64; ++offset) {
         memset(g_vmalloc_bitmap, 255, sizeof(g_vmalloc_bitmap));
         free_range(64 + offset, 193);
         free_range(VMALLOC_PAGE_COUNT - 67, 67);
         compare(67); compare(193); compare(194); compare(64); compare(1);
     }
-    /* Sparse, dense and fragmented mixtures, including cross-word suffixes. */
+    /* 覆盖稀疏、稠密和碎片化组合，包括跨字后缀。 */
     memset(g_vmalloc_bitmap,0,sizeof(g_vmalloc_bitmap));
     g_vmalloc_bitmap[0]=1;
     span_visits=0;compare(63);assert(span_visits==2);
-    /* Exhaust every 16-bit fragment, in both a word prefix and suffix.
-     * Empty following words ensure a result without full-arena oracle scans. */
+    /* 穷举字前缀和后缀中的所有 16 位片段。
+     * 后续字保持为空，确保无需扫描整个区域也能得到结果。 */
     for(unsigned pattern=0;pattern<65536;++pattern) {
         g_vmalloc_bitmap[0]=(uint64_t)pattern;
         g_vmalloc_bitmap[1]=(uint64_t)pattern<<48;

@@ -40,9 +40,9 @@ def checksum(path):
 def cached_command(command, inputs, outputs, receipt, cwd=None, atomic_output=False):
     receipt=Path(receipt)
     receipt.parent.mkdir(parents=True,exist_ok=True)
-    # Hold one stable lock inode across checking, execution and publication.
-    # Do not remove it on exit: a waiting caller must not lock a replacement
-    # inode while another caller still owns the original one.
+    # 在检查、执行和发布期间始终使用同一个稳定的锁 inode。
+    # 退出时不要删除它：否则等待中的调用者可能会锁住替代 inode，
+    # 而另一个调用者仍持有原 inode。
     with receipt.with_suffix(receipt.suffix+'.lock').open('a') as lock:
         fcntl.flock(lock,fcntl.LOCK_EX)
         return _cached_command_locked(command,inputs,outputs,receipt,cwd,atomic_output)
@@ -100,11 +100,11 @@ def _cached_command_locked(command, inputs, outputs, receipt, cwd=None, atomic_o
             validate_inputs()
             if not pending.is_file() or not pending.stat().st_size:
                 raise ValueError('Linker did not produce a nonempty output')
-            # mkstemp starts at 0600; linked shared objects must remain usable
-            # by the guest and by subsequent unprivileged staging commands.
+            # mkstemp 创建的文件权限为 0600；链接后的共享对象必须能由客户机
+            # 以及之后以非特权身份运行的暂存命令使用。
             pending.chmod(0o755)
-            # Preserve the previous inode when reproducible linking yields
-            # identical bytes, including on fixed-mode FAT/NTFS mounts.
+            # 若可复现链接生成了相同字节，则保留原 inode，
+            # 固定权限模式的 FAT/NTFS 挂载也适用。
             if not target.is_file() or checksum(target)!=checksum(pending):
                 pending.replace(target)
         finally:

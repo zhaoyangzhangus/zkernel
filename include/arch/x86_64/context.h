@@ -49,8 +49,8 @@ void x86_switch_context_root(arch_switch_context_t *from,
                              paddr_t root, bool finish_handoff);
 
 /*
- * Pure Ring0 thread first-entry trampoline.
- * R12 carries entry, R13 carries its single void * argument.
+ * 纯 Ring0 线程的首次入口跳板。
+ * R12 保存入口，R13 保存唯一的 void * 参数。
  */
 __attribute__((noreturn))
 void x86_kernel_thread_start(void);
@@ -84,9 +84,8 @@ void x86_rebase_stack_and_call(uint64_t virtual_delta,
                                x86_stack_continuation_t continuation,
                                void *context);
 
-/* Switch to an explicitly supplied, already mapped stack alias and enter a
- * fresh continuation.  The runtime uses this at the post-scheduler boundary
- * so it does not depend on the caller's scheduler stack remaining mapped. */
+/* 切换到显式提供且已映射的栈别名，并进入新的续执行路径。运行时会在调度器之后的边界使用此函数，
+ * 因此不依赖调用方的调度器栈继续保持映射。 */
 __attribute__((noreturn))
 void x86_switch_stack_and_call(uint64_t stack_top,
                                x86_stack_continuation_t continuation,

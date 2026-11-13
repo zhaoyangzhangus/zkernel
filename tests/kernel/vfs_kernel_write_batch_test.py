@@ -27,17 +27,17 @@ typedef int kstatus_t;
 typedef struct {void *fs_private;} vnode_t;
 typedef struct {struct {unsigned type;} object;vnode_t *vnode;unsigned rights;uint64_t position;} file_t;
 typedef struct {
- void *context;int (*write)(void *,uint64_t,const void *,size_t,uint64_t *);
+ int write_mutex;void *context;int (*write)(void *,uint64_t,const void *,size_t,uint64_t *);
 } vfs_backend_node_t;
 static unsigned calls,cache_calls,stop_at,mode;
 static bool held,transaction;
 static uint64_t committed;
 static const unsigned char *base;
-static int vfs_file_write_begin(file_t *f,vfs_backend_node_t *b,size_t n,bool *locked){
- (void)f;(void)b;(void)n;assert(!transaction&&!held);transaction=true;*locked=true;return K_OK;
+static int vfs_file_write_begin(file_t *f,vfs_backend_node_t *b,size_t n){
+ (void)f;(void)b;(void)n;assert(!transaction&&!held);transaction=true;return K_OK;
 }
-static void vfs_write_transaction_end(vfs_backend_node_t *b,bool locked){
- (void)b;assert(locked&&transaction&&!held);transaction=false;
+static void io_mutex_unlock_required(int *m){
+ (void)m;assert(transaction&&!held);transaction=false;
 }
 static void vfs_backend_lock(vfs_backend_node_t *b){(void)b;assert(transaction&&!held);held=true;}
 static void vfs_backend_unlock(vfs_backend_node_t *b){(void)b;assert(held);held=false;}
@@ -63,7 +63,7 @@ int main(void){
  unsigned cases=0;
  for(unsigned n=0;n<sizeof(sizes)/sizeof(*sizes);++n)
  for(stop_at=0;stop_at<5;++stop_at)for(mode=0;mode<5;++mode){
-  vfs_backend_node_t b={NULL,backend_write};vnode_t v={&b};
+  vfs_backend_node_t b={0,NULL,backend_write};vnode_t v={&b};
   file_t f={{KOBJECT_TYPE_FILE},&v,VFS_OPEN_WRITE,17};
   calls=cache_calls=0;committed=0;transaction=held=false;
   size_t expected=0;unsigned expected_calls=0,expected_cache=0;int expected_status=K_OK;

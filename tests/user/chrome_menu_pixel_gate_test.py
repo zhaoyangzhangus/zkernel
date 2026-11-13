@@ -18,8 +18,7 @@ def rect(left,top,right,bottom,color):
 rect(533,78,969,842,(0,0,0))
 assert not gate(width,pixels)  # Uninitialized black popup is not painted.
 rect(557,90,945,806,(255,255,255))
-# A complete menu contains text. The gate no longer relies on the obsolete
-# solid black alpha border to distinguish it from the underlying white page.
+# 完整菜单包含文本。检查不再依赖过时的纯黑 alpha 边框来区分菜单和下方白色页面。
 for y in range(230, 591, 45):
     rect(620,y,750,y+5,(50,50,50))
 assert gate(width,pixels)  # Complete panel over an equally white page.
@@ -28,8 +27,7 @@ rect(660,150,800,185,(0,0,0))
 assert not gate(width,pixels)  # Small tooltip cannot satisfy the geometry.
 print('Chrome menu gate: white-on-white panel accepted, empty surface and tooltip rejected')
 
-# Execute the production observation loop with a simulated fade: substantial
-# pixels appear first, but the complete opaque-shadow gate must still wait.
+# 通过模拟淡入执行正式观测循环：大部分像素会先出现，但完整的不透明阴影检查仍必须等待。
 from types import SimpleNamespace
 wait = next(node for node in ast.walk(tree)
             if isinstance(node,ast.FunctionDef) and node.name=='wait_for')

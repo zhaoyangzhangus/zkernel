@@ -1,4 +1,4 @@
-# Native/WSL diagnostic variants are disposable build outputs too.
+# Native/WSL 诊断变体也属于可丢弃的构建产物。
 build*/
 __pycache__/
 *.pyc

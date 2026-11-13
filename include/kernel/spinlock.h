@@ -19,7 +19,7 @@ static inline void spinlock_lock(spinlock_t *lock) {
     unsigned expected = 0U;
     while (!atomic_compare_exchange_strong_explicit(&lock->state, &expected,
                 1U, memory_order_acquire, memory_order_relaxed)) {
-        /* Avoid repeated exclusive cache-line ownership while contended. */
+        /* 锁竞争时避免反复独占缓存行。 */
         do {
             __asm__ volatile ("pause");
         } while (atomic_load_explicit(&lock->state, memory_order_relaxed) != 0U);

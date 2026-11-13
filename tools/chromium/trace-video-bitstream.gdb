@@ -1,4 +1,4 @@
-# Compare submitted CPU-mapped Vulkan slice bytes with the matching input packet.
+# 将已提交的 CPU 映射 Vulkan 切片字节与相应输入数据包进行比较。
 set pagination off
 set confirm off
 python

@@ -110,13 +110,10 @@ static void reset(void){
  for(unsigned i=0;i<4;++i)plan[i]=MISSING;
 }
 static void rtl_paths(unsigned family){
- static const char *const names[2][4]={
-  {"/rtl_nic/rtl8126a-2.fw","/lib/firmware/rtl_nic/rtl8126a-2.fw",
-   "/usr/lib/firmware/rtl_nic/rtl8126a-2.fw","/boot/firmware/rtl_nic/rtl8126a-2.fw"},
-  {"/rtl_nic/rtl8126a-3.fw","/lib/firmware/rtl_nic/rtl8126a-3.fw",
-   "/usr/lib/firmware/rtl_nic/rtl8126a-3.fw","/boot/firmware/rtl_nic/rtl8126a-3.fw"}};
- for(unsigned i=0;i<4;++i)paths[i]=names[family][i];
- root_count=4;limit=RTL8126_FIRMWARE_MAX_BYTES;
+ /* RTL 固件已统一到 OS 目录；旧 Linux 路径不再属于部署契约。 */
+ paths[0]=family?"/EFI/OS/firmware/rtl8126/rtl8126a-3.fw":
+                 "/EFI/OS/firmware/rtl8126/rtl8126a-2.fw";
+ root_count=1;limit=RTL8126_FIRMWARE_MAX_BYTES;
 }
 static void nv_paths(unsigned family){
  paths[0]=family?"/EFI/OS/firmware/gsp_tu10x.bin":"/EFI/OS/firmware/gsp_ga10x.bin";
@@ -126,12 +123,12 @@ static void nv_paths(unsigned family){
 int main(void){
  unsigned rtl_cases=0,nv_cases=0;
  for(unsigned family=0;family<2;++family)for(unsigned fault=MISSING;fault<=SHORT_READ;++fault)
-  for(unsigned location=0;location<=4;++location){
+  for(unsigned location=0;location<=1;++location){
    reset();rtl_paths(family);e1000_state_t state={family?RTL8126_XID_3:RTL8126_XID_2};
    for(unsigned i=0;i<location;++i)plan[i]=fault;
-   if(location<4)plan[location]=GOOD;
-   assert(rtl8126_load_firmware(&state)==(location<4));
-   assert(attempts==(location<4?location+1:4)&&formats==(location<4)&&runs==formats);
+   if(location<root_count)plan[location]=GOOD;
+   assert(rtl8126_load_firmware(&state)==(location<root_count));
+   assert(attempts==1&&formats==(location<root_count)&&runs==formats);
    assert(!data_memory&&!handle_memory&&!locked);++rtl_cases;
   }
  for(unsigned failure=0;failure<2;++failure){

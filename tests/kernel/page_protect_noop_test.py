@@ -11,7 +11,10 @@ protect = source[begin:end]
 begin = source.index('kstatus_t x86_protect_user_page_deferred(')
 end = source.index('\n}', begin) + 2
 deferred = source[begin:end]
-# The rollback INVLPG is privileged; the host test checks its PTE result.
+begin = source.index('static kstatus_t page_table_protect_user_entry_locked(')
+end = source.index('\n}', begin) + 2
+deferred = source[begin:end] + '\n' + deferred
+# 回滚使用的 INVLPG 是特权指令；宿主测试检查其 PTE 结果。
 protect = protect.replace('__asm__ volatile ("invlpg (%0)" : : "r"(va) : "memory");',
                           '++local_invalidations;')
 defines = '\n'.join(line for line in

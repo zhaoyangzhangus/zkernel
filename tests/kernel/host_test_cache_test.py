@@ -32,8 +32,9 @@ with tempfile.TemporaryDirectory(prefix='liteos-host-test-cache-') as directory:
         '\n' + targets + ': build/.host-toolchain makefile tools/host-tests.mk\n'
         '-include $(wildcard build/*.exe.d)\n')
     def run(*args):
-        subprocess.run(['make', '-j4', 'all', *args], cwd=base,
-                       check=True, capture_output=True)
+        result = subprocess.run(['make', '-j4', 'all', *args], cwd=base,
+                                capture_output=True, text=True)
+        assert result.returncode == 0, result.stdout + result.stderr
     def identities():
         return {name: ((base / 'build' / name).stat().st_ino,
                        (base / 'build' / name).stat().st_mtime_ns) for name in names}

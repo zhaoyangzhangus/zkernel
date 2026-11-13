@@ -37,32 +37,32 @@ def probe(extra, environment):
                           env={**os.environ, **environment}, capture_output=True,
                           text=True, timeout=30)
 
-# No selected checkout means a clear failure, not a guessed historical copy.
+# 未选择工作区时应明确失败，不能猜测使用历史副本。
 result = probe([], {'OS_ROOT': ''})
 assert result.returncode != 0 and 'Invalid native OS header root' in result.stderr
 
-# The GN argument must override even an inherited environment pointing at an
-# unrelated checkout. Clang must not receive the wrapper-only flag itself.
+# GN 参数必须覆盖继承自环境、指向其他工作区的值。Clang 不得直接收到仅供包装器
+# 使用的标志。
 result = probe([f'--native-os-root={root}'], {'OS_ROOT': '/nonexistent/old-root'})
 assert result.returncode == 0, result.stderr
 assert str(root / 'user/libc/include') in result.stderr
 assert str(root / 'include') in result.stderr
 assert '/nonexistent/old-root' not in result.stderr
 
-# Existing explicitly configured build scripts retain environment support.
+# 已有的显式配置构建脚本仍保留环境变量支持。
 result = probe([], {'OS_ROOT': str(root)})
 assert result.returncode == 0, result.stderr
 assert str(root / 'user/libc/include') in result.stderr
 
-# Cache compiler discovery runs without GN's wrapper-only root argument.
-# Exercise its version probe with the same explicit environment as the builder.
+# 缓存编译器发现过程不会使用 GN 专用的根目录参数。
+# 使用与构建器相同的显式环境变量测试其版本探测。
 result = subprocess.run([str(wrapper), '--version'],
                         env={**os.environ, 'OS_ROOT': str(root)},
                         capture_output=True, text=True, timeout=30)
 assert result.returncode == 0, result.stderr
 assert 'clang version' in result.stdout
 
-# Never silently fall back when a selected root is unavailable.
+# 所选根目录不可用时，绝不能静默回退。
 result = probe(['--native-os-root=/nonexistent/selected-root'],
                {'OS_ROOT': str(root)})
 assert result.returncode != 0

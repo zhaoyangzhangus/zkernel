@@ -7,10 +7,12 @@ root = Path(__file__).resolve().parents[2]
 source = (root / 'kernel/fs/nativefs/file_lifecycle.c').read_text()
 begin = source.index('static BOOLEAN locate_file_cluster(')
 body = source[begin:source.index('static BOOLEAN count_file_clusters(', begin)]
-assignment = 'file->SeekIndexLength[slot] = (UINT32)end;'
-assert body.count(assignment) == 1
+helper = source[source.index('static void fat32_extend_seek_hint('):begin]
+assignment = '*stored_length = (UINT32)end;'
+assert helper.count(assignment) == 1
+reference_helper = helper.replace('fat32_extend_seek_hint(', 'reference_extend_seek_hint(').replace(assignment, '(void)end;')
 reference = body.replace('locate_file_cluster(', 'reference_locate_file_cluster(', 1)
-reference = reference.replace(assignment, '(void)end;')
+reference = reference.replace('fat32_extend_seek_hint(', 'reference_extend_seek_hint(')
 
 program = r'''
 #include <assert.h>
@@ -35,7 +37,7 @@ static BOOLEAN fat32_read_next_cluster(const OS_FAT32 *fs, UINT32 current, UINT3
     if (!fat32_cluster_valid(fs, *next)) *next = 0;
     return 1;
 }
-''' + body + reference + r'''
+''' + helper + reference_helper + body + reference + r'''
 int main(void) {
     OS_FAT32 fs = {.ClusterCount=65536, .BytesPerSector=512, .SectorsPerCluster=8};
     OS_FAT32_FILE actual = {.FileSystem=&fs, .FirstCluster=2, .Size=65536ULL*4096};

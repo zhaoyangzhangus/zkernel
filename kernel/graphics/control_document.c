@@ -42,6 +42,33 @@ typedef struct window_control_document {
     size_t run_bytes;
 } window_control_document_t;
 
+/* 文档头、节点、目标索引和文本同寿命；布局仍在校验后单独分配，避免重复提交
+ * 提前占用整树几何内存。仅清零头部，节点与文本随后由调用方完整填充。 */
+static window_control_document_t *control_document_allocate(uint32_t count,
+    uint32_t text_size, bool indexed) {
+    _Static_assert(_Alignof(window_control_document_t) >= _Alignof(os_control_node_t),
+        "文档尾部必须满足节点对齐要求");
+    _Static_assert(OS_CONTROL_TREE_MAX_NODES <=
+        (SIZE_MAX - sizeof(window_control_document_t) - OS_CONTROL_TREE_MAX_TEXT) /
+        (sizeof(os_control_node_t) + sizeof(uint16_t)), "文档大小不能溢出");
+    if (!count || count > OS_CONTROL_TREE_MAX_NODES || text_size > OS_CONTROL_TREE_MAX_TEXT)
+        return 0;
+    size_t nodes_bytes = (size_t)count * sizeof(os_control_node_t);
+    size_t targets_bytes = indexed ? (size_t)count * sizeof(uint16_t) : 0U;
+    window_control_document_t *document = kmalloc(sizeof(*document) + nodes_bytes +
+        targets_bytes + (text_size ? text_size : 1U), 0);
+    if (!document) return 0;
+    memset(document, 0, sizeof(*document));
+    atomic_init(&document->references, 1U);
+    document->count = count;
+    document->text_size = text_size;
+    document->nodes = (os_control_node_t *)(document + 1);
+    if (indexed) document->targets = (uint16_t *)(document->nodes + count);
+    document->text = (char *)document->nodes + nodes_bytes + targets_bytes;
+    if (!text_size) document->text[0] = '\0';
+    return document;
+}
+
 bool window_control_has_caption(const window_control_document_t *document) {
     return document && document->has_caption;
 }
@@ -101,7 +128,7 @@ void window_control_document_put(window_control_document_t *document) {
         if (run && atomic_fetch_sub_explicit(&run->references,1U,memory_order_acq_rel)==1U) kfree(run);
     }
     kfree(document->runs);
-    kfree(document->nodes); kfree(document->boxes); kfree(document->text); kfree(document);
+    kfree(document->boxes); kfree(document);
 }
 
 #define CONTROL_TEXT_BUDGET (8U*1024U*1024U)
@@ -216,14 +243,11 @@ window_control_document_t *window_control_prepare_overlay(window_control_documen
             previous->nodes[i].text_length==nodes[i].text_length &&
             previous->boxes[i].style.font_size==boxes[i].style.font_size;
     if (same) {window_control_document_get(previous);return previous;}
-    window_control_document_t *document=kzalloc(sizeof(*document),0);
+    window_control_document_t *document=control_document_allocate(count,text_size,false);
     if (!document) return 0;
-    atomic_init(&document->references,1U);document->count=count;document->text_size=text_size;
-    document->nodes=kmalloc((size_t)count*sizeof(*nodes),0);
     document->boxes=kmalloc((size_t)count*sizeof(*boxes),0);
-    document->text=kmalloc(text_size?text_size:1U,0);
     /* 复用字形的标识索引；弹层节点数很小，无须单独建立排序索引。 */
-    if (!document->nodes || !document->boxes || !document->text) goto fail_overlay;
+    if (!document->boxes) goto fail_overlay;
     memcpy(document->nodes,nodes,(size_t)count*sizeof(*nodes));
     memcpy(document->boxes,boxes,(size_t)count*sizeof(*boxes));
     memcpy(document->text,text,text_size);
@@ -612,17 +636,8 @@ kstatus_t window_server_control_tree(process_t *owner, os_window_control_tree_t 
     window_unlock();
     if (!owned) return K_EPERM;
     if (request->count) {
-        document = kzalloc(sizeof(*document), 0);
+        document = control_document_allocate(request->count, request->text_size, true);
         if (!document) { status = K_ENOMEM; goto fail; }
-        atomic_init(&document->references, 1U);
-        document->count = request->count; document->text_size = request->text_size;
-        document->nodes = kmalloc((size_t)request->count *
-            (sizeof(*document->nodes)+sizeof(*document->targets)), 0);
-        document->targets = document->nodes ? (uint16_t *)(document->nodes+request->count) : 0;
-        if (request->text_size) document->text = kmalloc(request->text_size, 0);
-        if (!document->nodes || (request->text_size && !document->text)) {
-            status = K_ENOMEM; goto fail;
-        }
         status = copy_from_user(document->nodes,
             (const void __user *)(uintptr_t)request->nodes,
             (size_t)request->count * sizeof(*document->nodes));
@@ -1150,39 +1165,18 @@ typedef struct control_paint_context {
 
 static void control_paint_surface(control_paint_context_t *context,
     const control_tree_box_t *box, Rect damage) {
-    const compositor_window_view_t *view = context->view;
-    compositor_surface_source_context_t source;
-    compositor_surface_source_prepare(view, &source);
-    uint64_t cached_page = UINT64_MAX;
-    uint8_t *cached_base = 0;
-    /* 第一版宿主按原始像素裁剪，不隐式缩放共享 Surface，也不改变其行跨度。 */
-    int64_t right = (int64_t)box->bounds.x0 + view->width;
-    int64_t bottom = (int64_t)box->bounds.y0 + view->height;
-    if (damage.x1 > right) damage.x1 = (int32_t)right;
-    if (damage.y1 > bottom) damage.y1 = (int32_t)bottom;
-    for (int32_t y = damage.y0; y < damage.y1; ++y) {
-        uint32_t first = (uint32_t)(damage.x0 - box->bounds.x0);
-        uint32_t last = (uint32_t)(damage.x1 - box->bounds.x0);
-        if (first >= last) continue;
-        uint64_t destination = (uint64_t)(context->y + y) * g_window_server.display_stride +
-            (uint32_t)(context->x + damage.x0);
-        uint64_t row = (uint64_t)(y - box->bounds.y0) * source.row_bytes;
-        uint32_t *wb = g_window_server.composite_framebuffer != g_window_server.framebuffer ?
-            (uint32_t *)(uintptr_t)(g_window_server.composite_framebuffer + destination) : 0;
-        compositor_copy_surface_span(view, &source, row, first, last, wb,
-            wb ? 0 : g_window_server.framebuffer + destination, &cached_page, &cached_base);
-    }
+    Rect screen;
+    if (!rect_clip_to_extent(context->x + damage.x0, context->y + damage.y0,
+            context->x + damage.x1, context->y + damage.y1,
+            g_window_server.display_width, g_window_server.display_height, &screen)) return;
+    compositor_surface_region_locked(context->view,
+        context->x + box->bounds.x0, context->y + box->bounds.y0, screen, false);
 }
 
-static void control_fill(int64_t x, int64_t y, uint32_t w, uint32_t h,
+static void control_fill(Rect clip, int64_t x, int64_t y, uint32_t w, uint32_t h,
     uint32_t radius, uint32_t color) {
-    if (!radius && x >= INT32_MIN && x <= INT32_MAX && y >= INT32_MIN && y <= INT32_MAX) {
-        compositor_fill_rounded_locked((int32_t)x, (int32_t)y, w, h, radius, color);
-        return;
-    }
     color=os_theme_resolve(color,g_compositor_snapshot.theme);
     /* 先裁剪宽坐标再收窄，背景、透明背景和边环使用同一个逐行轮廓。 */
-    Rect clip = g_compositor_snapshot.damage_bounds;
     int64_t right = x + w, bottom = y + h;
     int64_t left = x > clip.x0 ? x : clip.x0;
     int64_t top = y > clip.y0 ? y : clip.y0;
@@ -1201,7 +1195,7 @@ static void control_fill(int64_t x, int64_t y, uint32_t w, uint32_t h,
         int64_t first=left>x+inset?left:x+inset;
         int64_t last=right<x+w-inset?right:x+w-inset;
         if (first < last)
-            compositor_fill_locked((int32_t)first, (int32_t)py,
+            compositor_fill_locked(clip, (int32_t)first, (int32_t)py,
                 (uint32_t)(last-first), rows, color);
         py+=rows-1U;
     }
@@ -1209,14 +1203,13 @@ static void control_fill(int64_t x, int64_t y, uint32_t w, uint32_t h,
 
 static void control_border_emit(void *context, int64_t x, int64_t y,
     uint32_t width, uint32_t height, uint32_t color) {
-    (void)context;
-    control_fill(x, y, width, height, 0U, color);
+    Rect clip = *(const Rect *)context;
+    control_fill(clip, x, y, width, height, 0U, color);
 }
 
 /* 底纹锚定到控件原点，局部损坏和窗口移动都不能改变格子的相位。 */
-static void control_checkerboard(int64_t x, int64_t y, uint32_t w, uint32_t h,
+static void control_checkerboard(Rect clip, int64_t x, int64_t y, uint32_t w, uint32_t h,
     uint32_t radius, uint32_t light, uint32_t dark) {
-    Rect clip=g_compositor_snapshot.damage_bounds;
     int64_t top=y>clip.y0?y:clip.y0,bottom=y+h<clip.y1?y+h:clip.y1;
     for (int64_t py=top;py<bottom;) {
         uint32_t rows=radius?1U:16U-(uint32_t)(py-y)%16U;
@@ -1228,35 +1221,34 @@ static void control_checkerboard(int64_t x, int64_t y, uint32_t w, uint32_t h,
             uint32_t span=16U-(uint32_t)(first-x)%16U;
             if ((int64_t)span>last-first) span=(uint32_t)(last-first);
             uint32_t color=(((uint64_t)(first-x)/16U+(uint64_t)(py-y)/16U)&1U)?dark:light;
-            control_fill(first,py,span,rows,0,color);
+            control_fill(clip, first,py,span,rows,0,color);
             first+=span;
         }
         py+=rows;
     }
 }
 
-static void control_border(int64_t x, int64_t y, uint32_t w, uint32_t h,
+static void control_border(Rect clip, int64_t x, int64_t y, uint32_t w, uint32_t h,
     uint32_t radius, uint32_t border, uint32_t color) {
-    control_raster_border_spans(g_compositor_snapshot.damage_bounds, x, y,
-        w, h, radius, border, color, control_border_emit, 0);
+    control_raster_border_spans(clip, x, y,
+        w, h, radius, border, color, control_border_emit, &clip);
 }
 
-static void control_fill_alpha(int64_t x, int64_t y, uint32_t w, uint32_t h,
+static void control_fill_alpha(Rect clip, int64_t x, int64_t y, uint32_t w, uint32_t h,
     uint32_t radius, uint32_t color) {
     control_raster_target_t target = {g_window_server.composite_framebuffer,
-        g_window_server.display_stride, g_compositor_snapshot.damage_bounds};
+        g_window_server.display_stride, clip};
     control_raster_fill_alpha(&target, x, y, w, h, radius,
         os_theme_resolve(color,g_compositor_snapshot.theme));
 }
 
-static void control_paint_text(const os_control_node_t *node, const char *text,
+static void control_paint_text(Rect clip, const os_control_node_t *node, const char *text,
     int64_t text_x, int64_t text_y, const uint8_t *cache) {
     if (!text || !node->text_length) return;
     uint32_t font_w = ascii_font_width(), font_h = ascii_font_height();
     uint32_t target_h = node->font_size ? node->font_size : font_h;
     uint32_t target_w = os_control_text_cell_width(' ',target_h);
     if (!font_w || !font_h || !target_w || !target_h) return;
-    Rect clip = g_compositor_snapshot.damage_bounds;
     if (rect_is_empty(clip) || text_y >= clip.y1 || text_y + target_h <= clip.y0) return;
     /* 先按半开裁剪范围跳过整枚字形，再限制字形内的行列，不能逐像素检查整段文本。
      * 所有偏移先使用宽整数，负滚动原点和居中的超长文字都不能回绕。 */
@@ -1329,8 +1321,8 @@ static void control_paint_node(void *raw, const os_control_node_t *node,
         (box->style.background_alpha ? OS_CONTROL_BACKGROUND_ALPHA : 0U);
     node = &resolved;
     control_paint_context_t *context = raw;
-    Rect saved = g_compositor_snapshot.damage_bounds;
-    g_compositor_snapshot.damage_bounds = (Rect){
+    /* 每个节点持有自己的裁剪矩形，嵌套绘制不会改写合成快照。 */
+    Rect clip = {
         (int32_t)(context->x + damage.x0), (int32_t)(context->y + damage.y0),
         (int32_t)(context->x + damage.x1), (int32_t)(context->y + damage.y1)};
     int64_t x = context->x + box->bounds.x0;
@@ -1359,26 +1351,24 @@ static void control_paint_node(void *raw, const os_control_node_t *node,
         uint32_t side=w<h?w:h;
         uint32_t diameter=side*7U/8U;
         if (box->enabled && (pressed || hover))
-            control_fill_alpha(x+(w-diameter)/2U,y+(h-diameter)/2U,
+            control_fill_alpha(clip, x+(w-diameter)/2U,y+(h-diameter)/2U,
                 diameter,diameter,diameter/2U,pressed?0x22000000U:0x14000000U);
-        compositor_control_caption_icon(x,y,w,h,node->value,context->view->maximized,
+        compositor_control_caption_icon(clip,x,y,w,h,node->value,context->view->maximized,
             appearance_enabled && (hover || context->view->identifier==g_compositor_snapshot.focused_identifier));
-        g_compositor_snapshot.damage_bounds=saved;
         return;
     }
     if (node->flags & OS_CONTROL_CHECKERBOARD)
-        control_checkerboard(x,y,w,h,node->radius,background,box->style.foreground);
+        control_checkerboard(clip, x,y,w,h,node->radius,background,box->style.foreground);
     else if (node->flags & OS_CONTROL_BACKGROUND_ALPHA)
-        control_fill_alpha(x, y, w, h, node->radius, background);
-    else control_fill(x, y, w, h, node->radius, background);
+        control_fill_alpha(clip, x, y, w, h, node->radius, background);
+    else control_fill(clip, x, y, w, h, node->radius, background);
     if (node->kind == OS_CONTROL_SURFACE) control_paint_surface(context, box, damage);
-    control_border(x, y, w, h, node->radius, node->border_width, node->border_color);
+    control_border(clip, x, y, w, h, node->radius, node->border_width, node->border_color);
     if (node->flags & OS_CONTROL_SYMBOL) {
         uint32_t side=node->icon_size ? node->icon_size : node->font_size ? node->font_size : 16U;
         if (side>w) side=w;
         if (side>h) side=h;
         int64_t left=x+(w-side)/2U, top=y+(h-side)/2U;
-        Rect clip=g_compositor_snapshot.damage_bounds;
         int64_t first_x=left>clip.x0 ? left : clip.x0, first_y=top>clip.y0 ? top : clip.y0;
         int64_t last_x=left+side<clip.x1 ? left+side : clip.x1;
         int64_t last_y=top+side<clip.y1 ? top+side : clip.y1;
@@ -1416,22 +1406,22 @@ static void control_paint_node(void *raw, const os_control_node_t *node,
         int64_t mark_y = y+(h-side)/2U;
         bool checked = node->flags & OS_CONTROL_CHECKED;
         uint32_t radius = node->kind == OS_CONTROL_CHECKBOX ? 3U : side/2U;
-        control_fill(x, mark_y, mark_w, side, radius, checked ? accent : OS_THEME_FIELD);
-        control_border(x, mark_y, mark_w, side, radius, 1U, checked ? accent : OS_THEME_BORDER);
+        control_fill(clip, x, mark_y, mark_w, side, radius, checked ? accent : OS_THEME_FIELD);
+        control_border(clip, x, mark_y, mark_w, side, radius, 1U, checked ? accent : OS_THEME_BORDER);
         if (node->kind == OS_CONTROL_SWITCH && side > 4U) {
             uint32_t knob = side-4U;
-            control_fill(x+2+(checked ? mark_w-side : 0U), mark_y+2,
+            control_fill(clip, x+2+(checked ? mark_w-side : 0U), mark_y+2,
                 knob, knob, knob/2U, OS_THEME_SURFACE);
         } else if (checked && side >= 8U) {
             if (node->kind == OS_CONTROL_RADIO)
-                control_fill(x+side/3U, mark_y+side/3U, side-2U*(side/3U),
+                control_fill(clip, x+side/3U, mark_y+side/3U, side-2U*(side/3U),
                     side-2U*(side/3U), side/2U, OS_THEME_SURFACE);
             else {
                 /* 勾号按控件实际字号栅格化，不依赖应用字体是否包含符号。 */
                 for (uint32_t i=0; i<side/2U; ++i) {
                     int64_t cy = i<side/5U ? mark_y+side/2U+i :
                         mark_y+side/2U+2U*(side/5U)-i;
-                    control_fill(x+side/4U+i, cy, 2U, 2U, 0U, OS_THEME_ON_ACCENT);
+                    control_fill(clip, x+side/4U+i, cy, 2U, 2U, 0U, OS_THEME_ON_ACCENT);
                 }
             }
         }
@@ -1441,24 +1431,24 @@ static void control_paint_node(void *raw, const os_control_node_t *node,
         uint32_t thickness = cross < 6U ? cross : 6U;
         int64_t tx = x+(vertical ? (cross-thickness)/2U : 0U);
         int64_t ty = y+(vertical ? 0U : (cross-thickness)/2U);
-        control_fill(tx, ty, vertical ? thickness : length,
+        control_fill(clip, tx, ty, vertical ? thickness : length,
             vertical ? length : thickness, thickness/2U, OS_THEME_BORDER);
         if (node->kind == OS_CONTROL_PROGRESS) {
             uint32_t filled = (uint32_t)((uint64_t)length*node->value/OS_CONTROL_VALUE_MAX);
-            control_fill(tx, ty, vertical ? thickness : filled,
+            control_fill(clip, tx, ty, vertical ? thickness : filled,
                 vertical ? filled : thickness, thickness/2U, accent);
         } else {
             uint32_t knob = os_control_range_thumb(node,length,cross);
             uint32_t position = (uint32_t)((uint64_t)(length-knob)*node->value/OS_CONTROL_VALUE_MAX);
             uint32_t breadth = node->kind == OS_CONTROL_SCROLLBAR ? thickness : cross;
-            control_fill(x+(vertical ? (cross-breadth)/2U : position),
+            control_fill(clip, x+(vertical ? (cross-breadth)/2U : position),
                 y+(vertical ? position : (cross-breadth)/2U),
                 vertical ? breadth : knob, vertical ? knob : breadth,
                 breadth/2U, accent);
         }
     } else if (node->kind == OS_CONTROL_SEPARATOR) {
         bool vertical = node->flags & OS_CONTROL_VERTICAL;
-        control_fill(x+(vertical ? w/2U : 0U), y+(vertical ? 0U : h/2U),
+        control_fill(clip, x+(vertical ? w/2U : 0U), y+(vertical ? 0U : h/2U),
             vertical ? (w ? 1U : 0U) : w, vertical ? h : (h ? 1U : 0U), 0U, node->border_color);
     }
     if ((context->document->nodes[0].flags & OS_CONTROL_MANAGED_FOCUS) &&
@@ -1466,14 +1456,13 @@ static void control_paint_node(void *raw, const os_control_node_t *node,
         w > 10U && h > 10U) {
         /* 焦点框也是声明式控件的样式，不要求应用把边线画进 Surface。 */
         uint32_t focus = node->background == OS_THEME_ACCENT ? OS_THEME_ON_ACCENT : OS_THEME_FOCUS;
-        control_fill(x+4, y+4, w-8, 1, 0U, focus);
-        control_fill(x+4, y+h-5, w-8, 1, 0U, focus);
-        control_fill(x+4, y+4, 1, h-8, 0U, focus);
-        control_fill(x+w-5, y+4, 1, h-8, 0U, focus);
+        control_fill(clip, x+4, y+4, w-8, 1, 0U, focus);
+        control_fill(clip, x+4, y+h-5, w-8, 1, 0U, focus);
+        control_fill(clip, x+4, y+4, 1, h-8, 0U, focus);
+        control_fill(clip, x+w-5, y+4, 1, h-8, 0U, focus);
     }
     /* 无文字节点的背景、图标、边框和焦点框已绘制，无需访问文字或字体缓存。 */
     if (!node->text_length) {
-        g_compositor_snapshot.damage_bounds = saved;
         return;
     }
     /* 文字由合成器绘制，Surface 不保存预先栅格化的按钮或标签。 */
@@ -1484,16 +1473,14 @@ static void control_paint_node(void *raw, const os_control_node_t *node,
         styled.foreground=(g_compositor_snapshot.theme>>8U)==3U?0x202125U:0xFFFFFFU;
     else styled.foreground=os_theme_resolve(styled.foreground,g_compositor_snapshot.theme);
     /* 控件文字始终受自身包围盒裁剪，不能因长标签覆盖相邻控件。 */
-    Rect text_clip = g_compositor_snapshot.damage_bounds;
+    Rect text_clip = clip;
     if (text_clip.x0 < x) text_clip.x0 = (int32_t)x;
     if (text_clip.y0 < y) text_clip.y0 = (int32_t)y;
     if (text_clip.x1 > x+w) text_clip.x1 = (int32_t)(x+w);
     if (text_clip.y1 > y+h) text_clip.y1 = (int32_t)(y+h);
     if (rect_is_empty(text_clip)) {
-        g_compositor_snapshot.damage_bounds = saved;
         return;
     }
-    g_compositor_snapshot.damage_bounds = text_clip;
     control_text_run_t *run=context->document->runs ?
         context->document->runs[source_node-context->document->nodes] : 0;
     const char *text=context->document->text?context->document->text+node->text_offset:0;
@@ -1508,19 +1495,18 @@ static void control_paint_node(void *raw, const os_control_node_t *node,
         if(last<=node->text_length) {
             uint32_t start=control_selection_prepared_prefix(run,text,first,font);
             uint32_t end=control_selection_prepared_prefix(run,text,last,font);
-            control_fill(text_x+start,text_y,end-start,font,0U,OS_THEME_TEXT_SELECTION);
+            control_fill(text_clip, text_x+start,text_y,end-start,font,0U,OS_THEME_TEXT_SELECTION);
         }
     }
     if (run) {
         control_raster_target_t target={g_window_server.composite_framebuffer,
             g_window_server.display_stride,text_clip};
         control_text_draw(&target,run,text_x,text_y,styled.foreground);
-    } else control_paint_text(&styled,text,text_x,text_y,
+    } else control_paint_text(text_clip, &styled,text,text_x,text_y,
         context->document->fonts[styled.font_size] ? context->document->fonts[styled.font_size]->pixels : 0);
-    g_compositor_snapshot.damage_bounds = saved;
 }
 
-void compositor_control_tree(const compositor_window_view_t *view) {
+void compositor_control_tree(Rect clip, const compositor_window_view_t *view) {
     window_control_document_t *document = view->controls;
     if (!document || !view->width || !view->height) return;
     if (!document->layout_valid || document->layout_width != view->width ||
@@ -1535,10 +1521,10 @@ void compositor_control_tree(const compositor_window_view_t *view) {
         .x = (int64_t)view->x + window_client_offset_x(view->flags),
         .y = (int64_t)view->y + window_client_offset_y(view->flags)};
     if (!document->layout_valid) {
-        compositor_fill_locked((int32_t)context.x, (int32_t)context.y, view->width, view->height, view->background);
+        compositor_fill_locked(clip, (int32_t)context.x, (int32_t)context.y, view->width, view->height, view->background);
         return;
     }
-    Rect screen = g_compositor_snapshot.damage_bounds;
+    Rect screen = clip;
     if (screen.x0 < 0) screen.x0 = 0;
     if (screen.y0 < 0) screen.y0 = 0;
     if ((uint32_t)screen.x1 > g_window_server.display_width) screen.x1 = (int32_t)g_window_server.display_width;
@@ -1551,22 +1537,14 @@ void compositor_control_tree(const compositor_window_view_t *view) {
     if (top < viewport.y0) top = viewport.y0;
     if (right > view->width) right = view->width;
     if (bottom > view->height) bottom = view->height;
-    /* 声明窗口操作的树占有整个标题栏，绘制和命中使用相同裁剪边界。 */
-    if (left < right && top < 0 && bottom > viewport.y0) {
-        int64_t caption_right = right;
-        if (left < caption_right)
-            control_tree_paint(document->nodes, document->count, document->boxes,
-                (Rect){(int32_t)left, (int32_t)top, (int32_t)caption_right,
-                    bottom < 0 ? (int32_t)bottom : 0}, control_paint_node, &context);
-        top = 0;
-    }
+    /* 标题栏与客户区共享同一矩形裁剪，跨界控件按层叠顺序一次绘制。 */
     if (left < right && top < bottom)
         control_tree_paint(document->nodes, document->count, document->boxes,
             (Rect){(int32_t)left, (int32_t)top, (int32_t)right, (int32_t)bottom}, control_paint_node, &context);
 }
 
 /* 内核桌面弹出层复用同一个绘制器；调用方提供已验证的纯控件布局，不携带 Surface。 */
-void compositor_control_nodes(const os_control_node_t *nodes, uint32_t count,
+void compositor_control_nodes(Rect clip, const os_control_node_t *nodes, uint32_t count,
     const control_tree_box_t *boxes, const char *text, uint32_t hover, uint32_t pressed,
     const window_control_document_t *prepared) {
     if (!nodes || !count || !boxes) return;
@@ -1576,6 +1554,6 @@ void compositor_control_nodes(const os_control_node_t *nodes, uint32_t count,
         .runs = prepared && prepared->count==count ? prepared->runs : 0};
     compositor_window_view_t view = {.control_hover = hover, .control_pressed = pressed};
     control_paint_context_t context = {.view = &view, .document = &document};
-    control_tree_paint(nodes, count, boxes, g_compositor_snapshot.damage_bounds,
+    control_tree_paint(nodes, count, boxes, clip,
         control_paint_node, &context);
 }

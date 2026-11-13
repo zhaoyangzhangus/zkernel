@@ -1,5 +1,6 @@
 #include <kernel/console_backend.h>
 #include <kernel/console.h>
+#include <kernel/pixel_format.h>
 #include <kernel/realtest.h>
 #include <kernel/sched.h>
 
@@ -120,31 +121,15 @@ static void serial_unlock(UINT64 flags, BOOLEAN owned) {
 }
 #endif
 
-static UINT32 gop_debug_component(UINT8 value, UINT32 mask) {
-    UINT32 shift = 0U;
-    UINT32 width = 0U;
-    UINT32 maximum;
-    if (mask == 0U) return 0U;
-    while (shift < 32U && ((mask >> shift) & 1U) == 0U) ++shift;
-    while (shift + width < 32U && ((mask >> (shift + width)) & 1U) != 0U) {
-        ++width;
-    }
-    if (width == 0U || width >= 32U) return mask;
-    maximum = (1U << width) - 1U;
-    return ((((UINT32)value * maximum + 127U) / 255U) << shift) & mask;
-}
-
 static UINT32 gop_debug_color(UINT32 pixel) {
     UINT8 red = (UINT8)(pixel >> 16);
     UINT8 green = (UINT8)(pixel >> 8);
     UINT8 blue = (UINT8)pixel;
-    if (g_gop_debug_console.format == OS_PIXEL_BGRR) {
-        return (UINT32)blue | ((UINT32)green << 8) | ((UINT32)red << 16);
-    }
+    if (g_gop_debug_console.format == OS_PIXEL_RGBR) return pixel_xrgb_to_rgbr(pixel);
     if (g_gop_debug_console.format == OS_PIXEL_BITMASK) {
-        return gop_debug_component(red, g_gop_debug_console.masks[0]) |
-               gop_debug_component(green, g_gop_debug_console.masks[1]) |
-               gop_debug_component(blue, g_gop_debug_console.masks[2]);
+        return pixel_format_component(red, g_gop_debug_console.masks[0]) |
+               pixel_format_component(green, g_gop_debug_console.masks[1]) |
+               pixel_format_component(blue, g_gop_debug_console.masks[2]);
     }
     return pixel & 0x00FFFFFFU;
 }

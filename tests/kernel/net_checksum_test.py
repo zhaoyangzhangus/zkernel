@@ -76,7 +76,7 @@ int main(void) {
             for (unsigned i=0;i<sizeof(lengths)/sizeof(lengths[0]);++i)
                 check(p+offset,lengths[i]);
     }
-    /* Old 32-bit accumulation loses carry on sufficiently large buffers. */
+    /* 对足够大的缓冲区使用旧 32 位累加时会丢失进位。 */
     uint32_t old=0;
     for (size_t i=0;i<capacity;i+=2) old+=65535;
     while (old>>16) old=(old&65535)+(old>>16);

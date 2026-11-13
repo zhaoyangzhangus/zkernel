@@ -58,7 +58,7 @@ with tempfile.TemporaryDirectory(prefix='system-taskmgr-pixels-') as directory:
     large=frame()
     assert roi(large,800,244,4,4)==bytes.fromhex('d3e3fd')*16, 'Caption did not grow with font'
     screenshot('large-font')
-    # Bottom part of the enlarged maximize target, outside the old 40px hit box.
+    # 扩大的最大化目标下半部，位于旧的 40px 命中框之外。
     click(1432,252);time.sleep(.5)
     maximized=frame()
     assert roi(maximized,20,10,4,4)==bytes.fromhex('d3e3fd')*16, 'Enlarged caption hit target failed'

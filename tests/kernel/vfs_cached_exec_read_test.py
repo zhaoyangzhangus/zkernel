@@ -65,7 +65,7 @@ static void *phys_to_direct(uintptr_t address) {
  return (void*)address;
 }
 static vfs_cached_page_t *vfs_page_cache_lookup(vfs_page_cache_t *cache,uint64_t index) {
- // Fault injection models a missing cache entry, not a failing resident hit.
+ // 故障注入模拟缓存项缺失，而不是驻留项命中失败。
  if(!cache || (int)index==fail_index || missing_page || (int)index==missing_index)return 0;
  for(vfs_cached_page_t *e=cache->head;e;e=e->next)if(e->index==index)return e;
  return 0;
@@ -84,12 +84,12 @@ static kstatus_t vfs_file_page_get_batch(vnode_t *v,uint64_t index,unsigned maxi
  *out=&pages[index];return K_OK;
 }
 static void *checked_copy(void *destination,const void *source,size_t length) {
- assert(depth==1 && length>0 && length<=PAGE_SIZE);
+ assert(depth==1 && length>0 && length<=16*PAGE_SIZE);
  uintptr_t address=(uintptr_t)source;bool bounded=false;
  for(unsigned i=0;i<3;++i) {
   uintptr_t first=(uintptr_t)pages[i].data;
   if(address>=first && address-first<PAGE_SIZE &&
-     length<=PAGE_SIZE-(address-first)) bounded=true;
+     length<=(uintptr_t)(pages+3)-address) bounded=true;
  }
  assert(bounded);++copies;return memcpy(destination,source,length);
 }
@@ -103,9 +103,9 @@ int main(void) {
  unsigned char out[10000];uint64_t got=123;
  assert(vfs_read_cached_kernel(&file,out,6000,&got)==K_OK && got==6000 && loads==2 && copies==2);
  for(unsigned i=0;i<6000;++i)assert(out[i]==(unsigned char)(13+i));
- file.position=13;locks=page_gets=0;
+ file.position=13;locks=page_gets=copies=0;
  assert(vfs_read_cached_kernel(&file,out,6000,&got)==K_OK && loads==2);
- assert(locks==1 && page_gets==0); // 连续常驻页共享一次有界保护。
+ assert(locks==1 && page_gets==0 && copies==1); // 连续常驻页在一次有界保护中合并复制。
  unsigned char update[]={9,8,7};vfs_page_cache_copy_in(&node,31,update,3);
  file.position=31;assert(vfs_read_cached_kernel(&file,out,3,&got)==K_OK && !memcmp(out,update,3));
  file.position=8990;assert(vfs_read_cached_kernel(&file,out,100,&got)==K_OK && got==10);
@@ -154,7 +154,7 @@ int main(void) {
   for(unsigned i=progress;i<sizeof(out);++i)assert(out[i]==0x69);
  }
  fail_index=missing_index=bad_direct_index=-1;
- // Invalid page-get state must still fail on a resident hit, without progress.
+ // 命中驻留项时，页面获取状态无效仍必须失败，且不能推进。
  for(unsigned invalid=0;invalid<3;++invalid) {
   file.position=0;got=123;memset(out,0x69,sizeof(out));
   node.object.type=invalid==0?0:KOBJECT_TYPE_VNODE;
@@ -163,12 +163,12 @@ int main(void) {
   assert(out[0]==0x69);
  }
  node.object.type=KOBJECT_TYPE_VNODE;node.fs_private=&backend;backend.read=1;
- // A broken resident entry must not masquerade as a cache miss or copy data.
+ // 损坏的驻留项不能伪装成缓存未命中，也不能复制数据。
  entries[0].page=0;file.position=0;got=123;locks=page_gets=0;
  assert(vfs_read_cached_kernel(&file,out,1,&got)==K_EIO && !got && !file.position);
  assert(locks==1 && page_gets==0 && !depth);
  entries[0].page=&pages[0];
- /* Cache writes span page boundaries without touching surrounding bytes. */
+ /* 缓存写入可以跨越页边界，但不能修改相邻字节。 */
  memset(out,0x75,4096);vfs_page_cache_copy_in(&node,4090,out,4096);
  assert(pages[0].data[4089]==0);
  for(unsigned i=4090;i<PAGE_SIZE;++i) assert(pages[0].data[i]==0x75);
@@ -198,11 +198,11 @@ with tempfile.TemporaryDirectory(prefix='liteos-cached-exec-') as directory:
                  '-fsanitize=address,undefined','-fno-pie','-no-pie',
                  '-x','c','-','-x','none',obj,'-o',binary],input=program,text=True,check=True)
  subprocess.run([binary],check=True)
- # A green byte comparison alone would also accept the old repeated lookup.
- # Reject removal of the warm path with the actual lock/page-get assertions.
- guard='vfs_cached_page_t *cached = vfs_page_cache_lookup(\n            (vfs_page_cache_t *)vnode->page_cache, position / PAGE_SIZE);'
+ # 仅检查字节相等也会接受旧的重复查找行为。
+ # 使用真实的锁/page-get 断言拒绝移除热路径的实现。
+ guard='vfs_cached_page_t *cached = lookahead != 0 ? lookahead : vfs_page_cache_lookup(\n            (vfs_page_cache_t *)vnode->page_cache, position / PAGE_SIZE);'
  assert guard in program
- negative=program.replace(guard,'vfs_cached_page_t *cached = 0;')
+ negative=program.replace(guard,'vfs_cached_page_t *cached = 0; (void)lookahead;')
  subprocess.run(['cc','-std=c11','-Wall','-Wextra','-Werror',
                  '-fsanitize=address,undefined','-fno-pie','-no-pie',
                  '-x','c','-','-x','none',obj,'-o',binary],input=negative,text=True,check=True)

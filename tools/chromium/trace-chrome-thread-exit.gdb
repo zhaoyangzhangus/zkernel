@@ -42,8 +42,8 @@ class ThreadExit(gdb.Breakpoint):
         print('CHROME_THREAD_EXIT pid=%d tid=%d status=%d syscall=%d user_pc=%#x' % (
             int(process['pid']), int(current['tid']), int(gdb.parse_and_eval('$rdi')),
             int(frame['rax']), int(frame['rip'])), flush=True)
-        # glibc omits frame pointers. Stack words are candidates, not an
-        # unwind: print only executable-range addresses, never user text.
+        # glibc 不保留帧指针。栈字只是候选地址，不是栈回溯：只打印可执行区域中的地址，
+        # 绝不打印用户文本。
         for offset in range(0, 512, 8):
             try:
                 value = user_word(process, int(frame['rsp']) + offset)

@@ -16,7 +16,7 @@ for left in (11, 287, 650):
     for y in (84,86,88,90,92):
         start = (y*width+left)*3
         pixels[start:start+943*3] = b'\xff'*(943*3)
-        # Toolbar glyphs are small gaps, not separate browser windows.
+        # 工具栏字形只是小间隔，不是独立浏览器窗口。
         start = (y*width+left+23)*3
         pixels[start:start+9*3] = b'\0'*(9*3)
         if left > 200:
@@ -36,7 +36,7 @@ for left in (11, 287, 650):
         start=(y*width+left+175)*3
         pixels[start:start+165*3]=bytes((20,80,230))*165
     assert focused(width,pixels,left)
-    # A focused field's thin blue outline cannot invalidate the window gate.
+    # 输入框获得焦点时的细蓝色边框不能导致窗口检查失败。
     start = (90*width+left+130)*3
     pixels[start:start+600*3] = b'\0'*(600*3)
     assert extent(width, pixels) == (left,left+943)

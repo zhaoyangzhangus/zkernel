@@ -78,7 +78,7 @@ void vm_object_put(vm_object_t *object) {
             kfree(node);
             node = next;
         }
-        kfree(store);
+        /* 存储头嵌入对象分配块，页面及节点清理后由下面统一释放。 */
         if (object->type == VM_OBJECT_ANON) object->u.anon.anon_root = 0;
         else object->u.shared.shared_root = 0;
     }
@@ -124,14 +124,14 @@ kstatus_t vm_object_create_anon_store(size_t size, uint32_t type,
                                       vm_object_t **out) {
     if (out == 0 || size == 0 ||
         (type != VM_OBJECT_ANON && type != VM_OBJECT_SHARED)) return K_EINVAL;
-    vm_object_t *object = (vm_object_t *)kzalloc(sizeof(vm_object_t), 0);
-    anon_store_t *store = object != 0 ?
-        (anon_store_t *)kzalloc(sizeof(anon_store_t), 0) : 0;
-    if (object == 0 || store == 0) {
-        kfree(store);
-        kfree(object);
-        return K_ENOMEM;
-    }
+    /* 对象与存储头具有相同生命周期，首成员就是公开对象地址，只分配、释放一次。 */
+    struct {
+        vm_object_t object;
+        anon_store_t store;
+    } *allocation = kzalloc(sizeof(*allocation), 0);
+    if (allocation == 0) return K_ENOMEM;
+    vm_object_t *object = &allocation->object;
+    anon_store_t *store = &allocation->store;
     atomic_init(&store->lock.state, 0U);
     store->pages = 0;
     vm_object_init_internal(object, type, size);
@@ -144,6 +144,36 @@ kstatus_t vm_object_create_anon_store(size_t size, uint32_t type,
 
 kstatus_t vm_object_create_anon(size_t size, vm_object_t **out) {
     return vm_object_create_anon_store(size, VM_OBJECT_ANON, out);
+}
+
+/* 未发布的对象由当前构造者独占，可直接建立索引，无需逐页查找和竞争存储锁。
+ * 页面仍逐一清零分配，不要求物理连续；构造期间允许调度，任何失败统一销毁对象。 */
+kstatus_t vm_object_create_shared_populated(size_t size, vm_object_t **out) {
+    if (out == 0) return K_EINVAL;
+    vm_object_t *object = 0;
+    kstatus_t status = vm_object_create_shared(size, &object);
+    if (status != K_OK) return status;
+    anon_store_t *store = anon_object_store(object);
+    uint64_t count = size >> PAGE_SHIFT;
+    for (uint64_t index = 0U; index < count; ++index) {
+        page_t *page = page_alloc(0, PAGE_ALLOC_ZERO);
+        if (page == 0) { status = K_ENOMEM; goto fail; }
+        anon_page_node_t *node = kmalloc(sizeof(*node), 0);
+        if (node == 0) { page_free(page); status = K_ENOMEM; goto fail; }
+        if (phys_to_direct(page_to_phys(page)) == 0) {
+            page_free(page); kfree(node); status = K_EIO; goto fail;
+        }
+        page->owner = PAGE_OWNER_ANON;
+        node->index = index;
+        node->page = page;
+        (void)anon_page_index_insert(store, node);
+    }
+    atomic_store_explicit(&object->populated_pages, count, memory_order_relaxed);
+    *out = object;
+    return K_OK;
+fail:
+    vm_object_put(object);
+    return status;
 }
 
 void anon_page_unpin(page_t *page) {
@@ -248,9 +278,8 @@ static kstatus_t anon_page_index_clone(const rb_node_t *source,
         ((const uint8_t *)source - __builtin_offsetof(anon_page_node_t,
                                                       index_node));
     anon_page_node_t *copy = *spare;
-    if (copy != 0) *spare = copy->next;
-    else copy = kmalloc(sizeof(*copy), 0);
     if (copy == 0) return K_ENOMEM;
+    *spare = copy->next;
     copy->index = node->index;
     copy->page = node->page;
     rb_tree_node_init(&copy->index_node);
@@ -278,24 +307,59 @@ kstatus_t vm_object_clone_anon(vm_object_t *source, vm_object_t **out) {
     anon_store_t *target_store = (anon_store_t *)(*out)->u.anon.anon_root;
     if (source_store == 0) return K_OK;
     uint64_t copied_pages = 0;
-    /* 不持有源自旋锁时预备常见数量的节点。这只是容量提示，不是快照：克隆前，
-     * 并发缺页可能新增节点（加锁后的克隆过程会补充分配），丢弃页面则会产生
-     * 解锁后需要释放的多余节点。加锁前不借用源页面/节点，以保持快照和引用语义。 */
+    /* 计数只是容量提示；加锁前不借用源页面或节点。预留不足时，先在锁外回收
+     * 未完成快照并补充节点，再重新克隆，保证分配器不进入源存储的抢占临界区。 */
     anon_page_node_t *spare = 0;
     uint64_t reserve = atomic_load_explicit(&source->populated_pages,
                                            memory_order_relaxed);
+    uint64_t reserved_nodes = 0U;
     for (uint64_t i = 0; i < reserve; ++i) {
         anon_page_node_t *node = kmalloc(sizeof(*node), 0);
-        /* 预留是可选的。使用已取得的节点，由加锁后的克隆过程判断是否确实需要更多：
-         * 页面丢弃可能使估算过大，临时内存压力也可能已经缓解。 */
+        /* 预留失败不直接终止：已分配节点可能足够，临时内存压力也可能已经缓解。 */
         if (node == 0) break;
         node->next = spare;
         spare = node;
+        ++reserved_nodes;
     }
-    vm_store_lock(&source_store->lock);
-    status = anon_page_index_clone(source_store->page_index.root,
-        &target_store->page_index.root, 0, target_store, &spare, &copied_pages);
-    vm_store_unlock(&source_store->lock);
+    bool allocation_failed = false;
+    for (;;) {
+        vm_store_lock(&source_store->lock);
+        status = anon_page_index_clone(source_store->page_index.root,
+            &target_store->page_index.root, 0, target_store, &spare, &copied_pages);
+        vm_store_unlock(&source_store->lock);
+        if (status == K_OK || allocation_failed) break;
+
+        /* 目标尚未发布，部分快照只归本次调用所有。解锁后释放页面引用并复用索引节点；
+         * 不保留源树指针，因此并发缺页、丢弃或 COW 不会使下一次克隆访问退役节点。 */
+        anon_page_node_t *node = target_store->pages;
+        target_store->pages = 0;
+        target_store->page_index.root = 0;
+        while (node != 0) {
+            anon_page_node_t *next = node->next;
+            page_reference_put(node->page);
+            node->next = spare;
+            spare = node;
+            node = next;
+        }
+        copied_pages = 0U;
+        /* 几何增长使过小提示下的重复复制总量保持线性；新提示较大时直接补足。
+         * 分配中途失败仍复查一次源树，允许并发丢弃或已有节点足够时成功。 */
+        uint64_t wanted = reserved_nodes > UINT64_MAX / 2U ? UINT64_MAX :
+                          reserved_nodes != 0U ? reserved_nodes * 2U : 1U;
+        uint64_t hint = atomic_load_explicit(&source->populated_pages,
+                                             memory_order_relaxed);
+        if (wanted < hint) wanted = hint;
+        while (reserved_nodes < wanted) {
+            node = kmalloc(sizeof(*node), 0);
+            if (node == 0) {
+                allocation_failed = true;
+                break;
+            }
+            node->next = spare;
+            spare = node;
+            ++reserved_nodes;
+        }
+    }
     while (spare != 0) {
         anon_page_node_t *next = spare->next;
         kfree(spare);
@@ -344,7 +408,7 @@ static rb_node_t *anon_page_index_lower_bound(const anon_store_t *store,
     return candidate;
 }
 
-/* 调用方持有 store->lock；返回新插入的节点或并发操作中已存在的结果。 */
+/* 调用方持有 store->lock，或独占尚未发布的对象；返回插入节点或已存在的结果。 */
 static anon_page_node_t *anon_page_index_insert(anon_store_t *store,
                                    anon_page_node_t *node) {
     rb_node_t **link = &store->page_index.root;

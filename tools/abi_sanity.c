@@ -260,10 +260,11 @@ ABI_ASSERT(offsetof(os_audio_stream_stats_t, overruns) == 32, "audio stats.overr
 ABI_ASSERT(offsetof(os_audio_stream_stats_t, device_generation) == 40, "audio stats.device_generation offset changed");
 ABI_ASSERT(offsetof(os_audio_stream_stats_t, state) == 48, "audio stats.state offset changed");
 ABI_ASSERT(offsetof(os_audio_stream_stats_t, reserved) == 52, "audio stats.reserved offset changed");
-ABI_ASSERT(sizeof(os_audio_open_t) == 48, "audio open ABI size changed");
+ABI_ASSERT(sizeof(os_audio_open_t) == 56, "audio open ABI size changed");
 ABI_ASSERT(offsetof(os_audio_open_t, hdr) == 0, "audio open.hdr offset changed");
 ABI_ASSERT(offsetof(os_audio_open_t, config) == 8, "audio open.config offset changed");
 ABI_ASSERT(offsetof(os_audio_open_t, handle) == 40, "audio open.handle offset changed");
+ABI_ASSERT(offsetof(os_audio_open_t, backend) == 48, "audio open.backend offset changed");
 ABI_ASSERT(sizeof(os_audio_control_t) == 48, "audio control ABI size changed");
 ABI_ASSERT(offsetof(os_audio_control_t, hdr) == 0, "audio control.hdr offset changed");
 ABI_ASSERT(offsetof(os_audio_control_t, code) == 8, "audio control.code offset changed");

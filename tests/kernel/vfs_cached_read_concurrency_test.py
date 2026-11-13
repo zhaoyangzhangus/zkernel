@@ -66,7 +66,7 @@ static vfs_cached_page_t *vfs_page_cache_lookup(vfs_page_cache_t *c,uint64_t ind
 static kstatus_t vfs_file_page_get_batch(vnode_t *v,uint64_t index,unsigned maximum,page_t **out) {
  (void)maximum;
  (void)v;(void)index;(void)out;
- // Every test page is resident. Entering page-get is a regression here.
+ // 测试中的所有页面都已驻留。此处若进入 page-get 即为回归。
  assert(!"resident read called page-get");return K_EIO;
 }
 static uintptr_t page_to_phys(page_t *p) {assert(held==1);return (uintptr_t)p;}
@@ -87,7 +87,7 @@ static void *writer(void *arg) {
    vnode.size=PAGE_SIZE;memset(page.data,(unsigned char)++n,PAGE_SIZE);
   } else {
    memset(page.data,0x5a,PAGE_SIZE);
-   // Stable data, but change EOF across the reader's unlock/relock boundary.
+   // 数据保持不变，但在读取者解锁/重新加锁的边界处更改 EOF。
    vnode.size=(n++&1)?127U:PAGE_SIZE;
   }
   vfs_vnode_unlock(&vnode);

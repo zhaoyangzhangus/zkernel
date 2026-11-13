@@ -1,6 +1,6 @@
 #include "internal.h"
 
-/* REFACTOR_P2_PAGE_ALLOC_OWNER: cold order allocation and Buddy fallback. */
+/* REFACTOR_P2_PAGE_ALLOC_OWNER：低频阶数分配及 Buddy 回退路径。 */
 
 PAGE_NOINLINE void free_legacy_slow(page_t *head, uint8_t order) {
     lock_pages();

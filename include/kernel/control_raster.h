@@ -1,5 +1,6 @@
 #pragma once
 #include <stdint.h>
+#include <kernel/pixel_blend.h>
 #include <uapi/chrome_caption.h>
 #include <kernel/rect.h>
 
@@ -32,24 +33,6 @@ static inline uint32_t control_round_inset(uint32_t row, uint32_t width,
         else low = mid + 1U;
     }
     return low;
-}
-
-/* 合成目标保存的是 XRGB/ARGB 容器，混合只更新颜色通道，不把来源透明度写回目标。 */
-static inline uint32_t control_blend_argb(uint32_t under, uint32_t color) {
-    uint32_t alpha = color >> 24U, result = under & 0xff000000U;
-    if (!alpha) return under;
-    if (alpha == 255U) return result | (color & 0x00ffffffU);
-    /* 红、蓝各占独立的 16 位通道，乘加与舍入均不会向相邻通道进位。
-     * 对 0..65025 的加权和，移位舍入与原来的 (和 + 127) / 255 完全等价。 */
-    uint32_t inverse = 255U - alpha;
-    uint32_t rb = (color & 0x00ff00ffU) * alpha +
-        (under & 0x00ff00ffU) * inverse + 0x00800080U;
-    rb += (rb >> 8U) & 0x00ff00ffU;
-    uint32_t green = (color & 0x0000ff00U) * alpha +
-        (under & 0x0000ff00U) * inverse + 0x00008000U;
-    green += (green >> 8U) & 0x0000ff00U;
-    return result | ((rb >> 8U) & 0x00ff00ffU) |
-        ((green >> 8U) & 0x0000ff00U);
 }
 
 typedef struct control_raster_target {

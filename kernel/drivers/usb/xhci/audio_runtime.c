@@ -170,8 +170,7 @@ bool xhci_queue_audio_transfer_device(
     return true;
 }
 
-/* Transfer Event Slot ID is the permanent Audio device identity.  Published
- * audio state is never routed through the enumeration scratch context. */
+/* 传输事件中的 Slot ID 是 Audio 设备的永久标识。已发布的音频状态绝不经由枚举临时上下文传递。 */
 bool xhci_handle_audio_transfer_event(
     xhci_state_t *state,
     const xhci_trb_t *event) {

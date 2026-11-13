@@ -2,8 +2,7 @@
 
 #include <stdint.h>
 
-/* Linux-compatible epoll surface.  The System libc implementation uses the
- * same event ABI but performs the initial wait through its native poll path. */
+/* Linux 兼容的 epoll 接口。System libc 实现使用相同的事件 ABI，但首次等待通过原生 poll 路径执行。 */
 typedef union epoll_data {
     void *ptr;
     int fd;

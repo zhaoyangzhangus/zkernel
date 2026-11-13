@@ -31,7 +31,7 @@ int main() {
  assert(!w.HasCapture()); w.ReleaseCapture(); assert(d.lost == 0);
  w.SetCapture(); assert(w.HasCapture());
  w.SetCapture(); assert(w.HasCapture());
- // Widget's auto-release guard must now permit releasing Aura capture.
+ // Widget 的自动释放保护现在必须允许释放 Aura 捕获。
  if (w.HasCapture()) w.ReleaseCapture();
  assert(!w.HasCapture()); assert(d.lost == 1);
  w.ReleaseCapture(); assert(d.lost == 1);
@@ -43,8 +43,8 @@ int main() {
  w.ReleaseCapture(); assert(w.HasCapture() && w.native_capture==1 && d.lost==lost);
  w.commit_ok=true;
  w.ReleaseCapture(); assert(!w.HasCapture() && w.native_capture==0);
- // Menus request capture before Show(). No native acquisition is attempted
- // while hidden, but Aura's release guard must still see the pending request.
+ // 菜单会在 Show() 前请求捕获。窗口隐藏时不会尝试原生捕获，但 Aura 的释放保护
+ // 仍须识别这一待处理请求。
  w.visible_=false;int before=w.commits;
  w.SetCapture();assert(w.HasCapture() && w.capture_pending_ && !w.has_capture_);
  assert(w.commits==before);

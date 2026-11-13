@@ -26,21 +26,26 @@ static BOOLEAN memory_fail_at(const kernel_init_memory_hooks_t *hooks,
 #define memory_fail(hooks, message) \
     memory_fail_at((hooks), (message), __FILE__, __LINE__)
 
+/* 映射和缓存属性变更共用相同页范围；在任何页表写入前拒绝溢出的物理末地址。 */
+static bool framebuffer_page_range(const OS_BOOT_INFO *info,
+    uint64_t *physical_page, uint64_t *span) {
+    if (info == 0 || info->FrameBufferBase == 0U || info->FrameBufferSize == 0U ||
+        info->FrameBufferSize > UINT64_MAX - info->FrameBufferBase) return false;
+    uint64_t start = info->FrameBufferBase & ~(PAGE_SIZE - 1ULL);
+    uint64_t end = info->FrameBufferBase + info->FrameBufferSize;
+    if (end > UINT64_MAX - (PAGE_SIZE - 1ULL)) return false;
+    end = (end + PAGE_SIZE - 1ULL) & ~(PAGE_SIZE - 1ULL);
+    *physical_page = start;
+    *span = end - start;
+    return true;
+}
+
 BOOLEAN map_framebuffer_wc(const OS_BOOT_INFO *info,
                                   UINT64 *virtual_base) {
-    if (info == 0 || virtual_base == 0 || info->FrameBufferBase == 0 ||
-        info->FrameBufferSize == 0) return 0;
-
-    UINT64 physical_page = info->FrameBufferBase & ~(PAGE_SIZE - 1ULL);
-    UINT64 page_offset = info->FrameBufferBase - physical_page;
-    if (info->FrameBufferSize > UINT64_MAX - page_offset) return 0;
-    UINT64 span = info->FrameBufferSize + page_offset;
-    if (span > UINT64_MAX - (PAGE_SIZE - 1ULL)) return 0;
-    span = (span + PAGE_SIZE - 1ULL) & ~(PAGE_SIZE - 1ULL);
-    if (span == 0 ||
-        span > X86_64_MMIO_END - FRAMEBUFFER_KERNEL_VIRTUAL_BASE + 1ULL) {
-        return 0;
-    }
+    uint64_t physical_page, span;
+    if (virtual_base == 0 || !framebuffer_page_range(info, &physical_page, &span) ||
+        span > X86_64_MMIO_END - FRAMEBUFFER_KERNEL_VIRTUAL_BASE + 1ULL) return 0;
+    uint64_t page_offset = info->FrameBufferBase - physical_page;
 
     paddr_t root = x86_current_root_table();
     UINT64 mapped = 0;
@@ -74,14 +79,10 @@ BOOLEAN map_framebuffer_wc(const OS_BOOT_INFO *info,
 /* PCI 资源归属尚未确定时，早期启动使用 UC。仅将完整且可预取的 AMD/QEMU 显示 BAR 升级；
  * NVIDIA BAR 别名仍采用保守映射。 */
 static bool framebuffer_wc_owner(const OS_BOOT_INFO *info, const pci_host_t *host) {
-    if (info == 0 || host == 0 || !host->initialized ||
-        host->device_count > PCI_MAX_DEVICES ||
-        info->FrameBufferBase == 0U || info->FrameBufferSize == 0U ||
-        info->FrameBufferSize > UINT64_MAX - info->FrameBufferBase) return false;
-    uint64_t start = info->FrameBufferBase & ~(PAGE_SIZE - 1ULL);
-    uint64_t end = info->FrameBufferBase + info->FrameBufferSize;
-    if (end > UINT64_MAX - (PAGE_SIZE - 1ULL)) return false;
-    end = (end + PAGE_SIZE - 1ULL) & ~(PAGE_SIZE - 1ULL);
+    uint64_t start, span;
+    if (host == 0 || !host->initialized || host->device_count > PCI_MAX_DEVICES ||
+        !framebuffer_page_range(info, &start, &span)) return false;
+    uint64_t end = start + span;
     bool owner = false;
     for (uint32_t i = 0U; i < host->device_count; ++i) {
         const pci_device_t *device = &host->devices[i];
@@ -107,9 +108,9 @@ BOOLEAN framebuffer_enable_wc(const OS_BOOT_INFO *info, UINT64 virtual_base) {
         virtual_base == 0U ||
         (virtual_base & (PAGE_SIZE - 1ULL)) !=
             (info->FrameBufferBase & (PAGE_SIZE - 1ULL))) return 0;
-    uint64_t offset = info->FrameBufferBase & (PAGE_SIZE - 1ULL);
-    uint64_t span = (info->FrameBufferSize + offset + PAGE_SIZE - 1ULL) &
-                    ~(PAGE_SIZE - 1ULL);
+    uint64_t physical_page, span;
+    if (!framebuffer_page_range(info, &physical_page, &span)) return 0;
+    uint64_t offset = info->FrameBufferBase - physical_page;
     uint64_t base = virtual_base - offset;
     if (span > UINT64_MAX - base) return 0;
     paddr_t root = x86_current_root_table();

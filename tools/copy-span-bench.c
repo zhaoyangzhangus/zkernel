@@ -1,6 +1,6 @@
-/* Bounded host WB-RAM benchmark, NOT a GOP/MMIO throughput measurement.
+/* 有界的宿主 WB-RAM 基准测试，不是 GOP/MMIO 吞吐量测试。
  * cc -O2 -Wall -Wextra -Werror tools/copy-span-bench.c -o /tmp/copy-span-bench
- * No GPU mappings, privileged instructions or host configuration changes.
+ * 不创建 GPU 映射，不执行特权指令，也不更改宿主配置。
  */
 #define _GNU_SOURCE
 #include <errno.h>
@@ -13,9 +13,9 @@
 
 typedef void (*copy_fn)(void *, const void *, size_t);
 #ifdef OS_BENCH_KERNEL_COPY
-/* Link kernel/string.c compiled separately with kernel (non-SIMD) flags and
- * -Dmemcpy=os_bench_kernel_memcpy (rename the other exports likewise).
- * Keep timing/stdio in this hosted translation unit. */
+/* 链接使用内核（非 SIMD）标志单独编译的 kernel/string.c，并传入
+ * -Dmemcpy=os_bench_kernel_memcpy（其他导出符号也作相同重命名）。
+ * 计时和 stdio 保留在此宿主翻译单元中。 */
 void *os_bench_kernel_memcpy(void *, const void *, size_t);
 static void copy_kernel(void *d, const void *s, size_t n) {
     os_bench_kernel_memcpy(d,s,n);
@@ -142,7 +142,7 @@ int main(int argc, char **argv) {
         unsigned loops=(unsigned)((64U*1024U*1024U)/(row*height));
         if (loops < 4) loops=4;
         double samples[3][7];
-        // Rotate method order to reduce systematic temperature/order bias.
+        // 轮换方法顺序，以降低温度和执行顺序造成的系统性偏差。
         for (unsigned round=0; round<7; ++round)
         for (unsigned slot=0; slot<3; ++slot) {
             unsigned method=(round+slot)%3;

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Read-only audit for the Linux/QEMU test host.
+# 对 Linux/QEMU 测试宿主进行只读审计。
 set -u -o pipefail
 
 script_dir="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"

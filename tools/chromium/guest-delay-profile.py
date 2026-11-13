@@ -104,7 +104,7 @@ if action=='begin':
     inferior.write_memory(address('g_sched_wake_stall'),bytes(14*8))
     inferior.write_memory(address('g_sched_inbox_stall'),bytes(17*8))
     inferior.write_memory(address('g_sched_ipi_send'),bytes(7*8))
-    # Do not mix a startup/earlier-window maximum with this bounded trial.
+    # 不要将启动阶段/更早时间窗中的最大值与本次有界测试混在一起。
     inferior.write_memory(address('g_vm_lock_diagnostics'),bytes(8*8))
     inferior.write_memory(address('g_sched_preempt_callers'),
                           bytes(int(gdb.parse_and_eval('sizeof(g_sched_preempt_callers)'))))
@@ -133,8 +133,8 @@ else:
     result['lapic_ticks']=int(gdb.parse_and_eval('g_tick_count'))
     result['cpu_clock_ns']=[int(gdb.parse_and_eval('g_cpus[%d].queue.clock_ns'%cpu))
                             for cpu in range(int(gdb.parse_and_eval('g_cpu_count')))]
-    # Stopped-guest snapshot only; never consume a FIFO or alter references.
-    # A CPU halted mid-publication may show a transient head/pending mismatch.
+    # 仅快照已暂停的客户机；绝不消费 FIFO 或修改引用。
+    # CPU 若在发布过程中暂停，可能会短暂显示 head/pending 不匹配。
     result['command_release_queues']=[
         {'cpu':cpu,
          'head':int(gdb.parse_and_eval('g_cpus[%d].command_release_head'%cpu)),

@@ -118,12 +118,10 @@ $makeArgs = @(
 ) + @($normalTargets)
 Invoke-Native $makePath $makeArgs
 
-# The P9 link graph contains the Phase 6-enabled vendor bridge and its full
-# CE Gate object.  P10 must not rerun that previous-phase stress probe while
-# testing EGL.  Recompile the same bridge source/flags from the verified P8
-# command signature, changing only the phase-6 compile define, and omit the
-# standalone phase-6 probe object below.  The bridge/frontend/GSP path remains
-# real; no success path is added here.
+# P9 链接图包含启用了 Phase 6 的供应商桥接层和完整 CE Gate 对象。测试 EGL 时，P10 不得
+# 重新运行上一阶段的压力探测。使用已验证的 P8 命令签名重新编译相同的桥接源文件/标志，
+# 只更改 Phase 6 编译定义，并省略下方独立的 Phase 6 探测对象。桥接层/前端/GSP 路径仍为
+# 真实实现；此处不添加成功路径。
 $phase8BridgeSource = Join-Path $repoRoot 'kernel\drivers\gpu\nvidia\rm\nv_rm_vendor_bridge.c'
 $phase8BridgeCmd = Join-Path $repoRoot 'build\nvidia\phase8\objects\nv_rm_vendor_bridge.o.cmd'
 Require-File $phase8BridgeCmd 'verified Phase 8 vendor bridge compile signature'

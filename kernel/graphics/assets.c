@@ -10,7 +10,7 @@
 #include "internal.h"
 #include "../../user/runtime/control_file.h"
 
-/* REFACTOR_P7A_SHELL_ASSETS_OWNER: cold desktop asset I/O and worker policy. */
+/* REFACTOR_P7A_SHELL_ASSETS_OWNER：桌面资源的低频 I/O 和工作线程策略。 */
 
 #define WINDOW_DESKTOP_ASSET_WORKER_STACK_SIZE (32U * 1024U)
 #define DESKTOP_ASSET_MAX_BYTES               (16ULL * 1024ULL * 1024ULL)

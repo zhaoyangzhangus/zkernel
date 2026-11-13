@@ -12,8 +12,7 @@ for name in ('audit-environment.sh', 'run-qemu-vfio-5070.sh'):
     assert 'LITEOS_GPU' not in script, name
     subprocess.run(['bash', '-n', str(ROOT / 'tools' / name)], check=True)
     initialization = script[:script.index('usage() {')]
-    # The real initialization is executed, but only its path discovery is
-    # replaced: BASH_SOURCE would otherwise point to the stdin test harness.
+    # 执行真实初始化，但只替换路径发现逻辑：否则 BASH_SOURCE 会指向 stdin 测试框架。
     initialization = re.sub(r'^script_dir=.*$',
                             'script_dir="$1/tools"', initialization,
                             count=1, flags=re.M)
@@ -38,8 +37,7 @@ for name in ('audit-environment.sh', 'run-qemu-vfio-5070.sh'):
                                 capture_output=True, check=True, env=environment)
         assert result.stdout.splitlines() == expected, (name, result.stdout)
 
-    # Exercise the production option parser as well; stop before any host
-    # probes, module loading, driver changes or VM launch can run.
+    # 同时测试生产选项解析器；在宿主探测、模块加载、驱动更改或虚拟机启动之前停止。
     parser = script[:script.index('\ndone\n') + len('\ndone\n')]
     parser = re.sub(r'^script_dir=.*$', 'script_dir="$1/tools"; shift',
                     parser, count=1, flags=re.M)
@@ -63,8 +61,7 @@ for name in ('build-windows.ps1', 'run-qemu-auto.ps1',
              'stop-qemu-auto-debug.ps1', 'stop-qemu-native-debug.ps1'):
     source = (ROOT / 'tools' / name).read_text()
     assert not re.search(r'\$env:LITEOS_(BUILD|TOOLPREFIX|ELFTOOLPREFIX)', source)
-    # Both one-line and multi-line forms are intentionally checked against
-    # the same precedence contract: explicit parameter, OS_*, generic, default.
+    # 有意使用相同优先级约定分别检查单行和多行形式：显式参数、OS_*、通用变量、默认值。
     start = source.index('$buildName = if ')
     end = source.index("'build'", start) + len("'build'")
     expression = source[start:end] + ' }'

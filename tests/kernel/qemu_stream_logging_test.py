@@ -27,7 +27,7 @@ printf 'ordinary diagnostic\\nqemu: invalid fixture\\nterminating on signal 15 f
         assert (external/'stderr.log').read_bytes()==(local/'qemu-stderr.log').read_bytes()
         if direct:assert not (local/'qemu-serial.log').exists()
         else:assert (local/'qemu-serial.log').read_bytes()==(external/'stdout.log').read_bytes()
-    # The opt-in must not change existing launchers or require an external disk.
+    # 启用该选项不得更改现有启动器，也不得要求外接磁盘。
     local=base/'default';local.mkdir()
     subprocess.run(['bash','-c','set -euo pipefail\nbuild_dir="$1"\nstream_log_run=""\nserial_to_file=0\n'+mirrors+
                     '\nprintf "boot\\n" | mirror_qemu_stdout','default',str(local)],check=True)

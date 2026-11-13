@@ -1,5 +1,5 @@
-/* Recompile against the current kernel headers before inspecting guest state.
- * This object provides DWARF types only; it is never linked into the kernel. */
+/* 检查客户机状态前，使用当前内核头文件重新编译。
+ * 此对象只提供 DWARF 类型信息，绝不会链接进内核。 */
 #include <kernel/process.h>
 #include <kernel/boot_profile.h>
 #include <kernel/sched.h>

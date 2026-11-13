@@ -58,7 +58,7 @@ with tempfile.TemporaryDirectory(prefix='stage-verifier-modes-') as tmp:
     for arguments in (['--unknown'], [str(log),str(log)], ['--interactive',str(log),str(log)]):
         result = subprocess.run(['bash',str(script),*arguments],cwd=ROOT,capture_output=True,text=True)
         assert result.returncode == 2 and 'usage:' in result.stderr
-    # Exercise the real make recipe with only its static prerequisite stubbed.
+    # 只替换静态前置条件桩函数，测试真实的 make 配方。
     makefile = Path(tmp) / 'Makefile'
     makefile.write_text(f'override BUILD := {tmp}/unused\nSTAGE_LOG := {log}\n'
                         f'include {ROOT / "tools/host-tests.mk"}\nroadmap-stage-layout:\n')

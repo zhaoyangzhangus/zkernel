@@ -50,10 +50,14 @@ kstatus_t x86_unmap_user_page_batch(paddr_t root, const vaddr_t *addresses,
                                    size_t count, size_t *unmapped);
 kstatus_t x86_protect_page(paddr_t root, vaddr_t virtual_address, uint32_t flags,
                            enum x86_cache_mode cache_mode);
-/* 仅供 fork 更新用户 PTE。必须持续持有 VM 锁；发布子进程前，
+/* 批量更新用户 PTE 时必须持续持有 VM 锁；发布新权限或子进程前，
  * 对已修改的 PTE 必须调用 x86_tlb_shootdown_root。 */
 kstatus_t x86_protect_user_page_deferred(paddr_t root, vaddr_t address,
     uint32_t flags, enum x86_cache_mode cache_mode, bool *changed);
+/* 查找并修改下一个常驻用户页；与上面的单页接口使用相同的 VM 锁和刷新约束。 */
+kstatus_t x86_protect_next_user_page_deferred(paddr_t root, vaddr_t start,
+    uint64_t end, uint32_t flags, enum x86_cache_mode cache_mode,
+    vaddr_t *address, bool *changed);
 bool x86_tlb_shootdown_root(paddr_t root);
 /* 判断是否存在 PTE/大页映射与 [start, end) 相交。
  * 稀疏 VM 预留区可能宽达数 TB，因此调用方不能为了确认没有常驻页，

@@ -113,8 +113,8 @@ int main(void) {
     scan_visits=0;vfree((void *)123);assert(scan_visits==64);
     for(unsigned i=0;i<64;++i)vfree(bounded[i]);
     empty();
-    /* Last pending cleanup at the first slot must not scan the live suffix.
-     * Failed cleanup still traverses the suffix looking for other retries. */
+    /* 第一个槽位的最后一次待处理清理不得扫描后面的活动项。
+     * 清理失败时仍须遍历后缀，以查找其他待重试项。 */
     for(unsigned i=0;i<128;++i)bounded[i]=vmalloc(PAGE_SIZE);
     fail_unmap_va=(uintptr_t)bounded[0];vfree(bounded[0]);
     assert(g_vmalloc_pending_cleanup==1&&g_vmalloc_area_limit==128);
@@ -166,7 +166,7 @@ int main(void) {
         }
         assert(!live);empty();
     }
-    /* The old path rescans every retired suffix page after a head failure. */
+    /* 旧路径在头部失败后会重新扫描后缀中的每个已回收页面。 */
     p=vmalloc(PAGE_SIZE*4096);assert(p&&live==4096);
     fail_unmap_va=(uintptr_t)p;
     uint64_t old_irq=vmalloc_lock_irqsave();
@@ -181,7 +181,7 @@ int main(void) {
     assert(live==1&&g_vmalloc_areas[0].data_pages==1);
     unmap_before=unmap_calls;vfree(p);
     assert(unmap_calls-unmap_before==1&&live==1);
-    /* Full virtual reservation and saved root remain intact until success. */
+    /* 完整的虚拟地址预留和已保存根节点都必须保留到成功为止。 */
     assert(g_vmalloc_areas[0].total_pages==4098&&bitmap_test_bit(g_vmalloc_bitmap,4097));
     fail_unmap_va=0;unmap_before=unmap_calls;vfree(p);
     assert(unmap_calls-unmap_before==1&&!live);empty();
@@ -265,7 +265,7 @@ int main(void) {
     assert(area_visits==VMALLOC_MAX_AREAS);
     assert(!vmalloc(PAGE_SIZE));
     assert(area_visits==VMALLOC_MAX_AREAS);
-    /* Holes must be reused in record-index order, not release order. */
+    /* 空洞必须按记录索引顺序重用，而不是按释放顺序。 */
     vfree(slots[700]);vfree(slots[123]);
     void *low=vmalloc(PAGE_SIZE),*high=vmalloc(PAGE_SIZE);
     assert(low==slots[123] && high==slots[700]);

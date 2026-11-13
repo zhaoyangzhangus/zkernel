@@ -1,6 +1,8 @@
 """Exercise production COW clone with sparse residency and injected failures."""
 from pathlib import Path
 import subprocess
+import resource
+import signal
 import tempfile
 
 root = Path(__file__).resolve().parents[2]
@@ -29,6 +31,7 @@ program = r'''
 #include <stdint.h>
 #include <stdatomic.h>
 #include <stdlib.h>
+#include <stdio.h>
 #include <string.h>
 #include <kernel/rbtree.h>
 static uint64_t x86_read_tsc(void) { return 0; }
@@ -81,40 +84,47 @@ static unsigned index_builds,snapshot_count;
 static struct {
     vm_area_t *area; rb_node_t rb; uint64_t start,end,min,max,gap;
 } snapshot[192];
-static unsigned area_attempts, fail_area;
+static unsigned area_attempts, fail_area, area_live;
+static void (*reserve_hook)(void);
 static vm_area_t *area_allocate(void) {
+    assert(!locked);
     if (++area_attempts == fail_area) return 0;
+    if(reserve_hook){void (*hook)(void)=reserve_hook;reserve_hook=0;hook();}
+    ++area_live;
     return calloc(1, sizeof(vm_area_t));
 }
 static unsigned cache_allocations, cache_frees, clone_calls, object_gets;
 static bool fail_cache_alloc, fail_clone;
 static vm_object_t cloned_objects[512];
-static struct { void *pointer; bool cloned; } allocations[1024];
+static struct { void *pointer; } allocations[1024];
 static unsigned allocation_slots;
 static void kfree(void *p) {
     if (p) {
         ++cache_frees;
+        bool cached=false;
         for (unsigned i=0; i<allocation_slots; ++i) {
             if (allocations[i].pointer != p) continue;
-            /* Successfully published cache entries must be retired unlocked. */
-            if (allocations[i].cloned) assert(!locked);
+            assert(!locked);
             allocations[i].pointer=0;
+            cached=true;
             break;
         }
+        if(!cached){assert(!locked&&area_live);--area_live;}
     }
     free(p);
 }
 static void *kmalloc(size_t size, unsigned flags) {
-    (void)flags;
+    assert(!flags&&!locked);
     if (fail_cache_alloc) return 0;
     ++cache_allocations;
     assert(allocation_slots < 1024);
     void *p=malloc(size); assert(p);
     allocations[allocation_slots].pointer=p;
-    allocations[allocation_slots++].cloned=false;
+    ++allocation_slots;
     return p;
 }
 static void area_release(vm_area_t *a) {
+    assert(!locked&&area_live);--area_live;
     if (a->object) { assert(a->object->refs); --a->object->refs; }
     if (a->private_object) { assert(a->private_object->refs); --a->private_object->refs; }
     free(a);
@@ -122,8 +132,7 @@ static void area_release(vm_area_t *a) {
 static void vm_object_get(vm_object_t *o) { if (o) { ++object_gets; ++o->refs; } }
 static int vm_object_clone_anon(vm_object_t *o, vm_object_t **out) {
     if (fail_clone) return K_ENOMEM;
-    assert(allocation_slots && allocations[allocation_slots-1].pointer);
-    allocations[allocation_slots-1].cloned=true;
+
     assert(clone_calls < 512);
     cloned_objects[clone_calls]=*o;
     cloned_objects[clone_calls].refs=1;
@@ -203,6 +212,13 @@ static int x86_protect_user_page_deferred(paddr_t root, uint64_t va,
     if (status==K_OK) *changed=old != ((flags & VM_PROT_WRITE)!=0);
     return status;
 }
+static int x86_protect_next_user_page_deferred(paddr_t root, uint64_t start,
+    uint64_t end, unsigned flags, int cache, vaddr_t *out, bool *changed) {
+    *changed=false;
+    int status=x86_next_present_page(root,start,end,out);
+    if(status!=K_OK)return status;
+    return x86_protect_user_page_deferred(root,*out,flags,cache,changed);
+}
 static bool x86_tlb_shootdown_root(paddr_t root) {
     (void)root; assert(locked); ++flushes; return !fail_batch;
 }
@@ -245,8 +261,8 @@ static void run(unsigned initial_flags, unsigned protect_failure, unsigned resto
     }
 }
 static void rollback_boundary(void) {
-    /* Objects can fail before PTE processing starts. Existing COW mappings
-     * must remain read-only, even though no OLD_COW marker was installed. */
+    /* 对象操作可能在处理 PTE 前失败。即使尚未安装 OLD_COW 标记，现有 COW 映射
+     * 仍必须保持只读。 */
     for(unsigned failure=0;failure<4;++failure) {
         vm_space_t parent={0},*child=0;vm_object_t object={VM_OBJECT_ANON,3};
         vm_area_t area[3]={0};list_init(&parent.area_list);
@@ -266,8 +282,7 @@ static void rollback_boundary(void) {
         assert(object.refs==3);
     }
     fail_area=0;fail_cache_alloc=fail_clone=false;
-    /* A later untouched COW area has no OLD_COW marker either. Inject a
-     * protection failure at each page and independently fail rollback. */
+    /* 后续未处理的 COW 区域也没有 OLD_COW 标记。逐页注入保护失败，并单独注入回滚失败。 */
     for(unsigned mask=0;mask<8;++mask)for(unsigned failure=1;failure<=3;++failure)
       for(unsigned restore_failure=0;restore_failure<=3;++restore_failure) {
         vm_space_t parent={0},*child=0;vm_object_t object={VM_OBJECT_ANON,3};
@@ -293,8 +308,7 @@ static void rollback_boundary(void) {
         }
     }
     fail_protect=fail_restore=0;
-    /* A read-only old-COW area still owns a marker, but an intervening plain
-     * file mapping did not participate in phase two and owns no new marker. */
+    /* 只读旧 COW 区域仍持有标记，但中间的普通文件映射未参与第二阶段，因此没有新标记。 */
     {
         vm_space_t parent={0},*child=0;vm_object_t object={VM_OBJECT_ANON,2},file={2,1};
         vm_area_t area[3]={0};list_init(&parent.area_list);
@@ -351,17 +365,90 @@ static void generation_cases(void) {
     assert(!generation && !flushes && !clone_calls && !atomic_load(&child->commit_pages));
     vm_space_put(child);
 }
+static vm_space_t *reserve_parent;
+static vm_area_t *reserve_areas;
+static vm_object_t replacement;
+static unsigned reserve_mode;
+static void mutate_reservation(void) {
+    assert(!locked&&!clone_calls&&!protects);
+    if(reserve_mode==0 || reserve_mode==4){
+        for(unsigned i=1;i<3;++i){
+            list_add_before(&reserve_parent->area_list,&reserve_areas[i].ordered_node);
+            ++reserve_areas[i].object->refs;
+        }
+        if(reserve_mode==4)fail_area=2;
+    }else if(reserve_mode==1){
+        reserve_parent->area_list.prev=&reserve_areas[0].ordered_node;
+        reserve_areas[0].ordered_node.next=&reserve_parent->area_list;
+        reserve_areas[0].object->refs-=2;
+    }else if(reserve_mode==2){
+        list_init(&reserve_parent->area_list);
+        reserve_areas[0].object->refs-=3;
+    }else if(reserve_mode==3){
+        --reserve_areas[0].object->refs;
+        reserve_areas[0].object=&replacement;++replacement.refs;
+        reserve_areas[0].start=20*PAGE_SIZE;
+        reserve_areas[0].end=21*PAGE_SIZE;
+    }else{
+        replacement=(vm_object_t){VM_OBJECT_ANON,1};
+        reserve_areas[0].private_object=&replacement;
+        if(reserve_mode==6)fail_cache_alloc=true;
+    }
+}
+static void reservation_cases(void) {
+    for(unsigned mode=0;mode<7;++mode){
+        vm_space_t parent={0},*child=0;
+        vm_area_t areas[3]={0};
+        unsigned initial=mode==1||mode==2?3:1;
+        vm_object_t object={mode>=5?2:VM_OBJECT_ANON,initial};
+        replacement=(vm_object_t){2,0};
+        list_init(&parent.area_list);atomic_init(&parent.commit_pages,0);
+        for(unsigned i=0;i<3;++i){
+            areas[i].start=i*PAGE_SIZE;areas[i].end=(i+1)*PAGE_SIZE;
+            areas[i].object=&object;areas[i].flags=VM_MAP_PRIVATE;
+            if(i<initial)list_add_before(&parent.area_list,&areas[i].ordered_node);
+        }
+        area_attempts=clone_calls=protects=flushes=generation=0;
+        fail_area=fail_protect=fail_restore=0;
+        fail_cache_alloc=fail_clone=fail_batch=false;
+        reserve_parent=&parent;reserve_areas=areas;reserve_mode=mode;
+        reserve_hook=mutate_reservation;
+        int status=vm_space_clone_cow(&parent,&child);
+        assert(!locked&&!reserve_hook&&!protects&&!flushes);
+        if(mode==4||mode==6){
+            assert(status==K_ENOMEM&&!child&&!clone_calls&&!area_live);
+            assert(object.refs==(mode==4?3U:1U));continue;
+        }
+        assert(status==K_OK&&child);
+        unsigned count=0;
+        for(list_head_t *n=child->area_list.next;n!=&child->area_list;n=n->next){
+            vm_area_t *copy=area_from_list(n);
+            assert(copy->start==areas[count].start&&copy->end==areas[count].end);
+            if(mode==3)assert(copy->object==&replacement);
+            if(mode==5)assert(copy->object==&object&&copy->private_object&&copy->private_object!=&replacement);
+            ++count;
+        }
+        assert(count==(mode==0?3U:mode==2?0U:1U));
+        assert(area_attempts==(mode==3||mode==5?1U:3U));
+        vm_space_put(child);assert(!area_live);
+        assert(object.refs==(mode==0?3U:mode==1||mode==5?1U:0U));
+        assert(replacement.refs==(mode==3||mode==5?1U:0U));
+    }
+    puts("fork VMA 锁外预留：增长、缩减、全部取消映射、替换和补充预留 OOM 均重新读取映射，父对象引用及空闲节点无泄漏");
+}
 int main(void) {
+    reservation_cases();
     generation_cases();
     rollback_boundary();
     run(0,0,0,false); run(0,1,0,false); run(0,2,0,false);
     run(0,2,1,false); run(VM_AREA_COW,2,0,false);
     run(0,0,0,true); run(0,0,1,true); run(VM_AREA_COW,0,0,true);
     fail_batch=false;
-    rb_root_t cache={0};
+    vm_clone_cache_t cache={0};
     vm_object_t sources[130], *copies[130];
     cache_allocations=cache_frees=clone_calls=object_gets=0;
-    /* Distinct sources retain independent copies; aliases reuse one copy. */
+    assert(clone_cache_reserve(&cache,130)==K_OK);
+    /* 不同源各自保留副本；别名则复用同一副本。 */
     for (unsigned i=0;i<130;++i) {
         sources[i].type=VM_OBJECT_ANON;
         assert(clone_anon_cached(&cache,&sources[i],&copies[i])==K_OK);
@@ -372,18 +459,20 @@ int main(void) {
         assert(clone_anon_cached(&cache,&sources[i],&again)==K_OK);
         assert(again==copies[i]);
     }
-    assert(clone_calls==130 && object_gets==130 && cache_allocations==130);
-    clone_cache_release(&cache); assert(cache_frees==cache_allocations && !cache.root);
+    assert(clone_calls==130 && object_gets==130 && cache_allocations==1);
+    clone_cache_release(&cache); assert(cache_frees==cache_allocations && !cache.index.root);
     for(unsigned i=0;i<130;++i) assert(copies[i]->refs==2);
     vm_object_t *failed=0;
     fail_cache_alloc=true;
-    assert(clone_anon_cached(&cache,&sources[0],&failed)==K_ENOMEM);
+    assert(clone_cache_reserve(&cache,1)==K_ENOMEM);
     assert(clone_calls==130 && !failed);
     fail_cache_alloc=false; fail_clone=true;
+    assert(clone_cache_reserve(&cache,1)==K_OK);
     assert(clone_anon_cached(&cache,&sources[0],&failed)==K_ENOMEM);
+    clone_cache_release(&cache);
     assert(cache_frees==cache_allocations && !failed);
     fail_clone=false;
-    /* Real fork: split VMAs must share ONE cloned backing in the child. */
+    /* 真实 fork：子进程中拆分的 VMA 必须共享同一个克隆后备对象。 */
     vm_space_t parent={0}, *child=0;
     vm_area_t split[2]={{.start=0,.end=4096,.flags=VM_MAP_PRIVATE,.object=&sources[0]},
                       {.start=1ULL<<40,.end=(1ULL<<40)+4096,
@@ -408,14 +497,13 @@ int main(void) {
     fail_cache_alloc=false; fail_clone=true;
     assert(vm_space_clone_cow(&parent,&child)==K_ENOMEM && !child && !locked);
     fail_clone=false;
-    /* Failure after the first VMA still releases its cache outside map_lock,
-     * before destroying the partially constructed child and its references. */
+    /* 预留失败发生在克隆对象和修改父空间之前。 */
     area_attempts=0; fail_area=2;
     unsigned partial_clone=clone_calls;
     assert(vm_space_clone_cow(&parent,&child)==K_ENOMEM && !child && !locked);
-    assert(clone_calls==partial_clone+1 && !cloned_objects[partial_clone].refs);
+    assert(clone_calls==partial_clone && !area_live);
     fail_area=0;
-    /* Private file shadows also retain sharing, independently of the file. */
+    /* 私有文件影子也应保留共享关系，且与文件本身相互独立。 */
     vm_object_t file={2,1};
     for(unsigned i=0;i<2;++i) {
         split[i].object=&file; split[i].private_object=&sources[1];
@@ -428,8 +516,7 @@ int main(void) {
     assert(backing==second->private_object && backing!=&sources[1]);
     assert(clone_calls==1 && backing->refs==2 && file.refs==3);
     vm_space_put(child); assert(!backing->refs && file.refs==1);
-    /* Retire many distinct cache entries in a
-     * real fork. The kfree hook checks every entry is released unlocked. */
+    /* 在真实 fork 中回收多个不同的缓存项。kfree 钩子会检查每个项释放时均未持锁。 */
     vm_area_t many[130]={0};
     list_init(&parent.area_list);
     for (unsigned i=0; i<130; ++i) {
@@ -446,8 +533,8 @@ int main(void) {
     vm_space_put(child);
     for (unsigned i=0; i<130; ++i)
         assert(!cloned_objects[i].refs && sources[i].refs==1);
-    /* Only two middle mappings had COW before this fork. The wider phase-two
-     * range must not force 130 marker-clear visits. */
+    /* 此次 fork 前只有中间两个映射处于 COW 状态。第二阶段范围变宽后，
+     * 仍不得强制执行 130 次清除标记的遍历。 */
     for(unsigned i=0;i<130;++i)
         many[i].flags=VM_MAP_PRIVATE|((i==64 || i==65)?VM_AREA_COW:0);
     clone_calls=marker_visits=0;child=0;
@@ -457,9 +544,10 @@ int main(void) {
     vm_space_put(child);
     area_attempts=clone_calls=0; fail_area=129; child=0;
     assert(vm_space_clone_cow(&parent,&child)==K_ENOMEM && !child && !locked);
-    assert(clone_calls==128);
+    assert(clone_calls==0 && !area_live);
     for (unsigned i=0; i<128; ++i) assert(!cloned_objects[i].refs);
     for (unsigned i=0; i<allocation_slots; ++i) assert(!allocations[i].pointer);
+    assert(!area_live);
 }
 '''
 with tempfile.TemporaryDirectory(prefix='liteos-cow-rollback-') as directory:
@@ -470,4 +558,16 @@ with tempfile.TemporaryDirectory(prefix='liteos-cow-rollback-') as directory:
                     '-fsanitize=address,undefined', '-fno-pie', '-no-pie',
                     str(path / 'test.c'), '-o', str(path / 'test')], check=True)
     subprocess.run([str(path / 'test')], check=True)
+    allocation='vm_area_t *copy = area_allocate();'
+    assert program.count(allocation)==1
+    negative=program.replace(allocation,
+        'map_lock(source); '+allocation+' map_unlock(source);')
+    (path/'test.c').write_text(negative)
+    subprocess.run(['cc','-std=c11','-Wall','-Wextra','-Werror',
+                    '-I'+str(root/'include'),str(path/'test.c'),'-o',str(path/'test')],check=True)
+    result=subprocess.run([str(path/'test')],capture_output=True,text=True,
+        preexec_fn=lambda:resource.setrlimit(resource.RLIMIT_CORE,(0,0)),timeout=15)
+    assert result.returncode==-signal.SIGABRT and '!locked' in result.stderr
+    print('负面对照通过：VMA 分配重新进入父映射锁时触发断言')
+
 print('COW clone: 41 metadata/PTE/no-op generation cases and 101 failure/rollback cases; single-pass rollback, read-only COW/unrelated markers preserved; exact success marker bounds, 130 first-fork clears -> 0 and two middle markers -> 2; unchanged parent index, unlocked child publication, sparse iteration, aliases and partial failures passed')

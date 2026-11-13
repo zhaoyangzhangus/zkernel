@@ -19,7 +19,7 @@
 
 #include "exec_internal.h"
 
-/* REFACTOR_P5_USER_RUNTIME_TEST_OWNER: locatable user runtime self-test. */
+/* REFACTOR_P5_USER_RUNTIME_TEST_OWNER：可定位的用户运行时自检。 */
 
 #ifndef OS_DEBUG_SERIAL
 #define OS_DEBUG_SERIAL 0

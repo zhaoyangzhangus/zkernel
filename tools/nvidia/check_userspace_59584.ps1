@@ -27,8 +27,8 @@ function Invoke-Readelf([string]$Tool, [string[]]$Arguments) {
     return $output
 }
 
-# App deployment has a different topology from the rename-only host cache.
-# Use the shared checker for manifest remapping, hashes, ELF and symbol closure.
+# 应用部署的目录结构与仅重命名的宿主缓存不同。
+# 使用共享检查器验证清单映射、哈希、ELF 和符号依赖闭包。
 if (-not [string]::IsNullOrWhiteSpace($AppRoot)) {
     $python = Get-Command python3 -ErrorAction SilentlyContinue
     if ($null -eq $python) { $python = Get-Command python -ErrorAction Stop }

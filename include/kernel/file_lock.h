@@ -10,8 +10,7 @@ typedef struct file_lock_range {
 kstatus_t file_lock_query(vnode_t *node, const file_lock_range_t *request,
                           file_lock_range_t *conflict);
 kstatus_t file_lock_set(vnode_t *node, const file_lock_range_t *request);
-/* Caller serializes logical fd close with lock acquisition. Notify waiters
- * only after releasing the fd table lock. Temporary fd pins are NOT closes. */
+/* 调用方负责将逻辑 fd 关闭与加锁操作串行化。释放 fd 表锁后再通知等待者。临时 fd 固定不等于关闭。 */
 void file_lock_release_file(vnode_t *node, uint64_t owner);
 void file_lock_release_owner(uint64_t owner);
 kstatus_t file_lock_begin_wait(vnode_t *node, const file_lock_range_t *request,

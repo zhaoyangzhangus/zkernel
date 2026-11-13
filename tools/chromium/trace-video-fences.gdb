@@ -1,4 +1,4 @@
-# Bounded, read-only return probes for the pinned native video bridge.
+# 针对固定版本原生视频桥接层的有界只读返回探测点。
 set pagination off
 set confirm off
 python

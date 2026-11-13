@@ -88,7 +88,7 @@ if 'static bool vfs_fat_relative_path_equal(' in source:
         'char a = left_relative[index], b = right[suffix + index];',
         '++compared_characters; char a = left_relative[index], b = right[suffix + index];')
 program += r'''
-/* Previous identity wrapper retained only as a test oracle. */
+/* 保留旧的身份包装函数，仅作为测试基准。 */
 static bool vfs_fat_path_equal(const char *left,const char *right){
  char relative[256];vfs_fat32_mount_t *m=vfs_fat32_mount_for_path(left,relative);
  return m&&vfs_fat_relative_path_equal(relative,vfs_string_length(relative),m,right);
@@ -101,7 +101,7 @@ program += function('static vnode_t *vfs_find_fat_node_locked(').replace(
 program += function('static void vfs_set_node_slot_locked(')
 program += function('static bool vfs_path_matches_subtree_prefix(')
 program += function('static kstatus_t vfs_rekey_cached_subtree_locked(')
-# Exercise the actual post-delete eviction loop, including lock/reference order.
+# 覆盖真实的删除后逐出循环，包括锁和引用的处理顺序。
 remove_start = source.index('kstatus_t vfs_remove_typed_kernel(')
 detach_start = source.index('        if (mounted_victim != 0) {',
                             source.index('/* 删除磁盘目录项后同步摘除规范 vnode', remove_start))
@@ -176,7 +176,7 @@ int main(void) {
     total_routes=0;check("/profile/missing",0);
     assert(total_routes==1);
     puts("32768 cached FAT nodes: hit mount routes 32769 -> 2; absent-name routes 32769 -> 1");
-    /* A detached inode can remain alive for old handles, not for new opens. */
+    /* 已分离的 inode 可以由旧句柄继续持有，但不能供新的打开操作使用。 */
     b[n-1].detached=true;check("/PROFILE/32767",0);
     strcpy(b[n-2].path,b[n-1].path);check("/PROFILE/32767",&v[n-2]);
     snprintf(b[n-2].path,sizeof(b[n-2].path),"/profile/%05u",n-2);
@@ -184,7 +184,7 @@ int main(void) {
     check("/profile/32767/child",0); check("/profile/3276",0);
     g_vfs_nodes[0]=0;v[1].fs_private=0;b[2].fat32_node=false;
     check("/profile/00000",0);check("/profile/00001",0);check("/profile/00002",0);
-    /* Different filesystems must not share a vnode just because names match. */
+    /* 不同文件系统不能仅因名称相同就共享 vnode。 */
     strcpy(b[n-1].path,"/vol/nested/Deep/File");
     check("/vol/nested/deep/file",&v[n-1]);
     check("/Deep/File",0);
@@ -192,7 +192,7 @@ int main(void) {
     assert(!vfs_fat_path_equal("/vol/nested/Deep/File","/deep/file"));
     assert(!vfs_fat_path_equal("/vol/nested/Deep/File","/deep/files"));
     assert(!vfs_fat_path_equal("/tmp/file","/file"));
-    /* Same-filesystem aliases retain canonical identity and ASCII folding. */
+    /* 同一文件系统中的别名应保留规范身份和 ASCII 大小写折叠规则。 */
     g_fat32_mounts[2].filesystem=g_fat32_mounts[0].filesystem;
     check("/Deep/File",&v[n-1]);
     assert(vfs_fat_path_equal("/vol/nested/Deep/File","/deep/file"));
@@ -238,7 +238,7 @@ int main(void) {
     }
     memset(right,'x',256);right[0]='/';
     assert(!vfs_fat_path_equal("/x",right));
-    /* Exercise every real mount slot and all filesystem-identity pairs. */
+    /* 覆盖每个实际挂载槽位以及所有文件系统身份组合。 */
     unsigned identities=0;
     for(unsigned i=1;i<VFS_FAT32_MOUNT_LIMIT;++i){
         snprintf(g_fat32_mounts[i].prefix,256,"/disk%u",i);
@@ -282,8 +282,8 @@ int main(void) {
             b[i].fat32_node=true;v[i].fs_private=&b[i];v[i].drops=0;g_vfs_nodes[i]=&v[i];
         }
         b[11].fat32_node=false;strcat(b[15].path,"s");
-        /* A concurrent recreation may already occupy another canonical slot.
-         * It has the exact same path, but is a different inode/page cache. */
+        /* 并发重新创建可能已占用另一个规范槽位。
+         * 路径完全相同，但 inode 和页缓存均不同。 */
         strcpy(b[8].path,b[7].path);
         b[7].detached=true;b[8].detached=false;
         request_routes=0;remount_after_drop=remount;
@@ -304,8 +304,8 @@ int main(void) {
         ++eviction_cases;
     }
     printf("Actual delete eviction: %u distinct/alias/remount cases; same-name replacement retained, old inode released once outside lock; zero mount scans\n",eviction_cases);
-    /* Recreation can also occur at the unlock/reference-release boundary,
-     * reusing the slot just freed by removal. Never detach that new inode. */
+    /* 重新创建也可能发生在解锁/释放引用的边界处，并重用刚由删除腾出的槽位。
+     * 绝不能分离这个新 inode。 */
     g_vfs_nodes[7]=&v[7];g_vfs_nodes[8]=0;
     v[7].drops=v[8].drops=0;
     replacement_after_drop=&v[8];
@@ -313,8 +313,8 @@ int main(void) {
     assert(!replacement_after_drop&&g_vfs_nodes[7]==&v[8]);
     assert(v[7].drops==1&&v[8].drops==0&&!lock_depth);
     puts("Delete release-boundary recreation: reused slot retains the new inode");
-    /* FAT rename must rekey case-insensitive and aliased canonical inodes,
-     * but never a different filesystem or a detached old version. */
+    /* FAT 重命名必须为不区分大小写的规范 inode 及其别名重新建键，
+     * 但不能影响其他文件系统或已分离的旧版本。 */
     g_vfs_node_capacity=7;
     g_fat32_mounts[0]=(vfs_fat32_mount_t){true,(void*)1,"/"};
     g_fat32_mounts[1]=(vfs_fat32_mount_t){true,(void*)1,"/disk1"};

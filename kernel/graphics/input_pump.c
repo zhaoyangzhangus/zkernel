@@ -204,13 +204,10 @@ void window_server_pump_input_mode(bool compose_now) {
             desktop_cycle_window_focus();
         }
 
-        if (app != DESKTOP_APP_NONE) {
-            if (!desktop_launch_enqueue(app) &&
-                !desktop_restore_minimized_app(app)) {
-                /* 忙碌/不可用时，不得让输入所有者执行磁盘 I/O 和 ELF 加载。队列清空后用户可以
-                 * 重试。 */
-                continue;
-            }
+        /* 已有窗口直接恢复；只有不存在可恢复窗口时才交给启动线程。
+         * 队列忙碌时允许重试，不得在输入线程同步读取或加载程序。 */
+        if (app != DESKTOP_APP_NONE && !desktop_restore_minimized_app(app)) {
+            (void)desktop_launch_enqueue(app);
         }
     }
 

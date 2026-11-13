@@ -1,6 +1,8 @@
 """编译真实 FAT 空间查询和表项写入，覆盖缓存维护及错误回滚。"""
 from pathlib import Path
 import subprocess
+import resource
+import signal
 import tempfile
 root=Path(__file__).resolve().parents[2]
 source=(root/'kernel/fs/nativefs/fat_table.c').read_text()
@@ -10,15 +12,17 @@ def function(signature):
 code=r'''
 #include <assert.h>
 #include <string.h>
+#include <stdio.h>
 #include <kernel/fat32.h>
 #define FAT_TABLE_TYPE_16 16U
 static unsigned reads,writes,locked;
 static bool read_failure,write_failure;
+static UINT64 failed_lba=UINT64_MAX;
 static UINT8 image[32][4096];
 void fat32_mutation_lock(OS_FAT32 *f){(void)f;assert(!locked);locked=1;}
 void fat32_mutation_unlock(OS_FAT32 *f){(void)f;assert(locked);locked=0;}
 BOOLEAN fat32_read_sector(const OS_FAT32 *f,UINT64 lba,UINT8 *out){
- assert(locked);++reads;if(read_failure || lba>=32)return 0;
+ assert(locked);++reads;if(read_failure || lba==failed_lba || lba>=32)return 0;
  memcpy(out,image[lba],f->BytesPerSector);return 1;
 }
 BOOLEAN fat32_write_sector(OS_FAT32 *f,UINT64 lba,const UINT8 *in){
@@ -30,7 +34,7 @@ static UINT32 fat32_read_u32(const UINT8 *p){return fat32_read_u16(p)|(UINT32)fa
 static void fat32_write_u16(UINT8 *p,UINT16 n){p[0]=n;p[1]=n>>8;}
 static void fat32_write_u32(UINT8 *p,UINT32 n){fat32_write_u16(p,n);fat32_write_u16(p+2,n>>16);}
 BOOLEAN fat32_cluster_valid(const OS_FAT32 *f,UINT32 c){return c>=2 && c<f->ClusterCount+2;}
-''' + function('BOOLEAN fat32_write_fat_entry(') + function('BOOLEAN fat32_space(') + r'''
+''' + function('static BOOLEAN fat32_fat_entry_location(') + '\n' + function('BOOLEAN fat32_write_fat_entry(') + function('BOOLEAN fat32_space(') + r'''
 int main(void){
  for(unsigned type=16;type<=32;type+=16)for(unsigned sector=512;sector<=4096;sector*=8){
   memset(image,0xff,sizeof(image));reads=writes=0;
@@ -66,6 +70,51 @@ int main(void){
   fs.FatSectors=1;assert(!fat32_space(&fs,&total,&free_blocks,&size) || sector==4096);
   fs.Mounted=0;assert(!fat32_space(&fs,&total,&free_blocks,&size));
  }
+
+ unsigned cases=0;
+ for(unsigned type=16;type<=32;type+=16)
+ for(unsigned bps=512;bps<=4096;bps*=2) {
+  unsigned width=type/8,entries=bps/width;
+  unsigned sizes[]={1,2,entries-3,entries-2,entries-1,entries,
+                    entries+1,2*entries-3,2*entries-2,2*entries+1,2050};
+  for(unsigned k=0;k<sizeof(sizes)/sizeof(*sizes);++k)
+  for(unsigned pattern=0;pattern<5;++pattern) {
+   unsigned count=sizes[k],end=count+2;
+   OS_FAT32 fs={.Mounted=1,.FatType=type,.BytesPerSector=bps,.SectorsPerCluster=8,
+    .FatCount=2,.FatSectors=24,.FatStartLba=1,.ClusterCount=count};
+   memset(image,0,sizeof(image));
+   UINT64 expected=0,first=end;
+   for(unsigned c=2;c<end;++c) {
+    bool vacant=pattern==0 || (pattern==2 && c==2) ||
+     (pattern==3 && c==end-1) || (pattern==4 && (c*17+count)%7<3);
+    UINT32 value=vacant?0:7;
+    /* FAT32 高四位不参与空闲判断；保留项和最后扇区的尾部始终为零。 */
+    if(type==32)value|=0xa0000000U;
+    UINT8 *entry=image[1+c/entries]+(c%entries)*width;
+    if(type==16)fat32_write_u16(entry,(UINT16)value);else fat32_write_u32(entry,value);
+    if(vacant){++expected;if(first==end)first=c;}
+   }
+   reads=0;UINT64 total=99,available=99,unit=99;
+   assert(fat32_space(&fs,&total,&available,&unit));
+   assert(total==count && available==expected && unit==bps*8);
+   assert(fs.FreeClusterSearchStart==first && !locked);
+   unsigned sectors=(end+entries-1)/entries;
+   assert(reads==sectors);
+   assert(fat32_space(&fs,&total,&available,&unit)&&reads==sectors);
+   /* 任意扇区读取失败都不能发布部分计数或污染已知分配下界。 */
+   for(unsigned failed=1;failed<=sectors;++failed) {
+    fs.FreeClusterCountValid=0;fs.FreeClusterCount=123;
+    fs.FreeClusterSearchStart=2;failed_lba=failed;
+    total=available=unit=99;reads=0;
+    assert(!fat32_space(&fs,&total,&available,&unit)&&!locked);
+    assert(total==99 && available==99 && unit==99);
+    assert(!fs.FreeClusterCountValid && fs.FreeClusterCount==123);
+    assert(fs.FreeClusterSearchStart==2 && reads==failed);
+   }
+   failed_lba=UINT64_MAX;++cases;
+  }
+ }
+ printf("FAT space: %u geometry/pattern/boundary cases, cached queries and every-sector failure rollback PASS\n",cases);
  assert(!fat32_space(0,0,0,0)&&!locked);
 }
 '''
@@ -76,4 +125,19 @@ with tempfile.TemporaryDirectory(prefix='fat-space-') as directory:
                     '-I'+str(root/'include'),'-x','c','-','-o',str(binary)],
                    input=code,text=True,check=True)
     subprocess.run([str(binary)],check=True)
+    for name, old, new in (
+        ('reserved entries', 'UINT32 cluster = 2U; cluster < end;', 'UINT32 cluster = 0U; cluster < end;'),
+        ('volume tail', 'if (count > end - cluster) count = end - cluster;', '(void)end;'),
+        ('FAT32 high bits', 'fat32_read_u32(entry) & 0x0FFFFFFFU', 'fat32_read_u32(entry)'),
+    ):
+        broken=code.replace(old,new)
+        assert broken!=code
+        subprocess.run(['cc','-std=c11','-O2','-Wall','-Wextra','-Werror',
+                        '-fsanitize=address,undefined','-fno-pie','-no-pie',
+                        '-I'+str(root/'include'),'-x','c','-','-o',str(binary)],
+                       input=broken,text=True,check=True)
+        result=subprocess.run([str(binary)],capture_output=True,timeout=15,
+            preexec_fn=lambda:resource.setrlimit(resource.RLIMIT_CORE,(0,0)))
+        assert result.returncode==-signal.SIGABRT and b'Assertion' in result.stderr
+        print('Negative control rejected: '+name)
 print('PASS: FAT16/32 real free-space scan, one read per sector, cached queries, primary/mirror writes, failed I/O and geometry validation')

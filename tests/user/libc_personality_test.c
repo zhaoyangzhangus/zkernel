@@ -28,8 +28,8 @@ int main(int argc, char **argv) {
     }
     if (g_probe_count != 1U || g_bad_probe) return 2;
 
-    /* A process personality cannot change after loader activation.  Changing
-     * the mock result catches accidental re-probing after the cache is warm. */
+    /* 加载器激活后不能更改进程 personality。改变模拟结果可以捕获缓存预热后意外
+     * 再次探测的情况。 */
     g_probe_result = expected_linux ? 0LL : -38LL;
     if (__libc_linux_personality() != expected_linux || g_probe_count != 1U)
         return 3;

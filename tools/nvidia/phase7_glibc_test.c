@@ -1,4 +1,4 @@
-/* Real Linux/glibc x86-64 ABI acceptance binary for Phase 7. */
+/* 阶段 7 的真实 Linux/glibc x86-64 ABI 验收程序。 */
 #include <fcntl.h>
 #include <pthread.h>
 #include <stdint.h>

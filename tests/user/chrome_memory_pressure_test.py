@@ -93,7 +93,7 @@ int main(){
   available(sample.totalram/5+sample.totalram/40);tick(16);
   assert(evaluator.current_vote()==MEMORY_PRESSURE_LEVEL_NONE && votes==6 && notifications==5);
   tick(30);assert(votes==6 && notifications==5);
-  // sysinfo is allowed to report counts in pages, not bytes.
+  // sysinfo 可以按页面数报告计数，不必按字节数报告。
   sample.totalram=1048576;sample.freeram=1000;sample.mem_unit=4096;tick(31);
   assert(evaluator.current_vote()==MEMORY_PRESSURE_LEVEL_CRITICAL && notifications==6);
  }

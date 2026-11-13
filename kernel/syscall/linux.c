@@ -905,12 +905,16 @@ static bool linux_epoll_watch_matches_entry(const linux_epoll_watch_t *watch,
 static void linux_epoll_prune_description(linux_epoll_object_t *epoll,
                                           linux_fd_description_t *description) {
     bool changed = false;
+    uint32_t next_index = 0U;
+    /* 最后一个外部引用已关闭，不能再为此描述新增 interest。只保留下标而非表项指针，
+     * 每次解锁释放对象后继续扫描后缀；并发删除或其他描述复用空槽都不会遗漏目标。 */
     for (;;) {
         linux_epoll_watch_t removed = {0};
         spinlock_lock(&epoll->lock);
-        for (uint32_t index = 0U; index < epoll->watch_limit; ++index) {
+        for (uint32_t index = next_index; index < epoll->watch_limit; ++index) {
             linux_epoll_watch_t *watch = &epoll->watches[index];
             if (!watch->used || watch->description != description) continue;
+            next_index = index + 1U;
             linux_epoll_watch_unlink(watch);
             removed = *watch;
             *watch = (linux_epoll_watch_t){0};
@@ -2279,16 +2283,10 @@ static int64_t linux_getresids(uint64_t real_pointer,
 static kstatus_t linux_copy_string(uint64_t pointer, char *destination,
                                    size_t capacity) {
     if (pointer == 0U || destination == 0 || capacity < 2U) return K_EINVAL;
-    for (size_t index = 0U; index + 1U < capacity; ++index) {
-        char value = 0;
-        kstatus_t status = copy_from_user(&value,
-            (const void __user *)(uintptr_t)(pointer + index), sizeof(value));
-        if (status != K_OK) return status;
-        destination[index] = value;
-        if (value == '\0') return K_OK;
-    }
-    destination[capacity - 1U] = '\0';
-    return K_ENAMETOOLONG;
+    kstatus_t status = copy_string_from_user(destination,
+        (const char __user *)(uintptr_t)pointer, capacity - 1U);
+    if (status == K_ENAMETOOLONG) destination[capacity - 1U] = '\0';
+    return status;
 }
 
 static kstatus_t linux_system_config_path(char path[LINUX_MAX_PATH]) {
@@ -4905,7 +4903,7 @@ static int64_t linux_poll(process_t *process, uint64_t fds_pointer,
     linux_fd_entry_t *entries = inline_entries;
     /* 每个描述符最多贡献一个包装对象和两个 Unix 端点。
      * 常见的 <=8 fd 等待使用栈空间，不再使用旧版完整上限
-     * 27 KiB table. Larger blocking sets allocate once, never under a lock. */
+     * 27 KiB 的表。更大的阻塞集合只分配一次，且绝不在持锁时分配。 */
     void *inline_objects[3U * 8U];
     uint8_t inline_owned[3U * 8U];
     linux_poll_wait_set_t inline_wait_set = {
@@ -7373,8 +7371,8 @@ static int64_t linux_readv(process_t *process, int64_t descriptor,
     if (count > LINUX_MAX_IOV || copy_from_user(
             vectors, (const void __user *)(uintptr_t)vector_pointer,
             (size_t)count * sizeof(vectors[0])) != K_OK) return LINUX_EFAULT;
-    /* Reject an unrepresentable aggregate before any vector changes file
-     * state. Checking each length alone does not protect signed total. */
+    /* 在任一向量改变文件状态前，先拒绝无法表示的总长度。只检查每段长度无法防止
+     * 有符号总长度溢出。 */
     uint64_t requested = 0U;
     for (uint64_t index = 0U; index < count; ++index) {
         if (vectors[index].length > (uint64_t)INT64_MAX - requested)
@@ -7600,8 +7598,7 @@ static int64_t linux_getdents64(process_t *process, int64_t descriptor,
             if (total == 0U) status = K_EINVAL;
             break;
         }
-        /* Header and name are overwritten below; initialize only alignment
-         * padding, the remaining bytes that will be exposed to userspace. */
+        /* 下方会覆盖头部和名称；这里只初始化对齐填充，即最终会暴露给用户态的其余字节。 */
         linux_zero(record + sizeof(header) + name_length + 1U,
                     record_length - sizeof(header) - name_length - 1U);
         header.inode = index + 1U;

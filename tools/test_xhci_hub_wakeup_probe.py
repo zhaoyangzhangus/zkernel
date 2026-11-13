@@ -147,10 +147,8 @@ def main():
         ):
             return 3
 
-        # Hub runtime readiness precedes the post-display user-runtime
-        # self-test.  Wait for that independent boot gate before removing a
-        # device, so a recovery probe cannot turn a slow self-test into a
-        # misleading stage failure.
+        # Hub 运行时就绪发生在显示初始化后的用户运行时自测之前。先等待这个独立启动门禁，
+        # 再移除设备，以免恢复探测将较慢的自测误报为阶段失败。
         if not wait_for(
             lambda: "OS_USER_RUNTIME_SUBTESTS_OK" in serial_text(),
             BOOT_READY_TIMEOUT,
@@ -160,9 +158,8 @@ def main():
         if "OS_STAGE_FAIL" in serial_text():
             return 5
 
-        # Attach HMP only after the boot-critical user-runtime self-test.  A
-        # connected monitor increases TCG main-loop load and can otherwise
-        # perturb that self-test's scheduling window.
+        # 只有启动关键的用户运行时自测完成后才连接 HMP。已连接的监视器会增加 TCG 主循环
+        # 负载，否则可能扰乱该自测的调度时间窗。
         end = time.monotonic() + 5.0
         while hmp is None:
             try:
@@ -172,9 +169,8 @@ def main():
                     raise
                 time.sleep(0.05)
 
-        # Give the freshly armed interrupt endpoints enough time to reach
-        # QEMU's normal NAK/retry state even for the slowest legal interval
-        # used by this test topology.
+        # 给刚刚布防的中断端点留出足够时间，使其进入 QEMU 的常规 NAK/重试状态；即使此
+        # 测试拓扑使用允许的最慢间隔，也必须如此。
         time.sleep(1.0)
 
         print()

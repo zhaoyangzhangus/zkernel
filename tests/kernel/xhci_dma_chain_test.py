@@ -25,7 +25,7 @@ typedef struct {uint64_t parameter;uint32_t status,control;} xhci_trb_t;
 static xhci_trb_t trbs[512],snapshot[512];
 static unsigned first_index,first_cycle,barriers;
 static void dma_wmb(void) {
-    /* First TRB must remain unavailable until all descriptors are ready. */
+    /* 所有描述符准备好之前，第一个 TRB 必须保持不可用。 */
     assert((trbs[first_index].control&1)!=first_cycle);++barriers;
 }
 static uint64_t xhci_dma_address(const dma_mapping_t *m) {return m->segments[0].addr.value;}

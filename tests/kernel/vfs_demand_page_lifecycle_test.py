@@ -182,8 +182,8 @@ int main(void){
   assert(vfs_page_cache_lookup(v.page_cache,0)->page==first);
   vfs_page_cache_destroy(&v);reset();++cases;
  }
- /* Every heap/page/read/publication failure must keep output untouched and
-  * release temporary ownership. Destroy also reclaims an empty cache. */
+ /* 堆/页面/读取/发布任一步骤失败时，都必须保持输出不变并释放临时所有权。
+  * 销毁操作也要回收空缓存。 */
  for(unsigned kind=0;kind<3;++kind)for(unsigned failure=0;failure<10;++failure){
   reset();vfs_backend_node_t b={.size=8193,.detached=kind==2,
    .read=kind==0?vfs_memory_backend_read:read_data};
@@ -206,8 +206,8 @@ int main(void){
   else {assert(out!=&sentinel);check_bytes(out,0,b.size);}
   assert(!lock_depth);vfs_page_cache_destroy(&v);reset();++cases;
  }
- /* A failed compound-page check must preserve a colliding resident entry,
-  * both indexes and the caller's output, for null and malformed tails. */
+ /* 复合页检查失败时，无论尾部为空还是格式错误，都必须保留冲突的驻留项、两个索引和
+  * 调用方输出。 */
  for(unsigned failure=1;failure<=2;++failure){
   reset();vfs_backend_node_t b={.size=259U*PAGE_SIZE,.read=vfs_memory_backend_read};
   vnode_t v={.object={KOBJECT_TYPE_VNODE},.fs_private=&b,.size=b.size};page_t *original=0;

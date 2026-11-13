@@ -124,10 +124,10 @@ int main(void){
   assert(!peer_wakes && !peer_notifications && peer_refs==1);
   assert(receive(family,out,1,&bytes,false)==K_OK && bytes==1);
   assert(peer_wakes==1 && peer_notifications==1 && peer_refs==1);
-  // Notify on partial drains too: a blocked atomic write may need more room.
+  // 部分排空时也要通知：阻塞的原子写入可能需要更多空间。
   assert(receive(family,out,2,&bytes,false)==K_OK && bytes==2);
   assert(peer_wakes==2 && peer_notifications==2 && peer_refs==1);
-  // A reference, not the mutable link, owns notification after unlock.
+  // 解锁后由引用而非可变链接负责维持通知对象的生命周期。
   detach_on_unlock=true;
   assert(receive(family,out,1,&bytes,false)==K_OK && bytes==1);
   assert(!state.peer && peer_wakes==3 && peer_notifications==3 && peer_refs==1);

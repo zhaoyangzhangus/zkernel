@@ -31,8 +31,7 @@ with tempfile.TemporaryDirectory(prefix='system-scroll-') as directory:
             assert f.readline().strip()==b'P6'
             w,h=map(int,f.readline().split());assert (w,h)==(1920,1080)
             assert f.readline().strip()==b'255';pixels=f.read()
-        # Exclude pointer, toolbars, scrollbars and desktop. Sparse sampling
-        # keeps host-side pixel comparison out of the guest input path.
+        # 排除指针、工具栏、滚动条和桌面。稀疏采样可避免宿主侧像素比较进入客户机输入路径。
         return b''.join(pixels[(y*w+x)*3:(y*w+x)*3+3]
                         for y in range(200,900,12) for x in range(40,890,24))
     for direction in ('wheel-down','wheel-up'):

@@ -206,8 +206,8 @@ $bridgeObject = Join-Path $phase8ObjectRoot 'nv_rm_vendor_bridge.o'
 Invoke-CompileIfChanged (Join-Path $rmSourceRoot 'nv_rm_vendor_bridge.c') $bridgeObject $bridgeFlags |
     Write-Output
 
-# Phase 7 changed process/thread layout. Rebuild every System object named by
-# the Phase 6 link list in an isolated ELF directory to avoid stale ABI mixes.
+# 阶段 7 改变了进程和线程布局。在独立的 ELF 目录中重建阶段 6 链接清单指定的
+# 每个 System 对象，避免混用过期 ABI。
 $normalTargets = New-Object 'System.Collections.Generic.List[string]'
 $normalLeaves = New-Object 'System.Collections.Generic.HashSet[string]'
 foreach ($row in @(Get-Content -LiteralPath $phase6LinkList)) {
@@ -312,7 +312,7 @@ if (@($undefined | Where-Object { $_.Trim() }).Count -ne 0) {
     throw ('Phase 8 kernel has unresolved symbols: {0}' -f $undefined[0])
 }
 
-# Build the real Linux/glibc probe with the pinned Debian development files.
+# 使用固定版本的 Debian 开发文件构建真实的 Linux/glibc 探测程序。
 if ([string]::IsNullOrWhiteSpace($GlibcRoot)) {
     $GlibcRoot = Join-Path $repoRoot 'build-phase7\host-deps\glibc'
 }

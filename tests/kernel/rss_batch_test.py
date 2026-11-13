@@ -50,7 +50,7 @@ static void *update(void *opaque) {
 int main(void) {
     unsigned cases=0;
     for(uint64_t value=0;value<512;++value)for(size_t count=0;count<=257;++count) {
-        /* Prior per-page saturation oracle, not wrapping subtraction. */
+        /* 使用此前逐页饱和处理的基准，而不是会回绕的减法。 */
         uint64_t old=value;
         for(size_t i=0;i<count;++i)if(old)--old;
         check(value,count);assert(atomic_load(&space.rss_pages)==old);++cases;

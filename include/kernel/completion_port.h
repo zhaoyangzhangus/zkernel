@@ -27,7 +27,7 @@ typedef struct completion_port {
     uint32_t head;
     uint32_t tail;
     uint32_t count;
-    /* Allocated once with exactly capacity slots; unpublished slots are unread. */
+    /* 一次性分配恰好 capacity 个槽位；尚未发布的槽位不可读取。 */
     os_completion_entry_t entries[];
 } completion_port_t;
 

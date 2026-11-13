@@ -112,8 +112,7 @@ static kstatus_t e1000_send_tcp_ipv6_segments(
     return K_OK;
 }
 
-/* A successfully submitted query still leaves the caller waiting for its
- * reply. Ring backpressure is equally retryable; never turn it into EIO. */
+/* 查询成功提交后，调用方仍需等待回复。环形缓冲区背压同样可以重试，绝不能将其转换为 EIO。 */
 static kstatus_t e1000_request_arp(e1000_state_t *state,
                                    uint32_t source, uint32_t neighbor) {
     uint8_t frame[NET_ARP_FRAME_SIZE];

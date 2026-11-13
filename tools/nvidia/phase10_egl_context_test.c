@@ -1,4 +1,4 @@
-/* Phase 10: real EGL device discovery, initialization, and current context. */
+/* Phase 10：真实的 EGL 设备发现、初始化和当前上下文测试。 */
 #include <stdint.h>
 #include <string.h>
 #include <unistd.h>
@@ -55,10 +55,8 @@ typedef p10_egl_boolean_t (*p10_egl_terminate_fn)(p10_egl_display_t);
 typedef void *(*p10_egl_get_proc_address_fn)(const char *);
 typedef const unsigned char *(*p10_gl_get_string_fn)(unsigned int);
 
-/* The real GLVND entry points are loaded after the process starts.  This is
- * the same loader path exercised by the Phase 9 closure test: libEGL parses
- * its vendor JSON and resolves the NVIDIA ICD through the system dynamic
- * linker. */
+/* 进程启动后会加载真实的 GLVND 入口。这与 Phase 9 依赖闭包测试使用相同加载路径：libEGL
+ * 解析供应商 JSON，并通过系统动态链接器解析 NVIDIA ICD。 */
 #define P10_RTLD_NOW 2
 #define P10_RTLD_GLOBAL 0x100
 #define P10_RTLD_NOLOAD 4
@@ -168,9 +166,8 @@ int main(void)
         "OS_P10_EGL_FAILURE_STAGE_UNKNOWN\n";
 
     p10_emit("OS_P10_EGL_PROBE_BEGIN\n");
-    /* Use the official GLVND override so the headless probe selects only the
-     * pinned NVIDIA ICD; the JSON is still parsed and the vendor is still
-     * loaded by libEGL itself. */
+    /* 使用官方 GLVND 覆盖设置，使无头探测只选择固定的 NVIDIA ICD；JSON 仍由 libEGL 自身
+     * 解析，供应商仍由 libEGL 加载。 */
     if (setenv("__EGL_VENDOR_LIBRARY_FILENAMES",
                "/usr/apps/p10-egl-context/egl/10_nvidia.json", 1) != 0) {
         return p10_fail("OS_P10_GLVND_ENV_FAIL\n");
@@ -238,14 +235,12 @@ int main(void)
         failure_marker = "OS_P10_EGL_GETDISPLAY_SYMBOL_FAIL\n";
         goto cleanup;
     }
-    /* Trigger normal GLVND vendor discovery through the exported EGL display
-     * entrypoint before asking for the device extension. */
+    /* 先通过导出的 EGL display 入口触发正常的 GLVND 供应商发现，再查询设备扩展。 */
     display = get_display(0);
     p10_emit("OS_P10_EGL_VENDOR_DISCOVERY_DONE\n");
 
-    /* Core EGL entry points are exported by libEGL.  Resolve them after the
-     * vendor has been selected; use eglGetProcAddress only as the standard
-     * dispatch fallback for implementations that expose a core symbol there. */
+    /* 核心 EGL 入口由 libEGL 导出。供应商选定后再解析这些入口；仅当实现通过
+     * eglGetProcAddress 提供核心符号时，才将其作为标准分发回退。 */
     initialize = (p10_egl_initialize_fn)dlsym(egl_handle, "eglInitialize");
     if (initialize == 0)
         initialize = (p10_egl_initialize_fn)get_proc_address("eglInitialize");

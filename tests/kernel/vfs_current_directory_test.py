@@ -56,6 +56,11 @@ kstatus_t copy_from_user(void *out, const void __user *in, size_t size) {
  for (size_t i=0;i<size;++i) { d[i]=s[i]; if (!s[i]) { memset(d+i+1,0,size-i-1); break; } }
  return K_OK;
 }
+kstatus_t copy_string_from_user(char *out, const char __user *in, size_t size) {
+ if (!out || (uintptr_t)in < 4096U || !size) return K_EINVAL;
+ for(size_t i=0;i<size;++i) { out[i]=in[i];if(!out[i])return K_OK; }
+ return K_ENAMETOOLONG;
+}
 kstatus_t copy_to_user(void __user *out, const void *in, size_t size) {
  if ((uintptr_t)out < 4096U || !in) return K_EACCES;
  memcpy(out,in,size); return K_OK;

@@ -75,9 +75,8 @@ static int read_blob(const char *path, uint8_t **out, size_t *size) {
         return 0;
     }
     length = ftell(file);
-    /* ftell() returns long.  Every supported host here has a size_t wide
-     * enough to represent a positive long; comparing through unsigned long
-     * is rejected by MinGW when long is 32-bit and size_t is 64-bit. */
+    /* ftell() 返回 long。此处所有受支持的宿主，其 size_t 都足以表示正 long 值；
+     * 通过 unsigned long 比较时，MinGW 在 long 为 32 位、size_t 为 64 位的平台上会拒绝。 */
     if (length <= 0) {
         fclose(file);
         return 0;

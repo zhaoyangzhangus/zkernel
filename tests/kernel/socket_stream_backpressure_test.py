@@ -88,7 +88,7 @@ int main(void){
   memset(data,0xcc,sizeof(data));bytes=99;
   assert(socket_send_stream(&sock,&state,data,1,&bytes)==K_EAGAIN);
   assert(!bytes&&outputs==before+1&&!memcmp(state.tcp_send_payload,saved,expected_length));
-  /* After ACK, only a genuinely new write gets the next sequence. */
+  /* 收到 ACK 后，只有真正的新写入才会获得下一个序列号。 */
   state.tcp_send_pending=false;expected_sequence=state.tcp_send_next_sequence;
   expected_length=1;output_status=K_OK;emitted=0;
   assert(socket_send_stream(&sock,&state,data,1,&bytes)==K_OK&&bytes==1);
@@ -115,8 +115,8 @@ int main(void){
    assert(bytes==expected_length&&state.tcp_send_length==expected_length);
   }
  }
- /* A 16 KiB TLS record formerly required 12 stop-and-wait ACK rounds.
-  * Model one complete cumulative ACK per bounded retained flight. */
+ /* 以前一个 16 KiB TLS 记录需要 12 轮停等 ACK。
+  * 现在按每个有界的保留数据批次模拟一个完整的累积 ACK。 */
  for(unsigned family=0;family<2;++family) {
   memset(&state,0,sizeof(state));sock.family=family?OS_AF_INET6:OS_AF_INET4;
   state.tcp_state=SOCKET_TCP_ESTABLISHED;state.tcp_peer_window=8192;
@@ -132,7 +132,7 @@ int main(void){
   }
   assert(rounds==4);
  }
- /* A nonzero peer window smaller than MSS still permits a short write. */
+ /* 对端窗口非零但小于 MSS 时，仍允许短写入。 */
  memset(&state,0,sizeof(state));sock.family=OS_AF_INET4;
  state.tcp_state=SOCKET_TCP_ESTABLISHED;state.tcp_peer_window=37;state.tcp_peer_mss=1460;
  expected_length=37;expected=data;expected_sequence=0;emitted=0;output_status=K_OK;

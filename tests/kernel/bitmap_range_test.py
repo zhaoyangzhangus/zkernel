@@ -26,7 +26,7 @@ static void check(size_t start, size_t count, bool value) {
     assert(!memcmp(actual,expected,sizeof(actual)));
 }
 int main(void) {
-    /* Exhaust every offset and length through four word boundaries. */
+    /* 遍历跨越四个字边界的所有偏移和长度组合。 */
     for (unsigned start=0; start<128; ++start)
         for (unsigned count=0; count<=257; ++count)
             for (unsigned v=0; v<2; ++v) check(start,count,v);

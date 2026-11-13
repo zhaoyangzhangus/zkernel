@@ -4,7 +4,7 @@
 #include <stdint.h>
 #include <time.h>
 
-/* A process-local POSIX semaphore backed by the System futex primitive. */
+/* 由 System futex 原语支持的进程本地 POSIX 信号量。 */
 typedef struct {
     volatile uint32_t value;
 } sem_t;

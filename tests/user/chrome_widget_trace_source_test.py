@@ -72,7 +72,7 @@ extra = (root/'build/config/ozone_extra.gni').read_text()
 assert 'ozone_external_platforms = [ "nativeguest" ]' in extra
 assert '"platform/nativeguest"' in extra
 assert '"ozone-platform") == "nativeguest"' in webui
-# The generator uses platform.capitalize(), not camel-case word splitting.
+# 生成器使用 platform.capitalize()，而不是按驼峰形式拆分单词。
 suffix = 'nativeguest'.capitalize()
 for filename, typename in (('ozone_platform_nativeguest.cc', 'OzonePlatform'),
                            ('client_native_pixmap_factory_nativeguest.cc', 'ClientNativePixmapFactory')):

@@ -1,13 +1,11 @@
-/* Phase 12 Linux personality runner for the CPU readback window bridge. */
+/* 第 12 阶段：验证 CPU 回读窗口桥接与进程清理。 */
 #include <arch/x86_64/cpu.h>
 #include <kernel/console.h>
 #include <kernel/elf_loader.h>
-#include <kernel/kmem.h>
 #include <kernel/linux_abi.h>
 #include <kernel/process.h>
 #include <kernel/realtest.h>
 #include <kernel/sched.h>
-#include <kernel/vfs.h>
 #include <kernel/vm.h>
 #include <kernel/window_server.h>
 #include <uapi/window.h>
@@ -23,35 +21,6 @@
 #define PHASE12_WINDOW_Y 32
 #define PHASE12_WINDOW_WIDTH 320U
 #define PHASE12_WINDOW_HEIGHT 240U
-
-static kstatus_t phase12_load_path(const char *path, process_t *process,
-                                   user_elf_image_info_t *info,
-                                   vaddr_t *stack_pointer) {
-    file_t *file = 0;
-    kstatus_t status = vfs_open_kernel(path, VFS_OPEN_READ, 0U, &file);
-    if (status != K_OK) return status;
-    if (file->vnode == 0 || file->vnode->size == 0U ||
-        file->vnode->size > PHASE12_IMAGE_LIMIT) {
-        vfs_close(file);
-        return K_EINVAL;
-    }
-    size_t image_size = (size_t)file->vnode->size;
-    uint8_t *image = (uint8_t *)kmalloc(image_size, 0U);
-    if (image == 0) {
-        vfs_close(file);
-        return K_ENOMEM;
-    }
-    uint64_t bytes = 0U;
-    status = vfs_read_kernel(file, image, image_size, &bytes);
-    vfs_close(file);
-    if (status == K_OK && bytes != image_size) status = K_EIO;
-    if (status == K_OK) {
-        status = process_load_elf_image(process, image, image_size,
-                                        info, stack_pointer);
-    }
-    kfree(image);
-    return status;
-}
 
 static bool phase12_wait_for_process(process_t *process, thread_t *thread) {
     vm_space_t *runtime_space = process != 0 ? process->vm : 0;
@@ -104,8 +73,8 @@ bool linux_phase12_realtest(void) {
     bool success = false;
 
     if (process_create(0, &process) != K_OK ||
-        phase12_load_path("/tests/p12-window", process, &info,
-                          &stack_pointer) != K_OK) {
+        process_load_elf_from_vfs(process, "/tests/p12-window",
+                                  PHASE12_IMAGE_LIMIT, &info, &stack_pointer) != K_OK) {
         goto cleanup;
     }
     process_set_name(process, "/tests/p12-window");
@@ -139,8 +108,7 @@ cleanup:
         object_put(thread);
     }
     if (window != 0) {
-        /* Process teardown normally removes an unclosed window.  The
-         * explicit close ioctl removes it on the success path. */
+        /* 进程退出负责清理未关闭窗口；正常路径会先通过关闭请求移除窗口。 */
         window_server_put(window);
     }
     if (process != 0) {

@@ -1,15 +1,16 @@
 #pragma once
-#pragma once
 #include "base.h"
 #include "refcount.h"
 #include "wait.h"
 
 typedef uint16_t object_type_id_t;
 
+/* 对象发布前确定，发布后保持不变；禁止 fork 继承不影响显式复制句柄。 */
+#define OBJECT_FLAG_NO_FORK (1U << 0)
+
 typedef struct object_ops {
     void (*destroy)(void *object);
-    /* The owning subsystem closes logical state before a handle reference is
-     * released; Object only dispatches this private lifecycle hook. */
+    /* 句柄引用释放前，由所属子系统关闭逻辑状态；Object 只负责分发此私有生命周期钩子。 */
     void (*handle_close)(void *object);
     const char *type_name;
     bool (*is_signaled)(const void *object);

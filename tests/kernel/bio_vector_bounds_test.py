@@ -71,8 +71,8 @@ int main(void) {
     bio.vec_count=0; assert(!bio_submission_valid(&bio));
     bio.op=BIO_OP_FLUSH; request.opcode=IO_FLUSH; request.vec_count=0;
     assert(bio_submission_valid(&bio));
-    /* 16-bit vector count and 32-bit lengths cannot overflow a 64-bit sum.
-     * Exercise all 65535 entries and a last-entry failure without accumulation. */
+    /* 16 位向量数量和 32 位长度相加不会溢出 64 位总和。
+     * 覆盖全部 65535 个条目，并测试最后一个条目失败且不发生累加。 */
     bio_vec_t *many=calloc(UINT16_MAX,sizeof(*many)); assert(many);
     page.flags=PAGE_COMPOUND_HEAD; page.order=BUDDY_MAX_ORDER;
     for(unsigned i=0;i<UINT16_MAX;++i) many[i]=(bio_vec_t){.page=&page,.length=PAGE_SIZE<<BUDDY_MAX_ORDER};

@@ -7,7 +7,7 @@ root = Path(__file__).resolve().parents[2]
 source = (root / 'kernel/fs/vfs/file_io.c').read_text()
 read_paths = source[source.index('static kstatus_t vfs_read_backend_chunk('):
                     source.index('static kstatus_t vfs_write_chunk(')]
-write_helpers = source[source.index('static kstatus_t vfs_write_transaction_begin('):
+write_helpers = source[source.index('static kstatus_t vfs_file_write_begin('):
                        source.index('kstatus_t vfs_truncate_node(')]
 seek_path = source[source.index('kstatus_t vfs_seek('):
                    source.index('kstatus_t vfs_truncate_kernel(')]

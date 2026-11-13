@@ -54,8 +54,7 @@ def png(label):
 assert command('query-status')['running']
 try:
     command('send-key', {'keys': [{'type': 'qcode', 'data': 'esc'}], 'hold-time': 40})
-    # Repair any stale hover from an earlier failed run before establishing
-    # the reference, then prove hover actually differs from this baseline.
+    # 建立参考状态前先修复先前失败运行遗留的悬停状态，然后确认悬停后的画面确实与基线不同。
     move(928, 72)
     time.sleep(.3)
     move(450, 125)
@@ -76,8 +75,8 @@ try:
             panel = b''.join(pixels[(y*width+600)*3:(y*width+900)*3]
                              for y in range(200, 650))
             painted = namespace['menu_is_painted'](width, pixels)
-            # Google page artwork can satisfy the absolute ink/white gate.
-            # Require a panel change from the closed-page reference as well.
+            # Google 页面图案可能满足绝对墨迹/白色门槛。
+            # 还要确认面板相对于关闭菜单时的页面发生了变化。
             visible = (painted and panel_reference is not None and
                        sum(abs(a-b) > 20 for a, b in zip(panel, panel_reference)) > 3000)
             return button, visible, panel
@@ -98,8 +97,8 @@ try:
             while not frame()[1]:
                 assert time.monotonic()-start < 3, 'First click failed to open menu'
                 time.sleep(.03)
-            # In anchor mode no intervening motion is allowed between clicks.
-            # Other modes verify the same cleanup on outside click and Escape.
+            # 锚点模式下，两次点击之间不允许发生其他指针移动。
+            # 其他模式会验证外部点击和 Escape 是否执行相同清理。
             if args.dismiss == 'anchor':
                 click()
             elif args.dismiss == 'outside':

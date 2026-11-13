@@ -8,8 +8,8 @@ typedef struct kernel_init_scheduler_hooks {
     void (*halt)(void);
 } kernel_init_scheduler_hooks_t;
 
-/* Start the APs, publish the scheduler, and run the early kernel gates. */
+/* 启动 AP、发布调度器，并运行内核早期检查。 */
 BOOLEAN kernel_init_scheduler(const OS_BOOT_INFO *boot_info,
                               const kernel_init_scheduler_hooks_t *hooks);
 
-/* Transitional self-test for the legacy queue API; it is not the live scheduler. */
+/* 旧队列 API 的过渡期自检；它不是当前使用的调度器。 */

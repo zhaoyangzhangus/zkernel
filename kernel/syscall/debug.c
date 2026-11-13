@@ -54,9 +54,8 @@ int64_t syscall_debug_write(uint64_t buffer, uint64_t length,
     kernel_serial_write_serial_only(text);
 #elif OS_CHROME_DEBUG_SERIAL
     if (debug_write_from_chrome()) {
-        /* serial_only itself is gated off in normal builds. Use the same
-         * bounded capture as Linux write(2), without enabling global UART
-         * logging or drawing diagnostics into the framebuffer. */
+        /* 普通构建会禁用 serial_only。本路径沿用 Linux write(2) 的有界捕获方式，
+         * 不启用全局 UART 日志，也不在帧缓冲区上绘制诊断信息。 */
         linux_chrome_stderr_write(current_process(), text, (size_t)length);
     }
 #else

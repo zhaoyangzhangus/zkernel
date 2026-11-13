@@ -1,4 +1,4 @@
-/* Phase 12: reuse the verified EGL/OpenGL path and add CPU HBUFFER present. */
+/* 阶段 12：复用已验证的 EGL/OpenGL 路径，并增加 CPU HBUFFER 呈现。 */
 #define P11_APP_ROOT "/usr/apps/p12-window"
 #define P11_WINDOW_BRIDGE 1
 #define P11_FRAME_COUNT 2U

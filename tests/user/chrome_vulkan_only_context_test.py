@@ -74,8 +74,8 @@ namespace gfx {struct ExtensionSet{};}
 namespace gl {
  enum {kGLImplementationDisabled=0};static int implementation=0;
  int GetGLImplementation(){return implementation;}
- // A missing GL implementation has no version string. The real ES parser
- // fatally rejects the former "0.0" placeholder, which this fixture accepted.
+ // 缺少 GL 实现时没有版本字符串。真实 ES 解析器会拒绝原先的 "0.0" 占位值，
+ // 而该测试夹具曾接受这个值。
  struct GLVersionInfo {GLVersionInfo(const char* v,const char* r,gfx::ExtensionSet){assert(v==nullptr&&std::string(r).empty());}};
  struct GLDisplay{};
  struct GLSurface {GLDisplay display;GLDisplay* GetGLDisplay(){return &display;}};

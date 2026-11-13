@@ -270,7 +270,7 @@ long sysconf(int name) {
             long count = linux_processor_count();
             if (count > 0L) return count;
         }
-        /* Native test images use the run-qemu.sh four-vCPU default. */
+        /* 原生测试映像使用 run-qemu.sh 的默认值，即四个 vCPU。 */
         return 4L;
     case _SC_PHYS_PAGES:
     case _SC_AVPHYS_PAGES: {

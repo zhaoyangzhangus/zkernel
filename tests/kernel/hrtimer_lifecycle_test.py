@@ -134,8 +134,8 @@ int main(void) {
  timer_poll(UINT64_MAX-1);assert(notifications==before+1);
  timer_poll(UINT64_MAX);assert(timer->deadline_tsc==UINT64_MAX && notifications==before+2);
  object_put(timer);
- // Simultaneous expiration must publish/notify only once; readiness stays
- // observable even after 80000 subsequent polls, until explicit cancellation.
+ // 同时到期时只能发布/通知一次；即使后续又轮询 80000 次，就绪状态仍须保持可见，
+ // 直到显式取消。
  assert(timer_create(25,0,&timer)==K_OK);deadline=timer->deadline_tsc;before=notifications;locks=expiry_calls;
  for(unsigned i=0;i<8;++i)assert(!pthread_create(&threads[i],0,poll_worker,&deadline));
  for(unsigned i=0;i<8;++i)assert(!pthread_join(threads[i],0));
@@ -152,8 +152,8 @@ int main(void) {
  for(unsigned i=0;i<TIMER_OBJECT_LIMIT;++i)object_put(full[i]);
  for(unsigned i=0;i<TIMER_OBJECT_LIMIT;++i)assert(!g_timers[i]);
  assert(!g_timer_scan_limit);
- // Real create/retire sequence leaves only the final slot; polling must
- // preserve its lifetime while avoiding all 127 retired pointer slots.
+ // 真实的创建/回收序列只留下最后一个槽位；轮询时必须保持其生命周期，同时跳过全部
+ // 127 个已回收指针槽位。
  for(unsigned i=0;i<TIMER_OBJECT_LIMIT;++i)assert(timer_create(5000,0,&full[i])==K_OK);
  for(unsigned i=0;i<TIMER_OBJECT_LIMIT-1;++i)object_put(full[i]);
  unsigned sparse_scans=poll_slot_checks;
@@ -162,7 +162,7 @@ int main(void) {
  unsigned scans=poll_slot_checks;
  for(unsigned i=0;i<10000;++i)timer_poll(now);
  assert(poll_slot_checks==scans);
- // Lowest-free-slot and exact highest-occupied bound, independently modeled.
+ // 独立建模最低空闲槽位和精确的最高占用边界。
  for(unsigned i=0;i<TIMER_OBJECT_LIMIT;++i)full[i]=0;
  unsigned seed=19;
  for(unsigned step=0;step<20000;++step) {

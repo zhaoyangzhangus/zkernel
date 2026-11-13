@@ -141,8 +141,8 @@ void net_manager_poll(void) {
     if (link_changed && g_net_manager_event_port != 0 &&
         object_try_get(g_net_manager_event_port)) {
         event_port = g_net_manager_event_port;
-        /* Construct a snapshot only when its subscriber reference is held.
-         * Ordinary timer polls need neither event clearing nor field stores. */
+        /* 只有持有订阅者引用时才构造快照。
+         * 普通定时器轮询既不需要清除事件，也不需要写入字段。 */
         event = (os_net_event_t){0};
         event.hdr.size = sizeof(event);
         event.hdr.version = OS_SYSCALL_ABI_VERSION;
@@ -182,9 +182,8 @@ bool net_manager_self_test(void) {
     if (!net_manager_init() || !net_manager_get_status(&status) || !status.initialized) {
         return false;
     }
-    /* Address configuration is asynchronous: IPv4 arrives through DHCP and
-     * IPv6 may arrive later through router advertisements.  Neither is a
-     * prerequisite for the manager itself to be healthy.  The invariant we
-     * can check here is that a link cannot be up when no NIC is present. */
+    /* 地址配置是异步的：IPv4 通过 DHCP 获取，IPv6 可能稍后通过路由器通告获取。
+     * 两者都不是网络管理器正常工作的前提。此处可检查的不变量是：没有 NIC 时，
+     * 网络链路不能处于已连接状态。 */
     return status.hardware_present || !status.link_up;
 }

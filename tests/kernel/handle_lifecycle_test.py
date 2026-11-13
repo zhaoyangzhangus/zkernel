@@ -45,6 +45,9 @@ static int fail_after=-1;
 static bool reject_reference;
 static atomic_uint try_get_calls,get_calls,put_calls;
 static _Thread_local unsigned depth;
+static unsigned unlocked_arrays;
+static void (*allocation_hook)(void);
+static void (*chunk_allocation_hook)(void);
 static handle_table_t table;
 static bool release_mode,destroy_before_lock;
 static unsigned destroy_lock_countdown;
@@ -55,12 +58,21 @@ void sched_preempt_disable(void) {
 }
 void sched_preempt_enable(void) {assert(depth);--depth;}
 void *kzalloc(size_t n,uint32_t flags) {
- (void)flags;assert(depth);
+ (void)flags;
+ if(!depth) {
+  assert(n>=4*sizeof(handle_chunk_t *) && n%sizeof(handle_chunk_t *)==0);
+  ++unlocked_arrays;
+  if(allocation_hook){void (*hook)(void)=allocation_hook;allocation_hook=0;hook();}
+ }
  if(fail_after==0)return 0;if(fail_after>0)--fail_after;
  void *p=calloc(1,n);if(p)atomic_fetch_add(&allocations,1);if(p && n==sizeof(handle_chunk_t))clone_zeroed_bytes+=(unsigned)n;return p;
 }
 void *kmalloc(size_t n,uint32_t flags) {
- (void)flags;assert(depth);
+ (void)flags;assert(depth || n==sizeof(handle_chunk_t));
+ if(n==sizeof(handle_chunk_t)) {
+  assert(!depth);
+  if(chunk_allocation_hook){void (*hook)(void)=chunk_allocation_hook;chunk_allocation_hook=0;hook();}
+ }
  if(fail_after==0)return 0;if(fail_after>0)--fail_after;
  void *p=malloc(n);if(p){memset(p,0xa5,n);atomic_fetch_add(&allocations,1);}return p;
 }
@@ -115,11 +127,28 @@ static void *worker(void *unused) {
  }
  return 0;
 }
+static void grow_during_clone(void) {
+ assert(!depth);handle_lock(&table.grow_lock);
+ assert(grow_table_locked(&table)==K_OK);handle_unlock(&table.grow_lock);
+}
+static void destroy_during_clone(void) {assert(!depth);handle_table_destroy(&table);}
+static void add_chunk_during_clone(void) {
+ assert(!depth);handle_lock(&table.grow_lock);
+ assert(table.chunk_count<table.chunk_capacity);
+ handle_chunk_t *chunk=chunk_allocate();assert(chunk);
+ table.chunks[table.chunk_count++]=chunk;handle_unlock(&table.grow_lock);
+}
+static void drop_chunk_during_clone(void) {
+ assert(!depth);handle_lock(&table.grow_lock);assert(table.chunk_count);
+ handle_chunk_t *chunk=table.chunks[--table.chunk_count];table.chunks[table.chunk_count]=0;
+ handle_unlock(&table.grow_lock);kfree(chunk);
+}
+static void exhaust_after_growth(void) {add_chunk_during_clone();fail_after=1;}
 int main(void) {
- for(unsigned i=0;i<2;++i) {objects[i].header.type=100+i;objects[i].header.ops=&ops;atomic_init(&objects[i].count,1);}
+ for(unsigned i=0;i<2;++i) {objects[i].header.type=100;objects[i].header.flags=0x8000U;objects[i].header.ops=&ops;atomic_init(&objects[i].count,1);}
  assert(handle_table_init(&table)==K_OK && !depth);
- /* Structurally impossible handles never acquire table/chunk locks, even
-  * while storage growth could race. All operations preserve outputs/refs. */
+ /* 结构上不可能有效的句柄绝不能获取表/块锁，即使此时可能发生存储扩展竞争。
+  * 所有操作都必须保留输出和引用。 */
  unsigned rejected_start=atomic_load(&lock_entries);
  for(uint32_t index=1;index<=65536;++index) {
   assert_absent(make_handle(index,0));
@@ -128,8 +157,8 @@ int main(void) {
   assert(handle_duplicate(&table,make_handle(index,0),0,&duplicate)==K_ENOENT && duplicate==123);
  }
  assert(atomic_load(&lock_entries)==rejected_start);
- /* An allocated pointer array is not an allocated chunk. The release scan
-  * must visit exactly the published high-water mark, including its holes. */
+ /* 已分配指针数组不代表块本身已分配。释放扫描必须恰好遍历已发布的高水位范围，
+  * 包括其中的空槽。 */
  for(unsigned count=0;count<=8;++count){
   handle_table_destroy(&table);assert(handle_table_init(&table)==K_OK);
   handle_lock(&table.grow_lock);
@@ -162,15 +191,14 @@ int main(void) {
   assert((uint32_t)handles[i]==i && (handles[i]>>32)==1 && !depth);
  }
  assert(table.chunk_capacity==8 && table.chunk_count==5);
- /* Reusing a low hole leaves a long occupied suffix before the next slot. */
+ /* 重用低位空槽后，下一个空槽之前仍会有一段较长的占用后缀。 */
  assert(handle_close(&table,handles[0])==K_OK);
  assert(handle_create(&table,&objects[0],7,&handles[0])==K_OK && (handles[0]>>32)==2);
  unsigned lock_start=atomic_load(&lock_entries);handle_t extra;
  assert(handle_create(&table,&objects[0],7,&extra)==K_OK && (uint32_t)extra==N);
  assert(atomic_load(&lock_entries)-lock_start==1+table.chunk_count);
  assert(handle_close(&table,extra)==K_OK);
- /* Lookup and duplication must share reference acquisition, but denial
-  * precedes try-get and neither failure may overwrite an output. */
+ /* 查找和复制必须共用引用获取逻辑，但拒绝检查要先于 try-get；任一失败都不得覆盖输出。 */
  unsigned try_start=atomic_load(&try_get_calls),ref_start=atomic_load(&objects[0].count);
  void *unchanged=(void*)1;handle_t unchanged_handle=123;
  reject_reference=true;
@@ -211,7 +239,8 @@ int main(void) {
   unsigned closes[2]={atomic_load(&objects[0].closes),atomic_load(&objects[1].closes)};
   unsigned initialized=fresh_entry_initializations;
   unsigned cleared=clone_zeroed_bytes;
-  kstatus_t status=exclude?handle_table_clone_without_type(&table,&clone,101):handle_table_clone(&table,&clone);
+  objects[1].header.flags=0x8000U | (exclude?OBJECT_FLAG_NO_FORK:0U);
+  kstatus_t status=handle_table_clone(&table,&clone);
   assert(fresh_entry_initializations==initialized);
   assert(clone_zeroed_bytes==cleared);
   assert(status==K_ENOMEM);fail_after=-1;
@@ -223,14 +252,30 @@ int main(void) {
    void *p=0;assert(handle_lookup(&table,handles[i],7,&p)==K_OK && p==&objects[i&1]);object_put(p);
   }
  }
- /* Exercise generation wrap in both preserved and excluded clone entries. */
+ /* 同类型对象都禁止继承时，克隆保留表结构但不得获取引用或关闭源对象。 */
+ objects[0].header.flags=objects[1].header.flags=OBJECT_FLAG_NO_FORK;
+ handle_table_t empty_clone;
+ unsigned inherited_gets=atomic_load(&get_calls);
+ assert(handle_table_clone(&table,&empty_clone)==K_OK);
+ assert(atomic_load(&get_calls)==inherited_gets);
+ for(unsigned i=0;i<N;++i) {
+  void *p=(void*)1;
+  assert(handle_lookup(&empty_clone,handles[i],0,&p)==K_ENOENT && p==(void*)1);
+ }
+ handle_table_destroy(&empty_clone);
+ assert(atomic_load(&objects[0].count)==refs[0] && atomic_load(&objects[1].count)==refs[1]);
+ objects[0].header.flags=objects[1].header.flags=0x8000U;
+ /* 覆盖保留和排除的克隆项中的代数回绕。 */
  table.chunks[1]->entries[1].generation=UINT32_MAX;
  handles[257]=make_handle(257,UINT32_MAX);
  handle_table_t clone,excluded;
  unsigned initialized=fresh_entry_initializations;
  unsigned cleared=clone_zeroed_bytes;
+ objects[1].header.flags=0x8000U;
  assert(handle_table_clone(&table,&clone)==K_OK);
- assert(handle_table_clone_without_type(&table,&excluded,101)==K_OK);
+ objects[1].header.flags|=OBJECT_FLAG_NO_FORK;
+ assert(handle_table_clone(&table,&excluded)==K_OK);
+ objects[1].header.flags=0x8000U;
  assert(fresh_entry_initializations==initialized);
  assert(clone_zeroed_bytes==cleared);
  for(unsigned chunk=0;chunk<table.chunk_count;++chunk){
@@ -264,7 +309,9 @@ int main(void) {
  void *p=0;assert(handle_lookup(&table,handles[0],0,&p)==K_ENOENT);
  handle_t replacement,duplicate;
  assert(handle_create(&table,&objects[0],7,&replacement)==K_OK && (uint32_t)replacement==0 && (replacement>>32)==3);
+ objects[1].header.flags|=OBJECT_FLAG_NO_FORK;
  assert(handle_duplicate(&table,handles[1],0,&duplicate)==K_OK);
+ objects[1].header.flags=0x8000U;
  assert(handle_set_flags(&table,replacement,HANDLE_FLAG_CLOEXEC)==K_OK);
  assert(handle_table_close_on_exec(&table)==K_OK);
  assert(handle_lookup(&table,replacement,0,&p)==K_ENOENT);
@@ -309,9 +356,8 @@ int main(void) {
  }
  handle_table_destroy(&table);
  assert(atomic_load(&objects[0].count)==1 && !depth);
- /* Allocation failure must return the temporary reference, leave the output
-  * unchanged, and preserve every existing handle. Exercise chunk and array
-  * growth failures separately, then retry with the same source handle. */
+ /* 分配失败时必须归还临时引用、保持输出不变，并保留所有现有句柄。
+  * 分别测试块和数组扩展失败，再使用同一源句柄重试。 */
  for(unsigned limit=HANDLE_CHUNK_ENTRIES;limit<=4*HANDLE_CHUNK_ENTRIES;limit*=4) {
   assert(handle_table_init(&table)==K_OK);
   for(unsigned i=0;i<limit;++i)assert(handle_create(&table,&objects[0],7,&handles[i])==K_OK);
@@ -350,11 +396,38 @@ int main(void) {
  assert(atomic_load(&objects[0].count)==1);
  assert(handle_table_init(&table)==K_OK);
  assert(handle_create(&table,&objects[0],7,&extra)==K_OK);
- /* Two source locks, then destruction before destination publication. */
+ /* 获取两个源锁，然后在发布目标之前执行销毁。 */
  destroy_lock_countdown=3;not_created=123;
  assert(handle_duplicate(&table,extra,0,&not_created)==K_EINVAL && not_created==123);
  assert(!table.chunks && !destroy_lock_countdown && !depth);
  assert(atomic_load(&objects[0].count)==1);
+ /* 分配窗口内扩容或销毁：重新加锁后必须更新快照或安全失败。 */
+ assert(handle_table_init(&table)==K_OK);
+ handle_table_t raced;
+ unsigned unlocked_before=unlocked_arrays;
+ allocation_hook=grow_during_clone;
+ assert(handle_table_clone(&table,&raced)==K_OK && !allocation_hook);
+ assert(unlocked_arrays==unlocked_before+2 && raced.chunk_capacity==table.chunk_capacity);
+ handle_table_destroy(&raced);
+ allocation_hook=destroy_during_clone;unlocked_before=unlocked_arrays;
+ assert(handle_table_clone(&table,&raced)==K_EINVAL && !allocation_hook);
+ assert(unlocked_arrays==unlocked_before+1 && !raced.chunks && !raced.chunk_capacity && !depth);
+ handle_table_destroy(&raced);handle_table_destroy(&table);
+ /* 容量不变但实际分块增加：预留不足时必须重试，不能在复制期间分配。 */
+ assert(handle_table_init(&table)==K_OK);add_chunk_during_clone();
+ chunk_allocation_hook=add_chunk_during_clone;unlocked_before=unlocked_arrays;
+ assert(handle_table_clone(&table,&raced)==K_OK && !chunk_allocation_hook);
+ assert(unlocked_arrays==unlocked_before+2 && raced.chunk_count==2);
+ handle_table_destroy(&raced);
+ /* 实际分块减少时回收多余预留块，无需再次分配。 */
+ chunk_allocation_hook=drop_chunk_during_clone;unlocked_before=unlocked_arrays;
+ assert(handle_table_clone(&table,&raced)==K_OK && !chunk_allocation_hook);
+ assert(unlocked_arrays==unlocked_before+1 && raced.chunk_count==1);
+ handle_table_destroy(&raced);
+ chunk_allocation_hook=exhaust_after_growth;
+ assert(handle_table_clone(&table,&raced)==K_ENOMEM && !chunk_allocation_hook);
+ fail_after=-1;assert(!raced.chunks && !raced.chunk_capacity && !depth);
+ handle_table_destroy(&raced);handle_table_destroy(&table);
  assert(atomic_load(&allocations)==atomic_load(&frees) && !depth && !handle_debug_waiting_lock());
  puts("Handles: growth/reuse/permissions/generations, twelve OOM rollbacks, exec, 8000 concurrent operations, 1100 unlocked reentrant callbacks/puts with four destroyers, no resurrection after destroy and balanced references passed");
 }
@@ -366,6 +439,24 @@ with tempfile.TemporaryDirectory(prefix='liteos-handles-') as directory:
                     '-fno-pie','-no-pie','-x','c','-','-o',binary],
                    input=code,text=True,check=True)
     subprocess.run([binary],check=True,timeout=30)
+    policy = 'OBJECT_FLAG_NO_FORK) != 0U'
+    assert policy in code
+    negative = code.replace(policy, 'OBJECT_FLAG_NO_FORK) == 0U')
+    subprocess.run(['cc','-std=c11','-O2','-Wall','-Wextra','-Werror',
+                    '-pthread','-I'+str(root/'include'),'-x','c','-','-o',binary],
+                   input=negative,text=True,check=True)
+    result=subprocess.run([binary],capture_output=True,text=True,timeout=30,
+                          preexec_fn=lambda:resource.setrlimit(resource.RLIMIT_CORE,(0,0)))
+    assert result.returncode != 0 and 'Assertion' in result.stderr,result.stderr
+    print('Negative control rejected: inverted fork inheritance; same-type objects, unrelated flags, generations and references passed')
+    negative = code.replace('source->chunk_capacity == capacity &&', '')
+    assert negative != code
+    subprocess.run(['cc','-std=c11','-O2','-Wall','-Wextra','-Werror',
+                    '-pthread','-I'+str(root/'include'),'-x','c','-','-o',binary],
+                   input=negative,text=True,check=True)
+    result=subprocess.run([binary],capture_output=True,text=True,timeout=30)
+    assert result.returncode != 0 and 'raced.chunk_capacity==table.chunk_capacity' in result.stderr,result.stderr
+    print('Negative control rejected: stale clone array capacity after concurrent growth')
     bound = 'uint32_t chunk_count = table->chunk_count;'
     assert bound in code
     negative = code.replace(bound, 'uint32_t chunk_count = table->chunk_capacity;')

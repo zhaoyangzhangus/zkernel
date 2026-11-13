@@ -120,8 +120,8 @@ struct Host {
  }
 };
 int main(){
- // Concurrent first access and repeated queries must only configure each
- // property once, never publish defaults then mutate them on the read path.
+ // 并发首次访问和重复查询都只能配置每个属性一次，不能先发布默认值，再在读取路径
+ // 上修改它们。
  std::barrier start(16);
  std::vector<std::thread> readers;
  const PlatformProperties* platform_addresses[16]{};
@@ -145,8 +145,8 @@ int main(){
   assert(runtime_addresses[n]==runtime_addresses[0]);
  }
  assert(property_writes==7);
- // Execute the actual browser preference decision and actual Views host
- // initialization together: custom frames must not regain a server caption.
+ // 同时执行真实的浏览器偏好判定和 Views 宿主初始化：自定义边框不得重新出现
+ // 服务端标题栏。
  for(bool supported:{false,true})for(bool pref:{false,true})
  for(bool normal:{false,true})for(bool app:{false,true})for(bool pip:{false,true}){
   ui::OzonePlatform::GetInstance()->properties.supports_server_side_window_decorations=supported;
@@ -170,7 +170,7 @@ int main(){
    unsigned f=w.flags(type,custom);
    bool server=type==PlatformWindowType::kWindow&&!custom;
    assert(w.ShouldUseNativeFrame()==server);
-   // Popup buffers must accept Chromium's programmatic resize operations too.
+   // 弹出窗口缓冲区也必须接受 Chromium 发起的程序化调整大小操作。
    assert(f==((type==PlatformWindowType::kWindow&&!custom?18:6)|
               (type==PlatformWindowType::kWindow?64:0)));
    unsigned before=w.toggles;
@@ -205,8 +205,8 @@ with tempfile.TemporaryDirectory(prefix='chrome-server-frame-') as directory:
                     str(base/'test.cc'),'-o',str(base/'test')]
     subprocess.run(command,check=True)
     subprocess.run([str(base/'test')],check=True)
-    # Negative control: reproduce the old runtime getter's repeated writes.
-    # Identical returned values must not hide an unsafe mutation on every read.
+    # 负对照：复现旧运行时 getter 的重复写入。
+    # 返回值相同也不能掩盖每次读取都会发生的不安全修改。
     assert '    return properties;' in properties
     broken_properties = properties.replace('static const Properties properties;',
                                           'static Properties properties;').replace(

@@ -1,5 +1,4 @@
 #pragma once
 
-/* Linux-compatible include spelling used by Abseil and a few third-party
- * libraries. */
+/* Abseil 和部分第三方库使用的 Linux 兼容头文件名称。 */
 #include <sys/syscall.h>

@@ -42,7 +42,7 @@ static waiter_t *new_waiter(void) {
 static uint64_t wait_lock(spinlock_t *lock) {
  if(lock==&g_timeout_lock && race_armed) {
   assert(!depth);race_armed=false;
-  /* Owner finishes before the canceller acquires the common timeout lock. */
+  /* 取消方获取公共超时锁之前，所有者已经完成操作。 */
   atomic_store(&target.blocked_waiter,NULL);
   for(unsigned i=0;i<queue_count;++i)list_init(&queues[i].waiters);
   free(old_waiter);

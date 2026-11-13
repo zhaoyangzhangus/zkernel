@@ -54,7 +54,7 @@ static inline uint32_t desktop_icon_area_pixel(const uint8_t *pixels,
            (uint32_t)((blue + alpha / 2U) / alpha);
 }
 
-/* Vector coordinates are in 1/256 units on a 48-unit design canvas. */
+/* 矢量坐标以 1/256 为单位，设计画布宽度为 48 个单位。 */
 static inline uint32_t desktop_icon_vector_sample(uint32_t kind, int32_t x, int32_t y) {
     if (kind == 0U) {
         int32_t dx = x - 24 * 256, dy = y - 24 * 256;

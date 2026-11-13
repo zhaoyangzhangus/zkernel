@@ -156,6 +156,8 @@ kstatus_t vm_object_create_page_array(const uint64_t *physical_pages,
 
 /* 创建可被多个地址空间映射并共享后备页的共享对象。 */
 kstatus_t vm_object_create_shared(size_t size, vm_object_t **out);
+/* 全部后备页准备成功后才返回对象；失败时不发布部分对象。 */
+kstatus_t vm_object_create_shared_populated(size_t size, vm_object_t **out);
 
 kstatus_t vm_map_object(vm_space_t *mm, vm_object_t *object, vaddr_t *inout_addr,
                         uint64_t offset, size_t size, uint32_t prot, uint32_t flags);

@@ -127,7 +127,7 @@ kstatus_t nv_port_dma_map_pages(struct device *device, page_t **pages,
         physical_pages[index] = page_to_phys(pages[index]).value;
     }
     uint32_t physical_count = 0U;
-    /* A page-count-sized temporary is required for arbitrary scatter input. */
+    /* 任意散布输入都需要按页面数量分配大小合适的临时缓冲区。 */
     nv_port_dma_segment_t *physical_list = (nv_port_dma_segment_t *)kzalloc(
         (size_t)page_count * sizeof(*physical_list), 0U);
     if (physical_list == 0) {
@@ -147,9 +147,8 @@ kstatus_t nv_port_dma_map_pages(struct device *device, page_t **pages,
         return status;
     }
     if (out->core_mapping.segment_count == 1U && physical_count != 1U) {
-        /* IOMMU baseline: the core presents one contiguous IOVA while the
-         * backing pages may be physically scattered. Keep each page's
-         * physical identity explicit in the port descriptor. */
+        /* IOMMU 基本约定：核心提供一段连续 IOVA，而后备页面的物理地址可能分散。应在端口描述符中
+         * 明确保留每个页面的物理标识。 */
         for (uint32_t index = 0U; index < page_count; ++index) {
             out->segments[index].phys_addr = physical_pages[index];
             out->segments[index].dma_addr =

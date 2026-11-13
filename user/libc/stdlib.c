@@ -425,9 +425,8 @@ long double strtold(const char *text, char **end) {
 }
 
 int abs(int value) {
-    /* Avoid invoking signed-overflow UB for INT_MIN.  The ISO contract leaves
-     * that input undefined; preserving it is the least surprising freestanding
-     * behavior and avoids a divide/negate trap in optimized builds. */
+    /* 避免 INT_MIN 导致有符号溢出未定义行为。ISO 约定未定义该输入；对独立运行实现而言，保留该值
+     * 最符合预期，也能避免优化构建中发生除法/取负陷阱。 */
     return value == INT_MIN ? INT_MIN : (value < 0 ? -value : value);
 }
 

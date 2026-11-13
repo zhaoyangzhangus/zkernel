@@ -12,9 +12,8 @@ mapping = (root / 'kernel/mm/map.c').read_text().replace('#include "internal.h"'
 vma = (root / 'kernel/mm/vma.c').read_text()
 copy_tail = vma[vma.index('vm_area_t *vm_area_copy_tail('):
                 vma.index('vm_area_t *vm_area_split(')]
-# Tail preparation still requires the protected source VMA. Give that
-# allocator call its own fixture entry so ordinary mapping allocations can
-# assert they never run under map_lock, without weakening split coverage.
+# 准备尾部仍需要受保护的源 VMA。为该分配器调用单独设置测试入口，这样普通映射分配
+# 可以断言自己从不在 map_lock 下运行，同时不削弱拆分路径覆盖。
 copy_tail = copy_tail.replace('area_allocate()', 'tail_area_allocate()')
 linux = (root / 'kernel/syscall/linux.c').read_text()
 start = linux.index('static int64_t linux_mmap(')
@@ -225,9 +224,8 @@ static void cleanup(vm_space_t* space) {
 int main(void) {
     vm_space_t space; setup(&space); process_t process={&space};
     cleanup(&space);
-    /* Allocation is preemptible: a competing mapping may appear before the
-     * caller acquires map_lock. Both entry points must revalidate/publish
-     * against that new state, not an earlier unlocked snapshot. */
+    /* 分配过程可被抢占：调用方获取 map_lock 前可能出现竞争映射。两个入口都必须针对
+     * 这一新状态重新验证并发布，不能使用更早的未加锁快照。 */
     for(unsigned replace=0;replace<2;++replace) {
         allocation_race_space=&space;
         vaddr_t address=target;
@@ -238,8 +236,8 @@ int main(void) {
         assert(!locked_space&&areas_alive==1&&objects_alive==1&&space.commit_pages==1);
         assert(find(&space,target));cleanup(&space);
     }
-    /* A high hint must not escape MAP_32BIT, and a full low range must fail
-     * before publishing a VMA or retaining backing objects. */
+    /* 高位提示不能超出 MAP_32BIT 范围；低地址范围已满时，必须在发布 VMA 或保留后备
+     * 对象之前失败。 */
     vaddr_t low=0x90000000;
     assert(vm_map_object(&space,0,&low,0,PAGE_SIZE,VM_PROT_USER,
                          VM_MAP_PRIVATE|VM_MAP_LOW32)==K_OK && low==0x10000);
@@ -254,8 +252,8 @@ int main(void) {
     assert(low==0x90000000 && objects_alive==before_objects && areas_alive==before_areas);
     assert(vm_unmap(&space,0x10000,0x80000000ULL-0x10000)==K_OK);
     assert(!areas_alive && !objects_alive && !space.locked);
-    /* Every locked failure must drop transaction-owned backing/shadows,
-     * but never consume a borrowed file reference or publish the address. */
+    /* 任一持锁失败都必须释放事务所有的后备对象/影子对象，但不能消耗借用的文件引用，
+     * 也不能发布地址。 */
     for (unsigned file_backed=0;file_backed<2;++file_backed)
       for (unsigned failure=0;failure<6;++failure) {
         setup(&space);
@@ -342,8 +340,8 @@ int main(void) {
     assert(area->private_object->flags & VM_OBJECT_FLAG_MAP_OWNED);
     vm_object_put(file);
     cleanup(&space);
-    /* Mixed replacement/unmap shapes exercise full, head, tail and middle
-     * removal across fragmented VMAs, checking every address against a model. */
+    /* 混合替换/解除映射形态覆盖碎片化 VMA 中的整段、头部、尾部和中间移除，
+     * 并将每个地址与模型逐一比较。 */
     setup(&space);
     bool occupied[16]={true,true,true};
     uint32_t random=0x5070;

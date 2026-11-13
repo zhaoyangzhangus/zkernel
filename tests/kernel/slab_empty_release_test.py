@@ -45,8 +45,8 @@ int main(void){
  assert(count==5000);
  for(unsigned i=1;i<10000;i+=2)cache_release_empty(&c,&many[i]);
  assert(!c.slabs&&frees==10003&&errors==2);free(many);
- /* Every partial count, including a full/detached slab returning its first
-  * slot, retains exact chain order until the last slot releases the page. */
+ /* 对所有部分计数（包括满载/已分离 slab 归还首个槽位的情况），都要保持链表顺序，
+  * 直到最后一个槽位释放页面。 */
  for(unsigned slots=1;slots<=64;++slots)
  for(unsigned available=0;available<slots;++available){
   void *payload=0,*prior=0;unsigned before=frees;

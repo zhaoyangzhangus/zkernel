@@ -52,8 +52,7 @@ if (Test-Path -LiteralPath $pidFile) {
     Remove-Item -LiteralPath $pidFile -Force -ErrorAction SilentlyContinue
 }
 
-# Also recover a wrapper that was killed before it could write/remove its PID
-# file. Only QEMU listeners on the designated debug port are candidates.
+# 同时清理由于提前终止而未能写入/删除 PID 文件的包装器。候选进程仅限监听指定调试端口的 QEMU。
 $listeners = @(Get-NetTCPConnection -State Listen -LocalPort $GdbPort -ErrorAction SilentlyContinue)
 foreach ($listener in $listeners) {
     $process = Get-Process -Id $listener.OwningProcess -ErrorAction SilentlyContinue

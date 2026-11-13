@@ -80,8 +80,8 @@ int main(void){
   check(0);check(1);cases+=2;
   if(pattern==0)assert(locks==2 && !gets);
  }
- // A held reference survives unregister/close; a lower-slot replacement waits
- // for the next pass, and deleting a later slot cannot leave a stale pointer.
+ // 已持有的引用在注销/关闭后仍有效；低位槽的替换要等到下一轮，删除后续槽位也不能
+ // 留下过期指针。
  reset();table4[2].socket=&objects[2];table4[63].socket=&objects[63];
  uint32_t cursor=0;socket_t *p=socket_tcp_poll_next(&cursor,false);
  assert(p==&objects[2] && p->refs==1 && cursor==3);
@@ -91,8 +91,8 @@ int main(void){
  cursor=0;p=socket_tcp_poll_next(&cursor,false);assert(p==&objects[0]);object_put(p);
  assert(!socket_tcp_poll_next(&cursor,false));
  cursor=UINT32_MAX;assert(!socket_tcp_poll_next(&cursor,true) && cursor==UINT32_MAX);
- // Growth cannot keep extending an in-progress timer pass. New high slots
- // wait for the next pass; no pointer into the old backing is retained.
+ // 扩容不能不断延长正在进行的计时器轮次。新的高位槽要等下一轮；不能保留指向旧后备
+ // 存储的指针。
  reset();table4[2].socket=&objects[2];cursor=0;
  p=socket_tcp_poll_next(&cursor,false);assert(p==&objects[2]);object_put(p);
  capacity=128;table4[127].socket=&objects[127];
@@ -104,7 +104,7 @@ int main(void){
  capacity=128;table6[100].socket=&objects[228];cursor=0;
  p=socket_tcp_poll_next(&cursor,true);assert(p==&objects[228] && cursor==101);object_put(p);
  assert(!socket_tcp_poll_next(&cursor,true) && cursor==128 && gets==releases);
- // IPv6 uses the horizon captured by IPv4, not a second capacity snapshot.
+ // IPv6 使用 IPv4 捕获的范围，而不是再次获取容量快照。
  reset();table4[63].socket=&objects[63];cursor=0;
  p=socket_tcp_poll_next(&cursor,false);assert(p==&objects[63] && pass_limit==64);object_put(p);
  capacity=128;table6[31].socket=&objects[159];table6[100].socket=&objects[228];cursor=0;

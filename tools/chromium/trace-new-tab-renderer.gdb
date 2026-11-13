@@ -1,6 +1,6 @@
 set pagination off
 target remote /tmp/system-keys.sock
-# Current Chrome nm: RenderProcessHostImpl::Init + PIE bias 0x40000000.
+# 当前 Chrome 的 nm 符号：RenderProcessHostImpl::Init + PIE 偏移 0x40000000。
 hbreak *0x47f4d5d0
 commands
 silent

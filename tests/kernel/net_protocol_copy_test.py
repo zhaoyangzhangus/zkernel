@@ -13,7 +13,7 @@ prefix = r'''
 #include <string.h>
 #include "core_internal.h"
 static unsigned depth;
-/* This parity test sends ACK/data only; handshake lookup must stay cold. */
+/* 此一致性测试只发送 ACK/数据；握手查找必须保持未触发状态。 */
 int socket_tcp_syn_scale_ipv4(uint32_t a,uint16_t b,uint32_t c,uint16_t d,uint32_t e,uint32_t f){
  (void)a;(void)b;(void)c;(void)d;(void)e;(void)f;assert(0);return -1;
 }

@@ -1,6 +1,6 @@
 set pagination off
 target remote /tmp/system-keys.sock
-# Revalidated against nm of out/liteos-debian/chrome, PIE bias 0x40000000.
+# 已根据 out/liteos-debian/chrome 的 nm 重新验证，PIE 偏移为 0x40000000。
 hbreak *0x4a40ae60
 commands
 silent

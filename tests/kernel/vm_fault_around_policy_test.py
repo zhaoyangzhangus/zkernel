@@ -118,16 +118,14 @@ int main(void){
   assert(resolve_hint(&space,&fault,&surface_hint)==K_EACCES && !surface_hint);
   assert(locks==1 && !held && !allocations);check();
  }
- /* Sparse user heaps must not turn each isolated touch into sixteen/thirty
-  * two pages of zeroed backing. Exercise the real selection repeatedly. */
+ /* 稀疏用户堆中每次孤立访问不能分配 16/32 页的零填充后备存储。反复测试真实选择逻辑。 */
  setup(VM_OBJECT_ANON,0,0,33);
  for(unsigned i=0;i<4096;++i){
   vm_fault_info_t fault={.address=area.start+(i%32)*PAGE_SIZE,.access=VM_PROT_READ};
   vm_fault_around(&space,&fault);
  }
  assert(!allocations && !mappings && !faults && !retains);check();
- /* The first map unlock is the handoff to population. A replacement VMA
-  * must not inherit the old window's permission to allocate speculatively. */
+ /* 首次 map 解锁表示交接给填充阶段。替换后的 VMA 不得继承旧窗口的投机分配权限。 */
  for(unsigned t=0;t<5;++t)for(unsigned f=0;f<4;++f){
   setup(VM_OBJECT_SHARED,VM_OBJECT_FLAG_WINDOW_SURFACE,0,33);
   replacement.type=types[t];replacement.flags=flags[f];replace_on_unlock=true;
@@ -136,8 +134,7 @@ int main(void){
   unsigned expected=types[t]==VM_OBJECT_SHARED && (flags[f]&VM_OBJECT_FLAG_WINDOW_SURFACE)?VM_FAULT_AROUND_PAGES-1:0;
   assert(allocations==expected && mappings==expected && !faults);check();
  }
- /* Explicit population remains available for ordinary/shared memory; only
-  * automatic speculation changes. The public caller's requested range wins. */
+ /* 普通/共享内存仍允许显式填充；只有自动投机行为改变。以公共调用方请求的范围为准。 */
  for(unsigned t=0;t<2;++t){
   setup(types[t],0,0,33);
   assert(vm_populate_range_internal(&space,area.start,33U*PAGE_SIZE,false)==K_OK);
@@ -186,8 +183,7 @@ with tempfile.TemporaryDirectory(prefix='vm-fault-around-policy-') as directory:
         result = run(negative, 16)
         assert result.returncode != 0 and 'Assertion' in result.stderr, (name, result)
         print('Negative control rejected:', name)
-    # Restore both old decisions together: either gate alone is enough to
-    # stop cold-page population, but the complete old policy must fail too.
+    # 同时恢复旧的两项决策：任一门禁都足以阻止冷页填充，但完整旧策略也必须失败。
     legacy = program.replace(
         'area->object->type == VM_OBJECT_SHARED &&\n'
         '           (area->object->flags & VM_OBJECT_FLAG_WINDOW_SURFACE) != 0U',

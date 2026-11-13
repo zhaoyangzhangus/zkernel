@@ -21,8 +21,8 @@ FILES = (
     'trace-cache-read-error.gdb',
 )
 
-# Resolve exact entry symbols, not an assumed link-wide address delta. Each
-# anchor names an existing semantic role; tests independently verify its ELF.
+# 解析精确入口符号，不假定整个链接映像具有统一地址偏移。每个锚点对应现有语义角色；
+# 测试会独立验证其 ELF。
 ANCHORS = (
     (FIRST, r"'renderer': \((0x[0-9a-f]+)", 'content::RenderProcessHostImpl::Init()'),
     (FIRST, r"'navigate': \((0x[0-9a-f]+)", 'Navigate(NavigateParams*)'),
@@ -116,14 +116,14 @@ def main():
     output = subprocess.check_output(
         ['llvm-nm', '-C', '--defined-only', str(binary)], text=True)
     updates = refreshed(scripts, output, identity, bias)
-    # Recheck after the slow symbol read; never stamp addresses onto a new ELF
+    # 慢速读取符号后再次检查；绝不能将地址写入新的 ELF 文件。
     # if staging or linking raced this invocation.
     validate_chrome_symbols()
     if _chrome_build_id(binary) != identity:
         raise RuntimeError('Chrome changed while resolving symbols')
     changed = [name for name in FILES if scripts[name] != updates[name]]
     if args.apply:
-        # Validate the entire set before the first mechanical rewrite.
+        # 在首次机械式改写前验证完整集合。
         if any((directory / n).read_text() != scripts[n] for n in FILES):
             raise RuntimeError('Trace scripts changed while resolving symbols')
         for name in changed:

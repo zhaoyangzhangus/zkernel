@@ -22,7 +22,7 @@ for character, rows in re.findall(r"case '(.)': \{ static const uint8_t glyph\[7
 patterns[(0,) * 7] = ' '
 
 def decode(pixels):
-    # Cube drag regression leaves its outer window at (124,68), client +1,+31.
+    # 立方体拖拽回归测试将外窗留在 (124,68)，客户区偏移为 +1,+31。
     for origin_y in range(100, 105):
         for origin_x in range(127, 132):
             text = ''

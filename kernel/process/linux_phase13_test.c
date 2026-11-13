@@ -1,4 +1,4 @@
-/* Phase 13 real Linux ABI epoll and event-loop acceptance runner. */
+/* 第 13 阶段 Linux ABI epoll 和事件循环验收运行程序。 */
 #include <arch/x86_64/cpu.h>
 #include <kernel/elf_loader.h>
 #include <kernel/console.h>
@@ -102,8 +102,8 @@ bool linux_phase13_realtest(void) {
     }
     kernel_serial_write_serial_only("OS_P13_IMAGE_LOAD_PASS\r\n");
     process_set_name(process, "/usr/apps/linux-events-test/linux-events-test");
-    /* This acceptance runner loads the ELF directly instead of calling
-     * execve(), so seed the path normally recorded by the exec path. */
+    /* 此验收运行程序直接加载 ELF，不会调用 execve()，因此需要预先设置通常由
+     * exec 路径记录的文件路径。 */
     __builtin_memcpy(process->linux_exe, "/usr/apps/linux-events-test/linux-events-test",
                      sizeof("/usr/apps/linux-events-test/linux-events-test"));
     if (!info.linux_abi ||

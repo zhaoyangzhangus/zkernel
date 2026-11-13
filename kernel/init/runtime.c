@@ -622,8 +622,7 @@ static void __attribute__((noreturn)) kernel_runtime_main(void *context) {
         if (x86_smp_take_reschedule_request() || sched_runnable_count() != 0U) {
             (void)sched_try_run_ready();
         }
-        /* Persist post-desktop HID/window diagnostics without doing any I/O
-         * when the real-test buffer has not changed. */
+        /* 持久化桌面启动后的 HID/窗口诊断信息；真实测试缓冲区未变化时不执行 I/O。 */
         if (realtest_enabled()) (void)realtest_flush();
         net_manager_poll();
         if (net_manager_get_status(&net_status)) {

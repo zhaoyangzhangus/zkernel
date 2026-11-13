@@ -40,7 +40,7 @@ static int sched_try_run_ready(void) {
 }
 static void irq_enable_and_halt(void) {
  assert(!interrupts && !ready);
- /* A wake arriving after the CLI-protected check is retained until STI;HLT. */
+ /* CLI 保护的检查之后到达的唤醒必须保留，直到执行 STI;HLT。 */
  if(arrival) pending=true;
  interrupts=true; ++halted;
 }

@@ -9,6 +9,8 @@ source = (root / 'kernel/graphics/control_document.c').read_text()
 body = source[source.index('static void control_fill('):]
 body = body.replace('    if (!text || !node->text_length) return;',
     '    ++ascii_paint_calls;\n    if (!text || !node->text_length) return;',1)
+body = body.replace('    /* 框架根节点不能覆盖统一的聚焦/失焦底色；子控件照常绘制。 */',
+    '    ++paint_node_calls;\n    /* 框架根节点不能覆盖统一的聚焦/失焦底色；子控件照常绘制。 */',1)
 prefix = r'''
 #include <assert.h>
 #include <stdio.h>
@@ -21,8 +23,11 @@ prefix = r'''
 #include <uapi/window_theme.h>
 #include <ascii_font.h>
 static uint32_t pixels[128*96+2];
-static unsigned text_width_queries,text_position_queries,ascii_paint_calls;
-static struct {Rect damage_bounds;uint32_t focused_identifier;} g_compositor_snapshot;
+static unsigned text_width_queries,text_position_queries,ascii_paint_calls,paint_node_calls;
+typedef struct {Rect damage_bounds;uint32_t focused_identifier,theme;} snapshot_fixture_t;
+static snapshot_fixture_t snapshot_fixture;
+/* 绘制函数只能读取快照；夹具初始化在函数定义之后恢复可写视图。 */
+#define g_compositor_snapshot (*(const snapshot_fixture_t *)&snapshot_fixture)
 static struct {uint32_t display_stride;uint32_t *composite_framebuffer;uint32_t display_width,display_height;}
  g_window_server={128,pixels+1,128,96};
 typedef struct {uint8_t pixels[1];} font_t;
@@ -36,23 +41,23 @@ typedef struct {uint32_t control_hover,control_pressed,control_key_target,contro
 static uint32_t window_client_offset_x(uint32_t flags){(void)flags;return 1;}
 static uint32_t window_client_offset_y(uint32_t flags){return 1+os_window_caption_height(flags);}
 typedef struct {const compositor_window_view_t *view;window_control_document_t *document;int64_t x,y;} control_paint_context_t;
-static void compositor_control_caption_icon(int64_t x,int64_t y,uint32_t w,uint32_t h,uint32_t a,bool m,bool active){(void)x;(void)y;(void)w;(void)h;(void)a;(void)m;(void)active;}
+static void compositor_control_caption_icon(Rect clip,int64_t x,int64_t y,uint32_t w,uint32_t h,uint32_t a,bool m,bool active){(void)clip;(void)x;(void)y;(void)w;(void)h;(void)a;(void)m;(void)active;}
 static void control_paint_surface(control_paint_context_t *c,const control_tree_box_t *b,Rect d){
  (void)c;(void)b;(void)d;assert(false);
 }
 uint32_t ascii_font_width(void){return 8;}
 uint32_t ascii_font_height(void){return 16;}
 const uint8_t *ascii_font_glyph(uint8_t c){static uint8_t glyph[128];(void)c;memset(glyph,255,sizeof(glyph));return glyph;}
-static void compositor_fill_rounded_locked(int32_t x,int32_t y,uint32_t w,uint32_t h,uint32_t r,uint32_t color){
- assert(!r);Rect c=g_compositor_snapshot.damage_bounds;
+static void compositor_fill_rounded_locked(Rect clip,int32_t x,int32_t y,uint32_t w,uint32_t h,uint32_t r,uint32_t color){
+ assert(!r);Rect c=clip;
  int64_t right=(int64_t)x+w,bottom=(int64_t)y+h;
  for(int64_t py=y>c.y0?y:c.y0;py<bottom&&py<c.y1;++py)
   for(int64_t px=x>c.x0?x:c.x0;px<right&&px<c.x1;++px){
    assert(px>=0&&px<128&&py>=0&&py<96);pixels[1+py*128+px]=color;
   }
 }
-static void compositor_fill_locked(int32_t x,int32_t y,uint32_t w,uint32_t h,uint32_t color){
- compositor_fill_rounded_locked(x,y,w,h,0,color);
+static void compositor_fill_locked(Rect clip,int32_t x,int32_t y,uint32_t w,uint32_t h,uint32_t color){
+ compositor_fill_rounded_locked(clip,x,y,w,h,0,color);
 }
 static uint32_t counted_text_width(const control_text_run_t *run,const char *text,unsigned length,unsigned font){
  ++text_width_queries;return control_selection_prepared_width(run,text,length,font);
@@ -64,6 +69,8 @@ static control_text_position_t counted_text_position(const os_control_node_t *no
 #define control_text_position counted_text_position
 '''
 main = r'''
+#undef g_compositor_snapshot
+#define g_compositor_snapshot snapshot_fixture
 static os_control_node_t root_node={.flags=OS_CONTROL_MANAGED_FOCUS};
 static window_control_document_t doc={.nodes=&root_node};
 static compositor_window_view_t view;
@@ -88,7 +95,63 @@ static void draw(os_control_node_t n,int x,int y,unsigned w,unsigned h,Rect dama
   if(px<damage.x0||px>=damage.x1||py<damage.y0||py>=damage.y1)
    assert(pixels[1+py*128+px]==sentinel);
 }
+/* 对照旧的标题栏/客户区两次遍历，使用真实像素绘制器验证合并遍历。 */
+static void unified_frame_paint(void){
+ os_control_node_t nodes[4]={
+  {.identifier=1,.parent=OS_CONTROL_NO_PARENT,.kind=OS_CONTROL_CONTAINER,
+   .flags=OS_CONTROL_WINDOW_FRAME,.width=OS_CONTROL_FILL,.height=OS_CONTROL_FILL},
+  {.identifier=2,.parent=0,.kind=OS_CONTROL_CONTAINER,.x=3,.y=2,.width=88,.height=64,
+   .flags=OS_CONTROL_BACKGROUND_ALPHA,.background=0x80605040,.radius=5},
+  {.identifier=3,.parent=1,.kind=OS_CONTROL_BUTTON,.x=11,.y=14,.width=60,.height=25,
+   .background=OS_THEME_FIELD,.foreground=OS_THEME_TEXT,.font_size=16,.radius=7,
+   .text_length=1},
+  {.identifier=4,.parent=0,.kind=OS_CONTROL_CONTAINER,.x=-2,.y=3,.width=60,.height=42,
+   .flags=OS_CONTROL_BACKGROUND_ALPHA,.background=0x50708090,.radius=4}};
+ control_tree_box_t boxes[4];char text[]="A";
+ window_control_document_t document={.nodes=nodes,.count=4,.boxes=boxes,.text=text,
+  .layout_width=100,.layout_height=60,.layout_valid=true};
+ compositor_window_view_t window={.width=100,.height=60,.x=7,.y=5,
+  .flags=OS_WINDOW_STANDARD_CAPTION_CONTROLS,.controls=&document};
+ document.layout_flags=window.flags;
+ Rect viewport=control_tree_window_viewport(nodes,4,100,60,window.flags);
+ assert(viewport.y0<0);
+ assert(control_tree_layout_validated(nodes,4,viewport,boxes));
+ control_paint_context_t context={.view=&window,.document=&document,
+  .x=window.x+window_client_offset_x(window.flags),
+  .y=window.y+window_client_offset_y(window.flags)};
+ uint32_t reference[128*96+2];
+ unsigned fewer_calls=0;
+ for(unsigned mode=0;mode<256;++mode){
+  Rect damage={mode%3?0:18,mode%2?0:24,mode%5?128:72,mode%7?96:40};
+  window.control_hover=mode%3?0:3;window.control_pressed=mode%5?0:3;
+  for(unsigned i=0;i<128*96+2;++i)pixels[i]=sentinel;
+  g_compositor_snapshot.damage_bounds=damage;
+  int32_t left=damage.x0-context.x,top=damage.y0-context.y;
+  int32_t right=damage.x1-context.x,bottom=damage.y1-context.y;
+  if(left<0)left=0;if(top<viewport.y0)top=viewport.y0;
+  if(right>100)right=100;if(bottom>60)bottom=60;
+  unsigned before=paint_node_calls;
+  if(left<right&&top<0&&bottom>viewport.y0){
+   control_tree_paint(nodes,4,boxes,(Rect){left,top,right,bottom<0?bottom:0},control_paint_node,&context);
+   top=0;
+  }
+  if(left<right&&top<bottom)
+   control_tree_paint(nodes,4,boxes,(Rect){left,top,right,bottom},control_paint_node,&context);
+  unsigned old_calls=paint_node_calls-before;
+  memcpy(reference,pixels,sizeof(pixels));
+  for(unsigned i=0;i<128*96+2;++i)pixels[i]=sentinel;
+  before=paint_node_calls;
+  compositor_control_tree(g_compositor_snapshot.damage_bounds,&window);
+  assert(!memcmp(reference,pixels,sizeof(pixels)));
+  assert(paint_node_calls-before<=old_calls);
+  if(paint_node_calls-before<old_calls)++fewer_calls;
+ }
+ assert(fewer_calls);
+ printf("Unified frame paint: fewer callbacks in %u cases\n",fewer_calls);
+ puts("Unified frame paint: 256 real-renderer pixel comparisons against split caption/client traversal, alpha, rounded crossing controls, hover/press and clipping PASS");
+}
 int main(void){
+ unified_frame_paint();
  /* 模态背景只阻止输入，像素必须与原外观完全一致；真正禁用仍需变灰。 */
  uint32_t original[128*96+2];
  const unsigned backdrop_kinds[]={OS_CONTROL_BUTTON,OS_CONTROL_LIST_ITEM,OS_CONTROL_TAB,
@@ -123,13 +186,13 @@ int main(void){
    menu[0].flags=focus?OS_CONTROL_MANAGED_FOCUS:0;
    for(unsigned i=0;i<128*96+2;++i)pixels[i]=sentinel;
    g_compositor_snapshot.damage_bounds=(Rect){0,0,128,96};
-   compositor_control_nodes(menu,3,menu_boxes,"OpenAuto arrange",hover,pressed,0);
+   compositor_control_nodes(g_compositor_snapshot.damage_bounds,menu,3,menu_boxes,"OpenAuto arrange",hover,pressed,0);
    assert(pixels[0]==sentinel&&pixels[128*96+1]==sentinel);
    assert(pixel(10,50)!=(sentinel&0xffffff));
   }
- compositor_control_nodes(0,3,menu_boxes,0,0,0,0);
- compositor_control_nodes(menu,0,menu_boxes,0,0,0,0);
- compositor_control_nodes(menu,3,0,0,0,0,0);
+ compositor_control_nodes(g_compositor_snapshot.damage_bounds,0,3,menu_boxes,0,0,0,0);
+ compositor_control_nodes(g_compositor_snapshot.damage_bounds,menu,0,menu_boxes,0,0,0,0);
+ compositor_control_nodes(g_compositor_snapshot.damage_bounds,menu,3,0,0,0,0,0);
  Rect full={0,0,128,96};os_control_node_t n={.identifier=2,.kind=OS_CONTROL_PROGRESS};
  /* 无文字快捷路径必须位于装饰绘制之后，不能丢失圆角、焦点框或按压背景。 */
  view.control_focus=2;
@@ -179,7 +242,7 @@ int main(void){
  for(unsigned clipped=0;clipped<2;++clipped){
   for(unsigned i=0;i<128*96+2;++i)pixels[i]=sentinel;
   g_compositor_snapshot.damage_bounds=clipped?(Rect){10,6,11,8}:full;
-  compositor_control_tree(&frame_view);
+  compositor_control_tree(g_compositor_snapshot.damage_bounds,&frame_view);
   assert(frame_boxes[1].bounds.y0==-36);
   for(unsigned y=0;y<96;++y)for(unsigned x=0;x<128;++x){
    bool painted=x>=5&&x<85&&y>=5&&y<37;
@@ -189,7 +252,7 @@ int main(void){
   assert(pixels[0]==sentinel&&pixels[128*96+1]==sentinel);
  }
  frame_view.flags|=OS_WINDOW_CAPTION_HEIGHT(80);
- compositor_control_tree(&frame_view);assert(frame_boxes[1].bounds.y0==-76);
+ compositor_control_tree(g_compositor_snapshot.damage_bounds,&frame_view);assert(frame_boxes[1].bounds.y0==-76);
  /* 符号按钮执行真实绘制，逐像素确认居中、主题颜色、禁用和损坏裁剪。 */
  for(uint32_t symbol=OS_CONTROL_SYMBOL_BACK;symbol<=OS_CONTROL_SYMBOL_CLOSE;++symbol)
   for(unsigned size=1;size<=40;++size)for(unsigned disabled=0;disabled<2;++disabled){
@@ -338,6 +401,15 @@ with tempfile.TemporaryDirectory(prefix='control-widgets-') as directory:
                     str(root/'kernel/graphics/control_tree.c'), '-o', binary],
                    input=prefix+body+main, text=True, check=True)
     subprocess.run([binary], check=True)
+    # 只读视图必须在编译期拒绝恢复临时全局裁剪写入。
+    broken=body.replace('control_paint_context_t *context = raw;',
+        'control_paint_context_t *context = raw; g_compositor_snapshot.damage_bounds=(Rect){0};')
+    assert broken != body
+    result=subprocess.run(['cc','-std=c11','-O2','-I'+str(root/'include'),'-x','c','-',
+        str(root/'kernel/graphics/control_tree.c'),'-o',binary],
+        input=prefix+broken+main,text=True,capture_output=True)
+    assert result.returncode != 0 and 'read-only' in result.stderr,result.stderr
+    print('Negative control rejected: widget painting writes to the read-only compositor snapshot')
     # 负向对照重现此次 QEMU 崩溃，证明回归实际覆盖了根节点遗漏。
     broken = body.replace('.nodes = (os_control_node_t *)nodes', '.nodes = 0')
     assert broken != body

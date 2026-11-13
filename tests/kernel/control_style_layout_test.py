@@ -231,29 +231,29 @@ typedef struct { uint8_t pixels[1]; } font_t;
 typedef struct { os_control_node_t *nodes; char *text; font_t *fonts[97]; control_text_run_t **runs; } document_t;
 typedef struct { bool maximized;uint32_t identifier,control_key_target,control_hover,control_pressed,control_focus,control_text_target,control_text_anchor,control_text_end; } view_t;
 typedef struct { document_t *document; view_t *view; int64_t x,y; } control_paint_context_t;
-static struct { Rect damage_bounds;uint32_t focused_identifier; } g_compositor_snapshot;
+static struct { Rect damage_bounds;uint32_t focused_identifier,theme; } g_compositor_snapshot;
 /* 此夹具验证样式继承；图标像素由 control_widgets_test 覆盖。 */
 static struct { uint32_t display_stride; uint32_t *composite_framebuffer; } g_window_server;
 static uint32_t colors[16],radius,seen_font,seen_text;
 static unsigned calls,alphas;
-static void control_fill(int64_t x,int64_t y,uint32_t w,uint32_t h,uint32_t r,uint32_t color){
- (void)x;(void)y;assert(w&&h&&calls<16);colors[calls++]=color;radius=r;
+static void control_fill(Rect clip, int64_t x,int64_t y,uint32_t w,uint32_t h,uint32_t r,uint32_t color){
+ (void)clip;(void)x;(void)y;assert(w&&h&&calls<16);colors[calls++]=color;radius=r;
 }
-static void control_fill_alpha(int64_t x,int64_t y,uint32_t w,uint32_t h,uint32_t r,uint32_t color){
- ++alphas;control_fill(x,y,w,h,r,color);
+static void control_fill_alpha(Rect clip, int64_t x,int64_t y,uint32_t w,uint32_t h,uint32_t r,uint32_t color){
+ ++alphas;control_fill(clip, x,y,w,h,r,color);
 }
-static void control_checkerboard(int64_t x,int64_t y,uint32_t w,uint32_t h,uint32_t r,uint32_t light,uint32_t dark){
- (void)x;(void)y;(void)w;(void)h;(void)r;(void)light;(void)dark;assert(false);
+static void control_checkerboard(Rect clip, int64_t x,int64_t y,uint32_t w,uint32_t h,uint32_t r,uint32_t light,uint32_t dark){
+ (void)clip;(void)x;(void)y;(void)w;(void)h;(void)r;(void)light;(void)dark;assert(false);
 }
-static void control_border(int64_t x,int64_t y,uint32_t w,uint32_t h,uint32_t r,uint32_t b,uint32_t color){
- if(b)for(unsigned i=0;i<4;++i)control_fill(x,y,w,h,r,color);
+static void control_border(Rect clip, int64_t x,int64_t y,uint32_t w,uint32_t h,uint32_t r,uint32_t b,uint32_t color){
+ if(b)for(unsigned i=0;i<4;++i)control_fill(clip, x,y,w,h,r,color);
 }
-static void compositor_control_caption_icon(int64_t x,int64_t y,uint32_t w,uint32_t h,uint32_t a,bool m,bool active){(void)x;(void)y;(void)w;(void)h;(void)a;(void)m;(void)active;}
+static void compositor_control_caption_icon(Rect clip,int64_t x,int64_t y,uint32_t w,uint32_t h,uint32_t a,bool m,bool active){(void)clip;(void)x;(void)y;(void)w;(void)h;(void)a;(void)m;(void)active;}
 static void control_paint_surface(control_paint_context_t *c,const control_tree_box_t *b,Rect r){
  (void)c;(void)b;(void)r;assert(0);
 }
-static void control_paint_text(const os_control_node_t *node,const char *s,int64_t x,int64_t y,const uint8_t *cache){
- (void)cache;
+static void control_paint_text(Rect clip, const os_control_node_t *node,const char *s,int64_t x,int64_t y,const uint8_t *cache){
+ (void)clip;(void)cache;
  assert(s&&s[0]=='A'&&node->text_length==1);(void)x;(void)y;seen_font=node->font_size;seen_text=node->foreground;
 }
 ''' + paint + r'''

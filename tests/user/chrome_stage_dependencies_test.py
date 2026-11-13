@@ -133,7 +133,7 @@ with tempfile.TemporaryDirectory(prefix='chrome-gpu-profile-') as directory:
         assert 'Invalid or duplicate' in profile(text, 'glibc')
     for mode in ('software', 'vulkan', 'staging'):
         assert (ROOT/f'assets/chrome/gpu-{mode}.conf').read_bytes() == (mode+'\n').encode()
-    # The transaction fences must surround every browser/resource write.
+    # 事务保护必须覆盖每一次浏览器/资源写入。
     block = source.index('install_data "$project_root/assets/chrome/gpu-staging.conf"')
     launcher = source.index('install_executable "$launcher_source" "$stage_dir/chrome-start"')
     binary = source.index('python3 "$script_dir/chromium/stage-binary.py"')

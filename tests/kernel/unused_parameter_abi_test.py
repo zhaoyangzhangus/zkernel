@@ -25,7 +25,7 @@ static __attribute__((noinline))
 void movsq_local(void* dst,const void* src,uintptr_t reserved,size_t size) BODY
 static __attribute__((always_inline)) inline
 void movsq_inline(void* dst,const void* src,uintptr_t reserved,size_t size) BODY
-// Keep the probe entry points visible with their original three-argument ABI.
+// 保留探测入口的可见性及其原有的三参数 ABI。
 __attribute__((noipa))
 void call_external(void* d,const void* s,size_t n) {
  movsq_external(d,s,0x11223344,n);

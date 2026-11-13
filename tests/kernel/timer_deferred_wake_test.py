@@ -64,7 +64,7 @@ int main(void) {
     shootdown=false;disabled=true;
     lapic_timer_interrupt(0);
     assert(pending && !takes && ticks==1 && !switches);
-    /* No runnable snapshot yet: the wake is only in the remote inbox. */
+    /* 尚无可运行快照：唤醒请求仍在远端收件箱中。 */
     disabled=false;timeslice=false;
     lapic_timer_interrupt(0);
     assert(!pending && takes==1 && drains==1 && switches==1 && ticks==2);

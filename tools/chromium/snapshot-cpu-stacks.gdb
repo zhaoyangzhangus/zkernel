@@ -10,8 +10,8 @@ python
 import os
 if os.environ.get('OS_CAPTURE_ALLOCATOR_WAIT'):
     gdb.execute('break *$kernel_wait_entry')
-    # SysV entry arguments: process, user address. Browser PID is stable in
-    # this canonical boot; lock address must be revalidated after rebuilding.
+    # SysV 入口参数：进程、用户地址。规范启动中的浏览器 PID 保持稳定；重建后必须重新
+    # 验证锁地址。
     gdb.execute('condition $bpnum $rsi == 0x537ecbc0 && ((process_t*)$rdi)->pid == 125')
     gdb.execute('continue')
 if os.environ.get('OS_CAPTURE_ALLOCATOR_WAKE'):
@@ -92,8 +92,8 @@ for thread in gdb.selected_inferior().threads():
         process = current['process'].dereference()
         print('CURRENT pid', int(process['pid']), 'tid', int(current['tid']))
         top = int(current['kernel_stack_top'])
-        # arch_trap_frame_t is 22 uint64_t fields (context.h). Inspection
-        # objects may omit this unused type, so decode its fixed ABI directly.
+        # arch_trap_frame_t 包含 22 个 uint64_t 字段（见 context.h）。检查对象可能省略
+        # 此未使用类型，因此直接按固定 ABI 解码。
         frame_address = top - 22 * 8
         raw = bytes(gdb.selected_inferior().read_memory(frame_address, 22 * 8))
         trap = [int.from_bytes(raw[i:i+8], 'little') for i in range(0, len(raw), 8)]

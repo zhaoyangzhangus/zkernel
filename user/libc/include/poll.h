@@ -1,8 +1,7 @@
 #pragma once
 
-/* glibc's <sys/poll.h> uses this guard.  Defining it here prevents the
- * host/sysroot compatibility header from declaring a second pollfd when a
- * POSIX source includes both <poll.h> and <sys/poll.h>. */
+/* glibc 的 <sys/poll.h> 使用此保护宏。此处定义后，当 POSIX 源码同时包含 <poll.h> 和
+ * <sys/poll.h> 时，可防止宿主/sysroot 兼容头文件重复声明 pollfd。 */
 #ifndef _SYS_POLL_H
 #define _SYS_POLL_H 1
 

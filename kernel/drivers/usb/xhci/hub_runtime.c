@@ -193,7 +193,7 @@ bool xhci_hub_runtime_start(
         limit = XHCI_MAX_SLOT_TABLE - 1U;
     }
 
-    /* Normalize every published Hub before exposing runtime hotplug. */
+    /* 启用运行时热插拔前，先规范化所有已发布的 Hub。 */
     for(uint32_t slot = 1U;
         slot <= limit;
         ++slot)
@@ -255,9 +255,8 @@ static bool xhci_hub_runtime_ops_ready(
 }
 
 /*
- * Startup enumeration is a bounded Slot Table walk.  Newly published Hub
- * Slots are deliberately processed on the next pass, which supports nested
- * Hub topology without an inventory-side device model.
+ * 启动枚举会有界地遍历 Slot Table。新发布的 Hub Slot 特意留到下一轮处理，因此
+ * 无需依赖 inventory 侧设备模型也能支持嵌套 Hub 拓扑。
  */
 bool xhci_hub_runtime_probe_downstream(
     xhci_state_t *state,
@@ -350,7 +349,7 @@ bool xhci_hub_runtime_probe_downstream(
                     state, hub, (uint8_t)port, status);
                 uint8_t speed = xhci_hub_port_speed(status);
 
-                /* state->device is unpublished child working storage. */
+                /* state->device 是尚未发布的子设备工作存储。 */
                 ops->zero_device_context(&state->device);
                 ops->clear_device_flags();
                 if(!ops->submit_command(
@@ -399,7 +398,7 @@ bool xhci_hub_runtime_probe_downstream(
         }
     }
 
-    /* Runtime Hub TDs are armed only at the startup/runtime barrier. */
+    /* 运行时 Hub TD 只会在启动/运行时屏障处启用。 */
     return true;
 }
 

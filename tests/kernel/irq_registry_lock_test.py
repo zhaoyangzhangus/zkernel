@@ -6,8 +6,7 @@ import tempfile
 root = Path(__file__).resolve().parents[2]
 source = (root / 'kernel/arch/x86_64/irq/irq.c').read_text()
 source = source[source.index('typedef struct irq_slot'):source.index('static void irq_self_test_handler')]
-# Only privileged flag instructions are replaced; registry operations, first
-# publication, error paths and the production spinlock remain executable.
+# 只替换特权标志指令；注册表操作、首次发布、错误路径和生产自旋锁仍会实际执行。
 save = '__asm__ volatile ("pushfq; popq %0; cli" : "=r"(flags) : : "memory");'
 restore = '__asm__ volatile ("sti" : : : "memory");'
 assert source.count(save) == source.count(restore) == 1
@@ -36,8 +35,8 @@ static bool test_claim(atomic_uint *state,unsigned *expected,unsigned desired,
                        memory_order success,memory_order failure) {
     atomic_fetch_add_explicit(&init_claims,1,memory_order_relaxed);
     bool won=atomic_compare_exchange_strong_explicit(state,expected,desired,success,failure);
-    /* Delay the first publisher until all four startup CPUs have entered;
-     * exercise state 1, not just four readers arriving after publication. */
+    /* 等待四个启动 CPU 全部进入后，再允许第一个发布者继续；测试状态 1，而不只是
+     * 测试发布后才到达的四个读取者。 */
     if(won)while(atomic_load_explicit(&init_claims,memory_order_acquire)<4) {
         __asm__ volatile ("pause");
     }
@@ -116,8 +115,7 @@ int main(void) {
     assert(atomic_load(&g_irq_initialized)==2);
     unsigned initial_claims=atomic_load(&init_claims);
     assert(initial_claims==4);
-    /* Compare the old and current initialized paths, with live table entries
-     * present: neither may reset the table or change its lock. */
+    /* 在表中存在有效项时比较旧版和当前的已初始化路径：两者都不得重置表或更改其锁。 */
     reset(false);assert(irq_register(50,handler,&calls)==K_OK);
     irq_slot_t slots[IRQ_VECTOR_LAST+1];memcpy(slots,g_irq_slots,sizeof(slots));
     unsigned before=atomic_load(&init_claims);
@@ -147,8 +145,7 @@ int main(void) {
         x86_irq_dispatch(0);frame.vector=UINT64_MAX;x86_irq_dispatch(&frame);
         assert(eois==4);balanced(state);++cases;
     }
-    /* An IRQ arriving while the registering thread owns the table lock must
-     * be delayed until publication/unlock; its callback can remove itself. */
+    /* 注册线程持有表锁期间到达的 IRQ 必须等到发布/解锁之后再处理；其回调可以自行移除。 */
     for(unsigned vector=IRQ_VECTOR_FIRST;vector<=IRQ_VECTOR_LAST;++vector) {
         reset(true);inject=true;delivered_vector=vector;
         assert(irq_register(vector,remove_self,&calls)==K_OK);

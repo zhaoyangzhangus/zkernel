@@ -24,7 +24,7 @@ def snapshot():
          for i in range(nic['software_queues'].type.sizeof //
                         nic['software_queues'][0].type.sizeof)]))
     if int(nic['rtl_rx_ring']):
-        # DMA mappings are page-rounded, not a descriptor count.
+        # DMA 映射按页取整，而不是按描述符数量计算。
         ring_size = gdb.lookup_global_symbol('system_inspection_rtl_ring_type').type.sizeof // gdb.lookup_type('rtl8126_descriptor_t').sizeof
         if not 0 < ring_size <= 4096:
             raise RuntimeError('Invalid NIC descriptor ring geometry')

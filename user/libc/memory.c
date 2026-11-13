@@ -46,8 +46,8 @@ void *memmove(void *destination, const void *source, size_t length) {
         return libc_copy_forward(destination, source, length);
     } else {
 #if defined(__x86_64__)
-        /* Backward integer loads/stores preserve overlap even one byte
-         * apart, without setting DF or requiring aligned uint64_t access. */
+        /* 反向整数加载/存储可正确处理仅相隔一个字节的重叠区域，无需设置 DF，也不要求 uint64_t
+         * 访问对齐。 */
         typedef struct { uint64_t value; }
             __attribute__((packed, may_alias)) unaligned_word_t;
         if (length >= 64U) {

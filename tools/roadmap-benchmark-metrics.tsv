@@ -1,5 +1,5 @@
 # metric|profile
-# Required baseline metrics for the kernel refactoring benchmark.
+# 内核重构基准测试所需的基线指标。
 scheduler.schedule|common
 scheduler.enqueue|common
 scheduler.dequeue|common

@@ -45,12 +45,12 @@ static void closed(void *p) {
     assert(!depth && !atomic_load(&table.grow_lock.state));
     if (atomic_exchange(&reentered,true)) return;
     assert(handle_set_flags(&table,original[0],HANDLE_FLAG_CLOEXEC)==K_OK);
-    /* Clear a future slot before the scan reaches it. */
+    /* 在扫描到未来槽位之前先将其清空。 */
     if (mode==1) assert(handle_set_flags(&table,original[299],0)==K_OK);
     unsigned count=mode==2 ? 600 : 1;
     for (unsigned i=0;i<count;++i)
         assert(handle_create_with_flags(&table,&object,7,HANDLE_FLAG_CLOEXEC,&created[i])==K_OK);
-    /* New handles reuse the detached slot with a different generation. */
+    /* 新句柄会以不同的代数重用已分离的槽位。 */
     assert((uint32_t)created[0]==100 && created[0]!=original[100]);
 }
 static const object_ops_t ops={.handle_close=closed};

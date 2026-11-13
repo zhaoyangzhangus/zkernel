@@ -131,7 +131,7 @@ int main(int argc,char** argv){
  }else{
   check(u"抖音精选 - 视频",true);check(u"Chrome 中文 ABC",true);
   check(u"日本語 한글",true);
-  // An astral CJK code point must be decoded as one scalar, not two glyphs.
+  // 增补平面的 CJK 码点必须解码为一个标量，不能拆成两个字形。
   check(u"\U0002000B",true);
   check(u"\U0010FFFF",false);
   check(std::u16string_view(u"\xD800",1),false);

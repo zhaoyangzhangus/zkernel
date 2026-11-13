@@ -6,10 +6,9 @@
 #include <kernel/vfs.h>
 
 /*
- * The vendor nv_get_firmware contract returns an opaque lifetime handle and
- * a separately visible immutable byte buffer.  This adapter owns only the
- * system-memory copy read from the mounted System filesystem.  It does not
- * assign GPU addresses, create GMMU mappings, or speak GSP RPC.
+ * 厂商 nv_get_firmware 约定会返回一个不透明生命周期句柄，以及一个单独可见的不可变
+ * 字节缓冲区。此适配器只拥有从已挂载的 System 文件系统读取到系统内存中的副本；它不会
+ * 分配 GPU 地址、创建 GMMU 映射或处理 GSP RPC。
  */
 #define NVABI_FIRMWARE_MAGIC 0x4E564657U
 #define NVABI_FIRMWARE_PATH_CAP 128U
@@ -53,9 +52,8 @@ static bool nvabi_firmware_name(nv_firmware_type_t type,
     if (resolved == NULL || resolved[0] == '\0') return false;
 
     if (type != NV_FIRMWARE_TYPE_GSP) {
-        /* The matching 595.84 package does not ship a GSP log ELF.  The
-         * vendor path treats that image as optional when logs are disabled;
-         * do not substitute another binary. */
+        /* 对应的 595.84 软件包不包含 GSP 日志 ELF。禁用日志时，厂商路径会将该镜像视为
+         * 可选文件；不要用其他二进制文件代替。 */
         *name = resolved;
         return false;
     }
@@ -142,8 +140,7 @@ const void *NV_API_CALL nv_get_firmware(
         return NULL;
     }
 
-    /* The leading slash in the requested name is kept as a bounded metadata
-     * string; the vendor name itself remains the request identity. */
+    /* 请求名称的前导斜杠作为有界元数据字符串保留；厂商名称本身仍是请求标识。 */
     nvabi_memcpy(requested, name, nvabi_strlen(name) + 1U);
     kernel_serial_printf_serial_only(
         "OS_NVIDIA_FIRMWARE_REQUEST type=%u family=%u requested=%s expectation=595.84\r\n",

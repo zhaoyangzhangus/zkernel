@@ -90,7 +90,7 @@ with tempfile.TemporaryDirectory(prefix='ipv6-boot-probe-') as directory:
         if negative:
             candidate = candidate.replace('socket_listen(*listener_out, 1U) == K_OK',
                                           '((void)&socket_listen, true)')
-            # Keep the function syntactically used without opening a listener.
+            # 保留对函数的语法引用，但不打开监听套接字。
             assert candidate != program
         (path / 'test.c').write_text(candidate)
         subprocess.run(['cc', '-std=c11', '-O2', '-Wall', '-Wextra', '-Werror',

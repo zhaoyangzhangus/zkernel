@@ -37,8 +37,8 @@ TESTS = (
     'user/chrome_external_protocol_test.py',
 )
 
-# These validate symbol addresses/build identity against the deployed ESP,
-# not just source behavior. Keep them mandatory in the default full run.
+# 这些检查会依据已部署到 ESP 的符号地址/构建标识进行验证，而不只是检查源码行为。默认完整运行时
+# 必须执行这些检查。
 DEPLOYED_TESTS = (
     'user/chrome_frame_trace_identity_test.py',
     'user/chrome_new_tab_trace_test.py',
@@ -63,7 +63,7 @@ def run_test(name, source, timeout=90):
         return process.wait(timeout=timeout) == 0
     except subprocess.TimeoutExpired:
         print(f'CHROMIUM_SOURCE_TIMEOUT {name}', flush=True)
-        # Terminate this test's own process group, including compiler children.
+        # 终止此测试自身的进程组，包括编译器子进程。
         for sig, grace in ((signal.SIGTERM, 5), (signal.SIGKILL, 5)):
             try:
                 os.killpg(process.pid, sig)

@@ -57,10 +57,11 @@ uint32_t wake_all(wait_queue_t *q) {
  wake_check(q);++all_wakes;atomic_fetch_add(&q->sequence,1);return 1;
 }
 kstatus_t wait_on_queue(wait_queue_t *q,bool (*ready)(void*),void *ctx,uint64_t timeout) {
- (void)q;assert(timeout==123 || timeout==0);++wait_calls;
- if(before_wait) { void (*hook)(void*)=before_wait;before_wait=0;hook(ctx); }
+ void *port=(void*)((uint8_t*)q - offsetof(message_port_t,receive_waitq));
+ assert(timeout==123 || timeout==0);++wait_calls;
+ if(before_wait) { void (*hook)(void*)=before_wait;before_wait=0;hook(port); }
  bool value=ready(ctx);
- if(value && after_ready) { void (*hook)(void*)=after_ready;after_ready=0;hook(ctx); }
+ if(value && after_ready) { void (*hook)(void*)=after_ready;after_ready=0;hook(port); }
  return value?K_OK:K_ETIMEDOUT;
 }
 ''' + source.replace('    *out = port;', '    check_storage(port);\n    *out = port;') + r'''
@@ -75,9 +76,9 @@ static void post_between_check_and_wait(void *p) {
  unsigned char data=42;assert(message_port_send(p,&data,1)==K_OK);
 }
 static void close_between_check_and_wait(void *p) { assert(message_port_close(p)==K_OK); }
-static void consume_before_receiver_lock(void *p) {
- unsigned char data=0;size_t size=0;
- assert(message_port_receive(p,&data,1,&size,0)==K_OK && data==42 && size==1);
+static void compete_after_claim(void *p) {
+ unsigned char data=99;size_t size=123;
+ assert(message_port_receive(p,&data,1,&size,0)==K_ETIMEDOUT && data==99 && size==123);
 }
 static void *close_many(void *p) {
  for(unsigned i=0;i<10000;++i)assert(message_port_close(p)==K_OK);
@@ -116,7 +117,7 @@ int main(void) {
    assert(!p->count && !atomic_load(&p->lock.state));
    assert(message_port_receive(p,out,sizeof(out),&size,0)==K_ETIMEDOUT);
   }
-  /* Queue order, closed queue draining, and idempotent close notification. */
+  /* 队列顺序、关闭队列的排空以及幂等的关闭通知。 */
   for(unsigned i=0;i<capacity;++i) {data[0]=(uint8_t)i;assert(message_port_send(p,data,1)==K_OK);}
   unsigned notify=notifications,wakes=all_wakes;
   assert(message_port_close(p)==K_OK && notifications==notify+1 && all_wakes==wakes+1);
@@ -131,7 +132,7 @@ int main(void) {
   assert(notifications==notify+1 && all_wakes==wakes+1);
  }
  assert(message_port_create(1,&p)==K_OK);
- /* In-kernel callers may alias message storage: exercise both directions. */
+ /* 内核内调用者可能使用别名消息存储：两个方向都要测试。 */
  for(unsigned direction=0;direction<2;++direction) {
   for(unsigned i=0;i<256;++i)p->messages[0].data[i]=(uint8_t)i;
   memcpy(data,p->messages[0].data,256);
@@ -158,15 +159,15 @@ int main(void) {
  before_wait=post_between_check_and_wait;
  assert(message_port_receive(p,out,1,&size,123)==K_OK && out[0]==42 && size==1);
  assert(wait_calls==waits+1);
- before_wait=post_between_check_and_wait;after_ready=consume_before_receiver_lock;
+ before_wait=post_between_check_and_wait;after_ready=compete_after_claim;
  size=123;
- assert(message_port_receive(p,out,1,&size,123)==K_ETIMEDOUT && size==123);
- assert(wait_calls==waits+3 && !p->count);
+ assert(message_port_receive(p,out,1,&size,123)==K_OK && out[0]==42 && size==1);
+ assert(wait_calls==waits+2 && !p->count);
  before_wait=close_between_check_and_wait;
  assert(message_port_receive(p,out,1,&size,123)==K_ECANCELED);
- assert(wait_calls==waits+4 && !before_wait && !after_ready && !atomic_load(&p->lock.state));
+ assert(wait_calls==waits+3 && !before_wait && !after_ready && !atomic_load(&p->lock.state));
  object_put(p);
- /* Concurrent closes share one publication; destruction is also redundant. */
+ /* 并发 close 共享同一次发布；重复销毁操作也必须安全。 */
  assert(message_port_create(1,&p)==K_OK);
  unsigned notify=notifications,wakes=all_wakes;
  pthread_t workers[8];
@@ -206,7 +207,7 @@ with tempfile.TemporaryDirectory(prefix='liteos-message-port-') as directory:
         negative=code.replace(f'    port->{field} = 0U;', '')
         result=run(negative);assert result.returncode!=0,result.stderr
     print('Negative controls rejected: uninitialized head/tail/count')
-    negative=code.replace('liteos_memmove(data, message->data, message->size);',
-                          'liteos_memmove(data, message->data, OS_PORT_MAX_MESSAGE_SIZE);')
+    negative=code.replace('liteos_memmove(receive->data, message->data, message->size);',
+                          'liteos_memmove(receive->data, message->data, OS_PORT_MAX_MESSAGE_SIZE);')
     result=run(negative);assert result.returncode!=0,result.stderr
     print('Negative control rejected: unused message bytes copied into receiver buffer')

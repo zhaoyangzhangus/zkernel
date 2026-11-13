@@ -15,16 +15,16 @@ def rectangle(x0,y0,x1,y1,color):
     for y in range(y0,y1):
         pixels[(y*width+x0)*3:(y*width+x1)*3] = row
 
-# The normal example.com page is light gray, with text in the menu ROI.
+# 普通的 example.com 页面呈浅灰色，菜单 ROI 中包含文字。
 rectangle(600,400,670,500,(20,20,20))
 assert not namespace['menu_is_painted'](width,pixels)
-# Complete white panel and distributed menu text; shadow reveals gray below.
+# 完整白色面板和分布其中的菜单文字；阴影会显出下方的灰色背景。
 rectangle(557,90,945,806,(255,255,255))
 for y in range(205,645,10):
     rectangle(600,y,630,y+2,(20,20,20))
 assert namespace['menu_is_painted'](width,pixels)
 assert not namespace['menu_has_black_border'](width,pixels)
-# Old compositor discarded alpha in the same transparent margin.
+# 旧版合成器会丢弃同一透明边缘区域的 alpha。
 rectangle(533,78,556,842,(0,0,0))
 assert namespace['menu_is_painted'](width,pixels)
 assert namespace['menu_has_black_border'](width,pixels)

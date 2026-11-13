@@ -42,20 +42,20 @@ with tempfile.TemporaryDirectory(prefix='system-window-resize-') as directory:
         x, y = point
         offset = (y * 1920 + x) * 3
         return pixels[offset:offset + 3]
-    # All sample points are outside the cube left at (124,68), 802x632.
-    # Record the actual exposed background, without a PNG/image dependency.
+    # 所有采样点都在留于 (124,68)、大小为 802x632 的立方体之外。
+    # 直接记录实际露出的背景，不依赖 PNG/图像处理库。
     click(1600, 155)  # Minimize the terminal waiting synchronously for cube exit.
     move(1800, 960)
     background = frame()
-    # Reuse our QA terminal, or create an empty editor, never a user document.
+    # 复用 QA 终端，或创建空白编辑器；绝不打开用户文档。
     click(815 if args.terminal else 912, 1020)
     time.sleep(.8)
     move(1800, 960)
     original = frame()
     points = {'left': (250, 800), 'right': (1669, 800),
               'top': (1100, 140), 'bottom': (1100, 934)}
-    # Five pixels inside each border: beyond the old 3px grab strip, within
-    # the enlarged 8px strip, and clear of transparent rounded-corner pixels.
+    # 从每条边向内 5 像素：超出旧的 3px 拖拽区域，处于扩大的 8px 区域内，
+    # 并避开圆角透明像素。
     routes = [(245, 800, 30, 0, ('left',)),
               (1674, 800, -30, 0, ('right',)),
               (1100, 140, 0, 20, ('top',)),

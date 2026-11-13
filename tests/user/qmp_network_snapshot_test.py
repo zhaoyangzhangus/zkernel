@@ -60,8 +60,8 @@ def exercise(node, running, existing, failure):
                 workspace / 'tools/chromium/inspect-current-tcp.gdb')]
             assert cwd == workspace and stderr == subprocess.STDOUT and timeout == 60
             events.append('inspect')
-            # Model interruption after attach; the observer must recover the
-            # original state even if batch GDB cannot execute its own finally.
+            # 模拟附加后发生中断；即使批处理 GDB 无法执行 finally，观察器也必须恢复
+            # 原始状态。
             machine.update(running=not running,
                            status='paused' if running else 'running')
             if failure == 'timeout':
@@ -101,8 +101,7 @@ for running in (False, True):
         for failure in (None, 'exit', 'text', 'marker', 'timeout', 'spawn', 'terminal'):
             exercise(helper, running, existing, failure)
 
-# Reject an already terminal guest before creating a debugger, closing QMP,
-# or even inspecting an endpoint on disk.
+# 在创建调试器、关闭 QMP 或检查磁盘端点之前，先拒绝已经终止的客户机。
 for status in ('shutdown', 'internal-error'):
     events = []
     env = {'command': lambda name: {'status': status, 'running': False}}
@@ -114,8 +113,8 @@ for status in ('shutdown', 'internal-error'):
     else:
         raise AssertionError('already terminal guest accepted')
 
-# A regression restoring the old held-QMP or unconditional-resume behavior
-# must fail the same behavioral oracle, not merely a source-string check.
+# 如果回归到旧的保持 QMP 打开或无条件恢复行为，同一行为基准必须失败，不能只靠
+# 源码字符串检查发现问题。
 for old, new in [('    qmp.close()', '    pass'),
                  ("restore_run_state(qmp, state['running'])", "qmp.command('cont')")]:
     mutated = ast.unparse(helper)

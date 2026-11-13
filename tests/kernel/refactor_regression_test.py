@@ -162,8 +162,8 @@ def run(label, command):
 for group, test in tests:
     run(f'{group}/{test.name}', [sys.executable, str(test)])
 
-# Use the canonical host-test targets for complete FAT/cache implementations,
-# not only extracted hot-path fixtures. These targets never write VM images.
+# 使用规范的宿主测试目标覆盖完整的 FAT/缓存实现，而不只测试抽取的热点路径夹具。
+# 这些目标不会写入虚拟机镜像。
 if 'filesystem' in selected:
     before = len(failures)
     run('filesystem/fat_cache_compile', [
@@ -173,8 +173,8 @@ if 'filesystem' in selected:
         run('filesystem/fat32', [str(root / 'build/fat32-test.exe')])
         run('filesystem/block_cache', [str(root / 'build/cache-test.exe')])
 
-# Exercise the actual subscription/object implementation as well as Python
-# fixtures. Build only in a temporary directory, never in the guest image.
+# 除 Python 测试夹具外，也覆盖真实的订阅/对象实现。只在临时目录中构建，绝不写入
+# 客户机镜像。
 if 'sync' in selected:
     with tempfile.TemporaryDirectory(prefix='liteos-wait-regression-') as directory:
         binary = str(Path(directory) / 'test')

@@ -161,7 +161,7 @@ int main(void){
  for(unsigned read=0;read<64;++read)for(unsigned depth=0;depth<=64;++depth)
  for(unsigned pattern=0;pattern<8;++pattern)for(unsigned op=0;op<6;++op){
   setup(&w,read,depth,pattern);apply(&w,op,&input);++cases;
-  // Exercise repeated close deduplication and resize coalescing after the first append.
+  // 测试首次追加后重复关闭去重和调整大小合并。
   if(op==2 || op==4 || op==5){w.x=INT32_MAX;w.y=INT32_MIN;apply(&w,op,&input);++cases;}
  }
  setup(&w,63,0,0);uint32_t random=0xabcdef;
@@ -173,7 +173,7 @@ int main(void){
   apply(&w,random%6,&input);++cases;
   if(i%7==0 && count){w.event_read=(w.event_read+1)%64;--w.event_count;memmove(expected,expected+1,(count-1)*sizeof(*expected));--count;}
  }
- // Invalid public dispatch never modifies the queue or publishes a wake.
+ // 公共分发参数无效时，绝不修改队列或发布唤醒。
  registered=&w;unsigned before=wakes;
  assert(window_server_dispatch(w.identifier,NULL)==K_EINVAL);
  assert(window_server_dispatch(999,&input)==K_ENOENT);
@@ -237,6 +237,18 @@ int main(void){
  assert(count==2&&expected[0].control.tree_revision!=expected[1].control.tree_revision);
  assert(expected[0].control.node_index==789&&expected[1].control.node_index==789);
  assert(expected[1].control.user_data==(0xaabbcc0000000000ULL|789));
+ /* 每个环回位置都验证：同类型但属于其他窗口的队尾不能合并。 */
+ for(unsigned head=0;head<64;++head){
+  for(unsigned op=2;op<=5;op+=3){
+   setup(&w,head,1,0);
+   expected[0].identifier=w.identifier+1;
+   expected[0].type=op==2?OS_WINDOW_EVENT_RESIZE:OS_WINDOW_EVENT_MOVED;
+   w.events[head]=expected[0];apply(&w,op,&input);assert(count==2);
+  }
+  setup(&w,head,0,0);apply_control(&w,&input,789,OS_CONTROL_MOVE,10,20);
+  expected[0].identifier=w.identifier+1;w.events[head]=expected[0];
+  apply_control(&w,&input,789,OS_CONTROL_MOVE,20,30);assert(count==2);
+ }
  /* 物理事件复用场景结果；定向注入重新查询；键盘不触发指针扫描。 */
  setup(&w,0,0,0);registered=&w;input.type=OS_INPUT_EVENT_BUTTON;
  g_window_server.scene.hovered_window_identifier=w.identifier;
@@ -272,6 +284,18 @@ with tempfile.TemporaryDirectory(prefix='liteos-window-queue-') as directory:
             print(result.stdout.strip())
     run('production', program)
     if args.negative_controls:
+        run('merge-foreign-window-tail', program.replace(
+            'event->identifier == window->identifier && event->type == type',
+            'event->type == type'), True)
+        run('merge-across-event-type', program.replace(
+            'event->identifier == window->identifier && event->type == type',
+            '(void)type, event->identifier == window->identifier'), True)
+        run('missing-ring-boundary-copy', program.replace(
+            'window->events[WINDOW_EVENT_CAPACITY - 1U] = window->events[0];',
+            '(void)remaining;'), True)
+        run('wrapped-tail-too-short', program.replace(
+            'uint32_t wrapped = remaining - contiguous - 1U;',
+            'uint32_t wrapped = 0U;'), True)
         run('critical-event-evicts-key-before-motion',program.replace(
             'window->event_count >= WINDOW_EVENT_CAPACITY &&\n        !window_event_discard_motion_locked(window)',
             'window->event_count >= WINDOW_EVENT_CAPACITY'),True)
@@ -279,8 +303,8 @@ with tempfile.TemporaryDirectory(prefix='liteos-window-queue-') as directory:
             'if(action==OS_CONTROL_MOVE && window->event_count>=WINDOW_EVENT_CAPACITY &&',
             'if(false && window->event_count>=WINDOW_EVENT_CAPACITY &&'),True)
         run('missing-control-move-coalescing',program.replace(
-            'if (action == OS_CONTROL_MOVE && window->event_count)',
-            'if (false && window->event_count)'),True)
+            'if (action == OS_CONTROL_MOVE)',
+            'if (false)'),True)
         run('control-move-crosses-barrier',program.replace(
             'last->control.action == OS_CONTROL_MOVE && last->control.target == target &&',
             'last->control.target == target &&'),True)

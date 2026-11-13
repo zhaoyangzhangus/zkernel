@@ -7,7 +7,7 @@ static void nvme_queue_write32(const nvme_controller_t *controller,
     volatile uint32_t *address;
     if (controller == 0 || controller->registers == 0) return;
     address = (volatile uint32_t *)(controller->registers + offset);
-    /* NVMe doorbells require a 32-bit MMIO transaction. */
+    /* NVMe doorbell 要求执行 32 位 MMIO 事务。 */
     __asm__ volatile ("movl %1, %0" : "=m"(*address) : "r"(value) : "memory");
 }
 

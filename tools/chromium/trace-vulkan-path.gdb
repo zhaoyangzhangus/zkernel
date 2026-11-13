@@ -11,8 +11,8 @@ sys.path.insert(0, str(Path('tools/chromium').resolve()))
 from trace_build import validate_chrome_symbols
 
 binary = validate_chrome_symbols()
-# Derive entries from the matching executable rather than keeping addresses
-# which silently become stale after the next incremental Chromium build.
+# 从匹配的可执行文件中解析入口，而不是保留会在下次 Chromium 增量构建后
+# 悄然过期的地址。
 methods = {
     'content::VizProcessTransportFactory::OnEstablishedGpuChannel(': 'CHANNEL',
     'gpu::SharedContextState::InitializeVulkanOnly(': 'VULKAN_CONTEXT',

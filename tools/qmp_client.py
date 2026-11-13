@@ -104,10 +104,9 @@ class QMPClient:
         self.close()
 
     def move(self, x, y):
-        # QMP acknowledges host enqueueing, not guest HID consumption. Large
-        # rapid bursts can merge across the homing/placement direction change
-        # while Chrome is closing, so a later click misses its target. Keep
-        # reports small and allow each to drain before the next report.
+        # QMP 确认的是宿主入队，而不是客户机 HID 已消费。Chrome 关闭时快速发送大量事件，
+        # 可能会在归位/定位方向改变时合并，导致后续点击错过目标。每次只发送少量事件，
+        # 并等待当前报告处理完再发送下一个。
         for dx, dy in [(-2500, -1500), (x, y)]:
             while dx or dy:
                 a = max(-80, min(80, dx))

@@ -36,8 +36,8 @@ with tempfile.TemporaryDirectory(prefix='cube-drag-') as directory:
     for code in ('c', 'u', 'b', 'e', 'ret'):
         key(code)
     time.sleep(3)
-    # A responsive shell now displays child output while cube is running.
-    # Raise it briefly to capture the settled client, not the pre-launch text.
+    # 响应正常的 shell 现在会在立方体运行时显示子进程输出。
+    # 短暂将其置顶，以捕获稳定后的客户区，而非启动前的文本。
     click(1100, 155)
     time.sleep(.5)
     terminal_baseline = frame()
@@ -62,7 +62,7 @@ with tempfile.TemporaryDirectory(prefix='cube-drag-') as directory:
         pixels = frame()
         changed = 0
         for row in range(980):
-            # Ignore current cube bounds (800x600 client plus 2px/30px frame).
+            # 忽略立方体当前边界（800x600 客户区，加上 2px/30px 窗框）。
             for left, right in ((0, max(0, x - 8)),
                                 (min(1920, x + 810), 1920)) if y - 8 <= row < y + 640 else ((0, 1920),):
                 if 935 <= row < 985:
@@ -99,7 +99,7 @@ with tempfile.TemporaryDirectory(prefix='cube-drag-') as directory:
         time.sleep(.6)
         pixels = frame()
         changed = 0
-        # Compare settled terminal client pixels, excluding the current cube.
+        # 排除当前立方体，比较稳定后的终端客户区像素。
         for row in range(400, 910):
             for col in range(250, 1670):
                 if x - 8 <= col < x + 810 and y - 8 <= row < y + 640:

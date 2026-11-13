@@ -41,7 +41,7 @@ int main(void){
   if(sample==158)x=INT32_MIN-10LL;
   if(sample==159)x=INT32_MAX+10LL;
   uint32_t radius=sample%13;
-  control_fill_alpha(x,y,w,h,radius,color);
+  control_fill_alpha(g_compositor_snapshot.damage_bounds,x,y,w,h,radius,color);
   assert(pixels[0]==under&&pixels[32*24+1]==under);
   for(int py=0;py<24;++py)for(int px=0;px<32;++px){
    bool inside=px>=2&&px<28&&py>=3&&py<20&&shape(px,py,x,y,w,h,radius);
@@ -66,10 +66,9 @@ with tempfile.TemporaryDirectory(prefix='control-alpha-') as directory:
     spans = r'''
 static unsigned fill_calls,largest_height;
 static bool count_only;
-static void compositor_fill_locked(int32_t x,int32_t y,unsigned w,unsigned h,unsigned color){
+static void compositor_fill_locked(Rect clip,int32_t x,int32_t y,unsigned w,unsigned h,unsigned color){
  ++fill_calls;if(h>largest_height)largest_height=h;
  if(count_only)return;
- Rect clip=g_compositor_snapshot.damage_bounds;
  int64_t right=(int64_t)x+w,bottom=(int64_t)y+h;
  if(x<clip.x0)x=clip.x0;if(y<clip.y0)y=clip.y0;
  if(right>clip.x1)right=clip.x1;if(bottom>clip.y1)bottom=clip.y1;
@@ -77,9 +76,6 @@ static void compositor_fill_locked(int32_t x,int32_t y,unsigned w,unsigned h,uns
   assert(px>=0&&px<32&&py>=0&&py<24);
   g_window_server.composite_framebuffer[py*g_window_server.display_stride+px]=color;
  }
-}
-static void compositor_fill_rounded_locked(int32_t x,int32_t y,unsigned w,unsigned h,unsigned r,unsigned color){
- assert(r==0);compositor_fill_locked(x,y,w,h,color);
 }
 '''
     opaque_main = main.replace('a=0;a<=255;a+=17', 'a=255;a<=255;a+=17').replace('sample<160', 'sample<4000')
@@ -89,15 +85,15 @@ static void compositor_fill_rounded_locked(int32_t x,int32_t y,unsigned w,unsign
     opaque_main = opaque_main.replace('\n}\n', r'''
  count_only=true;fill_calls=largest_height=0;
  g_compositor_snapshot.damage_bounds=(Rect){0,0,3840,2160};
- control_fill(0,0,3840,2160,8,0xff123456);
+ control_fill(g_compositor_snapshot.damage_bounds,0,0,3840,2160,8,0xff123456);
  assert(fill_calls==17&&largest_height==2144);
  fill_calls=largest_height=0;
  g_compositor_snapshot.damage_bounds=(Rect){100,100,3000,2100};
- control_fill(0,0,3840,2160,8,0xff123456);
+ control_fill(g_compositor_snapshot.damage_bounds,0,0,3840,2160,8,0xff123456);
  assert(fill_calls==1&&largest_height==2000);
  fill_calls=largest_height=0;
  g_compositor_snapshot.damage_bounds=(Rect){0,0,1,2160};
- control_fill(0,0,1,2160,96,0xff123456);
+ control_fill(g_compositor_snapshot.damage_bounds,0,0,1,2160,96,0xff123456);
  assert(fill_calls==1&&largest_height==2160);
  puts("Rounded fill: 4K background 17 submissions instead of 2160; clipped middle and clamped radius use one rectangle PASS");
 }

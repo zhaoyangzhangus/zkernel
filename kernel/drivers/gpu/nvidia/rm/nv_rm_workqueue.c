@@ -6,15 +6,12 @@
 #include "../../port/include/nv_port.h"
 
 /*
- * The 595.84 Unix RM passes an opaque queue to os_queue_work_item().  The
- * Phase 4 bridge deliberately leaves nv_state_t::queue NULL, which selects
- * the vendor global queue.  Back that queue with the existing system deferred worker
- * rather than introducing an NVIDIA-private scheduler.
+ * 595.84 Unix RM 会向 os_queue_work_item() 传递不透明队列。第 4 阶段桥接层特意将
+ * nv_state_t::queue 保持为 NULL，以选择厂商全局队列。使用现有系统延迟工作线程处理该队列，
+ * 不另建 NVIDIA 私有调度器。
  *
- * The pool size matches the vendor OS_MAX_QUEUED_WORKITEMS contract.  Keeping
- * both the dispatch record and its exact NVIDIA stack in the pool also makes
- * the enqueue path usable from atomic/interrupt callers without allocating
- * from the kernel heap there.
+ * 池大小符合厂商 OS_MAX_QUEUED_WORKITEMS 约定。将分发记录及其专用 NVIDIA 栈都保存在池中，
+ * 还能让原子/中断调用方在入队时无需从内核堆分配内存。
  */
 #define NV_RM_WORK_CAPACITY 32U
 
@@ -92,8 +89,8 @@ static void nv_rm_work_execute(void *argument)
 
     if (entry == NULL) return;
 
-    /* rm_execute_work_item() is the exact vendor dispatcher.  It owns the
-     * nv_work_item_t and its pData according to the 595.84 contract. */
+    /* rm_execute_work_item() 是厂商指定的分发函数。根据 595.84 约定，它负责处理
+     * nv_work_item_t 及其 pData。 */
     rm_execute_work_item(&entry->stack, entry->data);
     entry->data = NULL;
     atomic_store_explicit(&entry->completed, true, memory_order_release);
@@ -111,11 +108,9 @@ static kstatus_t nv_rm_work_drain_entry(
         if (state == NV_PORT_WORK_IDLE || state == NV_PORT_WORK_CANCELLED)
             return K_OK;
 
-        /* Phase 4 probes RM before System starts the persistent deferred
-         * worker.  The existing deferred runner is explicitly early-boot
-         * safe, so use it to execute the real queued callback.  If no item
-         * can be made runnable while the worker is absent, report the
-         * condition instead of spinning forever or claiming a flush. */
+        /* 第 4 阶段会在 System 启动持久延迟工作线程前探测 RM。现有延迟执行器明确支持
+         * 在引导早期安全运行，因此使用它执行真正排队的回调。若工作线程尚未启动且无法
+         * 运行任何项目，应报告此情况，而不是永久自旋或谎称已完成刷新。 */
         if (!deferred_worker_started()) {
             if (deferred_run(64U) == 0U)
                 return K_EAGAIN;
@@ -132,7 +127,7 @@ NV_STATUS NV_API_CALL os_queue_work_item(struct os_work_queue *queue,
     nv_rm_work_entry_t *entry;
     kstatus_t status;
 
-    /* No per-GPU queue is created until a later lifecycle phase. */
+    /* 生命周期的后续阶段才会为每个 GPU 创建独立队列。 */
     if (queue != NULL || data == NULL) return NV_ERR_NOT_SUPPORTED;
     if (nv_rm_work_ready() != NV_OK) return NV_ERR_OPERATING_SYSTEM;
 
@@ -155,10 +150,8 @@ NV_STATUS NV_API_CALL os_queue_work_item(struct os_work_queue *queue,
     atomic_store_explicit(&entry->completed, false, memory_order_release);
     nv_port_work_init(&entry->work, nv_rm_work_execute, entry);
 
-    /* Publishers are tracked separately so the real enqueue can happen
-     * without holding the pool lock.  A work callback is allowed to queue a
-     * follow-up item; holding this lock across the enqueue would deadlock in
-     * that valid vendor path. */
+    /* 单独跟踪发布者，以便实际入队操作不必持有池锁。工作回调可以继续排入后续项目；
+     * 若在入队期间一直持有此锁，这种有效的厂商调用路径就会死锁。 */
     atomic_fetch_add_explicit(&g_nv_rm_work_publishers, 1U,
                               memory_order_acq_rel);
     nv_port_spin_unlock(&g_nv_rm_work_lock);
@@ -191,8 +184,8 @@ NV_STATUS NV_API_CALL os_flush_work_queue(struct os_work_queue *queue,
     if (nv_rm_work_ready() != NV_OK) return NV_ERR_OPERATING_SYSTEM;
 
     nv_port_spin_lock(&g_nv_rm_work_lock);
-    /* Only the flush owner may reopen publication.  A second flush must not
-     * take a competing snapshot and clear the owner's admission barrier. */
+    /* 只有刷新所有者可以重新开放发布。第二个刷新操作不得获取竞争快照并清除所有者的
+     * 接纳屏障。 */
     if (atomic_load_explicit(&g_nv_rm_work_flushing, memory_order_acquire)) {
         nv_port_spin_unlock(&g_nv_rm_work_lock);
         return NV_ERR_NOT_READY;
@@ -201,9 +194,8 @@ NV_STATUS NV_API_CALL os_flush_work_queue(struct os_work_queue *queue,
                           memory_order_release);
     nv_port_spin_unlock(&g_nv_rm_work_lock);
 
-    /* A producer may have passed the flushing check just before it acquired
-     * the pool lock.  Wait until that producer has either queued or released
-     * its slot before taking the flush snapshot. */
+    /* 生产者可能在获取池锁前刚好通过刷新状态检查。取得刷新快照前，先等待该生产者完成
+     * 入队或释放其槽位。 */
     while (atomic_load_explicit(&g_nv_rm_work_publishers,
                                 memory_order_acquire) != 0U)
         __asm__ volatile ("pause");

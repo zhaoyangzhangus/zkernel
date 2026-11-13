@@ -197,8 +197,7 @@ int main(void) {
             first+=run;++segment;
         }
         assert(segment==m.segment_count);
-        /* The independent physical-run oracle also determines allocation
-         * size: no page_count-sized over-allocation for coalesced segments. */
+        /* 独立的物理连续区基准也会计算分配大小：合并后的段不应按 page_count 过量分配。 */
         assert(atomic_load(&allocation_bytes)-bytes_before==
                n*sizeof(page_t *)+segment*sizeof(dma_segment_t));
         for(unsigned s=0;s<segment;++s)

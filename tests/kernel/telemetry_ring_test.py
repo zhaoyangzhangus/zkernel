@@ -81,7 +81,7 @@ int main(void) {
  for(unsigned i=0;i<4;++i)assert(!pthread_create(&threads[i],0,writer,&ids[i]));
  while(atomic_load(&writers_done)<4) {
   size_t count=telemetry_snapshot(0,records,TELEMETRY_RING_CAPACITY,&next);
-  /* Early snapshots may still contain the production self-test's records. */
+  /* 较早的快照中可能仍包含生产自测生成的记录。 */
   size_t start=0;while(start<count && records[start].category!=7)++start;
   check_records(records+start,count-start);
  }
@@ -115,8 +115,7 @@ int main(void) {
  caller_depth=preempt_depth=0;
  for(unsigned i=0;i<10000;++i)assert(telemetry_init());
  assert(atomic_load(&init_attempts)==8 && !atomic_load(&g_telemetry.lock.state));
- /* The maximum sequence is valid; incrementing past it must terminate the
-  * snapshot rather than wrapping to zero while holding the ring lock. */
+ /* 最大序列号有效；递增越过它时必须终止快照，不能持有环锁并回绕到零。 */
  g_telemetry.next_sequence=UINT64_MAX-1;
  assert(telemetry_record(7,0,0,UINT64_MAX)==K_OK);
  assert(telemetry_record(7,0,0,UINT64_MAX)==K_EIO && !atomic_load(&g_telemetry.lock.state));

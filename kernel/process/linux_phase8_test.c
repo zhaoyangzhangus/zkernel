@@ -1,4 +1,4 @@
-/* Phase 8 Linux personality NVIDIA frontend acceptance runner. */
+/* 第 8 阶段 Linux personality NVIDIA 前端验收运行程序。 */
 #include <arch/x86_64/cpu.h>
 #include <kernel/elf_loader.h>
 #include <kernel/console.h>

@@ -66,6 +66,8 @@ kstatus_t wait_on_queues_in_place(wait_queue_t **queues, size_t count,
                                  bool (*predicate)(void *), void *ctx,
                                  uint64_t timeout_ns);
 uint32_t wake_one(wait_queue_t *q);
+/* 按队列顺序最多唤醒 maximum 个等待者；零上限不改变队列。 */
+uint32_t wake_n(wait_queue_t *q, uint32_t maximum);
 uint32_t wake_all(wait_queue_t *q);
 /* 调用方持有线程引用；栈等待者在等待锁保护下读取。 */
 bool wait_cancel_thread(struct thread *thread);

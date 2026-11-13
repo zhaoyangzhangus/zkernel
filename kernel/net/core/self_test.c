@@ -3,7 +3,7 @@
 
 #include "internal.h"
 
-/* REFACTOR_P8_NET_SELF_TEST_OWNER: protocol and cache regression fixtures. */
+/* REFACTOR_P8_NET_SELF_TEST_OWNER：协议和缓存回归测试夹具。 */
 
 bool net_core_self_test(void) {
     static const uint8_t source_mac[6] = {0x02, 0, 0, 0, 0, 1};

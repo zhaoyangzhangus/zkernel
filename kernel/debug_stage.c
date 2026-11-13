@@ -109,13 +109,11 @@ static void stage_emit(uint16_t phase, uint16_t step, uint32_t value,
     uint32_t length = 0U;
     kernel_serial_guard_t serial_guard;
 
-    /* The sequence and the complete record share the console COM1
-     * transaction.  This preserves strict sequence order while ordinary
-     * printf diagnostics are active on another CPU. */
+    /* 序号和完整记录共用一次控制台 COM1 事务。即使另一 CPU 正在输出普通 printf
+     * 诊断信息，也能保持严格的序号顺序。 */
     kernel_serial_guard_enter(&serial_guard);
-    /* Allocate the serial sequence while holding the output lock.  A stage
-     * event can be published concurrently by two CPUs; assigning the number
-     * before this lock would make the textual log appear out of order. */
+    /* 持有输出锁时分配串口序号。两个 CPU 可能同时发布阶段事件；若在获取此锁前分配
+     * 序号，文本日志中的顺序就可能错乱。 */
     uint64_t sequence = atomic_fetch_add_explicit(&g_stage_sequence, 1U,
                                                   memory_order_release) + 1U;
     output[0] = 0;
@@ -167,7 +165,7 @@ static void stage_publish(uint16_t phase, uint16_t step, uint32_t value,
 #endif
 }
 
-/* The header maps normal calls to the location-aware entry point. */
+/* 头文件会将普通调用映射到带位置信息的入口。 */
 #undef kernel_debug_stage
 #undef kernel_debug_stage_fail
 #undef debug_trace_stage

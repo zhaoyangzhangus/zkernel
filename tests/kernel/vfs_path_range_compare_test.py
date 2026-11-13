@@ -49,7 +49,7 @@ int main(void){
    for(unsigned i=0;i<3;++i){b[y+positions[i]]=0;check(a+x,n,b+y,n);b[y+positions[i]]=(char)0x81;}
   }
  }
- /* Embedded NULs and signed-char values remain ordinary range bytes. */
+ /* 内嵌 NUL 和有符号 char 值仍按普通范围字节处理。 */
  for(unsigned n=1;n<=256;++n)for(unsigned value=0;value<256;++value){
   memset(a,0,sizeof(a));memset(b,0,sizeof(b));
   b[n/2]=(char)value;check(a,n,b,n);check(b,n,a,n);
@@ -68,7 +68,7 @@ int main(void){
   check(left+page-n,n,right+page-n,n);
   if(n){right[page-1]=0;check(left+page-n,n,right+page-n,n);right[page-1]=(char)0x91;}
  }
- /* Rejection must not touch even completely inaccessible inputs. */
+ /* 即使输入完全不可访问，拒绝时也不得触碰它们。 */
  check(left+page,1,right+page,2);check(0,256,right+page,256);
  assert(!munmap(left,(size_t)page*2)&&!munmap(right,(size_t)page*2));
  printf("Path ranges: %zu exact byte-oracle alignment/overlap/NUL/value/null/length/guard cases; equal 256-byte paths use 32 word comparisons instead of 256 byte comparisons\n",cases);

@@ -38,8 +38,8 @@ static kstatus_t page_memory_get_stats(uint64_t *t,uint64_t *f){
 }
 ''' + code + r'''
 int main(void){
- /* Explicit small EOFs must be exact too, including the smallest payload.
-  * OOM must not publish EOF/capacity, and regrowth must clear stale bytes. */
+ /* 显式缩小到较小 EOF 时也必须精确，包括最小负载。
+  * OOM 时不得发布 EOF/容量；再次扩展时必须清除过期字节。 */
  const unsigned small_sizes[]={1,17,40,41,255,1984,1992,1993,2048,4040,4095,4096};
  for(unsigned i=0;i<sizeof(small_sizes)/sizeof(*small_sizes);++i){
   unsigned size=small_sizes[i];vfs_backend_node_t small={0};
@@ -93,7 +93,7 @@ int main(void){
    assert(frees==releases+(!size || (attempt&&!fail)));
    for(unsigned i=0;i<size;++i)assert(b.data[i]==(uint8_t)(i*19+7));
    assert(!stats && !g_vfs_memory_allocation_failure.failures);
-   // Identical EOF and small decrements must not churn the allocation.
+   // EOF 相同或只减少少量数据时，不得反复更换分配。
    before=allocs;
    assert(vfs_memory_backend_truncate(&b,size)==K_OK && allocs==before);
    fail=false;
@@ -106,7 +106,7 @@ int main(void){
    assert(!live && !live_bytes);++cases;
   }
  }
- // Repeated journal-like grow/shrink cycles must release the large storage.
+ // 重复进行类似日志的扩展/缩小循环时，必须释放大型存储。
  vfs_backend_node_t b={0};
  for(unsigned i=0;i<64;++i){
   assert(vfs_memory_backend_truncate(&b,1048576)==K_OK && live_bytes==1048576);

@@ -40,19 +40,18 @@ static bool window_caption_button_rect(uint32_t f,int32_t x,int32_t y,
     uint32_t w,uint32_t b,int32_t *ox,int32_t *oy) {
     *ox=x+w-(4-b)*os_window_caption_button_width(f);*oy=y;return true;
 }
-static bool inside(int64_t x,int64_t y) {
-    Rect r=g_compositor_snapshot.damage_bounds;
+static bool inside(Rect r,int64_t x,int64_t y) {
     return x>=0&&x<600&&y>=0&&y<400&&x>=r.x0&&x<r.x1&&y>=r.y0&&y<r.y1;
 }
-static void compositor_blend_pixel_locked(int32_t x,int32_t y,uint32_t color,uint32_t alpha) {
-    ++operations;if(!inside(x,y))return;
-    /* Order-sensitive test blend preserves repeated-write differences. */
+static void compositor_blend_pixel_locked(Rect clip,int32_t x,int32_t y,uint32_t color,uint32_t alpha) {
+    ++operations;if(!inside(clip,x,y))return;
+    /* 对顺序敏感的测试混合操作应保留重复写入产生的差异。 */
     pixels[y*600+x]=(pixels[y*600+x]*33U)^color^alpha;
 }
-static void compositor_fill_locked(int32_t x,int32_t y,uint32_t w,uint32_t h,uint32_t c) {
+static void compositor_fill_locked(Rect clip,int32_t x,int32_t y,uint32_t w,uint32_t h,uint32_t c) {
     ++operations;
     for(uint32_t row=0;row<h;++row)for(uint32_t col=0;col<w;++col)
-        if(inside((int64_t)x+col,(int64_t)y+row))pixels[(y+row)*600+x+col]=c;
+        if(inside(clip,(int64_t)x+col,(int64_t)y+row))pixels[(y+row)*600+x+col]=c;
 }
 ''' + body + reference + r'''
 int main(void) {
@@ -61,20 +60,20 @@ int main(void) {
         .width=510,.height=350,.identifier=7,.x=20,.y=20,.maximized=true};
     g_compositor_snapshot.damage_bounds=(Rect){0,0,600,400};
     g_compositor_snapshot.focused_identifier=7;
-    memset(pixels,0,sizeof(pixels));compositor_standard_caption_locked(&hovered);
+    memset(pixels,0,sizeof(pixels));compositor_standard_caption_locked(g_compositor_snapshot.damage_bounds,&hovered);
     memcpy(oracle,pixels,sizeof(pixels));
     g_compositor_snapshot.pointer_x=hovered.x+hovered.width-16;
     g_compositor_snapshot.pointer_y=hovered.y+20;
     g_compositor_snapshot.hovered_window_identifier=8;
     g_compositor_snapshot.hovered_title_button=3;
-    memset(pixels,0,sizeof(pixels));compositor_standard_caption_locked(&hovered);
+    memset(pixels,0,sizeof(pixels));compositor_standard_caption_locked(g_compositor_snapshot.damage_bounds,&hovered);
     assert(!memcmp(oracle,pixels,sizeof(pixels)));
     g_compositor_snapshot.hovered_window_identifier=7;
-    memset(pixels,0,sizeof(pixels));compositor_standard_caption_locked(&hovered);
+    memset(pixels,0,sizeof(pixels));compositor_standard_caption_locked(g_compositor_snapshot.damage_bounds,&hovered);
     assert(memcmp(oracle,pixels,sizeof(pixels)));
     memcpy(oracle,pixels,sizeof(pixels));
     g_compositor_snapshot.pointer_x=g_compositor_snapshot.pointer_y=0;
-    memset(pixels,0,sizeof(pixels));compositor_standard_caption_locked(&hovered);
+    memset(pixels,0,sizeof(pixels));compositor_standard_caption_locked(g_compositor_snapshot.damage_bounds,&hovered);
     assert(!memcmp(oracle,pixels,sizeof(pixels)));
     g_compositor_snapshot.hovered_window_identifier=0;
     g_compositor_snapshot.hovered_title_button=0;
@@ -89,7 +88,7 @@ int main(void) {
         g_compositor_snapshot.damage_bounds=(Rect){0,0,600,400};
         g_compositor_snapshot.focused_identifier=active?7:0;
         memset(pixels,0,sizeof(pixels));
-        compositor_standard_caption_locked(&w);
+        compositor_standard_caption_locked(g_compositor_snapshot.damage_bounds,&w);
         uint32_t expected=dark?0x001E1E1EU:
             (!active&&!client?OS_THEME_HEADER_INACTIVE:OS_THEME_HEADER);
         for(unsigned button=1;button<=3;++button) {
@@ -118,10 +117,10 @@ int main(void) {
         g_compositor_snapshot.title_pressed_identifier=hover?7:0;
         g_compositor_snapshot.title_pressed_button=3;
         for(unsigned i=0;i<600*400;++i)pixels[i]=i+123;
-        operations=0;reference_caption(&w);old_ops+=operations;
+        operations=0;reference_caption(g_compositor_snapshot.damage_bounds,&w);old_ops+=operations;
         memcpy(oracle,pixels,sizeof(pixels));
         for(unsigned i=0;i<600*400;++i)pixels[i]=i+123;
-        operations=0;compositor_standard_caption_locked(&w);new_ops+=operations;
+        operations=0;compositor_standard_caption_locked(g_compositor_snapshot.damage_bounds,&w);new_ops+=operations;
         assert(!memcmp(oracle,pixels,sizeof(pixels)));++cases;
     }
     assert(new_ops<old_ops/3);

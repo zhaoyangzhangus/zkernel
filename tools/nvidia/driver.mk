@@ -1,4 +1,4 @@
-# One production kernel and ESP; no phase kernels or prebuilt system objects.
+# 使用一个生产内核和 ESP；不构建阶段内核，也不使用预构建系统对象。
 .PHONY: nvidia-deploy nvidia-driver nvidia-payload
 .PHONY: vulkan-loader vulkan-deps vulkan-payload vulkan-deploy
 vulkan-deploy:
@@ -28,7 +28,7 @@ NVIDIA_RM_DRIVER_OBJECTS += $(NVIDIA_DRIVER_OBJECT)
 KERNEL_OBJECT_FORMAT = elf64-x86-64
 KERNEL_LINK = $(ELFCC) -nostdlib -no-pie -Wl,--build-id=none \
 	-Wl,--gc-sections -Wl,-T,tools/nvidia/phase4-kernel.ld -Wl,-Map,$(BUILD)/kernel/kernel.map
-# private prevents the ELF compiler from leaking into PE loader/user targets.
+# private 可避免 ELF 编译器配置泄漏到 PE 加载器/用户态目标。
 $(BUILD)/kernel/%.o: private CC = $(ELFCC)
 $(BUILD)/kernel/%.o: private OBJCOPY = $(ELFOBJCOPY)
 $(BUILD)/kernel/%.o: private KERNEL_CFLAGS += -mcmodel=kernel -fno-pie -DOS_NVIDIA_PHASE5=1

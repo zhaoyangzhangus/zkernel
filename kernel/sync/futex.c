@@ -185,14 +185,8 @@ static kstatus_t futex_get(process_t *process, vaddr_t address, bool create,
             return K_ENOENT;
         }
         if (candidate != 0) {
-            candidate->key = key.value;
-            candidate->space = key.space;
-            candidate->private_key = key.private_key;
-            candidate->process = process;
-            candidate->refs = 1U;
             if (key.private_key) vm_space_get(key.space);
             object_get(process);
-            wait_queue_init(&candidate->waitq);
             list_add_tail(&bucket->entries, &candidate->node);
             futex_bucket_unlock(&bucket->lock);
             *out = candidate;
@@ -201,6 +195,13 @@ static kstatus_t futex_get(process_t *process, vaddr_t address, bool create,
         futex_bucket_unlock(&bucket->lock);
         candidate = (futex_entry_t *)kzalloc(sizeof(*candidate), 0);
         if (candidate == 0) return K_ENOMEM;
+        /* 候选条目尚未发布；初始化无需占用桶锁，也不必禁止抢占。 */
+        candidate->key = key.value;
+        candidate->space = key.space;
+        candidate->private_key = key.private_key;
+        candidate->process = process;
+        candidate->refs = 1U;
+        wait_queue_init(&candidate->waitq);
         list_init(&candidate->node);
     }
 }
@@ -281,7 +282,7 @@ kstatus_t futex_wake_keyed(process_t *process, uint32_t __user *address,
                                  private_key, &entry);
     if (status == K_ENOENT) return K_OK;
     if (status != K_OK) return status;
-    while (*woken < maximum && wake_one(&entry->waitq) != 0) ++*woken;
+    *woken = wake_n(&entry->waitq, maximum);
     futex_put(entry);
     return K_OK;
 }

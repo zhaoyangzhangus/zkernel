@@ -76,11 +76,11 @@ int main(void) {
     g_vfs_nodes[0]=0;v[1].fs_private=0;
     check("/tmp/profile/00000",0);check("/tmp/profile/00001",0);
     check("",0);check(0,0);
-    /* Preserve bounded comparison: no byte beyond the 256-byte limit is read. */
+    /* 保留有界比较：不会读取 256 字节限制之外的数据。 */
     memset(needle,'x',sizeof(needle));memset(b[n-1].path,'x',sizeof(b[n-1].path));
     check(needle,&v[n-1]);needle[255]='y';check(needle,0);
     g_vfs_node_capacity=0;check("/tmp/empty",0);
-    /* Independent original algorithm, all terminated/unterminated lengths. */
+    /* 独立的原始算法，覆盖所有有终止符/无终止符的长度。 */
     g_vfs_node_capacity=1;g_vfs_nodes[0]=&v[0];v[0].fs_private=&b[0];
     unsigned cases=0;
     for(unsigned a=0;a<=256;++a)for(unsigned c=0;c<=256;++c){
@@ -102,7 +102,7 @@ int main(void) {
     }
     memset(b[0].path,0,256);request=0;
     check(0,previous_lookup(0));
-    /* Candidate ends exactly at a protected page: bound must not read [256]. */
+    /* 候选项恰好在保护页处结束：比较上限不得读取 [256]。 */
     long page=sysconf(_SC_PAGESIZE);assert(page>=256);
     char *guard=mmap(0,(size_t)page*2,PROT_READ|PROT_WRITE,
                      MAP_PRIVATE|MAP_ANONYMOUS,-1,0);assert(guard!=MAP_FAILED);

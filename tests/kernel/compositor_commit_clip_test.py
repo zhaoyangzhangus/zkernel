@@ -8,7 +8,7 @@ commit = (root / 'kernel/graphics/compositor.c').read_text()
 start = commit.index('void compositor_commit_snapshot(void)')
 commit = commit[start:commit.index('\n}', start) + 2]
 policy = (root / 'kernel/graphics/publication_policy.c').read_text()
-start = policy.index('uint64_t compositor_publication_damage_pixels(void)')
+start = policy.index('uint64_t compositor_publication_damage_pixels(')
 end = policy.index('\n/*\n * 从已完成的保留 WB 场景', start)
 policy = policy[start:end]
 damage = (root / 'kernel/graphics/damage_plan.c').read_text()
@@ -51,13 +51,14 @@ static bool sched_tick_should_preempt(void){return false;}
 static unsigned input_core_pending(void){return 0;}
 static void schedule(void){assert(!preempt);}
 static void window_server_pump_publication_motion(void){assert(!preempt);}
-static void compositor_publication_drag_old_exposure(void){assert(preempt);++exposures;}
+static void compositor_publication_drag_old_exposure(const compositor_snapshot_t *snapshot){assert(snapshot==&g_compositor_snapshot);assert(preempt);++exposures;}
 static void window_present_cursor_prepare_rect(const Rect *r){
  assert(preempt&&r->x0>=0&&r->y0>=0&&r->x1<=5&&r->y1<=4);++prepares;
 }
+static bool window_present_cursor_bounds(Rect *bounds){(void)bounds;return false;}
 static bool window_present_cursor_publish_span(volatile uint32_t *d,const uint32_t *s,
- uint32_t x,uint32_t y,uint32_t n){(void)d;(void)s;(void)x;(void)y;(void)n;assert(preempt);return false;}
-static void compositor_copy_wc_scanline(volatile uint32_t *d,const uint32_t *s,uint32_t n){
+ uint32_t x,uint32_t y,uint32_t n,const Rect *cursor_bounds){(void)cursor_bounds;(void)d;(void)s;(void)x;(void)y;(void)n;assert(preempt);return false;}
+static void display_core_publish_xrgb8888_span(volatile uint32_t *d,const uint32_t *s,uint32_t n){
  assert(preempt);copied+=n;for(unsigned i=0;i<n;++i)d[i]=s[i];
 }
 ''' + bounds + '\n' + collapse + '\n' + policy + '\n' + commit + r'''

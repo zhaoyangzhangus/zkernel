@@ -6,7 +6,7 @@ import resource
 
 root = Path(__file__).resolve().parents[2]
 source = (root/'kernel/fs/vfs/file_io.c').read_text()
-helpers = source[source.index('static kstatus_t vfs_write_transaction_begin('):
+helpers = source[source.index('static kstatus_t vfs_file_write_begin('):
                  source.index('kstatus_t vfs_seek(')]
 writes = source[source.index('static kstatus_t vfs_write_chunk('):
                 source.index('kstatus_t vfs_fsync(')]
@@ -185,8 +185,7 @@ with tempfile.TemporaryDirectory(prefix='vfs-append-transaction-') as directory:
                     '-x','c','-','-o',str(path/'large')],
                    input=large_fixture+helpers+writes+test,text=True,check=True)
     subprocess.run([str(path/'large')],check=True,timeout=20)
-    # Prove the fixture rejects the exact stale-offset bug, not just races
-    # introduced by the test scheduler.
+    # 验证测试夹具会拒绝特定的过期偏移缺陷，而不只是测试调度器引入的竞争。
     broken = helpers.replace('if ((file->flags & VFS_OPEN_APPEND) != 0U)',
                               'if (false)')
     assert broken != helpers

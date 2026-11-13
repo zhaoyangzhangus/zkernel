@@ -1,6 +1,8 @@
 """Production free-cluster search vs original entry reader; sector read counts."""
 from pathlib import Path
 import subprocess
+import resource
+import signal
 import tempfile
 
 root = Path(__file__).resolve().parents[2]
@@ -41,7 +43,7 @@ static BOOLEAN fat32_read_sector(const OS_FAT32 *f,UINT64 lba,UINT8 *out) {
     memcpy(out,disk+pos,f->BytesPerSector);return 1;
 }
 ''' + function('BOOLEAN fat32_cluster_valid(') + '\n'
-program += function('BOOLEAN fat32_read_fat_entry(') + '\n'
+program += function('static BOOLEAN fat32_fat_entry_location(') + '\n' + function('BOOLEAN fat32_read_fat_entry(') + '\n'
 program += function('BOOLEAN fat32_find_free_cluster_from(') + '\n'
 program += function('BOOLEAN fat32_find_free_cluster(') + r'''
 static BOOLEAN oracle(OS_FAT32 *f,UINT32 *out) {
@@ -75,6 +77,23 @@ static void check(OS_FAT32 *f) {
     if(!ok && fail_lba==UINT64_MAX && f->BytesPerSector==512)
         printf("FAT%u full 8192 clusters: sector reads %u -> %u\n",
                f->FatType,original_reads,reads);
+}
+/* 独立逐项参考：不使用生产扫描的扇区位置推进逻辑。 */
+static BOOLEAN reference_from(OS_FAT32 *f,UINT32 first,UINT32 *out) {
+    if(first<2)return 0;
+    UINT32 floor=f->FreeClusterSearchStart;
+    if(floor<2 || floor>f->ClusterCount+2)floor=2;
+    if(first<floor)first=floor;
+    for(UINT32 c=first;c<f->ClusterCount+2;++c) {
+        UINT32 value;
+        if(!fat32_read_fat_entry(f,1,c,&value))return 0;
+        if(!value){
+            if(first==floor)f->FreeClusterSearchStart=c;
+            *out=c;return 1;
+        }
+    }
+    if(first==floor)f->FreeClusterSearchStart=f->ClusterCount+2;
+    return 0;
 }
 int main(void) {
     for(unsigned type=16;type<=32;type+=16) {
@@ -117,6 +136,39 @@ int main(void) {
     f.BytesPerSector=0;assert(!fat32_find_free_cluster(&f,&out) && out==123);
     f.BytesPerSector=512;f.ClusterCount=0;reads=0;
     assert(!fat32_find_free_cluster(&f,&out) && out==123 && !reads);
+
+    unsigned cases=0;
+    unsigned geometries[]={1,2,3,4,5,7,511,512,513,1024,2048,4095,4096};
+    unsigned counts[]={0,1,2,127,128,129,1025};
+    unsigned starts[]={1,2,3,126,128,1026,UINT32_MAX};
+    unsigned floors[]={0,1,2,128,UINT32_MAX};
+    for(unsigned type=16;type<=32;type+=16)
+    for(unsigned g=0;g<sizeof(geometries)/sizeof(*geometries);++g)
+    for(unsigned n=0;n<sizeof(counts)/sizeof(*counts);++n)
+    for(unsigned pattern=0;pattern<3;++pattern) {
+        OS_FAT32 fs={counts[n],2,type,geometries[g],64,(1ULL<<40)+17,2};
+        memset(disk,0xff,sizeof(disk));
+        for(unsigned c=2;c<fs.ClusterCount+2;++c) {
+            if((pattern==1 && c==fs.ClusterCount+1) ||
+               (pattern==2 && (c*17+fs.ClusterCount)%23==0))
+                put(&fs,c,type==32?0xa0000000U:0);
+        }
+        for(unsigned a=0;a<sizeof(starts)/sizeof(*starts);++a)
+        for(unsigned b=0;b<sizeof(floors)/sizeof(*floors);++b)
+        for(unsigned failure=0;failure<3;++failure) {
+            OS_FAT32 actual_fs=fs,expected_fs=fs;
+            actual_fs.FreeClusterSearchStart=expected_fs.FreeClusterSearchStart=floors[b];
+            fail_lba=failure?fs.FatStartLba+failure-1:UINT64_MAX;
+            UINT32 expected=123,actual=123;
+            reads=0;BOOLEAN ok=reference_from(&expected_fs,starts[a],&expected);
+            unsigned reference_reads=reads;reads=0;
+            assert(fat32_find_free_cluster_from(&actual_fs,starts[a],&actual)==ok);
+            assert(actual==expected && actual_fs.FreeClusterSearchStart==expected_fs.FreeClusterSearchStart);
+            assert(reads<=reference_reads);++cases;
+        }
+    }
+    fail_lba=UINT64_MAX;
+    printf("FAT position: %u first/floor/volume/geometry/failure comparisons; 64-bit LBA and malformed sector boundaries PASS\n",cases);
     puts("FAT free scan: FAT16/32, 512..4096-byte sectors, first free, full, boundaries, failures and fresh reads passed");
 }
 '''
@@ -126,3 +178,18 @@ with tempfile.TemporaryDirectory(prefix='liteos-fat-free-') as directory:
                     '-fsanitize=address,undefined','-fno-pie','-no-pie',
                     str(path/'test.c'),'-o',str(path/'test')],check=True)
     subprocess.run([str(path/'test')],check=True,timeout=30)
+
+    for name,old,new in (
+        ('sector advance','++lba;','(void)lba;'),
+        ('offset reset','offset = 0U;','offset = entry_size;'),
+        ('fresh sector','loaded = 0;\n        }','loaded = 1;\n        }'),
+    ):
+        broken=program.replace(old,new)
+        assert broken!=program
+        subprocess.run(['cc','-std=c11','-O2','-Wall','-Wextra','-Werror',
+                        '-fsanitize=address,undefined','-fno-pie','-no-pie',
+                        '-x','c','-','-o',str(path/'test')],input=broken,text=True,check=True)
+        result=subprocess.run([str(path/'test')],capture_output=True,timeout=30,
+            preexec_fn=lambda:resource.setrlimit(resource.RLIMIT_CORE,(0,0)))
+        assert result.returncode==-signal.SIGABRT and b'Assertion' in result.stderr
+        print('Negative control rejected: '+name)

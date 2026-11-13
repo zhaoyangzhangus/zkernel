@@ -7,7 +7,7 @@ root = Path(__file__).resolve().parents[2]
 source = (root / 'kernel/drivers/usb/xhci/msc.c').read_text()
 body = source[source.index('static bool xhci_msc_direct_map('):
               source.index('static bool xhci_msc_init_stream_contexts(')]
-# This last-resort hardware-failure branch is never executed on the host.
+# 此硬件故障兜底分支绝不会在宿主机上执行。
 body = body.replace('for (;;) __asm__ volatile ("cli; hlt" : : : "memory");',
                     'assert(!"DMA could not be quiesced");')
 code = r'''

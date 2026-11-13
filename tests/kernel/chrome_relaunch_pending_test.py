@@ -106,7 +106,7 @@ int main(void) {
         assert(desktop_launch_worker_ready(0));
         assert(desktop_launch_dequeue(&app) && app==2); /* Other apps progress. */
         assert(!desktop_launch_dequeue(&app));
-        /* A recreated window satisfies the request, not a future auto-restart. */
+        /* 重新创建的窗口会满足当前请求，而不是触发未来的自动重启。 */
         g_window_server.scene.children[0]=&popup;
         g_window_server.scene.count=1;
         window_lock(); desktop_chrome_window_opened_locked(&old); window_unlock();
@@ -130,15 +130,15 @@ int main(void) {
         assert(atomic_load(&g_window_server.desktop_chrome_launch_pid)==next.pid);
         assert(atomic_load(&g_window_server.desktop_chrome_relaunch_pending));
         window_lock(); assert(desktop_chrome_process_released_locked(next.pid)); window_unlock();
-        /* New direct request also consumes pending, even before dequeue. */
+        /* 即使尚未出队，新的直接请求也会消耗待处理请求。 */
         assert(desktop_chrome_request_launch());
         assert(!desktop_launch_worker_ready(0));
         assert(!desktop_launch_dequeue(&app));
         assert(desktop_chrome_launch_release(
             &g_window_server.desktop_chrome_launch_pid,DESKTOP_CHROME_LAUNCH_STARTING));
     }
-    /* Real simultaneous request/exit: either immediate claim or one pending
-     * launch, never the old lost-request state (idle with no pending request). */
+    /* 真实并发的请求/退出场景：要么立即接管，要么只保留一个待启动请求；
+     * 不能回到旧的请求丢失状态（空闲且没有待处理请求）。 */
     for (unsigned repeat=0; repeat<1000; ++repeat) {
         pthread_t request, exit;
         atomic_store(&g_window_server.desktop_chrome_launch_pid,42);
@@ -160,7 +160,7 @@ int main(void) {
         assert(!desktop_launch_dequeue(&app));
     }
     atomic_store(&g_window_server.desktop_chrome_launch_pid,0);
-    /* Exit before the user's next click: claim immediately, no lost request. */
+    /* 在用户下次点击前退出：立即接管，不得丢失请求。 */
     assert(desktop_chrome_request_launch());
     assert(desktop_chrome_launch_publish_pid(&g_window_server.desktop_chrome_launch_pid,42));
     window_lock(); assert(!desktop_chrome_process_released_locked(42)); window_unlock();

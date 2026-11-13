@@ -72,8 +72,7 @@ with tempfile.TemporaryDirectory(prefix='window-surface-exchange-') as directory
                     '-I', str(root / 'include'), str(path / 'test.c'),
                     '-o', str(path / 'test')], check=True)
     subprocess.run([str(path / 'test')], check=True, timeout=20)
-    # Negative control: publishing at write-begin recreates the original
-    # half-written-frame visibility and must fail the same pixel assertions.
+    # 负对照：在写入开始时发布会复现原先半帧可见的问题，并必须违反相同的像素断言。
     header = (root / 'include/kernel/window_surface_exchange.h').read_text()
     broken = header.replace('state->writer_slot = back;',
                             'state->writer_slot = back; state->front = back;')

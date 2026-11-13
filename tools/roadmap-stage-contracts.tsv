@@ -1,7 +1,6 @@
 # family|phase|serial_name|owner_source
-# Keep one row per roadmap/specification phase.  The source column is the
-# first source-level publication boundary for that phase; later substeps may
-# publish from additional Owners, but this row is the debugger entry point.
+# 每个路线图/规范阶段保留一行。source 列表示该阶段首次在源码级发布的位置；后续子步骤
+# 可能由其他 Owner 发布，但本行是调试器入口。
 SPEC|0|SPEC_P0_REPOSITORY|kernel/init/early.c
 SPEC|1|SPEC_P1_CPU|kernel/init/early.c
 SPEC|2|SPEC_P2_MEMORY|kernel/init/memory.c

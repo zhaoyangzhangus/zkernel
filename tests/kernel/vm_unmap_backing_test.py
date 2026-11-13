@@ -66,7 +66,7 @@ int main(void) {
             }
             ++cases;
          }
-    /* Internal slices cannot be exported as aliases into another mapping. */
+    /* 内部切片不能作为别名导出到其他映射。 */
     prepare(0);objects[0].type=VM_OBJECT_ANON;objects[0].size=64*PAGE_SIZE;
     objects[0].flags=VM_OBJECT_FLAG_MAP_OWNED;
     vaddr_t address=VM_USER_BASE+36*PAGE_SIZE;

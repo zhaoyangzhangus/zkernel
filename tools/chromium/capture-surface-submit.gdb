@@ -1,4 +1,4 @@
-# Read stable client pixels at COMMIT entry, before compositor publication.
+# 在 COMMIT 入口、合成器发布之前读取稳定的客户区像素。
 set pagination off
 set confirm off
 target remote /tmp/system-surface-capture.sock

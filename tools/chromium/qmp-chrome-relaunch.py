@@ -15,7 +15,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument('--cycles', type=int, default=3, choices=range(1, 11))
 parser.add_argument('--close-method', choices=('x', 'hotkey'), default='x')
 args = parser.parse_args()
-# Use the existing inspected-toolbar gate without importing its CLI side effects.
+# 使用现有的已检查工具栏门禁，不导入其 CLI 副作用。
 tree = ast.parse((root / 'tools/chromium/qmp-startup-latency.py').read_text())
 scope = {}
 node = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == 'browser_extent')
@@ -35,7 +35,7 @@ def event(events):
     command('input-send-event', {'events': events})
 
 def move(dx, dy):
-    # USB relative packets need a polling interval; batching them loses motion.
+    # USB 相对位移数据包需要间隔轮询；批量处理会丢失移动量。
     while dx or dy:
         x, y = max(-100, min(100, dx)), max(-100, min(100, dy))
         event([{'type': 'rel', 'data': {'axis': 'x', 'value': x}},

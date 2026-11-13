@@ -40,7 +40,7 @@ static VKAPI_ATTR VkResult VKAPI_CALL query(VkDevice d,VkQueryPool p,uint32_t fi
     return answer;
 }
 '''
-# Use the real public device type, kept minimal because this routine only needs act_dev.
+# 使用真实的公共设备类型；此处只需 act_dev，因此保持定义精简。
 fixture = fixture.replace('typedef struct { FFVulkanFunctions vkfn;',
     'typedef struct { VkDevice act_dev; } AVVulkanDeviceContext;\n'
     'typedef struct { FFVulkanFunctions vkfn;')

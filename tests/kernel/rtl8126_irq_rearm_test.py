@@ -66,8 +66,8 @@ int main(void) {
             assert(offsets[1] == RTL8126_REG_INT_STATUS && values[1] == status);
             assert(!mask);
         } else assert(writes == 1 && mask == RTL8126_INT_MASK_VALUE);
-        /* Events arriving during a batch belong to the next ISR, not to
-         * the batch that just finished. Rearming must not acknowledge them. */
+        /* 批处理中到达的事件属于下一次 ISR，而不是刚结束的批次。重新布防时不能确认
+         * 这些事件。 */
         cause = 0x95; writes = 0;
         rtl8126_rearm_interrupts(&s);
         assert(cause == 0x95 && mask == RTL8126_INT_MASK_VALUE && flushes == 1U + relevant);

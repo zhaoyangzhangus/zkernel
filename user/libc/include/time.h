@@ -63,8 +63,7 @@ struct itimerspec {
     struct timespec it_value;
 };
 
-/* System currently exposes only the UTC timezone, but POSIX/ICU still
- * expects the traditional timezone-name array to exist. */
+/* System 当前只公开 UTC 时区，但 POSIX/ICU 仍要求存在传统的时区名称数组。 */
 #ifdef __cplusplus
 extern "C" {
 #endif

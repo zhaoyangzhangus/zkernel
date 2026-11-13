@@ -164,8 +164,8 @@ int main(void) {
         assert(actual.wakes==(unsigned)ok&&!lock_depth);
         ++cases;
     }
-    /* A wrapped full queue, alternating producer APIs, drains in exact FIFO
-     * order through the production consumer; failed extra enqueue is inert. */
+    /* 测试已回绕的满队列和交替使用的生产者 API，并通过生产消费者按 FIFO 顺序排空；
+     * 额外入队失败时不得产生副作用。 */
     initialized=true;concurrent=true;memset(&g_deferred,0,sizeof(g_deferred));
     g_deferred.head=g_deferred.tail=119;atomic_store(&wakes,0);fifo=true;
     for(unsigned id=0;id<128;++id) {

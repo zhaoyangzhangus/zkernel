@@ -1,7 +1,7 @@
 #pragma once
-/* Windows default 100%-scale Aero resize cursors from the local Windows installation.
- * Original .cur 32px frames: retained pixels/alpha and native hotspots.
- * Only transparent padding outside the 24px compositor extent is omitted. */
+/* 从本机 Windows 安装目录提取的默认 100% 缩放 Aero 窗口调整大小光标。
+ * 原始 .cur 文件的 32px 帧保留了像素、alpha 和原生热点。
+ * 仅省略合成器 24px 范围之外的透明填充。 */
 static const uint32_t window_resize_palette[4][16] = {
     {0x00000000U, 0x37020516U, 0xbd010210U, 0xffffffffU, 0xff00000dU, 0xfff0f0f3U, 0xffececeeU, 0xffe8e8eaU}, /* aero_ew.cur SHA256 6c4c856d899f208a3c0a31462acf085e51f4ffc9c3d607289ccbb157268ffe56 */
     {0x00000000U, 0x37020516U, 0xbd010210U, 0xffffffffU, 0xff00000dU, 0xfff0f0f3U, 0xffe8e8eaU, 0xffececeeU}, /* aero_ns.cur SHA256 e698b70e15126295b7c573aaa72c000cf050487a491514e8797e5608ad6817f8 */

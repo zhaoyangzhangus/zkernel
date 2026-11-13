@@ -1,7 +1,7 @@
 set pagination off
 target remote /tmp/system-keys.sock
-# Verified staged/unstripped build ID bb5196af759dd50f, PIE base 0x40000000.
-# Confirm these symbols before using with a different Chrome image.
+# 已验证的暂存/未剥离 build ID 为 bb5196af759dd50f，PIE 基址为 0x40000000。
+# 使用不同 Chrome 镜像前，先确认这些符号。
 set $accelerator_count = 0
 hbreak *0x4e95cb00
 commands

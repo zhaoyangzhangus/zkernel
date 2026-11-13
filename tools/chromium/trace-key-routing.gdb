@@ -1,6 +1,6 @@
 set pagination off
 target remote /tmp/system-keys.sock
-# Current out/liteos-debian Chrome symbols, PIE bias 0x40000000.
+# 当前 out/liteos-debian Chrome 符号，PIE 偏移为 0x40000000。
 hbreak *0x4e8f2c00
 commands
 silent

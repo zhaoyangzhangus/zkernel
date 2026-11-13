@@ -127,7 +127,7 @@
 #define LINUX_SYS_FACCESSAT2       439U
 #define LINUX_SYS_ACCEPT4          288U
 
-/* System-owned extension used by native Linux-personality desktop clients. */
+/* System 所有的扩展接口，供原生 Linux personality 桌面客户端使用。 */
 #define LINUX_SYS_WINDOW_CREATE 450U
 #define LINUX_SYS_DISPLAY_GET_INFO 451U
 
@@ -274,15 +274,13 @@ typedef struct linux_flock {
 
 #define LINUX_ARCH_ELF_PLATFORM  "x86_64"
 
-/* System-owned Linux-personality window bridge.  The device is exposed only
- * to the owner process of the window created by the Phase 12 runner. */
+/* System 所有的 Linux personality 窗口桥接接口。该设备只会公开给第 12 阶段运行程序创建的
+ * 窗口所属进程。 */
 #define LINUX_WINDOW_DEVICE_PATH "/dev/system-window"
 
 /*
- * Create a System window from a Linux-personality process.  The syscall
- * returns the new Linux fd; address, identifier and buffer_size are filled
- * by the kernel.  A zero address lets the VM choose an address, while a
- * non-zero address requests a page-aligned user mapping.
+ * 从 Linux personality 进程创建 System 窗口。系统调用返回新的 Linux fd；address、identifier
+ * 和 buffer_size 由内核填写。地址为零时由 VM 选择地址，非零时请求按页面对齐的用户映射。
  */
 typedef struct linux_window_create {
     int32_t x;
@@ -358,7 +356,7 @@ _Static_assert(sizeof(linux_window_create_t) == 80U,
 _Static_assert(__builtin_offsetof(linux_window_create_t, address) == 24U,
                "System Linux window create address offset changed");
 
-/* VISIBILITY: width = visible (0/1), height = inactive (0/1, show only). */
+/* VISIBILITY：width 表示可见（0/1），height 表示非活动（0/1，仅用于显示）。 */
 #define LINUX_WINDOW_VISIBILITY_INACTIVE 1U
 
 #define LINUX_SO_KEEPALIVE 9U
@@ -376,7 +374,7 @@ typedef struct linux_sysinfo {
     uint32_t mem_unit, reserved;
 } linux_sysinfo_t;
 
-/* x86-64 statfs, also used by glibc's statfs64/statvfs64 wrappers. */
+/* x86-64 statfs 结构，也供 glibc 的 statfs64/statvfs64 包装函数使用。 */
 typedef struct linux_statfs {
     int64_t type, block_size;
     uint64_t blocks, blocks_free, blocks_available, files, files_free;

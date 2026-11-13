@@ -1,8 +1,8 @@
 #pragma once
 
 /*
- * The runtime owns the multibyte conversion state. Keep this in a small header
- * that can also be consumed by libc++'s __mbstate_t compatibility probe.
+ * 多字节转换状态由运行时持有。将其放在小型头文件中，以便 libc++ 的 __mbstate_t 兼容性探测也能
+ * 使用。
  */
 #include <stdint.h>
 

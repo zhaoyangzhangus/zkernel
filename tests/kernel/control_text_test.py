@@ -34,7 +34,7 @@ static void verify(os_control_node_t n,int64_t x,int64_t y,uint32_t w,uint32_t h
  uint32_t th=n.font_size?n.font_size:fh,tw=th/2;
  int64_t tx=x+n.padding,ty=y+n.padding;
  if(n.kind==OS_CONTROL_BUTTON){tx=x+((int64_t)w-(int64_t)n.text_length*tw)/2;ty=y+((int64_t)h-th)/2;}
- queries=0;control_paint_text(&n,text,tx,ty,0);
+ queries=0;control_paint_text(g_compositor_snapshot.damage_bounds,&n,text,tx,ty,0);
  assert(pixels[0]==under&&pixels[1+40*28]==under);
  Rect clip=g_compositor_snapshot.damage_bounds;
  for(int py=0;py<28;++py)for(int px=0;px<40;++px){
@@ -73,12 +73,12 @@ int main(void){
  char long_text[65536];memset(long_text,'A',sizeof(long_text));
  os_control_node_t n={.kind=OS_CONTROL_TEXT,.text_length=sizeof(long_text)};
  g_compositor_snapshot.damage_bounds=(Rect){2,3,3,4};
- queries=0;control_paint_text(&n,long_text,-120000,0,0);
+ queries=0;control_paint_text(g_compositor_snapshot.damage_bounds,&n,long_text,-120000,0,0);
  assert(queries==1);
  g_compositor_snapshot.damage_bounds=(Rect){3,3,3,4};
- queries=0;control_paint_text(&n,long_text,0,0,0);assert(!queries);
+ queries=0;control_paint_text(g_compositor_snapshot.damage_bounds,&n,long_text,0,0,0);assert(!queries);
  g_compositor_snapshot.damage_bounds=(Rect){0,0,40,28};
- queries=0;control_paint_text(&n,long_text,0,100,0);assert(!queries);
+ queries=0;control_paint_text(g_compositor_snapshot.damage_bounds,&n,long_text,0,100,0);assert(!queries);
  /* 目标字号缓存必须直接使用，不能再次从默认低分辨率字形采样。 */
  static uint8_t native[95*58*96];
  for(unsigned th=20;th<=96;th+=4){
@@ -88,7 +88,7 @@ int main(void){
   const uint32_t under=0x9a174b8e;
   for(unsigned i=0;i<2+40*28;++i)pixels[i]=under;
   os_control_node_t exact={.kind=OS_CONTROL_TEXT,.font_size=th,.text_length=2,.foreground=0xe36291};
-  queries=0;control_paint_text(&exact,"AB",0,0,native);assert(!queries);
+  queries=0;control_paint_text(g_compositor_snapshot.damage_bounds,&exact,"AB",0,0,native);assert(!queries);
   for(unsigned y=0;y<28;++y)for(unsigned x=0;x<40;++x){
    uint32_t expected=under;
    if(y<th&&x<tw*2){

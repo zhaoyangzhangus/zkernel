@@ -12,7 +12,7 @@ def address(name):
 def scalar(name):
     return struct.unpack('<Q', inferior.read_memory(address(name), 8).tobytes())[0]
 
-# Match page_memory_get_stats(): 256 cache-line-aligned signed deltas.
+# 与 page_memory_get_stats() 一致：256 个按缓存行对齐的有符号差值。
 base = address('g_memory_page_deltas')
 delta = sum(struct.unpack('<q', inferior.read_memory(base + cpu * 64, 8).tobytes())[0]
             for cpu in range(256))

@@ -5,8 +5,8 @@ import tempfile
 root = Path(__file__).resolve().parents[2]
 source = (root/'kernel/graphics/window.c').read_text()
 begin = source.index('kstatus_t window_server_set_fullscreen_owned(')
-# Extract this top-level function, not every function inserted before the next
-# historical neighbour. Adjacent drag APIs have their own state and fixtures.
+# 只抽取此顶层函数，不要连同下一个历史函数之前插入的所有函数一起抽取。
+# 相邻的拖动 API 有各自的状态和测试夹具。
 body = source[begin:source.index('\n}', begin) + 2]
 code = r'''
 #include <assert.h>
@@ -70,7 +70,7 @@ int main(void){
   .width=640,.height=360,.buffer_size=32*1024*1024};
  assert(!window_server_set_fullscreen_owned(&owner,&hidden,1));hidden.flags&=~OS_WINDOW_VISIBLE;
  assert(!window_server_set_fullscreen_owned(&owner,&hidden,0)&&!(hidden.flags&OS_WINDOW_VISIBLE));
- // The allocation covers two frames, but neither slot can hold a full screen.
+ // 分配空间可容纳两帧，但两个槽位都无法容纳完整屏幕。
  hidden.surface_exchange_enabled=true;
  hidden.surface_span=1920ULL*1080*4/2;
  hidden.buffer_size=hidden.surface_span*2;

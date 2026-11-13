@@ -81,13 +81,13 @@ int main() {
  MenuButtonController nested;active_drop=&nested.d.drop;nested.pressed_lock_count_=2;
  nested.DecrementPressedLocked();assert(!nested.d.drop.sets && nested.b.state==Button::STATE_PRESSED);
  nested.DecrementPressedLocked();assert(!nested.d.drop.hovered && nested.b.state==Button::STATE_NORMAL);
- // Animation callbacks can destroy the controller before hover resync.
+ // 动画回调可能在悬停状态重新同步前销毁控制器。
  MenuButtonController animated;active_drop=&animated.d.drop;
  animated.d.should_hover=true;
  animated.d.drop.destroy_on_animation=&animated.b.alive;
  animated.DecrementPressedLocked();
  assert(!animated.b.alive && animated.d.drop.animations==1 && !animated.b.widget.moves);
- // Re-hit-testing itself may destroy the widget; no later access is allowed.
+ // 重新命中测试本身也可能销毁窗口部件；之后不得再访问它。
  MenuButtonController moved;active_drop=&moved.d.drop;moved.d.should_hover=true;
  moved.b.widget.destroy_on_move=&moved.b.alive;
  moved.DecrementPressedLocked();assert(!moved.b.alive && moved.b.widget.moves==1);

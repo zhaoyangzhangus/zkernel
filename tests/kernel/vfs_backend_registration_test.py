@@ -30,6 +30,7 @@ typedef int io_mutex_t;
 typedef struct vnode vnode_t;
 static void io_mutex_init(io_mutex_t *m,bool pi){assert(pi);*m=0;}
 typedef struct fat_file OS_FAT32_FILE;
+typedef struct fat_filesystem OS_FAT32;
 typedef int (*vfs_backend_read_t)(void);
 typedef vfs_backend_read_t vfs_backend_write_t;
 typedef vfs_backend_read_t vfs_backend_fsync_t;

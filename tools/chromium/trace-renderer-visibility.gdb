@@ -1,6 +1,6 @@
 set pagination off
 target remote /tmp/system-render.sock
-# Validated against the current Chrome build; PIE bias is 0x40000000.
+# 已根据当前 Chrome 构建验证；PIE 偏移为 0x40000000。
 hbreak *0x4fe93600
 commands
 silent

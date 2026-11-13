@@ -54,9 +54,11 @@ static BOOLEAN extend_file_to(OS_FAT32_FILE *file,UINT64 size,UINT64 zero_until)
  (void)zero_until;return size<=file->Size;
 }
 '''+'\n'.join((
+ function(table, 'static BOOLEAN fat32_fat_entry_location('),
  function(table,'BOOLEAN fat32_read_fat_entry('),
  function(table,'BOOLEAN fat32_read_next_cluster('),
  function(table,'UINT32 fat32_extent_length('),
+ function(files, 'static void fat32_extend_seek_hint('),
  function(files,'static BOOLEAN locate_file_cluster('),
  function(files,'static UINT64 fat32_contiguous_extent_bytes('),
  function(files,'static BOOLEAN fat32_write_locked('),

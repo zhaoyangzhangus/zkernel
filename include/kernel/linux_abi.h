@@ -7,15 +7,15 @@
 struct file;
 struct process;
 struct thread;
-/* Process registry owns lookup and pins the returned thread for the caller. */
+/* 由进程注册表负责查找，并为调用方固定返回的线程。 */
 struct thread *linux_thread_reference_by_tid(uint64_t tid);
 uint64_t linux_thread_visible_tid(const struct thread *thread);
 struct nv_frontend_file;
 struct socket;
 struct window_server_window;
 
-/* Match the advertised Linux NOFILE budget. Chromium's databases, shared
- * images and IPC channels exceed 256 even with only a few live tabs. */
+/* 与对外公布的 Linux NOFILE 限额一致。即使只打开少量标签页，Chromium 数据库、共享映像和 IPC
+ * 通道也会超过 256。 */
 #define OS_LINUX_FD_LIMIT 1024U
 
 enum linux_fd_kind {
@@ -57,14 +57,12 @@ void linux_fd_table_destroy(linux_fd_table_t *table);
 kstatus_t linux_fd_table_clone(const linux_fd_table_t *source,
                                linux_fd_table_t *destination);
 void linux_fd_table_close_on_exec(struct process *process);
-/* Reset under the table lock, transferring old slots to caller ownership.
- * Release the snapshot after dropping process/table locks. */
+/* 在表锁内重置，并将旧槽位的所有权转移给调用方。释放进程/表锁后，再释放快照。 */
 void linux_fd_table_reset_stdio(linux_fd_table_t *table,
                                 linux_fd_entry_t previous[3]);
 void linux_fd_table_release_stdio(linux_fd_entry_t previous[3]);
 
-/* Called by the process lifecycle code; this is separate from syscall
- * dispatch so clone/set_tid_address cleanup cannot become fake success. */
+/* 由进程生命周期代码调用；此逻辑与系统调用分发分开，避免 clone/set_tid_address 清理流程伪装成成功。 */
 void linux_thread_exit_cleanup(struct thread *thread);
 
 bool linux_process_is(struct process *process);
@@ -72,23 +70,23 @@ bool linux_elf_interpreter_path(const char *path);
 
 int64_t linux_syscall_dispatch(arch_trap_frame_t *frame);
 
-/* Phase 7 acceptance harness; only invoked by a Phase 7 test build. */
+/* 第 7 阶段验收程序入口；仅由第 7 阶段测试构建调用。 */
 bool linux_phase7_realtest(void);
 
-/* Phase 8 acceptance harness; only invoked by a Phase 8 test build. */
+/* 第 8 阶段验收程序入口；仅由第 8 阶段测试构建调用。 */
 bool linux_phase8_realtest(void);
 
-/* Phase 9 acceptance harness; only invoked by a Phase 9 test build. */
+/* 第 9 阶段验收程序入口；仅由第 9 阶段测试构建调用。 */
 bool linux_phase9_realtest(void);
 
-/* Phase 10 acceptance harness; only invoked by a Phase 10 test build. */
+/* 第 10 阶段验收程序入口；仅由第 10 阶段测试构建调用。 */
 bool linux_phase10_realtest(void);
 
-/* Phase 11 acceptance harness; only invoked by a Phase 11 test build. */
+/* 第 11 阶段验收程序入口；仅由第 11 阶段测试构建调用。 */
 bool linux_phase11_realtest(void);
 
-/* Phase 12 acceptance harness; only invoked by a Phase 12 test build. */
+/* 第 12 阶段验收程序入口；仅由第 12 阶段测试构建调用。 */
 bool linux_phase12_realtest(void);
 
-/* Phase 13 Linux event/epoll acceptance harness. */
+/* 第 13 阶段 Linux event/epoll 验收程序入口。 */
 bool linux_phase13_realtest(void);

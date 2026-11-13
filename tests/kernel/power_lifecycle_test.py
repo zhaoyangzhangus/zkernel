@@ -168,8 +168,7 @@ int main(void) {
     assert(power_get_device_state(contexts[0].device)==POWER_DEVICE_FAILED);
     assert(power_get_device_state(contexts[2].device)==POWER_DEVICE_RUNNING);
     assert(!atomic_load(&g_power.lock.state));
-    /* Independent fixtures for each failure position. Reset only mock state;
-     * this is not an implementation of recovery from SYSTEM_FAILED. */
+    /* 为每个失败位置使用独立测试夹具。只重置模拟状态；这不是 SYSTEM_FAILED 的恢复实现。 */
     for(unsigned failed=0;failed<3;++failed) {
         atomic_store(&g_power.system_state,POWER_SYSTEM_RUNNING);
         for(unsigned i=0;i<3;++i) {

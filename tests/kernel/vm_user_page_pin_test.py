@@ -95,7 +95,7 @@ int main(void) {
  area.prot=1;writable_pte=false;
  assert(vm_pin_user_page(&s,0x12000,false,&out)==0 && out==&page);
  vm_unpin_user_page(out);assert(page.refs==1);
- /* Only missing/COW pages fault, and the resulting VMA must be revalidated. */
+ /* 只有缺失页/COW 页会触发故障，且必须重新验证处理后的 VMA。 */
  repair_fault=true;area.prot=3;
  for(unsigned cow=0;cow<2;++cow) {
   translate_status=cow?0:K_ENOENT;writable_pte=false;
@@ -116,7 +116,7 @@ int main(void) {
  assert(vm_pin_user_page(&s,0x12000,true,&out)==0&&out==&page);
  assert(faults==cow_faults+2&&locks==cow_locks+3&&page.refs==2);
  vm_unpin_user_page(out);two_step_cow=false;
- /* A broken/repeated fault cannot turn this into an unbounded retry loop. */
+ /* 故障处理错误或重复时，不能造成无界重试循环。 */
  repair_fault=false;translate_status=K_ENOENT;unsigned repeated_faults=faults;
  assert(vm_pin_user_page(&s,0x12000,true,&out)!=0&&!out);
  assert(faults==repeated_faults+2&&!locked&&page.refs==1);

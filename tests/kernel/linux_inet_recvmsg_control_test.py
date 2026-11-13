@@ -102,7 +102,7 @@ with tempfile.TemporaryDirectory(prefix='inet-recvmsg-control-') as directory:
                     '-fsanitize=address,undefined', '-fno-pie', '-no-pie',
                     str(path / 'test.c'), '-o', str(path / 'test')], check=True)
     subprocess.run([str(path / 'test')], check=True)
-    # Restoring the old rejection must fail the same Chromium-shaped case.
+    # 恢复旧拒绝逻辑时，相同的 Chromium 场景必须失败。
     broken = program.replace(
         '        if (socket == 0 || socket->object.type != KOBJECT_TYPE_SOCKET) {',
         '        if (message.control_length != 0U) return LINUX_EOPNOTSUPP;\n'

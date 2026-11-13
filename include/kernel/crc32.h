@@ -1,8 +1,8 @@
 #pragma once
 #include <kernel/base.h>
 
-/* Reflected IEEE CRC32, not the CRC32C implemented by x86's crc32 opcode.
- * Callers start with UINT32_MAX and complement once after all segments. */
+/* 反射式 IEEE CRC32，不是 x86 crc32 操作码实现的 CRC32C。调用方从 UINT32_MAX 开始，
+ * 所有片段处理完后再执行一次取反。 */
 static inline uint32_t crc32_ieee_byte(uint32_t crc, uint8_t byte) {
     static const uint32_t table[16] = {
         0x00000000U, 0x1DB71064U, 0x3B6E20C8U, 0x26D930ACU,
@@ -22,8 +22,7 @@ static inline uint32_t crc32_ieee_update(uint32_t crc, const void *data,
     return crc;
 }
 
-/* Filesystem records store a four-byte checksum inside the covered bytes.
- * Compute it without mutating the record or constructing a temporary copy. */
+/* 文件系统记录会在校验范围内保存四字节校验和。计算时不得修改记录，也不得创建临时副本。 */
 static inline uint32_t crc32_ieee_zeroed(const uint8_t *bytes, size_t length,
                                         size_t checksum_offset) {
     size_t prefix = checksum_offset < length ? checksum_offset : length;

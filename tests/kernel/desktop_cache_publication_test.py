@@ -50,14 +50,14 @@ static bool desktop_render_assets_locked(desktop_render_context_t *c) {
 static void window_mark_dirty_locked(void) {
  assert(locked);assert(atomic_load(&g_desktop_cache_ready));dirty=true;
 }
-static void desktop_clear_region_locked(void) {++clears;}
-static void desktop_copy_cached_region(void) {++copies;}
-static void desktop_draw_hover_locked(void) {++hovers;}
+static void desktop_clear_region_locked(Rect clip) {(void)clip;++clears;}
+static void desktop_copy_cached_region(Rect clip) {(void)clip;++copies;}
+static void desktop_draw_hover_locked(Rect clip) {(void)clip;++hovers;}
 ''' + '\n'.join(function(s) for s in [
     'bool desktop_shell_build_cache(void)',
     'void desktop_shell_publish_cache_locked(void)',
     'bool desktop_shell_cache_ready(void)',
-    'void desktop_draw_wallpaper_locked(void)',
+    'void desktop_draw_wallpaper_locked(',
 ]) + r'''
 int main(void) {
  assert(!desktop_shell_cache_ready());
@@ -66,18 +66,18 @@ int main(void) {
  render_ok=true;assert(desktop_shell_build_cache());
  assert(!desktop_shell_cache_ready() && !dirty);
  for(unsigned i=0;i<64*48;++i)assert(g_desktop_cache[i]==0x123456);
- /* Frame already captured before activation: every damaged region stays solid. */
+ /* 激活前已捕获该帧：每个受损区域都应保持为不透明实色。 */
  g_compositor_snapshot.desktop_cache_ready=desktop_shell_cache_ready();
- desktop_draw_wallpaper_locked();assert(clears==1 && !copies);
+ desktop_draw_wallpaper_locked(((Rect){0,0,64,48}));assert(clears==1 && !copies);
  locked=true;desktop_shell_publish_cache_locked();
  assert(dirty && desktop_shell_cache_ready());locked=false;
- for(unsigned i=0;i<32;++i)desktop_draw_wallpaper_locked();
+ for(unsigned i=0;i<32;++i)desktop_draw_wallpaper_locked(((Rect){0,0,64,48}));
  assert(clears==33 && !copies);
- /* Next frame sees both complete cache and its full-screen damage. */
+ /* 下一帧应同时看到完整缓存及其全屏损坏区域。 */
  locked=true;assert(dirty);
  g_compositor_snapshot.desktop_cache_ready=desktop_shell_cache_ready();
  dirty=false;locked=false;
- for(unsigned i=0;i<32;++i)desktop_draw_wallpaper_locked();
+ for(unsigned i=0;i<32;++i)desktop_draw_wallpaper_locked(((Rect){0,0,64,48}));
  assert(copies==32 && hovers==32 && clears==33);
  assets=false;assert(!desktop_shell_cache_ready());assets=true;
  ++g_window_server.display_width;assert(!desktop_shell_cache_ready());

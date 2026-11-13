@@ -75,8 +75,22 @@ bool scheduler_select_cpu_mask(const cpumask_t *mask, uint32_t current_cpu,
     uint32_t best_load = UINT32_MAX;
     bool found = false;
     uint32_t cpu_count = g_cpu_count < MAX_CPUS ? g_cpu_count : MAX_CPUS;
+    /* 同负载时本地核心优先。先读取本地快照；空闲时不必访问远端缓存行，
+     * 非空闲时也只读取一次，随后扫描跳过已检查的本地位。 */
+    if (current_cpu < cpu_count &&
+        scheduler_affinity_mask_allows(mask, current_cpu) &&
+        scheduler_cpu_available(current_cpu)) {
+        best_load = scheduler_snapshot_load(&g_cpus[current_cpu]);
+        found = true;
+        if (best_load == 0U) {
+            *selected_cpu = current_cpu;
+            return true;
+        }
+    }
     for (uint32_t base = 0U; base < cpu_count; base += 64U) {
         uint64_t candidates = mask->bits[base >> 6];
+        if ((current_cpu >> 6) == (base >> 6))
+            candidates &= ~(1ULL << (current_cpu & 63U));
         uint32_t remaining = cpu_count - base;
         if (remaining < 64U) candidates &= (1ULL << remaining) - 1ULL;
         /* 按置位从低到高遍历，在跳过线程不可用 CPU 的同时保留现有平局规则。
@@ -87,17 +101,15 @@ bool scheduler_select_cpu_mask(const cpumask_t *mask, uint32_t current_cpu,
             if (!scheduler_cpu_available(cpu_id)) continue;
             scheduler_cpu_t *cpu = &g_cpus[cpu_id];
             uint32_t load = scheduler_snapshot_load(cpu);
-            /* 负载为零时已无更优选择，且负载相同时当前 CPU 始终胜出。
-             * 若本地空闲 CPU 符合条件，启动工作时无需访问其他 CPU 的缓存行。 */
-            if (load == 0U && cpu_id == current_cpu) {
-                *selected_cpu = cpu_id;
-                return true;
-            }
-            if (!found || load < best_load ||
-                (load == best_load && cpu_id == current_cpu)) {
+            if (!found || load < best_load) {
                 best_cpu = cpu_id;
                 best_load = load;
                 found = true;
+            }
+            /* 本地核心已经排除；按编号遇到的首个空闲核心就是最终最优解。 */
+            if (best_load == 0U) {
+                *selected_cpu = best_cpu;
+                return true;
             }
         }
     }

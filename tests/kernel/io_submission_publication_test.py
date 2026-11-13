@@ -74,7 +74,7 @@ static void publication_store(io_request_t *r){
   assert(r->submit_tsc==1234);
   atomic_store_explicit(&r->state,IOREQ_QUEUED,memory_order_release);
   ++boundaries;
-  /* Caller + registry + execution: cancellation may release the latter two. */
+  /* 调用方、注册表和执行过程各持有引用；取消时可以释放后两者的引用。 */
   assert(atomic_load(&r->object.refs.value)==3);
   if(boundary_cancel){
    assert(io_cancel(r)==K_OK);

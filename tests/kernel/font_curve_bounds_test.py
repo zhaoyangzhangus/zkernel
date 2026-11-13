@@ -19,8 +19,8 @@ fixture = r'''
 static unsigned long segments,intersections;
 '''
 oracle = r'''
-/* Frozen original subdivision and crossing, independent of production
- * early-outs and line helper. All coordinates fit the supported raster. */
+/* 固定使用原始细分和交点计算，独立于生产代码的提前退出和线段辅助函数。
+ * 所有坐标都在支持的光栅范围内。 */
 static void reference(ascii_font_point_t a,ascii_font_point_t b,
                       ascii_font_point_t c,int32_t x,int32_t y,bool *inside) {
  ascii_font_point_t previous=a;
@@ -76,7 +76,7 @@ int main(void) {
   ascii_font_point_t b={coordinate(),coordinate(),false};
   ascii_font_point_t c={coordinate(),coordinate(),true};
   check(a,b,c,coordinate(),coordinate());
-  /* Exact vertices, one fixed-point unit either side, and degeneracy. */
+  /* 精确顶点、左右各一个定点单位以及退化情况。 */
   check(a,b,c,a.x,a.y);check(a,b,c,b.x,b.y);check(a,b,c,c.x,c.y);
   check(a,b,c,b.x-1,b.y-1);check(a,b,c,b.x+1,b.y+1);
   check(a,a,a,a.x,a.y);check(a,b,a,a.x,b.y);

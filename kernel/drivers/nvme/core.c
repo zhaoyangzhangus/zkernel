@@ -31,7 +31,7 @@
 #define NVME_FEATURE_NUMBER_QUEUES 0x07U
 #define NVME_MMIO_BASE           (X86_64_MMIO_BASE + 0x01000000ULL)
 #define NVME_MMIO_SLOT_SIZE      0x00100000ULL
-/* REFACTOR_P8_NVME_CORE_OWNER: controller lifecycle, probe, and public state. */
+/* REFACTOR_P8_NVME_CORE_OWNER：控制器生命周期、探测和公开状态。 */
 
 bool g_nvme_hardware_seen;
 
@@ -95,11 +95,10 @@ void nvme_record_completion_status(uint16_t status) {
 }
 
 /*
- * NVMe queue/admin locks protect state that is also touched by scheduler
- * threads on other CPUs.  The lock owner must not be involuntarily switched
- * out by the local timer while another CPU spins for the same lock.
+ * NVMe 队列/管理锁保护的状态也会被其他 CPU 上的调度线程访问。当另一 CPU 为同一把锁
+ * 自旋时，本地定时器不能强制切走锁的所有者。
  *
- * Hard IRQ handlers never take these locks; they only enqueue deferred work.
+ * 硬 IRQ 处理程序绝不获取这些锁，只会将任务加入延迟队列。
  */
 void nvme_lock(spinlock_t *lock) {
     sched_preempt_disable();
@@ -126,10 +125,9 @@ static uint32_t nvme_read32(const nvme_controller_t *controller, uint32_t offset
     uint32_t value;
 
     /*
-     * A plain volatile uint32_t load is not sufficient here: when the
-     * caller only tests a low bit, GCC may fold it into an 8-bit test.  NVMe
-     * controller registers require 32-bit MMIO transactions (QEMU rejects
-     * the narrower access), so keep the access width explicit.
+     * 此处不能使用普通的 volatile uint32_t 读取：调用方只检查低位时，GCC 可能将其
+     * 折叠为 8 位测试。NVMe 控制器寄存器要求 32 位 MMIO 事务（QEMU 会拒绝更窄的访问），
+     * 因此必须明确指定访问宽度。
      */
     __asm__ volatile ("movl %1, %0" : "=r"(value) : "m"(*address) : "memory");
     return value;
@@ -655,9 +653,8 @@ kstatus_t nvme_recover_after_timeout(device_t *device) {
         (nvme_controller_t *)device->driver_data;
 
     /*
-     * Ignore late MSI-X while nvme_start() disables the controller and tears
-     * down the old queues. nvme_free_io_queues() aborts pending mappings only
-     * after the controller is no longer allowed to DMA.
+     * nvme_start() 禁用控制器并拆除旧队列时，忽略迟到的 MSI-X。只有控制器不再允许
+     * 执行 DMA 后，nvme_free_io_queues() 才会中止待处理映射。
      */
     controller->started = false;
 

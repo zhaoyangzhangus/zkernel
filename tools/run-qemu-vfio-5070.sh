@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Bind the isolated RTX 5070 IOMMU group to vfio-pci and run run-qemu.sh.
-# The default path restores the host drivers on exit.
+# 将隔离的 RTX 5070 IOMMU 组绑定到 vfio-pci，然后运行 run-qemu.sh。
+# 默认路径会在退出时恢复宿主驱动。
 set -u -o pipefail
 
 script_dir="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"

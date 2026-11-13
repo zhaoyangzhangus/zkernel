@@ -18,12 +18,12 @@ typedef struct nvme_pending_io {
     bool cancelled;
 } nvme_pending_io_t;
 
-/* The Core Owner keeps the registry storage private to core.c. */
+/* Core 所有者会将注册表存储保留在 core.c 内部。 */
 nvme_controller_t *nvme_controller_at(uint32_t index);
 bool nvme_pci_is_controller(const pci_device_t *pci);
 bool nvme_all_controllers_ready(void);
 
-/* Queue doorbells are private to the NVMe queue unit. */
+/* 队列 doorbell 仅由 NVMe 队列单元使用。 */
 void nvme_queue_ring_submission(nvme_controller_t *controller,
                                 const nvme_queue_t *queue);
 void nvme_queue_ring_completion(nvme_controller_t *controller,

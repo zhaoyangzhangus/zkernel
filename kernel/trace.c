@@ -62,7 +62,7 @@ kstatus_t telemetry_record(uint32_t category, uint64_t object_id,
     record->object_id = object_id;
     record->value0 = value0;
     record->value1 = value1;
-    /* All ring readers use telemetry_lock; unlock publishes the record. */
+    /* 所有环形缓冲区读取者都使用 telemetry_lock；解锁时发布记录。 */
     record->sequence = sequence;
     telemetry_unlock();
     return K_OK;
@@ -93,8 +93,7 @@ size_t telemetry_snapshot(uint64_t after_sequence, telemetry_record_t *records,
                      newest - TELEMETRY_RING_CAPACITY + 1U : 1U;
     if (after_sequence + 1U > first) first = after_sequence + 1U;
     if (first <= newest) {
-        /* Writers commit consecutive records under this same lock. The live
-         * sequence interval therefore occupies at most two contiguous spans. */
+    /* 写入者在同一把锁下提交连续记录。因此，当前序列区间最多占用两个连续片段。 */
         count = (size_t)(newest - first + 1U);
         if (count > capacity) count = capacity;
         size_t index = (size_t)((first - 1U) % TELEMETRY_RING_CAPACITY);

@@ -16,6 +16,7 @@ program = r'''
 #include "kernel/graphics/render_plan.c"
 window_server_state_t g_window_server;
 compositor_snapshot_t g_compositor_snapshot;
+static Rect test_damage;
 bool window_client_decorations(uint32_t flags){return (flags&OS_WINDOW_CLIENT_DECORATIONS)!=0;}
 static unsigned geometry_checks;
 uint32_t window_outer_width(uint32_t width,uint32_t flags){(void)flags;++geometry_checks;return width;}
@@ -28,30 +29,102 @@ void kernel_perf_emit_scope_at(const char *name,uint64_t start,const char *file,
 }
 static unsigned wallpaper_calls,layer_calls,menu_calls,cursor_calls;
 static uint64_t drawn_windows;
-void desktop_draw_wallpaper_locked(void){++wallpaper_calls;}
-void compositor_animation_window(const compositor_window_view_t *w){
- unsigned i=(unsigned)(w-g_compositor_snapshot.windows);assert(i<64);drawn_windows|=1ULL<<i;
+void desktop_draw_wallpaper_locked(Rect clip){assert(!memcmp(&clip,&test_damage,sizeof(clip)));++wallpaper_calls;}
+void compositor_animation_window(Rect clip,const compositor_window_view_t *w){
+ assert(!memcmp(&clip,&test_damage,sizeof(clip)));unsigned i=(unsigned)(w-g_compositor_snapshot.windows);assert(i<64);drawn_windows|=1ULL<<i;
 }
-void compositor_animation_layers(void){++layer_calls;}
-void desktop_draw_menu(void){++menu_calls;}
-void compositor_cursor_locked(void){++cursor_calls;}
+void compositor_animation_layers(Rect clip,uint64_t layers,uint64_t time){(void)layers;(void)time;assert(!memcmp(&clip,&test_damage,sizeof(clip)));++layer_calls;}
+void desktop_draw_menu(Rect clip){assert(!memcmp(&clip,&test_damage,sizeof(clip)));++menu_calls;}
+void compositor_cursor_locked(Rect clip){assert(!memcmp(&clip,&test_damage,sizeof(clip)));++cursor_calls;}
+#define g_compositor_snapshot (*(const compositor_snapshot_t *)&g_compositor_snapshot)
 __FALLBACK__
-bool compositor_window_intersects_damage_locked(const compositor_window_view_t *w){(void)w;return true;}
+bool compositor_window_intersects_damage_locked(Rect clip,const compositor_window_view_t *w){assert(!memcmp(&clip,&test_damage,sizeof(clip)));(void)w;return true;}
 static uint32_t expected(uint64_t opaque,unsigned count){
  uint32_t result=UINT32_MAX;
  for(unsigned i=0;i<64;++i)if(opaque&(1ULL<<i))result=i;
  return result<count?result:UINT32_MAX;
 }
 __REGION__
+#undef g_compositor_snapshot
 static void verify_region(const compositor_render_span_t *span){
  wallpaper_calls=layer_calls=menu_calls=cursor_calls=0;drawn_windows=0;
- g_compositor_snapshot.damage_bounds=span->rect;
- compositor_region_locked(span);
+ test_damage=span->rect;
+ compositor_region_locked(test_damage,span);
  assert(wallpaper_calls==(span->first_window==UINT32_MAX));
  assert(drawn_windows==span->window_mask);
  assert(layer_calls==1&&menu_calls==1&&cursor_calls==1);
 }
+/* 缓存命中、失效及强制冷规划必须生成逐项相同的指令。 */
+static compositor_render_span_t cached_plan[WINDOW_RENDER_PLAN_MAX_SPANS];
+static void verify_plan_cache(void){
+ g_window_server.display_width=128;g_window_server.display_height=128;
+ g_compositor_snapshot=(compositor_snapshot_t){.window_count=2,.damage_count=1,
+  .damage_rects={{0,0,128,128}}};
+ g_compositor_snapshot.windows[0]=(compositor_window_view_t){.width=128,.height=128,
+  .flags=OS_WINDOW_VISIBLE|OS_WINDOW_CLIENT_DECORATIONS,.maximized=true};
+ g_compositor_snapshot.windows[1]=(compositor_window_view_t){.x=16,.y=16,.width=64,.height=64,
+  .flags=OS_WINDOW_VISIBLE|OS_WINDOW_CLIENT_DECORATIONS};
+ for(unsigned change=0;change<12;++change){
+  if(change==1)g_compositor_snapshot.windows[1].x+=17;
+  if(change==2)g_compositor_snapshot.windows[1].y+=13;
+  if(change==3)g_compositor_snapshot.windows[1].width+=16;
+  if(change==4)g_compositor_snapshot.windows[1].height+=16;
+  if(change==5)g_compositor_snapshot.windows[1].maximized=true;
+  if(change==6)g_compositor_snapshot.windows[1].flags|=OS_WINDOW_PREMULTIPLIED_ALPHA;
+  if(change==7)g_compositor_snapshot.windows[1].flags&=~OS_WINDOW_VISIBLE;
+  if(change==8)g_window_server.display_width=96;
+  if(change==9)g_window_server.display_height=96;
+  if(change==10){g_compositor_snapshot.damage_count=2;g_compositor_snapshot.damage_rects[1]=(Rect){8,8,40,40};}
+  if(change==11)g_compositor_snapshot.damage_rects[0]=(Rect){0,0,80,80};
+  assert(compositor_tile_metadata_build(&g_compositor_snapshot));
+  assert(compositor_build_render_plan(&g_compositor_snapshot));
+  unsigned count=g_compositor_render_plan_count;
+  memcpy(cached_plan,g_compositor_render_plan,count*sizeof(*cached_plan));
+  uint64_t revision=compositor_tile_metadata_revision();
+  geometry_checks=0;
+  /* 帧结束会清除活动标志，但必须保留可供下一帧复用的指令数组。 */
+  compositor_render_plan_reset();
+  assert(compositor_tile_metadata_build(&g_compositor_snapshot));
+  assert(compositor_tile_metadata_revision()==revision);
+  assert(compositor_build_render_plan(&g_compositor_snapshot));
+  assert(geometry_checks==0&&g_compositor_render_plan_count==count);
+  g_compositor_plan_cache.valid=false;
+  assert(compositor_build_render_plan(&g_compositor_snapshot));
+  assert(g_compositor_render_plan_count==count);
+  for(unsigned i=0;i<count;++i){
+   const compositor_render_span_t *a=&cached_plan[i],*b=&g_compositor_render_plan[i];
+   assert(!memcmp(&a->rect,&b->rect,sizeof(Rect)));
+   assert(a->first_window==b->first_window&&a->window_mask==b->window_mask);
+  }
+ }
+ /* 像素提交、窗口身份不属于几何键，不能因此重建遮挡或持有旧窗口引用。 */
+ uint64_t revision=compositor_tile_metadata_revision();
+ ++g_compositor_snapshot.windows[0].identifier;
+ ++g_compositor_snapshot.windows[0].buffer_size;
+ ++g_compositor_snapshot.windows[0].present_sequence;
+ g_compositor_snapshot.windows[0].background^=0x00ffffffU;
+ geometry_checks=0;
+ assert(compositor_tile_metadata_build(&g_compositor_snapshot));
+ assert(compositor_tile_metadata_revision()==revision);
+ assert(compositor_build_render_plan(&g_compositor_snapshot)&&geometry_checks==0);
+ /* 无效输入、空帧和动画不得让旧计划重新变为有效。 */
+ assert(!compositor_build_render_plan(0)&&!g_compositor_plan_cache.valid);
+ assert(!g_compositor_render_plan_valid&&!g_compositor_render_plan_count);
+ g_compositor_snapshot.damage_count=0;
+ assert(!compositor_build_render_plan(&g_compositor_snapshot)&&!g_compositor_plan_cache.valid);
+ g_compositor_snapshot.damage_count=1;
+ assert(compositor_build_render_plan(&g_compositor_snapshot));
+ g_compositor_snapshot.animations=true;
+ assert(!compositor_tile_metadata_build(&g_compositor_snapshot));
+ assert(!compositor_build_render_plan(&g_compositor_snapshot)&&!g_compositor_plan_cache.valid);
+ g_compositor_snapshot.animations=false;
+ assert(compositor_tile_metadata_build(&g_compositor_snapshot));
+ assert(compositor_tile_metadata_revision()!=revision);
+ assert(compositor_build_render_plan(&g_compositor_snapshot));
+ puts("计划缓存：12 种场景与冷规划逐项一致，命中零几何重算，像素提交不失效，空帧/动画失效通过");
+}
 int main(void){
+ verify_plan_cache();
  g_window_server.display_width=128;g_window_server.display_height=128;
  g_compositor_snapshot.window_count=64;
  for(unsigned i=0;i<64;++i)g_compositor_snapshot.windows[i]=(compositor_window_view_t){
@@ -67,12 +140,12 @@ int main(void){
   assert(g_compositor_render_plan[i].first_window==63);
   assert(g_compositor_render_plan[i].window_mask==(1ULL<<63));
  }
- g_compositor_snapshot.damage_bounds=(Rect){-20,-20,200,200};
- assert(compositor_occlusion_floor_for_damage()==63);
+ test_damage=(Rect){-20,-20,200,200};
+ assert(compositor_occlusion_floor_for_damage(test_damage)==63);
  /* 透明顶层不能遮挡；圆角恢复窗口也不能覆盖边缘瓦片。 */
  g_compositor_snapshot.windows[63].flags|=OS_WINDOW_PREMULTIPLIED_ALPHA;
  assert(compositor_tile_metadata_build(&g_compositor_snapshot));
- assert(compositor_occlusion_floor_for_damage()==62);
+ assert(compositor_occlusion_floor_for_damage(test_damage)==62);
  assert(compositor_build_render_plan(&g_compositor_snapshot));
  for(unsigned i=0;i<g_compositor_render_plan_count;++i){
   assert(g_compositor_render_plan[i].first_window==62);
@@ -80,7 +153,7 @@ int main(void){
  }
  for(unsigned i=0;i<63;++i)g_compositor_snapshot.windows[i].flags|=OS_WINDOW_PREMULTIPLIED_ALPHA;
  assert(compositor_tile_metadata_build(&g_compositor_snapshot));
- assert(compositor_occlusion_floor_for_damage()==UINT32_MAX);
+ assert(compositor_occlusion_floor_for_damage(test_damage)==UINT32_MAX);
  assert(compositor_build_render_plan(&g_compositor_snapshot));
  for(unsigned i=0;i<g_compositor_render_plan_count;++i){
   assert(g_compositor_render_plan[i].window_mask==UINT64_MAX);
@@ -88,7 +161,7 @@ int main(void){
  g_compositor_snapshot.windows[63].flags&=~OS_WINDOW_PREMULTIPLIED_ALPHA;
  g_compositor_snapshot.windows[63].maximized=false;
  assert(compositor_tile_metadata_build(&g_compositor_snapshot));
- assert(compositor_occlusion_floor_for_damage()==UINT32_MAX);
+ assert(compositor_occlusion_floor_for_damage(test_damage)==UINT32_MAX);
  /* 独立的逐位参考实现覆盖最高位、越界索引及任意掩码组合。 */
  uint64_t seed=17;
  for(unsigned trial=0;trial<10000;++trial){
@@ -102,15 +175,15 @@ int main(void){
  for(unsigned i=0;i<WINDOW_DAMAGE_TILE_COUNT;++i)
   g_compositor_tile_meta[i]=(compositor_tile_meta_t){.opaque_mask=2};
  g_compositor_tile_meta[1].opaque_mask=0;
- g_compositor_snapshot.damage_bounds=(Rect){0,0,128,64};
- assert(compositor_occlusion_floor_for_damage()==UINT32_MAX);
+ test_damage=(Rect){0,0,128,64};
+ assert(compositor_occlusion_floor_for_damage(test_damage)==UINT32_MAX);
  g_compositor_tile_meta[1].opaque_mask=2;
- assert(compositor_occlusion_floor_for_damage()==1);
+ assert(compositor_occlusion_floor_for_damage(test_damage)==1);
  g_compositor_tile_meta[0].opaque_mask=1;
- assert(compositor_occlusion_floor_for_damage()==0);
+ assert(compositor_occlusion_floor_for_damage(test_damage)==0);
  const Rect empty[]={{0,0,0,1},{130,0,150,1},{-50,-50,-1,-1}};
  for(unsigned i=0;i<sizeof(empty)/sizeof(*empty);++i){
-  g_compositor_snapshot.damage_bounds=empty[i];assert(compositor_occlusion_floor_for_damage()==UINT32_MAX);
+  test_damage=empty[i];assert(compositor_occlusion_floor_for_damage(test_damage)==UINT32_MAX);
  }
  /* 64 个窗口只有两个接触当前瓦片，不应再做 64 次几何检查。 */
  for(unsigned i=0;i<64;++i)g_compositor_snapshot.windows[i]=(compositor_window_view_t){
@@ -185,8 +258,8 @@ int main(void){
       (int64_t)w.y+w.height-8>=span.rect.y1)exact_floor=i;
    }
    assert(compositor_render_plan_exact_floor(&g_compositor_snapshot,&span.rect)==exact_floor);
-   g_compositor_snapshot.damage_bounds=span.rect;
-   assert(compositor_topmost_damage_cover()==exact_floor);
+   test_damage=span.rect;
+   assert(compositor_topmost_damage_cover(test_damage)==exact_floor);
    unsigned first=span.first_window==UINT32_MAX?0:span.first_window;
    for(unsigned i=first;i<count;++i){
     const compositor_window_view_t *w=&g_compositor_snapshot.windows[i];
@@ -319,31 +392,31 @@ int main(void){
  assert(!compositor_tile_metadata_build(&g_compositor_snapshot));
  assert(!compositor_build_render_plan(&g_compositor_snapshot)&&!g_compositor_render_plan_valid);
  assert(compositor_tile_occlusion_floor(0,0,64)==UINT32_MAX);
- assert(compositor_occlusion_floor_for_damage()==UINT32_MAX);
+ assert(compositor_occlusion_floor_for_damage(test_damage)==UINT32_MAX);
  /* 规划和瓦片元数据不可用时，透明顶层不能跳过下层窗口或桌面。 */
  g_compositor_tile_meta_valid=false;
  g_compositor_snapshot.window_count=2;g_compositor_snapshot.animations=false;
- g_compositor_snapshot.damage_bounds=(Rect){32,32,64,64};
+ test_damage=(Rect){32,32,64,64};
  for(unsigned i=0;i<2;++i)g_compositor_snapshot.windows[i]=(compositor_window_view_t){
   .width=128,.height=128,.flags=OS_WINDOW_VISIBLE|OS_WINDOW_PREMULTIPLIED_ALPHA};
- assert(compositor_topmost_damage_cover()==UINT32_MAX);
+ assert(compositor_topmost_damage_cover(test_damage)==UINT32_MAX);
  wallpaper_calls=layer_calls=menu_calls=cursor_calls=0;drawn_windows=0;
- compositor_region_locked(0);
+ compositor_region_locked(test_damage,0);
  assert(wallpaper_calls==1&&drawn_windows==3&&layer_calls==1&&menu_calls==1&&cursor_calls==1);
  g_compositor_snapshot.windows[0].flags=OS_WINDOW_VISIBLE;
- assert(compositor_topmost_damage_cover()==0);
- wallpaper_calls=0;drawn_windows=0;compositor_region_locked(0);
+ assert(compositor_topmost_damage_cover(test_damage)==0);
+ wallpaper_calls=0;drawn_windows=0;compositor_region_locked(test_damage,0);
  assert(!wallpaper_calls&&drawn_windows==3);
  /* 最大化客户端外框是方角，损伤在边缘时也使用统一覆盖规则。 */
  g_compositor_snapshot.windows[0].flags=OS_WINDOW_VISIBLE|OS_WINDOW_CLIENT_DECORATIONS;
  g_compositor_snapshot.windows[0].maximized=true;
- g_compositor_snapshot.damage_bounds=(Rect){0,0,4,4};
- assert(compositor_topmost_damage_cover()==0);
+ test_damage=(Rect){0,0,4,4};
+ assert(compositor_topmost_damage_cover(test_damage)==0);
  g_compositor_snapshot.windows[0].maximized=false;
- assert(compositor_topmost_damage_cover()==UINT32_MAX);
+ assert(compositor_topmost_damage_cover(test_damage)==UINT32_MAX);
  g_compositor_snapshot.windows[0].maximized=true;
  g_compositor_snapshot.windows[0].flags&=~OS_WINDOW_VISIBLE;
- assert(compositor_topmost_damage_cover()==UINT32_MAX);
+ assert(compositor_topmost_damage_cover(test_damage)==UINT32_MAX);
  assert(compositor_tile_self_test());
  puts("Tile occlusion: 650000 mask/count queries, real alpha/rounded coverage, 15000 span/exact-floor geometry comparisons, bounded multi-tile unions and partial-metadata fallback, 507 clipped coverage oracles, 200 multi-row/multi-damage plans, full 128-column capacity, actual planned/fallback region desktop/window dispatch, transparent fallback exclusion, shared maximized/rounded/alpha coverage, mixed region floors, clipping and animation invalidation PASS");
 }
@@ -356,3 +429,44 @@ with tempfile.TemporaryDirectory(prefix='tile-occlusion-') as directory:
                     '-I' + str(root / 'include'), '-I' + str(root),
                     '-x', 'c', '-', '-o', str(binary)], input=program, text=True, check=True)
     subprocess.run([str(binary)], check=True)
+
+    # 必须能检出错误复用旧计划以及完全关闭缓存造成的重复规划。
+    production_plan = (root / 'kernel/graphics/render_plan.c').read_text()
+    for label, old, new in (
+        ('忽略几何修订号', 'g_compositor_plan_cache.revision == revision &&', ''),
+        ('忽略损坏坐标', 'memcmp(g_compositor_plan_cache.damage, snapshot->damage_rects, damage_bytes) == 0', 'true'),
+        ('禁用缓存命中', 'if (g_compositor_plan_cache.valid &&', 'if (false && g_compositor_plan_cache.valid &&'),
+    ):
+        assert old in production_plan
+        modified = production_plan.replace(old, new, 1).replace(
+            '#include "internal.h"', '#include "kernel/graphics/internal.h"')
+        broken = program.replace('#include "kernel/graphics/render_plan.c"', modified)
+        assert broken != program
+        subprocess.run(['cc', '-std=c11', '-O2', '-Wall', '-Wextra', '-Werror',
+                        '-I' + str(root / 'include'), '-I' + str(root),
+                        '-x', 'c', '-', '-o', str(binary)], input=broken, text=True, check=True)
+        result = subprocess.run([str(binary)], stderr=subprocess.PIPE, text=True,
+            preexec_fn=lambda: __import__('resource').setrlimit(__import__('resource').RLIMIT_CORE, (0, 0)))
+        assert result.returncode != 0 and 'Assertion' in result.stderr, label
+        print('缓存反例被拒绝：' + label)
+
+    # 整个区域分派必须保留调用方的局部范围，不能将某个图层放大为整屏。
+    broken = program.replace('desktop_draw_menu(clip);',
+        'desktop_draw_menu(((Rect){0,0,128,128}));')
+    assert broken != program
+    subprocess.run(['cc', '-std=c11', '-O2', '-Wall', '-Wextra', '-Werror',
+                    '-I' + str(root / 'include'), '-I' + str(root),
+                    '-x', 'c', '-', '-o', str(binary)], input=broken, text=True, check=True)
+    result = subprocess.run([str(binary)], stderr=subprocess.PIPE, text=True,
+        preexec_fn=lambda: __import__('resource').setrlimit(__import__('resource').RLIMIT_CORE, (0, 0)))
+    assert result.returncode != 0 and 'Assertion' in result.stderr
+    print('负面对照通过：区域分派丢失局部裁剪时，真实调用链拒绝绘制')
+
+    # 绘制阶段只读场景快照；故意写入已有状态也必须在编译阶段被拒绝。
+    broken = program.replace('uint32_t damage_left =',
+        'g_compositor_snapshot.animations = false;\n    uint32_t damage_left =', 1)
+    result = subprocess.run(['cc', '-std=c11', '-O2', '-Wall', '-Wextra', '-Werror',
+                    '-I' + str(root / 'include'), '-I' + str(root),
+                    '-x', 'c', '-', '-o', str(binary)], input=broken, text=True, capture_output=True)
+    assert result.returncode != 0 and 'read-only' in result.stderr, result.stderr
+    print('负面对照通过：区域绘制修改只读快照时编译失败')

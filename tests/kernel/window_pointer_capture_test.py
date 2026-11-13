@@ -67,7 +67,7 @@ int main(void){
  a.minimized=false;a.flags=0;a.present_sequence=1;assert(!route_client_capture_locked(&e));
  assert(window_server_capture_owned(&p,&a,1)==K_EINVAL);
  assert(window_server_capture_owned(&p,&a,0)==K_OK);
- // Show defers exposing the first surface, not capture ownership/routing.
+ // Show 会延迟公开第一个表面，但不会延迟捕获所有权/路由。
  a.present_sequence=0;
  assert(window_server_capture_owned(&p,&a,1)==K_OK && a.client_pointer_capture);
  assert(route_client_capture_locked(&e) && last==&a);
@@ -80,9 +80,9 @@ int main(void){
  e.value=INPUT_VALUE_RELEASE;
  assert(route_client_capture_locked(&e) && !a.client_button_capture);
  assert(!route_client_capture_locked(&e));
- // A same-process popup can take over the parent's implicit press grab.
- // No explicit or foreign capture may be stolen, and a later array conflict
- // must not clear an earlier same-owner grab before returning failure.
+ // 同一进程中的弹出窗口可以接管父窗口隐式获得的按压捕获。
+ // 不得窃取显式捕获或其他进程的捕获；稍后的数组冲突也不能在返回失败前清除先前由
+ // 同一所有者获得的捕获。
  a.client_button_capture=true;
  a.control_pressed=7;a.control_hover=7;
  assert(window_server_capture_owned(&p,&b,0)==K_OK&&a.client_button_capture);

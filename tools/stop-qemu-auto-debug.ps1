@@ -4,8 +4,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $projectRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
-# Always run the native cleanup first. It also scans the debug port, which
-# covers a wrapper that was cancelled after its PID file was removed.
+# 始终先执行原生清理。它也会扫描调试端口，以处理包装器取消后 PID 文件已被移除的情况。
 & powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
     (Join-Path $PSScriptRoot 'stop-qemu-native-debug.ps1') -Build $Build
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

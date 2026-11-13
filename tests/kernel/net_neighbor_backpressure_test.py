@@ -126,7 +126,7 @@ with tempfile.TemporaryDirectory(prefix='net-neighbor-busy-') as temp:
     anchor='return status == K_OK ? K_EAGAIN : status;'
     assert source.count(anchor)==2
     for index,label in enumerate(('ARP','NDP')):
-        # Replace exactly one helper so each family's regression is independent.
+        # 只替换一个辅助函数，确保每个地址族的回归测试彼此独立。
         offset=source.index(anchor) if index==0 else source.rindex(anchor)
         broken=source[:offset]+source[offset:].replace(anchor,
                          'return status == K_OK ? K_EAGAIN : K_EIO;',1)

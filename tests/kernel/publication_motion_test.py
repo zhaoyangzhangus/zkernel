@@ -91,7 +91,7 @@ with tempfile.TemporaryDirectory(prefix='publication-motion-') as directory:
     subprocess.run([str(path / 'test')],check=True)
 print('Publication motion: 8448 wrapped FIFO barriers, 16-event budget, drag exclusion, unlocked cursor/wakes and no synchronous launch PASS')
 
-# Compile the actual post-routing launch dispatch, including queue failure.
+# 编译真实的路由后启动分发逻辑，包括队列失败的情况。
 start = pump.index('    for (;;) {', pump.index('void window_server_pump_input_mode('))
 end = pump.index('\n    if (!compose_now) return;', start)
 dispatch = pump[start:end]
@@ -100,7 +100,9 @@ program = r'''
 #include <stdbool.h>
 #include <stdint.h>
 #define DESKTOP_APP_NONE 0U
-static unsigned pending,queued,restored,cycles,held;
+static unsigned pending,queued,restored,cycles,held,enqueue_calls,restore_calls;
+static unsigned power_calls,last_power;
+static struct {struct {unsigned power_request;} desktop;} g_window_server;
 static bool available,minimized;
 static void window_lock(void) {assert(!held);held=1;}
 static void window_unlock(void) {assert(held);held=0;}
@@ -110,20 +112,36 @@ static uint32_t window_input_take_desktop_launch_locked(void) {
 static bool window_input_take_focus_cycle_request_locked(void) {return false;}
 static void desktop_cycle_window_focus(void) {++cycles;}
 static bool desktop_launch_enqueue(unsigned app) {
- assert(!held && app);if(available)++queued;return available;
+ assert(!held && app);++enqueue_calls;if(available)++queued;return available;
 }
 static bool desktop_restore_minimized_app(unsigned app) {
- assert(!held && app);if(minimized)++restored;return minimized;
+ assert(!held && app);++restore_calls;if(minimized)++restored;return minimized;
+}
+static int power_system_request(unsigned action) {
+ assert(!held&&!g_window_server.desktop.power_request&&action<2U);
+ ++power_calls;last_power=action;return 0;
 }
 static void dispatch(void) {
 ''' + dispatch + r'''
 }
 int main(void) {
- /* Worker absent/full: a busy click never loads an ELF synchronously. */
+ /* 工作线程缺失/队列已满：忙碌状态下点击时绝不应同步加载 ELF。 */
  for(unsigned i=0;i<1000;++i){pending=1;dispatch();}
  assert(!queued && !restored && !pending && !held);
  minimized=true;pending=1;dispatch();assert(restored==1);
- available=true;pending=1;dispatch();assert(queued==1 && restored==1 && !cycles);
+ available=true;
+ /* 已有窗口即使启动队列可用，也不应唤醒启动线程。 */
+ unsigned before=enqueue_calls;
+ for(unsigned i=0;i<10000;++i){pending=1;dispatch();}
+ assert(enqueue_calls==before&&restored==10001&&!queued);
+ minimized=false;pending=1;dispatch();assert(queued==1 && restored==10001 && !cycles);
+ /* 电源请求应在窗口锁外仅派发一次，且不能吞掉同轮启动请求。 */
+ for(unsigned request=1;request<=2;++request){
+  g_window_server.desktop.power_request=request;pending=request==2?1:0;
+  dispatch();assert(power_calls==request&&last_power==request-1U);
+  assert(!g_window_server.desktop.power_request&&!held&&!pending);
+ }
+ assert(queued==2&&enqueue_calls==1002&&restore_calls==11003);
 }
 '''
 with tempfile.TemporaryDirectory(prefix='launch-nonblocking-') as directory:
@@ -132,4 +150,14 @@ with tempfile.TemporaryDirectory(prefix='launch-nonblocking-') as directory:
     subprocess.run(['cc','-std=c11','-Wall','-Wextra','-Werror',
                     str(path / 'test.c'),'-o',str(path / 'test')],check=True)
     subprocess.run([str(path / 'test')],check=True)
-print('Actual launch dispatch: 1000 busy/unavailable requests, minimized restore and successful enqueue PASS')
+    # 旧的先入队行为必须被已有窗口请求测试拒绝。
+    broken=program.replace(
+        'app != DESKTOP_APP_NONE && !desktop_restore_minimized_app(app)',
+        'app != DESKTOP_APP_NONE && !desktop_launch_enqueue(app) && !desktop_restore_minimized_app(app)')
+    assert broken!=program
+    (path / 'test.c').write_text(broken)
+    subprocess.run(['cc','-std=c11','-Wall','-Wextra','-Werror',
+                    str(path / 'test.c'),'-o',str(path / 'test')],check=True)
+    rejected=subprocess.run([str(path / 'test')],capture_output=True)
+    assert rejected.returncode!=0
+print('Actual launch dispatch: 1000 busy/unavailable requests, 10000 existing-window requests without enqueue, restore and successful enqueue PASS')

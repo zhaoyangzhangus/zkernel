@@ -18,7 +18,7 @@ strings = (root / 'kernel/string.c').read_text()
 copy = strings[strings.index('static void copy_forward('):strings.index('void *memmove(')]
 copy = copy.replace('void *memcpy(', 'static void *actual_memcpy(')
 publication = function('static void vfs_set_node_slot_locked(')
-# Audit every production registry mutation, not just an isolated hint fixture.
+# 检查生产注册表中的每一种修改，而不只是独立的提示测试夹具。
 writes = re.findall(r'g_vfs_nodes\[([^\]]+)\]\s*=(?!=)', source)
 assert writes == ['i', 'index'], writes
 # 定义、文件发布及各条删除路径，包括卸载时淘汰旧卷缓存。
@@ -96,7 +96,7 @@ int main(void) {
  for(unsigned i=0;i<8;++i)assert(!pthread_create(&threads[i],0,init_thread,0));
  for(unsigned i=0;i<8;++i)assert(!pthread_join(threads[i],0));
  parallel=false;assert(atomic_load(&attempts)==8);
- // A query does not reserve: abandoning it must not leak its slot.
+ // 查询不会预留槽位：放弃查询时不能泄漏槽位。
  for(unsigned i=0;i<100;++i)assert(vfs_free_node_slot_locked()==0);
  visits=0;
  for(unsigned i=0;i<4096;++i) {
@@ -109,7 +109,7 @@ int main(void) {
  for(unsigned i=0;i<4096;++i)assert(g_vfs_nodes[i]==&token);
  for(unsigned i=0;i<100000;++i)vfs_initialize();
  assert(atomic_load(&attempts)==8 && g_vfs_next_free_node==4096 && g_vfs_node_capacity==4096);
- // Failed growth leaves the full old registry intact and retries without rescanning.
+ // 扩展失败时保留完整旧注册表；重试时不重新扫描。
  vnode_t **old=g_vfs_nodes;fail_alloc=true;visits=0;
  for(unsigned i=0;i<3;++i)assert(vfs_free_node_slot_locked()==UINT32_MAX);
  assert(g_vfs_nodes==old && g_vfs_node_capacity==4096 && visits==0);
@@ -137,7 +137,7 @@ int main(void) {
   uint32_t first=oracle();assert(g_vfs_next_free_node<=first);
   for(uint32_t i=0;i<g_vfs_next_free_node;++i)assert(g_vfs_nodes[i]);
  }
- // Full capacity overflow returns failure without touching an array or allocating.
+ // 容量已满时溢出请求应直接失败，不访问数组，也不分配内存。
  uint32_t saved_capacity=g_vfs_node_capacity,saved_hint=g_vfs_next_free_node;
  unsigned before=allocations;
  g_vfs_node_capacity=UINT32_MAX;g_vfs_next_free_node=UINT32_MAX;

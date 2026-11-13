@@ -39,7 +39,7 @@ for path in sorted(DIRECTORY.glob('*.py')):
     python_count += 1
     assert clients <= servers, (path.name, servers, clients)
     for value in constants:
-        # This includes argparse defaults as well as subprocess -x arguments.
+        # 这既包括 argparse 默认值，也包括子进程的 -x 参数。
         if re.fullmatch(r'(?:tools/chromium/)?[a-z-]+\.gdb', value):
             script = DIRECTORY / Path(value).name
             assert script.is_file(), (path.name, value)

@@ -1,9 +1,7 @@
 #pragma once
 
-/* Linux-compatible TCP socket option names used by portable clients.  The
- * System socket layer can reject options it does not implement with
- * ENOPROTOOPT; keeping the declarations here lets the common networking code
- * compile without importing the host libc's ABI. */
+/* 可移植客户端使用的 Linux 兼容 TCP 套接字选项名称。System 套接字层可以用 ENOPROTOOPT 拒绝尚未
+ * 实现的选项；保留这些声明可让通用网络代码无需导入宿主 libc ABI 即可编译。 */
 #define SOL_TCP 6
 #define TCP_NODELAY 1
 #define TCP_MAXSEG 2

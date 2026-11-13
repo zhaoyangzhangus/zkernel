@@ -1,4 +1,4 @@
-/* Phase 3 fail-closed nv ABI boundary. Exact declarations are checked in nvabi_contracts.c. */
+/* 第 3 阶段的 NV ABI 安全失败边界。具体声明由 nvabi_contracts.c 检查。 */
 
     .section .text.nvabi_nv_unsupported,"ax",@progbits
     .extern nvabi_log_unsupported
@@ -90,7 +90,7 @@ nv_acpi_methods_init:
     leaq .Lnvabi_msg_nv_acpi_methods_init(%rip), %rdi
     leaq .Lnvabi_stage_nv(%rip), %rsi
     call nvabi_log_unsupported
-    # void return
+    # void 返回
     popq %rbp
     ret
     .size nv_acpi_methods_init, .-nv_acpi_methods_init
@@ -103,7 +103,7 @@ nv_acpi_methods_uninit:
     leaq .Lnvabi_msg_nv_acpi_methods_uninit(%rip), %rdi
     leaq .Lnvabi_stage_nv(%rip), %rsi
     call nvabi_log_unsupported
-    # void return
+    # void 返回
     popq %rbp
     ret
     .size nv_acpi_methods_uninit, .-nv_acpi_methods_uninit
@@ -155,7 +155,7 @@ nv_acquire_mmap_lock:
     leaq .Lnvabi_msg_nv_acquire_mmap_lock(%rip), %rdi
     leaq .Lnvabi_stage_nv(%rip), %rsi
     call nvabi_log_unsupported
-    # void return
+    # void 返回
     popq %rbp
     ret
     .size nv_acquire_mmap_lock, .-nv_acquire_mmap_lock
@@ -196,7 +196,7 @@ nv_allow_runtime_suspend:
     leaq .Lnvabi_msg_nv_allow_runtime_suspend(%rip), %rdi
     leaq .Lnvabi_stage_nv(%rip), %rsi
     call nvabi_log_unsupported
-    # void return
+    # void 返回
     popq %rbp
     ret
     .size nv_allow_runtime_suspend, .-nv_allow_runtime_suspend
@@ -209,7 +209,7 @@ nv_audio_dynamic_power:
     leaq .Lnvabi_msg_nv_audio_dynamic_power(%rip), %rdi
     leaq .Lnvabi_stage_nv(%rip), %rsi
     call nvabi_log_unsupported
-    # void return
+    # void 返回
     popq %rbp
     ret
     .size nv_audio_dynamic_power, .-nv_audio_dynamic_power
@@ -235,7 +235,7 @@ nv_cancel_nano_timer:
     leaq .Lnvabi_msg_nv_cancel_nano_timer(%rip), %rdi
     leaq .Lnvabi_stage_nv(%rip), %rsi
     call nvabi_log_unsupported
-    # void return
+    # void 返回
     popq %rbp
     ret
     .size nv_cancel_nano_timer, .-nv_cancel_nano_timer
@@ -248,7 +248,7 @@ nv_control_soc_irqs:
     leaq .Lnvabi_msg_nv_control_soc_irqs(%rip), %rdi
     leaq .Lnvabi_stage_nv(%rip), %rsi
     call nvabi_log_unsupported
-    # void return
+    # void 返回
     popq %rbp
     ret
     .size nv_control_soc_irqs, .-nv_control_soc_irqs
@@ -261,7 +261,7 @@ nv_create_nano_timer:
     leaq .Lnvabi_msg_nv_create_nano_timer(%rip), %rdi
     leaq .Lnvabi_stage_nv(%rip), %rsi
     call nvabi_log_unsupported
-    # void return
+    # void 返回
     popq %rbp
     ret
     .size nv_create_nano_timer, .-nv_create_nano_timer
@@ -274,7 +274,7 @@ nv_destroy_nano_timer:
     leaq .Lnvabi_msg_nv_destroy_nano_timer(%rip), %rdi
     leaq .Lnvabi_stage_nv(%rip), %rsi
     call nvabi_log_unsupported
-    # void return
+    # void 返回
     popq %rbp
     ret
     .size nv_destroy_nano_timer, .-nv_destroy_nano_timer
@@ -287,7 +287,7 @@ nv_disable_clk:
     leaq .Lnvabi_msg_nv_disable_clk(%rip), %rdi
     leaq .Lnvabi_stage_nv(%rip), %rsi
     call nvabi_log_unsupported
-    # void return
+    # void 返回
     popq %rbp
     ret
     .size nv_disable_clk, .-nv_disable_clk
@@ -300,7 +300,7 @@ nv_disallow_runtime_suspend:
     leaq .Lnvabi_msg_nv_disallow_runtime_suspend(%rip), %rdi
     leaq .Lnvabi_stage_nv(%rip), %rsi
     call nvabi_log_unsupported
-    # void return
+    # void 返回
     popq %rbp
     ret
     .size nv_disallow_runtime_suspend, .-nv_disallow_runtime_suspend
@@ -313,7 +313,7 @@ nv_dma_cache_invalidate:
     leaq .Lnvabi_msg_nv_dma_cache_invalidate(%rip), %rdi
     leaq .Lnvabi_stage_nv(%rip), %rsi
     call nvabi_log_unsupported
-    # void return
+    # void 返回
     popq %rbp
     ret
     .size nv_dma_cache_invalidate, .-nv_dma_cache_invalidate
@@ -417,7 +417,7 @@ nv_dma_put_dev_pagemap:
     leaq .Lnvabi_msg_nv_dma_put_dev_pagemap(%rip), %rdi
     leaq .Lnvabi_stage_nv(%rip), %rsi
     call nvabi_log_unsupported
-    # void return
+    # void 返回
     popq %rbp
     ret
     .size nv_dma_put_dev_pagemap, .-nv_dma_put_dev_pagemap
@@ -430,7 +430,7 @@ nv_dma_release_dma_buf:
     leaq .Lnvabi_msg_nv_dma_release_dma_buf(%rip), %rdi
     leaq .Lnvabi_stage_nv(%rip), %rsi
     call nvabi_log_unsupported
-    # void return
+    # void 返回
     popq %rbp
     ret
     .size nv_dma_release_dma_buf, .-nv_dma_release_dma_buf
@@ -443,7 +443,7 @@ nv_dma_release_sgt:
     leaq .Lnvabi_msg_nv_dma_release_sgt(%rip), %rdi
     leaq .Lnvabi_stage_nv(%rip), %rsi
     call nvabi_log_unsupported
-    # void return
+    # void 返回
     popq %rbp
     ret
     .size nv_dma_release_sgt, .-nv_dma_release_sgt
@@ -469,7 +469,7 @@ nv_dma_unmap_mmio:
     leaq .Lnvabi_msg_nv_dma_unmap_mmio(%rip), %rdi
     leaq .Lnvabi_stage_nv(%rip), %rsi
     call nvabi_log_unsupported
-    # void return
+    # void 返回
     popq %rbp
     ret
     .size nv_dma_unmap_mmio, .-nv_dma_unmap_mmio
@@ -482,7 +482,7 @@ nv_dma_unmap_peer:
     leaq .Lnvabi_msg_nv_dma_unmap_peer(%rip), %rdi
     leaq .Lnvabi_stage_nv(%rip), %rsi
     call nvabi_log_unsupported
-    # void return
+    # void 返回
     popq %rbp
     ret
     .size nv_dma_unmap_peer, .-nv_dma_unmap_peer
@@ -521,7 +521,7 @@ nv_flush_coherent_cpu_cache_range:
     leaq .Lnvabi_msg_nv_flush_coherent_cpu_cache_range(%rip), %rdi
     leaq .Lnvabi_stage_nv(%rip), %rsi
     call nvabi_log_unsupported
-    # void return
+    # void 返回
     popq %rbp
     ret
     .size nv_flush_coherent_cpu_cache_range, .-nv_flush_coherent_cpu_cache_range
@@ -535,7 +535,7 @@ nv_free_kernel_mapping:
     leaq .Lnvabi_msg_nv_free_kernel_mapping(%rip), %rdi
     leaq .Lnvabi_stage_nv(%rip), %rsi
     call nvabi_log_unsupported
-    # void return
+    # void 返回
     popq %rbp
     ret
     .size nv_free_kernel_mapping, .-nv_free_kernel_mapping
@@ -614,7 +614,7 @@ nv_get_disp_smmu_stream_ids:
     leaq .Lnvabi_msg_nv_get_disp_smmu_stream_ids(%rip), %rdi
     leaq .Lnvabi_stage_nv(%rip), %rsi
     call nvabi_log_unsupported
-    # void return
+    # void 返回
     popq %rbp
     ret
     .size nv_get_disp_smmu_stream_ids, .-nv_get_disp_smmu_stream_ids
@@ -720,7 +720,7 @@ nv_get_updated_emu_seg:
     leaq .Lnvabi_msg_nv_get_updated_emu_seg(%rip), %rdi
     leaq .Lnvabi_stage_nv(%rip), %rsi
     call nvabi_log_unsupported
-    # void return
+    # void 返回
     popq %rbp
     ret
     .size nv_get_updated_emu_seg, .-nv_get_updated_emu_seg
@@ -772,7 +772,7 @@ nv_i2c_del_adapter:
     leaq .Lnvabi_msg_nv_i2c_del_adapter(%rip), %rdi
     leaq .Lnvabi_stage_nv(%rip), %rsi
     call nvabi_log_unsupported
-    # void return
+    # void 返回
     popq %rbp
     ret
     .size nv_i2c_del_adapter, .-nv_i2c_del_adapter
@@ -798,7 +798,7 @@ nv_i2c_unregister_clients:
     leaq .Lnvabi_msg_nv_i2c_unregister_clients(%rip), %rdi
     leaq .Lnvabi_stage_nv(%rip), %rsi
     call nvabi_log_unsupported
-    # void return
+    # void 返回
     popq %rbp
     ret
     .size nv_i2c_unregister_clients, .-nv_i2c_unregister_clients
@@ -811,7 +811,7 @@ nv_idle_holdoff:
     leaq .Lnvabi_msg_nv_idle_holdoff(%rip), %rdi
     leaq .Lnvabi_stage_nv(%rip), %rsi
     call nvabi_log_unsupported
-    # void return
+    # void 返回
     popq %rbp
     ret
     .size nv_idle_holdoff, .-nv_idle_holdoff
@@ -941,7 +941,7 @@ nv_pci_tegra_pm_deinit:
     leaq .Lnvabi_msg_nv_pci_tegra_pm_deinit(%rip), %rdi
     leaq .Lnvabi_stage_nv(%rip), %rsi
     call nvabi_log_unsupported
-    # void return
+    # void 返回
     popq %rbp
     ret
     .size nv_pci_tegra_pm_deinit, .-nv_pci_tegra_pm_deinit
@@ -980,7 +980,7 @@ nv_post_event:
     leaq .Lnvabi_msg_nv_post_event(%rip), %rdi
     leaq .Lnvabi_stage_nv(%rip), %rsi
     call nvabi_log_unsupported
-    # void return
+    # void 返回
     popq %rbp
     ret
     .size nv_post_event, .-nv_post_event
@@ -994,7 +994,7 @@ nv_put_firmware:
     leaq .Lnvabi_msg_nv_put_firmware(%rip), %rdi
     leaq .Lnvabi_stage_nv(%rip), %rsi
     call nvabi_log_unsupported
-    # void return
+    # void 返回
     popq %rbp
     ret
     .size nv_put_firmware, .-nv_put_firmware
@@ -1060,7 +1060,7 @@ nv_release_mmap_lock:
     leaq .Lnvabi_msg_nv_release_mmap_lock(%rip), %rdi
     leaq .Lnvabi_stage_nv(%rip), %rsi
     call nvabi_log_unsupported
-    # void return
+    # void 返回
     popq %rbp
     ret
     .size nv_release_mmap_lock, .-nv_release_mmap_lock
@@ -1125,7 +1125,7 @@ nv_schedule_uvm_isr:
     leaq .Lnvabi_msg_nv_schedule_uvm_isr(%rip), %rdi
     leaq .Lnvabi_stage_nv(%rip), %rsi
     call nvabi_log_unsupported
-    # void return
+    # void 返回
     popq %rbp
     ret
     .size nv_schedule_uvm_isr, .-nv_schedule_uvm_isr
@@ -1138,7 +1138,7 @@ nv_schedule_uvm_resume_p2p:
     leaq .Lnvabi_msg_nv_schedule_uvm_resume_p2p(%rip), %rdi
     leaq .Lnvabi_stage_nv(%rip), %rsi
     call nvabi_log_unsupported
-    # void return
+    # void 返回
     popq %rbp
     ret
     .size nv_schedule_uvm_resume_p2p, .-nv_schedule_uvm_resume_p2p
@@ -1151,7 +1151,7 @@ nv_set_dma_address_size:
     leaq .Lnvabi_msg_nv_set_dma_address_size(%rip), %rdi
     leaq .Lnvabi_stage_nv(%rip), %rsi
     call nvabi_log_unsupported
-    # void return
+    # void 返回
     popq %rbp
     ret
     .size nv_set_dma_address_size, .-nv_set_dma_address_size
@@ -1190,7 +1190,7 @@ nv_set_safe_to_mmap_locked:
     leaq .Lnvabi_msg_nv_set_safe_to_mmap_locked(%rip), %rdi
     leaq .Lnvabi_stage_nv(%rip), %rsi
     call nvabi_log_unsupported
-    # void return
+    # void 返回
     popq %rbp
     ret
     .size nv_set_safe_to_mmap_locked, .-nv_set_safe_to_mmap_locked
@@ -1216,7 +1216,7 @@ nv_start_nano_timer:
     leaq .Lnvabi_msg_nv_start_nano_timer(%rip), %rdi
     leaq .Lnvabi_stage_nv(%rip), %rsi
     call nvabi_log_unsupported
-    # void return
+    # void 返回
     popq %rbp
     ret
     .size nv_start_nano_timer, .-nv_start_nano_timer
@@ -1307,7 +1307,7 @@ nv_unregister_peer_io_mem:
     leaq .Lnvabi_msg_nv_unregister_peer_io_mem(%rip), %rdi
     leaq .Lnvabi_stage_nv(%rip), %rsi
     call nvabi_log_unsupported
-    # void return
+    # void 返回
     popq %rbp
     ret
     .size nv_unregister_peer_io_mem, .-nv_unregister_peer_io_mem
@@ -1320,7 +1320,7 @@ nv_unregister_phys_pages:
     leaq .Lnvabi_msg_nv_unregister_phys_pages(%rip), %rdi
     leaq .Lnvabi_stage_nv(%rip), %rsi
     call nvabi_log_unsupported
-    # void return
+    # void 返回
     popq %rbp
     ret
     .size nv_unregister_phys_pages, .-nv_unregister_phys_pages
@@ -1333,7 +1333,7 @@ nv_unregister_sgt:
     leaq .Lnvabi_msg_nv_unregister_sgt(%rip), %rdi
     leaq .Lnvabi_stage_nv(%rip), %rsi
     call nvabi_log_unsupported
-    # void return
+    # void 返回
     popq %rbp
     ret
     .size nv_unregister_sgt, .-nv_unregister_sgt
@@ -1346,7 +1346,7 @@ nv_unregister_user_pages:
     leaq .Lnvabi_msg_nv_unregister_user_pages(%rip), %rdi
     leaq .Lnvabi_stage_nv(%rip), %rsi
     call nvabi_log_unsupported
-    # void return
+    # void 返回
     popq %rbp
     ret
     .size nv_unregister_user_pages, .-nv_unregister_user_pages

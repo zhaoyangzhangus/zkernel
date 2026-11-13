@@ -152,5 +152,5 @@ enum os_thread_state {
     OS_THREAD_DEAD = 5,
 };
 
-/* PROCESS_WAIT currently implements the POSIX WNOHANG behavior. */
+/* PROCESS_WAIT 当前实现 POSIX WNOHANG 行为。 */
 #define OS_PROCESS_WAIT_NOHANG (1U << 0)

@@ -170,7 +170,7 @@ with tempfile.TemporaryDirectory(prefix='cleanup-empty-locale-metadata-') as dir
 
 make = (ROOT/'makefile').read_text()
 assert 'DESKTOP_ASSET_DIR = $(BUILD)/esp/usr/apps/desktop' in make
-assert 'assets/desktop/vfsmap.tst | $(BUILD)/esp\n' in make
+assert 'assets/desktop/vfsmap.tst | $(BUILD)/esp/EFI/OS\n' in make
 with tempfile.TemporaryDirectory(prefix='legacy-diagnostics-') as directory:
     build = Path(directory)/'build'
     esp = build/'esp'

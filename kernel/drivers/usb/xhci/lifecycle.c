@@ -7,8 +7,7 @@
 
 #include "internal.h"
 
-/* REFACTOR_P8_XHCI_LIFECYCLE_OWNER: MMIO, DMA, controller bring-up, and
- * controller halt confirmation. */
+/* REFACTOR_P8_XHCI_LIFECYCLE_OWNER：MMIO、DMA、控制器启动和控制器停止确认。 */
 
 #define XHCI_MMIO_VA          (X86_64_MMIO_BASE + 0x14000000ULL)
 #define XHCI_MMIO_MAX_SIZE    0x00100000ULL
@@ -115,9 +114,8 @@ bool xhci_controller_map_mmio(xhci_state_t *state) {
     uint32_t bar_index = PCI_MAX_BARS;
     uint64_t virtual_base = XHCI_MMIO_VA;
     if (state == 0 || state->pci == 0) return false;
-    /* The storage controller remains at the legacy window.  HID-only
-     * controllers must have independent virtual mappings because more than
-     * one PCI xHCI function can be active at the same time. */
+    /* 存储控制器仍使用传统窗口。HID 专用控制器必须有独立的虚拟映射，因为多个 PCI xHCI
+     * 功能可能同时处于活动状态。 */
     if (state == xhci_hid_controller_state()) {
         virtual_base += XHCI_MMIO_MAX_SIZE;
     }

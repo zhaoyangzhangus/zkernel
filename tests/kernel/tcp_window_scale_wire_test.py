@@ -76,7 +76,7 @@ int main(void) {
    ++cases;
   }
  }
- // Invalid outgoing scales must fail before writing any byte, for all flags.
+ // 所有标志组合下，发送缩放值无效时都必须在写入任何字节前失败。
  for(unsigned family=0;family<2;++family)
  for(int scale=-128;scale<=127;++scale){
   if(scale>=-1 && scale<=14)continue;
@@ -87,7 +87,7 @@ int main(void) {
    for(unsigned i=0;i<sizeof(frame);++i)assert(frame[i]==0xa5);
   }
  }
- // Received values over 14 are clamped; WS on non-SYN is never negotiated.
+ // 收到大于 14 的值时应限幅；非 SYN 报文中的 WS 永不参与协商。
  for(unsigned family=0;family<2;++family)
  for(unsigned syn=0;syn<2;++syn)
  for(unsigned shift=0;shift<256;++shift){
@@ -100,7 +100,7 @@ int main(void) {
   assert(v.peer_window_scale_present==!!syn);
   assert(v.peer_window_scale==(syn?(shift>14?14:shift):0));
  }
- // Actual checksummed packets with malformed WS lengths, including truncation.
+ // 使用实际带校验和的数据包测试格式错误的 WS 长度，包括数据截断情况。
  for(unsigned family=0;family<2;++family)
  for(unsigned bad=0;bad<8;++bad){
   if(bad==3)continue;
@@ -109,7 +109,7 @@ int main(void) {
   uint8_t *tcp=frame+14+(family?40:20);tcp[26]=bad;checksum(family,frame,28);
   net_tcp_view_t v;assert(parse(family,frame,length,&v)==K_EIO);
  }
- // First valid WS wins; NOP/EOL/unknown options and unaligned parsing are bounded.
+ // 采用首个有效 WS；NOP/EOL/未知选项和非对齐解析都必须有界。
  uint8_t tcp[60]={0};uint16_t mss;uint8_t shift;bool present;
  tcp[13]=NET_TCP_FLAG_SYN;
  tcp[20]=3;tcp[21]=3;tcp[22]=0;tcp[23]=1;
@@ -133,11 +133,11 @@ with tempfile.TemporaryDirectory(prefix='tcp-ws-wire-') as directory:
                '-I'+str(root), '-I'+str(root/'include')]
     subprocess.run(command + [str(unit), '-o', str(path/'test')], check=True)
     subprocess.run([str(path/'test')], check=True, timeout=20)
-    # An empty implementation must not pass merely because legacy packets work.
+    # 不能仅因为旧数据包可用，就让空实现通过测试。
     source = (root/'kernel/net/core/core.c').read_text()
     broken = source.replace('} else if (kind == 3U) {', '} else if (false && kind == 3U) {')
     assert broken != source
-    # Keep the original file's relative include valid in the temporary copy.
+    # 保持原文件中的相对包含路径在临时副本中仍然有效。
     broken = broken.replace('#include "internal.h"',
                             '#include "kernel/net/core/internal.h"')
     (path/'broken.c').write_text(broken)

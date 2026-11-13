@@ -64,7 +64,7 @@ static void *worker(void *arg) {
     return 0;
 }
 int main(void) {
-    /* Uncontended acquire must not enter TLB wait or alter either IF state. */
+    /* 无竞争获取时不得进入 TLB 等待，也不得更改任一 IF 状态。 */
     for (unsigned i = 0; i < 2; ++i) {
         irq_flags = i ? 512 : 0;
         uint64_t saved = vmalloc_lock_irqsave();

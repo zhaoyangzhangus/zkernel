@@ -81,7 +81,7 @@ int main(void) {
  p.enumeration_thread_cursor=&items[255]->process_node;
  remove_thread(items[255]);
  assert(!p.enumeration_thread_cursor);
- // No early cursor assertion: a broken invalidation must reach the real UAF.
+ // 不提前断言游标状态：失效逻辑损坏时必须能够触发真实的 UAF。
  assert(!find(&p,256));
  for(unsigned i=1;i<255;++i)remove_thread(items[i]);
  assert(p.retired_cpu_ns==768);finish(&p);

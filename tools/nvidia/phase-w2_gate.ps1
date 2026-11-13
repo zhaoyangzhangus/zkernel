@@ -90,9 +90,8 @@ foreach ($requiredText in @(
 }
 Require-Text $graphicsText 'gpu_allocation_get_physical' 'user mapping uses generic physical accessor'
 
-# A generic Window/syscall consumer must not inspect the backend-private
-# pointer or RM/KMS handles.  The GPU core is the only owner of this field in
-# the current W2 contract.
+# 通用 Window/系统调用使用方不得检查后端私有指针或 RM/KMS 句柄。在当前 W2 约定中，
+# 只有 GPU 核心拥有此字段。
 $consumerPaths = @((Join-Path $repoRoot 'kernel\graphics'),
                    (Join-Path $repoRoot 'kernel\syscall'))
 $rgArguments = @('-n', '--fixed-strings', '--', 'backend_private') + $consumerPaths
@@ -102,8 +101,7 @@ if ($forbiddenConsumerMatches.Count -ne 0) {
     Fail-Gate 'backend_private is visible to generic Window or Ring3 syscall code'
 }
 
-# Preserve the hard vendor immutability boundary while the target builder is
-# allowed to consume the read-only source tree.
+# 保留供应商源文件不可修改的严格边界，同时允许目标构建器读取只读源码树。
 $vendorRoot = Join-Path $repoRoot 'third_party\nvidia\595.84\open-gpu-kernel-modules'
 $gitArguments = @('-C', $repoRoot, 'diff', '--name-only', '--',
                   'third_party/nvidia/595.84/open-gpu-kernel-modules')

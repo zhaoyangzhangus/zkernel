@@ -26,7 +26,7 @@ int main(void) {
  window_server_window_t popup={.identifier=8,.flags=OS_WINDOW_VISIBLE,.client_show_inactive=true};
  g_window_server.scene.count=2;g_window_server.scene.children[0]=&owner;g_window_server.scene.children[1]=&popup;
  assert(window_scene_keyboard_locked()==&owner && g_window_server.focused_identifier==3);
- /* An explicit pointer activation may focus an interactive menu. */
+ /* 显式指针激活可以将焦点移到可交互菜单上。 */
  g_window_server.focused_identifier=8;
  assert(window_scene_keyboard_locked()==&popup);
  g_window_server.focused_identifier=0;owner.minimized=true;

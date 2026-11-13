@@ -315,9 +315,8 @@ bool xhci_restart_hid_endpoint_secondary(xhci_state_t *state,
     return xhci_queue_hid_report_secondary(state, device);
 }
 
-/* HID context lookup is independent of context storage.  A published Slot
- * context wins; the enumeration context is only a bounded pre-publication
- * fallback for the first interrupt completion. */
+/* HID 上下文查找与上下文存储位置无关。优先使用已发布的 Slot 上下文；枚举上下文
+ * 仅在发布前用于第一次中断完成处理，且使用范围有界。 */
 static xhci_device_context_t *xhci_find_hid_context(
     xhci_state_t *state,
     uint8_t slot,
@@ -326,8 +325,7 @@ static xhci_device_context_t *xhci_find_hid_context(
     xhci_slot_device_t *slot_dev;
 
     if (state == 0 || slot == 0U) return 0;
-    /* Auxiliary controllers intentionally do not publish into the primary
-     * controller's Slot Table; their working context is authoritative. */
+    /* 辅助控制器特意不向主控制器的 Slot Table 发布信息；它们的工作上下文才是权威来源。 */
     if (state == xhci_hid_controller_state() &&
         state->device.device_slot == slot &&
         (state->device.hid_endpoint != 0U ||
@@ -445,8 +443,7 @@ bool xhci_handle_hid_transfer_event(xhci_state_t *state,
             xhci_set_error(90U);
         }
     } else if (completion != 0U) {
-        /* A stopped endpoint must be reinitialized before the next doorbell;
-         * otherwise the input waiter can remain asleep forever. */
+        /* 停止的端点必须在下一次 doorbell 前重新初始化，否则输入等待者可能永远无法醒来。 */
         if (secondary ? !xhci_restart_hid_endpoint_secondary(state, device) :
                         !xhci_restart_hid_endpoint(state, device)) {
             xhci_set_error(60U + completion);

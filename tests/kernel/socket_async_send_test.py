@@ -154,7 +154,7 @@ with tempfile.TemporaryDirectory(prefix='liteos-socket-async-') as directory:
              '-fsanitize=address,undefined','-fno-pie','-no-pie','-x','c','-','-o',binary]
     subprocess.run(command,input=code,text=True,check=True)
     subprocess.run([binary],check=True,timeout=30)
-    # Reintroduce the old post-publication access: immediate execution frees it.
+    # 重新引入旧的发布后访问：立即执行时该对象会被释放。
     bad=code.replace('*request_id = assigned_id;', '*request_id = request->request_id; (void)assigned_id;')
     subprocess.run(command,input=bad,text=True,check=True)
     failure=subprocess.run([binary],text=True,capture_output=True,timeout=30)

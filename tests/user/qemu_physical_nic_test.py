@@ -45,7 +45,8 @@ assert b'--net-dump' in bad.stderr and b'--no-emulated-net' in bad.stderr
 print('Canonical QEMU: physical NIC default, normalized/deduplicated selection, explicit emulation, invalid NIC and incompatible capture rejection passed')
 
 start = source.index('for vfio_device in "${vfio_devices[@]}"; do')
-end = source.index('\nif [[ -n "$qemu_trace" ]]', start)
+# 仅提取 PCI 设备循环，不把后续 USB 音频参数生成带入网络夹具。
+end = source.index('\ndone', start) + len('\ndone')
 for nic in ('0000:07:00.0', '0000:0A:00.0', '07:00.0'):
     script = ('physical_nic=' + nic + '\nvfio_primary=""\n'
               'vfio_devices=(0000:01:00.0 ' + nic.lower() + ')\nqemu_args=()\n' +

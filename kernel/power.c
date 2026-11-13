@@ -29,7 +29,7 @@ static struct {
 } g_power;
 
 static void power_lock(void) {
-    /* Pin only the registry/state update, never the device callbacks. */
+    /* 仅保护注册表和状态更新，不要保护设备回调。 */
     sched_preempt_disable();
     spinlock_lock(&g_power.lock);
 }
@@ -212,7 +212,7 @@ kstatus_t power_system_suspend(void) {
                 if (resume_status != K_OK) rollback_failed = true;
             }
             power_lock();
-            /* No suspend callback ran for the remaining devices. */
+            /* 其余设备尚未执行挂起回调。 */
             for (uint32_t j = i + 1U; j < count; ++j) {
                 atomic_store_explicit(&devices[j]->state, previous_states[j],
                                       memory_order_release);
@@ -261,8 +261,8 @@ kstatus_t power_system_resume(void) {
                                                POWER_DEVICE_FAILED,
                               memory_order_release);
         if (status != K_OK) {
-            /* Reverse-order resume stopped here: untouched devices remain
-             * suspended, not in a transition that can no longer complete. */
+            /* 逆序恢复在此处停止：未处理的设备仍保持挂起状态，而不是进入无法完成的
+             * 状态转换。 */
             for (uint32_t j = 0U; j + 1U < i; ++j) {
                 atomic_store_explicit(&devices[j]->state, POWER_DEVICE_SUSPENDED,
                                       memory_order_release);

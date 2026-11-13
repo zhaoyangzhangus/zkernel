@@ -218,7 +218,7 @@ class DriverDeployment(unittest.TestCase):
             before = cube.stat()
             self.assertFalse(stage.link_cube(cube, command, [obj]))
             self.assertEqual(subprocess.run([str(cube)]).returncode, 7)
-            # Missing/legacy/corrupt receipts revalidate without changing bytes.
+            # 回执缺失、过期或损坏时会重新验证，但不更改任何字节。
             receipt = cube.with_suffix('.link.json')
             for data in ('broken', '[]', '{"command":[]}'):
                 receipt.write_text(data)
@@ -322,7 +322,7 @@ class DriverDeployment(unittest.TestCase):
         source = (ROOT / 'tools/nvidia/opengl_cube_demo.c').read_text()
         functions = 'static char *cube_overlay_u64(' + source.split(
             'static char *cube_overlay_u64(', 1)[1].split(
-            'static void cube_draw_overlay(', 1)[0]
+            'static uint32_t cube_draw_overlay(', 1)[0]
         harness = '''
 #include <stdint.h>
 #include <string.h>
@@ -335,9 +335,11 @@ int main(void) {
  cube_format_overlay(text, 0, 0);
  assert(!strcmp(text, "FPS:0 TIME:0.0S"));
  cube_format_overlay(text, UINT32_MAX, 1);
- assert(!strcmp(text, "FPS:4294967295000000000 TIME:0.0S"));
+ assert(!strcmp(text, "FPS:4294967295 TIME:0.0S"));
  cube_format_overlay(text, 1000, 1234500000000ULL);
- assert(!strcmp(text, "FPS:0 TIME:1234.5S"));
+ assert(!strcmp(text, "FPS:1000 TIME:1234.5S"));
+ cube_format_overlay(text, UINT64_MAX, UINT64_MAX);
+ assert(!strcmp(text, "FPS:18446744073709551615 TIME:18446744073.7S"));
  return 0;
 }
 '''
@@ -399,7 +401,7 @@ int main(void) {
             fixture.write_text(harness)
             subprocess.run(['gcc', '-O2', '-Wall', '-Werror', str(fixture), '-o', str(binary)], check=True)
             subprocess.run([str(binary)], check=True)
-            # Negative control: omitting interrupt enable must fail in RM.
+            # 负对照：省略中断启用操作时，RM 必须失败。
             fixture.write_text(harness.replace('irq_enabled = 1;', '(void)0;', 1))
             subprocess.run(['gcc', '-O2', str(fixture), '-o', str(binary)], check=True)
             self.assertNotEqual(subprocess.run([str(binary)], stderr=subprocess.DEVNULL).returncode, 0)

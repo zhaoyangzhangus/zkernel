@@ -6,8 +6,8 @@
 #include <uapi/window_theme.h>
 #include "runtime/text.h"
 
-/* Shared Chrome-style client decorations, sized from the current font.
- * WINDOW_UPDATE publishes these metrics to the server's caption hit tests. */
+/* 共用的 Chrome 风格客户端装饰，尺寸根据当前字体确定。WINDOW_UPDATE 会将这些度量值发布给
+ * 服务器的标题栏命中测试。 */
 static inline uint32_t user_client_chrome_height(void) {
     uint32_t height = ui_text_line_height() + 16U;
     return height > 40U ? height : 40U;
@@ -45,7 +45,7 @@ static inline uint32_t user_client_chrome_blend_xrgb8888(
 #define USER_CLIENT_CHROME_ICON_IMAGE    4U
 #define USER_CLIENT_CHROME_ICON_TASKS    5U
 
-/* The same 16x16 alpha raster used by Fileman for the client close action. */
+/* 与 Fileman 客户端关闭操作使用的相同 16x16 alpha 光栅图。 */
 static const char user_client_close_alpha[16][17] = {
     "FE30000000003EFE", "EFE300000003EFE3",
     "3EFE3000003EFE30", "03EFE30003EFE300",
@@ -94,8 +94,7 @@ static inline void user_client_chrome_fill_rect(uint32_t *pixels,
     }
 }
 
-/* Small shared rounded primitives keep the non-Files clients visually aligned
- * without making them depend on Fileman's renderer. */
+/* 共用的小型圆角图形原语可保持非 Files 客户端的视觉一致性，同时避免依赖 Fileman 的渲染器。 */
 static inline void user_client_chrome_round_rect(uint32_t *pixels,
                                                  uint32_t stride,
                                                  uint32_t width,
@@ -121,7 +120,7 @@ static inline void user_client_chrome_round_rect(uint32_t *pixels,
     }
 }
 
-/* The server owns the restored border; clients paint only the separator. */
+/* 恢复的边框由服务器绘制；客户端只绘制分隔线。 */
 static inline void user_client_chrome_frame(uint32_t *pixels,
                                             uint32_t stride,
                                             uint32_t width,
@@ -232,8 +231,7 @@ static inline void user_client_chrome_close(uint32_t *pixels,
                                             uint32_t header_height,
                                             uint32_t background,
                                             uint32_t foreground) {
-    /* Compatibility entry point: standard caption controls are exclusively
-     * painted by the compositor. Do not paint an obsolete client-side X. */
+    /* 兼容入口：标准标题栏控件只由合成器绘制。不要再绘制过时的客户端 X 图标。 */
     (void)pixels; (void)stride; (void)width; (void)height;
     (void)header_height; (void)background; (void)foreground;
 }

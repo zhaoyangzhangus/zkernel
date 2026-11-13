@@ -13,8 +13,8 @@ except RuntimeError as error:
 end
 target remote /tmp/system-keys.sock
 python
-# One hardware address, eight bounded error records, no code/data writes.
-# Address = current llvm-nm OnCacheReadError 0xbad0310 + ELF_PIE_BIAS.
+# 一个硬件地址，最多记录 8 条错误，不写入代码或数据。
+# 地址 = 当前 llvm-nm 中的 OnCacheReadError 0xbad0310 + ELF_PIE_BIAS。
 samples=0
 class CacheError(gdb.Breakpoint):
     def stop(self):

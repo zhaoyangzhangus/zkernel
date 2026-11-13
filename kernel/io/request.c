@@ -222,9 +222,8 @@ kstatus_t io_submit(io_request_t *req) {
         return status;
     }
     req->submit_tsc = telemetry_timestamp();
-    /* Finish private setup before exposing a cancellable request. Completion
-     * acquires this publication before consuming/clearing submit_tsc. Only
-     * the NEW -> PREPARING winner may initialize it. */
+    /* 请求可取消之前，先完成私有初始化。完成路径会先获取此发布状态，再读取或清除
+     * submit_tsc。只有将状态从 NEW 改为 PREPARING 的胜出者可以初始化它。 */
     atomic_store_explicit(&req->state, IOREQ_QUEUED, memory_order_release);
     if (!device_io_begin(req->device, req)) {
         unsigned current = atomic_load_explicit(&req->state, memory_order_acquire);
@@ -260,7 +259,7 @@ static void io_finalize_cancel_owned(io_request_t *req, kstatus_t status,
                                      bool execution_ref) {
     req->status = status;
     if (execution_ref && req->cancel != 0) req->cancel(req);
-    /* The winning owner alone runs callbacks and publishes terminal state. */
+    /* 只有获胜的所有者会运行回调并发布终止状态。 */
     io_finalize_owned(req, status, req->bytes_done, execution_ref, IOREQ_COMPLETED);
 }
 
@@ -276,8 +275,8 @@ bool io_request_claim_device_cancel(io_request_t *req) {
 }
 
 void io_request_finish_device_cancel(io_request_t *req, kstatus_t status) {
-    /* A successful in-lock claim transfers the existing execution reference.
-     * No rival can finalize or reuse the request before this owner finishes. */
+    /* 在锁内成功认领后，会转移现有的执行引用。在此所有者完成前，其他竞争者不能
+     * 终结或复用该请求。 */
     io_finalize_cancel_owned(req, status, true);
 }
 
@@ -338,8 +337,7 @@ kstatus_t io_request_register_user(io_request_t *req) {
     }
     io_registry_initialize();
     io_registry_lock();
-    /* The caller keeps its initial reference across publication and submit.
-     * Teardown may remove the registry reference before registration returns. */
+    /* 调用方在发布和提交期间保留初始引用。注册返回前，拆除流程可能已移除注册表引用。 */
     object_get(req);
     io_registry_insert_tail(io_registry_bucket(req->request_id), &req->queue_node);
     req->internal_flags |= IOREQ_INTERNAL_USER_REQUEST;
@@ -371,10 +369,9 @@ kstatus_t io_request_lookup_user(struct process *process, uint64_t request_id,
 void io_cancel_process(struct process *process) {
     if (process == 0) return;
     io_registry_initialize();
-    /* Resume at the last selected bucket instead of rescanning drained
-     * prefixes. Wrap around under one lock before declaring the owner empty:
-     * a completion callback may register another request in an earlier bucket.
-     * Cancellation remains outside the lock with an observer reference held. */
+    /* 从上次选中的桶继续，而不是重新扫描已清空的前缀。声明所有者队列为空前，
+     * 应在同一把锁内回绕检查：完成回调可能已在更早的桶中注册了另一请求。
+     * 取消操作仍在锁外执行，并持有观察者引用。 */
     unsigned bucket_index = 0;
     for (;;) {
         io_request_t *request = 0;
@@ -403,17 +400,15 @@ void io_cancel_process(struct process *process) {
         io_registry_unlock();
         if (request == 0) {
             if (!busy) return;
-            /* Other owners must publish setup/completion before we retry.
-             * Do not churn references or starve cancellable requests behind
-             * them; the complete locked scan above distinguishes an empty
-             * registry from one containing only temporarily busy requests. */
+            /* 其他所有者必须先发布初始化或完成状态，我们才能重试。
+             * 不要反复增减引用，也不要让后续可取消请求挨饿；上方完整的加锁扫描可以
+             * 区分注册表为空与仅包含暂时繁忙请求这两种情况。 */
             __asm__ volatile ("pause");
             continue;
         }
         (void)io_cancel(request);
-        /* Successful cancellation finalizes synchronously. EBUSY means setup
-         * or another finalizer owns the request: do not read bytes_done or
-         * attempt completion on that owner's behalf. Retry the registry. */
+        /* 成功取消会同步完成终结。EBUSY 表示初始化或另一终结者拥有该请求：不要读取
+         * bytes_done，也不要代替该所有者尝试完成请求。重新扫描注册表。 */
         object_put(request);
     }
 }

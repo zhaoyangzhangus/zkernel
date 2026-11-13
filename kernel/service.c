@@ -39,7 +39,7 @@ static bool service_known_locked(const service_t *service) {
     uintptr_t base = (uintptr_t)g_services.services;
     if (address < base) return false;
     uintptr_t offset = address - base;
-    /* Reject foreign/interior pointers before dereferencing them. */
+    /* 解引用前先拒绝外部指针和对象内部指针。 */
     if (offset >= sizeof(g_services.services) || offset % sizeof(service_t) != 0U) {
         return false;
     }

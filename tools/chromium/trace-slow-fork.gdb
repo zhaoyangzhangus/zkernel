@@ -1,8 +1,8 @@
 set pagination off
 target remote /tmp/system-keys.sock
-# Current kernel disassembly: call after all phase timestamps are captured.
-# Revalidate this address after rebuilding kernel. No entry/phase breakpoints:
-# debugger pauses must not contaminate the measured fork intervals.
+# 当前内核反汇编：在采集完所有阶段时间戳后调用。
+# 重新构建内核后必须重新验证此地址。不设置入口或阶段断点：
+# 调试器暂停不能污染测得的 fork 时间区间。
 hbreak *0xffffffff8001a030
 commands
 silent

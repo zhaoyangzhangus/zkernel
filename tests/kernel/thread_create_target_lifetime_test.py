@@ -94,11 +94,11 @@ with tempfile.TemporaryDirectory() as directory:
     assert result.returncode == 0, result.stderr
     result = run(directory, 'retained_release', faults, cleanup, debug=0)
     assert result.returncode == 0, result.stderr
-    # Missing pin reproduces freed VM access when exit detaches the owner.
+    # 缺少固定引用会复现退出操作分离所有者时访问已释放 VM 的问题。
     broken = faults.replace('if (space != 0) vm_space_get(space);', '').replace('vm_space_put(space);', '')
     result = run(directory, 'borrowed_vm', broken, cleanup)
     assert result.returncode != 0 and 'heap-use-after-free' in result.stderr, result.stderr
-    # Releasing the last lookup ref before diagnostics reproduces target UAF.
+    # 在诊断前释放最后一个查找引用会复现目标对象 UAF。
     broken = cleanup.replace('        if (target_referenced) object_put(target);', '')
     broken = 'if (target_referenced) object_put(target);\n' + broken
     result = run(directory, 'early_target_put', faults, broken)

@@ -3,8 +3,7 @@
 #include <math.h>
 #include <complex.h>
 
-/* GCC's type-generic selector preserves the C11 rule that a complex operand
- * selects the complex variant while real operands retain their precision. */
+/* GCC 泛型选择器会遵循 C11 规则：复数操作数选择复数版本，实数操作数则保留其精度。 */
 #define LIBC_TGMATH_COMPLEX(value, real_name, complex_name) \
     __builtin_tgmath(real_name##f, real_name, real_name##l, \
                      complex_name##f, complex_name, complex_name##l, (value))

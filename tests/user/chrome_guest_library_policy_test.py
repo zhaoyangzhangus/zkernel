@@ -30,7 +30,7 @@ ime_pango = block('ui/base/ime/linux/BUILD.gn', 'if (use_pangocairo &&')
 browser_pango = block('content/browser/BUILD.gn', 'if (use_pangocairo &&')
 ffmpeg_zlib = block('third_party/ffmpeg/BUILD.gn',
                     'if (current_toolchain == "//build/toolchain/native_os:native_os_x64")')
-# Include the real else arm as well.
+# 也包含真实的 else 分支。
 ffmpeg_text = (root/'third_party/ffmpeg/BUILD.gn').read_text()
 ffmpeg_start = ffmpeg_text.index(ffmpeg_zlib)
 ffmpeg_else = ffmpeg_text[ffmpeg_start + len(ffmpeg_zlib):]

@@ -32,7 +32,7 @@ int main(void) {
  sched_preempt_enable();assert(!depth&&!g_sched_preempt_callers[3]);
  cpu=MAX_CPUS;sched_preempt_disable();assert(depth==1);
  sched_preempt_enable();assert(!depth);
- // Turning on a probe in an existing critical section cannot invent its caller.
+ // 在已有临界区中启用探测不能凭空推断调用者。
  cpu=0;g_sched_wake_trace_tid=0;sched_preempt_disable();
  g_sched_wake_trace_tid=126;sched_preempt_disable();
  assert(!g_sched_preempt_callers[0]);sched_preempt_enable();sched_preempt_enable();

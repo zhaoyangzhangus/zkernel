@@ -80,7 +80,7 @@ int main(void){
  assert(!linux_socket_option(99,SO_KEEPALIVE,&out));
  assert(!linux_socket_option(IPPROTO_TCP,TCP_NODELAY,&out));
  assert(!linux_socket_option(IPPROTO_TCP,TCP_KEEPIDLE,0));
- // Option number 4 has different meanings at SOL_SOCKET and SOL_TCP.
+ // 选项编号 4 在 SOL_SOCKET 和 SOL_TCP 下含义不同。
  assert(socket_option_number(SOL_SOCKET,SO_ERROR)==OS_SOCKET_OPTION_ERROR);
  assert(socket_option_number(IPPROTO_TCP,TCP_KEEPIDLE)==OS_SOCKET_OPTION_KEEPIDLE);
  assert(native_calls==16 && linux_calls==8);

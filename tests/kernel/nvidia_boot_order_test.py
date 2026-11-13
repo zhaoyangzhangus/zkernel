@@ -10,7 +10,7 @@ start = source.index('BOOLEAN kernel_init_userspace(')
 end = source.index('\n}', start)+2
 body = source[start:end]
 
-# Firmware description must exist even for the older early-probe builds.
+# 较早阶段探测的旧版本构建也必须提供固件描述。
 devices = (root/'kernel/init/devices.c').read_text()
 assert devices.index('nv_rm_driver_set_screen_info(') < devices.index('nv_rm_driver_probe(')
 post = (root/'kernel/init/self_tests.c').read_text()
@@ -80,8 +80,8 @@ int main(void) {
   if (failure==GPU) continue; /* Optional GPU failure is not fatal. */
   fail_at=failure; gpu_result=gpu==0?0:gpu==1?-5:-19;
   count=halts=0; cpus=smp?16:1;
-  /* Only failures beyond GPU allow its call. Earlier failures exit before it;
-   * the assertion in probe tests precisely that worker startup succeeded. */
+  /* 只有 GPU 之后的失败才允许调用它；更早的失败会在此之前退出。
+   * 探测断言会精确验证工作线程是否成功启动。 */
   bool result=kernel_init_userspace(&hooks);
   unsigned expected[16], n=0;
   bool failed=false;

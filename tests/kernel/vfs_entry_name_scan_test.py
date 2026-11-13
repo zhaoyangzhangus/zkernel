@@ -72,8 +72,7 @@ int main(void){
   if(count){assert(old_scans>=scans);avoided+=old_scans-scans;}
   else assert(!old_scans);++cases;
  }
- /* Equal prefixes with different lengths must never merge. Bytes after a
-  * shorter candidate's NUL need not be zero for the comparison to be safe. */
+ /* 前缀相同但长度不同的名称绝不能合并。较短候选项 NUL 之后的字节无需为零，比较仍须安全。 */
  for(unsigned candidate_length=1;candidate_length<64;++candidate_length)
  for(unsigned incoming_length=1;incoming_length<64;++incoming_length){
   memset(&arena,0x71,sizeof(arena));
@@ -90,7 +89,7 @@ int main(void){
   assert(before==after&&!memcmp(&arena,&result,sizeof(arena))&&!candidate_scans);
   assert(after==(candidate_length==incoming_length?1U:2U));++cases;
  }
- /* Input may alias an existing table entry; publication must stay identical. */
+ /* 输入可能与现有表项别名；发布结果必须保持一致。 */
  for(unsigned slot=0;slot<256;++slot){
   for(unsigned i=0;i<256;++i){
    arena.entries[i]=(os_file_info_t){.type=OS_FILE_TYPE_DIRECTORY,.mode=0755,.size=i};
@@ -108,8 +107,8 @@ int main(void){
  assert(!vfs_append_entry(arena.entries,0,&empty));
  assert(!vfs_append_entry(arena.entries,&count,0));
  assert(!vfs_append_entry(arena.entries,&count,&empty)&&!count&&!scans);
- /* An incoming name ends exactly at a protected page. The old 256-byte
-  * scanner faults; the bounded production helper rejects without mutation. */
+ /* 新名称恰好在保护页处结束。旧的 256 字节扫描器会触发故障；有界的生产辅助函数会
+  * 拒绝该名称且不作修改。 */
  long page=sysconf(_SC_PAGESIZE);assert(page>=(long)sizeof(os_file_info_t));
  char *memory=mmap(0,(size_t)page*2,PROT_READ|PROT_WRITE,
                    MAP_PRIVATE|MAP_ANONYMOUS,-1,0);assert(memory!=MAP_FAILED);
@@ -126,7 +125,7 @@ int main(void){
  if(!pid){signal(SIGSEGV,SIG_DFL);count=1;previous_append(arena.entries,&count,edge);_exit(0);}
  int status;assert(waitpid(pid,&status,0)==pid&&WIFSIGNALED(status)&&WTERMSIG(status)==SIGSEGV);
  assert(!munmap(memory,(size_t)page*2));
- /* Guard the last candidate in a full table as well. */
+ /* 同时保护满表中的最后一个候选项。 */
  size_t table_bytes=256*sizeof(os_file_info_t);
  size_t pages=(table_bytes+(size_t)page-1)/(size_t)page;
  memory=mmap(0,(pages+1)*(size_t)page,PROT_READ|PROT_WRITE,

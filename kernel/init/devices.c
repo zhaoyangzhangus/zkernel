@@ -94,8 +94,8 @@ BOOLEAN kernel_init_devices(OS_BOOT_INFO *info,
     /* IRQ 待处理边状态仅通过 interrupt.c 的 atomic 交接消费，运行时工作线程不会访问 ISR 所有的存储。 */
     kernel_debug_stage(OS_DEBUG_PHASE_REFACTOR_8,
                        OS_DEBUG_STEP_PROGRESS, 23U);
-    /* MSI-X failure diagnostics are read through interrupt.c's getter; the
-     * self-test does not own or reach into the interrupt state. */
+    /* MSI-X 故障诊断通过 interrupt.c 的 getter 读取；自检不拥有中断状态，也不会
+     * 直接访问该状态。 */
     kernel_debug_stage(OS_DEBUG_PHASE_REFACTOR_8,
                        OS_DEBUG_STEP_PROGRESS, 24U);
     hooks->write(xhci_hardware_present() ?

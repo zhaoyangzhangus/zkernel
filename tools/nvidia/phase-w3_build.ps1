@@ -73,9 +73,8 @@ Require-File (Join-Path $phase9Root 'kernel.elf') 'Phase 9 base kernel image'
 Require-File $linkerScript 'kernel linker script'
 Require-File $nvkmsBuild 'official NVKMS target builder'
 
-# W3 is downstream of the formally passing generic-buffer and CPU-readback
-# gates.  The previous gate is evaluated here so this target cannot silently
-# become a phase skip.
+# W3 建立在已正式通过的通用缓冲区和 CPU 读回门禁之后。此处会执行前一门禁，避免此目标
+# 悄然跳过阶段。
 $w2Gate = Join-Path $repoRoot 'tools\nvidia\phase-w2_gate.ps1'
 $w2Output = @(& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $w2Gate `
     -Phase12Build $Phase12Build -Phase12RealTestLog $Phase12RealTestLog 2>&1 |
@@ -87,11 +86,9 @@ if ($LASTEXITCODE -ne 0 -or
 }
 Write-Output 'W3_PREVIOUS_GATE=PASS'
 
-# The W3 link consumes the target-local NVKMS aggregate.  Re-run its
-# signature-aware builder here so a change to the System KAPI/OS adapter is
-# reflected in vkms-core.o before the final W3 link.  The official 595.84
-# source tree remains an input-only tree; all generated objects stay under
-# build/nvidia/modeset-target.
+# W3 链接会使用目标本地的 NVKMS 汇总对象。此处重新运行带签名检查的构建器，确保 System
+# KAPI/OS 适配器更改在最终 W3 链接前反映到 vkms-core.o 中。官方 595.84 源码树仍只作为
+# 输入；所有生成对象均保留在 build/nvidia/modeset-target 下。
 $nvkmsArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
                $nvkmsBuild)
 $nvkmsOutput = @(& powershell.exe @nvkmsArgs 2>&1 |
@@ -112,10 +109,8 @@ $linkerPath = (Get-Command $Linker -ErrorAction Stop).Source
 $nmPath = (Get-Command $Nm -ErrorAction Stop).Source
 New-Item -ItemType Directory -Force -Path $w3KernelRoot | Out-Null
 
-# Reuse the Phase 9 source inventory for the System side, but compile it into
-# this isolated root with the W3 switch.  This keeps the current W2 generic
-# allocation implementation in the closure without touching scheduler/MM or
-# the normal boot target.
+# 复用 Phase 9 的 System 侧源文件清单，但使用 W3 开关将其编译到此隔离根目录中。
+# 这样依赖闭包中仍包含当前 W2 通用分配实现，同时不触碰调度器/MM 或普通启动目标。
 $normalTargets = New-Object 'System.Collections.Generic.List[string]'
 $normalLeaves = New-Object 'System.Collections.Generic.HashSet[string]'
 foreach ($row in @(Get-Content -LiteralPath $phase9LinkList)) {
@@ -161,9 +156,8 @@ foreach ($row in @(Get-Content -LiteralPath $phase9LinkList)) {
             (Join-Path $w3KernelRoot $Matches[1]).Replace('\', '/'))
         continue
     }
-    # vkms-core.o already contains the verified bridge object.  Keep one
-    # definition in the W3 link rather than relying on duplicate-definition
-    # selection between two independently linked copies.
+    # vkms-core.o 已包含经过验证的桥接对象。W3 链接中只保留一份定义，不依赖两个独立链接副本
+    # 之间对重复定义的选择。
     if ($row -match '(?i)[\\/]build/nvidia/phase8/objects/nv_rm_vendor_bridge\.o$') {
         continue
     }
@@ -178,10 +172,8 @@ foreach ($row in @($linkRows)) {
 }
 Write-AsciiLines $w3LinkList @($linkRows)
 
-# First link every normal object and the complete official NVKMS object into
-# one relocatable closure.  This scan is deliberately performed before the
-# final --gc-sections image link, so an unreferenced vendor object cannot hide
-# a missing OS/RM boundary symbol.
+# 首先将每个普通对象和完整的官方 NVKMS 对象链接到一个可重定位依赖闭包中。此扫描有意在
+# 最终 --gc-sections 镜像链接之前执行，避免未引用的供应商对象掩盖缺失的 OS/RM 边界符号。
 $closureArguments = @(
     '-r', '--allow-multiple-definition', '-z', 'noexecstack', '-o',
     $w3Closure.Replace('\', '/'),
@@ -222,9 +214,8 @@ if ($finalUnexpected.Count -ne 0) {
     throw ('W3 kernel has unresolved symbols: {0}' -f $finalUnexpected[0])
 }
 
-# The real-hardware runner stages this ESP directory directly.  Keep its
-# generated kernel synchronized with the just-linked image so an incremental
-# deployment cannot accidentally boot a previous W3 kernel.
+# 真实硬件运行器会直接暂存此 ESP 目录。使其生成的内核与刚链接的镜像保持同步，避免增量部署
+# 意外启动上一次的 W3 内核。
 Copy-FileIfChanged $w3Kernel $w3EspKernel
 
 Write-Output ('W3_LINK_OBJECTS={0}' -f $linkRows.Count)

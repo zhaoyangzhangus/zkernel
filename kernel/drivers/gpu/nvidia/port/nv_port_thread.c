@@ -70,8 +70,7 @@ kstatus_t nv_port_thread_create(nv_port_thread_fn_t function, void *argument,
     thread->thread.object.type = KOBJECT_TYPE_THREAD;
     thread->thread.object.flags = 0U;
     thread->thread.object.ops = 0;
-    /* RM lock ownership and per-thread state require a unique nonzero ID;
-     * zero-filled kernel workers must not alias one another. */
+    /* RM 锁所有权和线程状态要求唯一的非零 ID；清零初始化的内核工作线程之间不能发生别名。 */
     thread->thread.tid = process_allocate_task_id();
     thread->thread.process = 0;
     sched_initialize_new_thread(&thread->thread, x86_current_cpu_index(), true);
@@ -105,8 +104,7 @@ kstatus_t nv_port_thread_start(nv_port_thread_t *thread) {
     thread->host_thread_valid = true;
     return K_OK;
 #else
-    /* A DEAD state precedes the final context switch. Retain an execution
-     * reference until the scheduler's post-switch reaper releases it. */
+    /* DEAD 状态会先于最后一次上下文切换发布。保留执行引用，直到调度器的切换后回收器释放它。 */
     object_get(&thread->thread);
     __atomic_fetch_or(&thread->thread.flags, THREAD_FLAG_EXECUTION_REF,
                       __ATOMIC_RELEASE);

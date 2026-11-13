@@ -71,7 +71,7 @@ int main(void){
   for(unsigned i=0;i<g_entry_count;++i)if(!g_entries[i].thread)g_entries[i].expanded=!g_entries[i].expanded;
   check();++cases;
  }
- // Maximum production capacity: every process expanded, every thread visible.
+ // 使用生产环境的最大容量：展开所有进程并显示所有线程。
  g_entry_count=768;
  for(unsigned i=0;i<256;++i)g_entries[i]=(entry_t){.id=i+1,.expanded=true};
  for(unsigned i=256;i<768;++i)g_entries[i]=(entry_t){.thread=true,.id=i+1,.parent_id=1+i%256};

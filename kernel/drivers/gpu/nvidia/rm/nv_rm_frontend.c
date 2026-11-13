@@ -204,8 +204,7 @@ void nv_frontend_mapping_release(void *opaque_cookie)
         kfree(cookie->vendor_cookie);
         cookie->vendor_cookie = 0;
     }
-    /* The file reference keeps the RM mapping context and its allocation
-     * private object alive until the VM object has been torn down. */
+    /* 文件引用会保持 RM 映射上下文及其分配私有对象有效，直到 VM 对象拆除完成。 */
     nv_frontend_file_put(cookie->file);
     kfree(cookie);
 }
@@ -217,8 +216,8 @@ uint32_t nv_frontend_live_count(void)
 
 bool nv_frontend_driver_ready(void)
 {
-    /* Only the process touching NVIDIA devices waits, never the compositor.
-     * The completion has boot-long lifetime, independent of worker cleanup. */
+    /* 只有访问 NVIDIA 设备的进程会等待，合成器不会等待。完成对象的生命周期与工作线程清理无关，
+     * 会持续整个引导过程。 */
     if (!userspace_wait_device_init()) return false;
     const nv_gpu_device_t *gpu = nv_rm_driver_current();
     return gpu != 0 && gpu->state == NV_GPU_GSP_READY;

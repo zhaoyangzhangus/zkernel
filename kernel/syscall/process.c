@@ -556,7 +556,7 @@ static int64_t process_fork_from_frame(uint64_t flags, uint64_t child_stack,
     }
     if (status == K_OK && (flags & LINUX_CLONE_CHILD_SETTID) != 0U &&
         child_tid != 0U) {
-        /* Linux exposes the group leader's TID as its PID. */
+        /* Linux 会将线程组组长的 TID 作为其 PID 暴露。 */
         status = process_fork_child_tid_write(child, child_tid,
                                               (uint32_t)child->pid);
     }
@@ -732,8 +732,8 @@ int64_t syscall_thread_create(uint64_t process_handle, uint64_t arguments_pointe
         .access = VM_PROT_WRITE,
         .cpu_error = 0,
     };
-    /* The process reference does not retain a VM detached by exit. Keep one
-     * owner-locked snapshot alive across both potentially blocking faults. */
+    /* 进程引用无法保留已由退出流程分离的 VM。应在两个可能阻塞的缺页处理期间，
+     * 持有一个由所有者锁保护的快照。 */
     process_thread_lock(target);
     vm_space_t *space = target->vm;
     if (space != 0) vm_space_get(space);
@@ -792,9 +792,8 @@ int64_t syscall_thread_create(uint64_t process_handle, uint64_t arguments_pointe
                 (unsigned long long)(caller != 0 ? caller->pid : 0U));
         }
 #endif
-        /* The suspended thread already owns an execution reference and may
-         * also own the caller-provided stack.  Roll it back before exposing
-         * the failure, otherwise the stack mapping and thread object leak. */
+        /* 已挂起的线程已持有执行引用，也可能拥有调用方提供的栈。向调用方报告失败前
+         * 先回滚这些资源，否则栈映射和线程对象会泄漏。 */
         if (thread != 0) {
             (void)thread_terminate(thread, K_ECANCELED);
             object_put(thread);

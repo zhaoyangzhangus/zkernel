@@ -71,7 +71,7 @@ static bool scheduler_command_ack_step(thread_t *t,uint32_t count,uint32_t mask,
 static bool scheduler_command_ack_step(thread_t *t,uint32_t count,uint32_t mask,
                                         uint32_t value,bool drain) {
  assert(local_cpu==0 && count==2 && drain && irq && queued);
- /* Reproduce a target entering an I/O guard after the request was sent. */
+ /* 复现请求发出后，目标进入 I/O 保护区的情况。 */
  if(guard_before_consume)sched_exit_defer_begin(t);
  if(migrate_before_consume)t->owner_cpu=0;
  uint64_t saved=scheduler_irq_save();
@@ -135,7 +135,7 @@ int main(void) {
  assert(!sched_publish_dead(&t) && !dequeues && !queued && releases==1 && irq);
  assert(atomic_load(&t.state)==THREAD_READY && (t.sched.flags&SCHED_ENTITY_ENQUEUED));
  assert(atomic_load(&t.command_ack)==SCHED_CMD_STATE_ACK);
- /* STOP/REMOVE retain their old queue-removal and acknowledgement policy. */
+ /* STOP/REMOVE 保留旧有的队列移除和确认策略。 */
  for(unsigned op=SCHED_CMD_REMOVE;op<=SCHED_CMD_STOP;++op) {
   init(&t,THREAD_READY,1,false,1,false);
   sched_cmd_t msg={.object=(uintptr_t)&t,.op=op,.generation=SCHED_CMD_REMOVE_ACK};
@@ -161,8 +161,8 @@ with tempfile.TemporaryDirectory(prefix='scheduler-exit-guard-') as directory:
     result = run(fixture)
     assert result.returncode == 0, result.stdout + result.stderr
     print(result.stdout.strip())
-    # Prove the matrix rejects both the missing owner-side guard and the
-    # old dequeue-before-deciding bug, rather than merely covering success.
+    # 验证此矩阵既能拒绝缺少所有者侧保护的实现，也能拒绝旧的“先出队再判定”缺陷，
+    # 而不只是覆盖成功路径。
     guard = 'scheduler_exit_can_publish(thread)'
     negative = fixture.replace(guard, '(scheduler_exit_can_publish(thread), true)')
     assert run(negative).returncode != 0

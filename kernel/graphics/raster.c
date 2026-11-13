@@ -16,7 +16,7 @@ void compositor_fill_span_wb(
         return;
     }
 
-    /* Align the destination to 8 bytes first. */
+    /* 先将目标地址对齐到 8 字节。 */
     if ((((uintptr_t)destination) & 7U) != 0U) {
         *destination++ = color;
         --pixels;
@@ -46,52 +46,35 @@ void compositor_fill_span_wb(
             (volatile uint32_t *)(uintptr_t)out;
     }
 
-    /* Odd pixel tail. */
+    /* 处理剩余的奇数个像素。 */
     if ((pixels & 1U) != 0U) {
         *destination = color;
     }
 }
 
-void compositor_fill_locked(int32_t x, int32_t y,
+void compositor_fill_locked(Rect clip, int32_t x, int32_t y,
                             uint32_t width, uint32_t height,
                             uint32_t color) {
-    compositor_fill_rounded_locked(x, y, width, height, 0U, color);
+    compositor_fill_rounded_locked(clip, x, y, width, height, 0U, color);
 }
 
-void compositor_fill_rounded_locked(int32_t x, int32_t y,
+void compositor_fill_rounded_locked(Rect clip, int32_t x, int32_t y,
                                     uint32_t width, uint32_t height,
                                     uint32_t radius, uint32_t color) {
     color=os_theme_resolve(color,g_compositor_snapshot.theme);
-    int32_t left = x < 0 ? 0 : x;
-    int32_t top = y < 0 ? 0 : y;
+    Rect visible;
     int64_t right = (int64_t)x + width;
     int64_t bottom = (int64_t)y + height;
-
-    if (right > (int64_t)g_window_server.display_width) {
-        right = g_window_server.display_width;
-    }
-
-    if (bottom > (int64_t)g_window_server.display_height) {
-        bottom = g_window_server.display_height;
-    }
-
-    if (left < (int32_t)g_compositor_snapshot.damage_bounds.x0) {
-        left = (int32_t)g_compositor_snapshot.damage_bounds.x0;
-    }
-
-    if (top < (int32_t)g_compositor_snapshot.damage_bounds.y0) {
-        top = (int32_t)g_compositor_snapshot.damage_bounds.y0;
-    }
-
-    if (right > (int64_t)g_compositor_snapshot.damage_bounds.x1) {
-        right = g_compositor_snapshot.damage_bounds.x1;
-    }
-
-    if (bottom > (int64_t)g_compositor_snapshot.damage_bounds.y1) {
-        bottom = g_compositor_snapshot.damage_bounds.y1;
-    }
-
-    if (left >= right || top >= bottom) return;
+    /* 先按损坏区域求交，再统一裁剪到屏幕；宽坐标相加不能先截断到 32 位。 */
+    if (!rect_clip_to_extent(x > clip.x0 ? x : clip.x0,
+            y > clip.y0 ? y : clip.y0,
+            right < clip.x1 ? right : clip.x1,
+            bottom < clip.y1 ? bottom : clip.y1,
+            g_window_server.display_width, g_window_server.display_height,
+            &visible)) return;
+    int32_t left = visible.x0, top = visible.y0;
+    right = visible.x1;
+    bottom = visible.y1;
 
     /* 完整覆盖行跨度时像素连续，合并为一次填充；保留长度上限和非连续路径。 */
     if (!radius && left == 0 && right == g_window_server.display_stride) {

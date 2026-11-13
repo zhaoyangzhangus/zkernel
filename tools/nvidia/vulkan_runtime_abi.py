@@ -17,7 +17,7 @@ def symbols(path, undefined):
             continue
         if (fields[6] == 'UND') != undefined:
             continue
-        # Weak imports may legitimately remain unresolved.
+        # 弱导入允许保持未解析状态。
         if undefined and fields[4] == 'WEAK':
             continue
         match = re.fullmatch(r'([^@]+)@@?(GLIBC_[A-Za-z0-9_.]+)', fields[7])

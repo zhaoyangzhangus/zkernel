@@ -1,9 +1,9 @@
 #pragma once
 
 /*
- * Small, libc-neutral compatibility surface used by portable POSIX code.
- * System is not glibc, so including the host sysroot's cdefs.h would pull in
- * glibc feature machinery and make target compilation depend on host macros.
+ * 可移植 POSIX 代码使用的精简 libc 中立兼容接口。
+ * System 并非 glibc，因此若包含宿主 sysroot 中的 cdefs.h，就会引入 glibc 特性机制，并使目标编译
+ * 依赖宿主宏。
  */
 
 #ifdef __cplusplus

@@ -75,7 +75,7 @@ void page_free(page_t *page) {
 #define unlock_pages test_unlock
 #define page_memory_zero test_zero
 ''' + function + r'''
-/* Independent unrolled control: first try, local recovery, then global recovery. */
+/* 独立展开的对照流程：先尝试分配，再执行本地回收，最后执行全局回收。 */
 static page_t *reference_pool_try(uint8_t order,page_alloc_flags_t flags,uint32_t owner){
     pool_cpu_lock(owner);
     page_t *page=0;

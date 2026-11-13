@@ -123,15 +123,15 @@ int main(void) {
  items[0]=add_process(1500);p=process_monitor_find(1500);assert(p==items[0]);object_put(p);
  process_registry_remove(items[0]);object_put(items[0]);
  assert(!process_monitor_find(1500)); // no dereference of the freed monitor hint
- // Removing the cached entry must not leave a pointer to freed memory.
+ // 移除缓存项后不得留下指向已释放内存的指针。
  for(unsigned i=0;i<18;++i)items[i]=add_process(2000+i);
  check(7,2007);process_registry_remove(items[7]);object_put(items[7]);
  check(7,2008); // same index now refers to its successor
  for(unsigned i=0;i<18;++i)if(i!=7) { process_registry_remove(items[i]);object_put(items[i]); }
- // Insertion invalidates a cached prefix; returning to index zero is exact.
+ // 插入会使缓存前缀失效；返回索引零时结果必须准确。
  items[0]=add_process(3000);check(0,3000);items[1]=add_process(3001);
  assert(!g_process_enumeration_cursor);check(1,3001);check(0,3000);clean(2);
- // Removal after registry unlock cannot destroy the pinned snapshot owner.
+ // 注册表解锁后再移除项，不能销毁仍被固定的快照所有者。
  items[0]=add_process(4000);items[1]=add_process(4001);
  unsigned before=destroyed;detach_after_unlock=items[0];check(0,4000);
  assert(destroyed==before+1);check(0,4001);

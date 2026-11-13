@@ -77,7 +77,7 @@ int main(void) {
  thrd_t workers[12];
  for(uintptr_t i=0;i<12;i++)assert(thrd_create(&workers[i],stress,(void*)i)==thrd_success);
  for(unsigned i=0;i<12;i++)thrd_join(workers[i],NULL);
- /* No writer exists to rescue a reader incorrectly sleeping after a CAS race. */
+ /* 没有写者能够唤醒因 CAS 竞争而错误休眠的读者。 */
  for(unsigned i=0;i<12;i++)assert(thrd_create(&workers[i],stress,(void*)1)==thrd_success);
  for(unsigned i=0;i<12;i++)thrd_join(workers[i],NULL);
  assert(atomic_load(&value)==8001);assert(!atomic_load(&lock.state));

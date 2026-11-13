@@ -31,10 +31,9 @@ SHT_DYNSYM = 11
 SHT_REL = 9
 SHN_UNDEF = 0
 
-# The complete x86-64 relocation number range currently assigned by the ELF
-# ABI and GNU toolchain.  Keeping this explicit catches a wrong-architecture
-# or vendor-private relocation without rejecting TLS/GOT relocations used by
-# glibc and NVIDIA's official objects.
+# ELF ABI 和 GNU 工具链当前为 x86-64 分配的完整重定位编号范围。显式列出这些编号可以
+# 捕获错误架构或供应商私有重定位，同时不会拒绝 glibc 和 NVIDIA 官方对象使用的 TLS/GOT
+# 重定位。
 KNOWN_X86_64_RELOCS = set(range(43)) | set(range(250, 256))
 
 

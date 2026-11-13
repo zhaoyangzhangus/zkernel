@@ -36,8 +36,8 @@ with tempfile.TemporaryDirectory(prefix='native-entry-') as directory:
     fixture = path / 'build'
     sbin = fixture / 'esp/sbin'
     sbin.mkdir(parents=True)
-    # A parent make exports command-line assignments through MAKEFLAGS. This
-    # isolated fixture must not inspect the real BUILD directory in that case.
+    # 父级 make 会通过 MAKEFLAGS 导出命令行赋值。这种情况下，隔离的测试夹具不能
+    # 检查真实的 BUILD 目录。
     program = f'override BUILD := {fixture}\n{rule}\nall:\n\t@printf "%s\\n" "$(EXISTING_DIAGNOSTIC_IMAGES)"\n'
     for expected in ((), ('fat-fsync-probe',), ('fat-fsync-probe', 'linux-events-test')):
         for name in expected:
@@ -83,8 +83,7 @@ with tempfile.TemporaryDirectory(prefix='native-entry-') as directory:
     assert len(code) == 38
     assert hashlib.sha256(code).hexdigest() == '229ba0506f65e9a78dd602edfe68b9979c26e87a591eb62472423f4b58dddb88'
     image = path / 'entry.elf'
-    # Resolve the external startup routine for this link-only fixture. Never
-    # execute it: the real startup path is separately exercised in QEMU.
+    # 为此仅用于链接的测试夹具解析外部启动例程。绝不执行它：真实启动路径另由 QEMU 测试。
     subprocess.run(['ld', '--entry=libc_crt_entry', '--defsym=__libc_start_main=0',
                     str(obj), '-o', str(image)], check=True)
     symbols = subprocess.check_output(['nm', str(image)], text=True)

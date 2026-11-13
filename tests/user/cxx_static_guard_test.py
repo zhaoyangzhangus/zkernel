@@ -60,7 +60,7 @@ static RetryValue& retry_instance() {
 int main() {
     uint64_t guard = 0;
     assert(__cxa_guard_acquire(&guard)==1);
-    /* Compiler fast paths test this byte without calling guard_acquire. */
+    /* 编译器快速路径会直接检查此字节，不调用 guard_acquire。 */
     assert(__atomic_load_n(reinterpret_cast<unsigned char*>(&guard),
                            __ATOMIC_ACQUIRE)==0);
     __cxa_guard_abort(&guard);
@@ -83,8 +83,8 @@ int main() {
     assert(pthread_join(initializer,nullptr)==0);
     for (auto thread:readers) assert(pthread_join(thread,nullptr)==0);
     assert(constructors==1 && reader_returned);
-    /* The compiler must invoke abort after a throwing constructor, allowing
-     * a later caller to retry rather than treating the object as complete. */
+    /* 构造函数抛出异常后，编译器必须调用 abort，使后续调用者能够重试，
+     * 而不是把对象误判为已完成初始化。 */
     bool caught = false;
     try { (void)retry_instance(); }
     catch (int value) { assert(value==42); caught = true; }

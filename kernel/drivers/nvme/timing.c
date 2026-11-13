@@ -3,8 +3,8 @@
 #include "internal.h"
 
 /*
- * REFACTOR_P8_NVME_TIMING_OWNER: deadline arithmetic and command-id
- * allocation are independent from controller lifecycle and I/O completion.
+ * REFACTOR_P8_NVME_TIMING_OWNER：截止时间计算和命令 ID 分配与控制器生命周期及 I/O
+ * 完成处理相互独立。
  */
 
 bool nvme_deadline_reached(uint64_t deadline) {

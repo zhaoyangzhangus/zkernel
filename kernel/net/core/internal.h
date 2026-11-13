@@ -2,7 +2,7 @@
 
 #include <kernel/string.h>
 
-/* REFACTOR_P8_NET_INTERNAL: shared private byte-zeroing primitive. */
+/* REFACTOR_P8_NET_INTERNAL：共用的私有清零字节操作原语。 */
 static inline void net_zero(void *destination, size_t length) {
     memset(destination, 0, length);
 }

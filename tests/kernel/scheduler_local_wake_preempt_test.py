@@ -14,7 +14,7 @@ int main(void) {
  cpu.queue.current=&current;cpu.queue.idle=&idle;
  atomic_init(&current.state,THREAD_RUNNING);
  current.sched_class=SCHED_CLASS_FAIR;waking.sched_class=SCHED_CLASS_FAIR;
- // UI was READY while a local syscall ran: no IPI pending bit exists.
+ // 本地系统调用运行时 UI 已处于 READY 状态：不存在待处理的 IPI 位。
  assert(scheduler_local_wake_requires_preempt(&cpu,&waking));
  assert(!scheduler_local_wake_requires_preempt(0,&waking));
  assert(!scheduler_local_wake_requires_preempt(&cpu,0));

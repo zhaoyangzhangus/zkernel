@@ -1,6 +1,6 @@
 // WhiteSur icon theme by vinceliuice, GPL-3.0 (COPYING beside the source SVGs).
-// Sources: https://github.com/vinceliuice/WhiteSur-icon-theme/tree/2026-09-10/src/apps/scalable
-// Regenerate the committed PNG atlas; the OS build needs no SVG renderer.
+// 来源：https://github.com/vinceliuice/WhiteSur-icon-theme/tree/2026-09-10/src/apps/scalable
+// 重新生成已提交的 PNG 图集；操作系统构建无需 SVG 渲染器。
 const sharp = require('sharp');
 const path = require('node:path');
 const root = path.resolve(__dirname, '..');

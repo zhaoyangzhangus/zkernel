@@ -1,6 +1,6 @@
 #include "internal.h"
 
-/* REFACTOR_P2_PERCPU_PAGE_OWNER: pooled state and order-zero fast paths. */
+/* REFACTOR_P2_PERCPU_PAGE_OWNER：池化状态和零阶快速路径。 */
 
 typedef struct __attribute__((aligned(CACHELINE_SIZE))) {
     spinlock_t lock;

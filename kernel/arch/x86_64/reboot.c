@@ -42,7 +42,7 @@ __attribute__((noreturn)) void x86_system_reboot(void) {
         }
     }
 
-    /* PCI reset control is present on common PC firmware and QEMU. */
+    /* 常见 PC 固件和 QEMU 都提供 PCI 复位控制。 */
     port_out8(0xCF9U, 0x06U);
     io_delay();
     port_out8(0xCF9U, 0x0EU);

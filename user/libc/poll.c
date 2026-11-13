@@ -101,7 +101,7 @@ int poll(struct pollfd *fds, nfds_t count, int timeout) {
         return -1;
     }
     /* Linux 兼容模式下的 socket 位于 Linux fd 表中。等待操作应使用
-     * their public fd numbers as native System handles cannot observe data. */
+     * 使用它们公开的 fd 编号；原生 System 句柄无法观察这些数据。 */
     if (count != 0U) {
         bool all_linux = true;
         bool any_linux = false;

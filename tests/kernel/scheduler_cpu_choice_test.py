@@ -1,5 +1,6 @@
 """Actual CPU choice and common affinity predicate against the old routing."""
 from pathlib import Path
+import resource
 import subprocess
 import tempfile
 
@@ -62,7 +63,7 @@ static unsigned check(thread_t *thread,unsigned current) {
     availability_calls=load_calls=candidate_visits=word_visits=0;
     unsigned actual=scheduler_choose_cpu(thread,current);
     unsigned visits=availability_calls,loads=load_calls;
-    assert(candidate_visits==visits);
+    assert(candidate_visits<=visits&&visits-candidate_visits<=1);
     assert(word_visits<=(thread?(g_cpu_count+63)/64:0));
     availability_calls=load_calls=0;
     unsigned expected=previous_choose_cpu(thread,current);
@@ -90,8 +91,8 @@ static unsigned check(thread_t *thread,unsigned current) {
 }
 int main(void) {
     thread_t thread={0};unsigned cases=0;uint32_t seed=73;
-    /* Exhaust all 8-CPU online/allowed combinations and nine current IDs,
-     * including equal loads, idle-less queues and no legal destination. */
+    /* 穷举 8 个 CPU 的在线/允许组合和 9 个当前 ID，包括负载相等、没有空闲 CPU 的队列，
+     * 以及不存在合法目标的情况。 */
     g_cpu_count=8;
     for(unsigned mask=0;mask<256;++mask)
     for(unsigned on=0;on<256;++on)
@@ -104,8 +105,7 @@ int main(void) {
         }
         check(&thread,current);++cases;
     }
-    /* Cross-word masks and every discovered count, poisoned out-of-range
-     * affinity bits, invalid current IDs and NULL thread fallback. */
+    /* 覆盖跨字掩码、每种发现数量、被污染的范围外亲和位、无效当前 ID 和 NULL 线程回退。 */
     for(unsigned trial=0;trial<50000;++trial) {
         seed=seed*1664525U+1013904223U;g_cpu_count=seed%(MAX_CPUS+1);
         for(unsigned i=0;i<MAX_CPUS/64;++i) {
@@ -139,8 +139,8 @@ int main(void) {
     assert(!scheduler_select_cpu_mask(0,0,&out)&&out==17&&!availability_calls);
     assert(!scheduler_select_cpu_mask(&empty,0,0)&&!availability_calls);
     assert(!scheduler_select_cpu_mask(&empty,0,&out)&&out==17&&!availability_calls);
-    /* Corrupt/discovery-overflow counts must not read past the fixed mask or
-     * CPU array. Test the selector directly: the old oracle is unbounded. */
+    /* 计数损坏或发现数量溢出时，不得越过固定掩码或 CPU 数组读取。
+     * 直接测试选择器：旧基准没有边界。 */
     const unsigned oversized_counts[]={MAX_CPUS+1U,MAX_CPUS+64U,UINT32_MAX};
     for(unsigned i=0;i<sizeof(oversized_counts)/sizeof(oversized_counts[0]);++i) {
         g_cpu_count=oversized_counts[i];
@@ -150,7 +150,7 @@ int main(void) {
         }
         availability_calls=load_calls=candidate_visits=word_visits=0;
         assert(scheduler_select_cpu_mask(&thread.affinity,MAX_CPUS-1U,&out));
-        assert(out==MAX_CPUS-1U&&candidate_visits==MAX_CPUS);
+        assert(out==MAX_CPUS-1U&&candidate_visits==MAX_CPUS-1U);
         assert(availability_calls==MAX_CPUS&&load_calls==MAX_CPUS&&word_visits==4);
         out=17;
         assert(!scheduler_select_cpu_mask(&empty,0,&out)&&out==17);
@@ -161,8 +161,15 @@ int main(void) {
         online[cpu]=1;g_cpus[cpu].queue.idle=&thread;g_cpus[cpu].load=0;
     }
     assert(check(&thread,0)==1);
-    assert(check(&thread,MAX_CPUS-1)==MAX_CPUS);
-    puts("Idle local CPU selection: 256 eligible CPUs -> 1 load/candidate read on CPU0; equal-load local preference preserved");
+    assert(check(&thread,MAX_CPUS-1)==1);
+    /* 本地忙时首个远端零负载已经是最优解，不再读取剩余 254 个核心。 */
+    g_cpus[MAX_CPUS-1].load=7;
+    assert(check(&thread,MAX_CPUS-1)==2);
+    assert(check(&thread,MAX_CPUS)==1);
+    online[MAX_CPUS-1]=false;
+    assert(check(&thread,MAX_CPUS-1)==2);
+    puts("Busy/offline local CPU: first eligible remote idle CPU ends the scan; invalid current CPU remains bounded");
+    puts("Idle local CPU selection: 256 eligible CPUs -> 1 availability/load read on CPU0 or CPU255; equal-load local preference preserved");
     puts("Oversized CPU counts: 257, 320 and UINT32_MAX bounded to four mask words/256 CPUs; empty output preserved");
     assert(saturated_corrections>0);
     printf("CPU choice: %u independent minimum-load/eligibility cases; %u saturated-load corrections retained; singleton masks visit 4 words/1 candidate instead of 256 CPUs; exact sparse/dense/partial-word traversal, ties/start/immutability passed\n",cases,saturated_corrections);
@@ -174,3 +181,15 @@ with tempfile.TemporaryDirectory(prefix='liteos-cpu-choice-') as directory:
                     '-fsanitize=address,undefined', '-fno-pie', '-no-pie',
                     '-x', 'c', '-', '-o', binary], input=code, text=True, check=True)
     subprocess.run([binary], check=True, timeout=60)
+    marker='if (best_load == 0U) {'
+    assert code.count(marker)==2
+    head,tail=code.rsplit(marker,1)
+    for negative in (code.replace(marker,'if (false) {',1),
+                     head+'if (false) {'+tail):
+        subprocess.run(['cc','-std=c11','-O2','-Wall','-Wextra','-Werror',
+                        '-fsanitize=address,undefined','-fno-pie','-no-pie',
+                        '-x','c','-','-o',binary],input=negative,text=True,check=True)
+        result=subprocess.run([binary],capture_output=True,timeout=60,
+                              preexec_fn=lambda:resource.setrlimit(resource.RLIMIT_CORE,(0,0)))
+        assert result.returncode!=0 and b'Assertion' in result.stderr
+    print('Negative controls rejected: scanning remote CPUs with an idle local CPU, and scanning past the first eligible remote idle CPU')

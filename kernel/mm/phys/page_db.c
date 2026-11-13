@@ -2,7 +2,7 @@
 #include <kernel/mm_boot.h>
 #include <uefi.h>
 
-/* REFACTOR_P2_PAGE_DB_OWNER: physical metadata and Buddy ownership. */
+/* REFACTOR_P2_PAGE_DB_OWNER：物理内存元数据及 Buddy 管理权。 */
 
 page_section_t g_sections[PAGE_DB_MAX_SECTIONS];
 page_pool_section_t g_pool_sections[PAGE_DB_MAX_SECTIONS];

@@ -26,8 +26,7 @@ bool xhci_usb_mass_storage_configured(void);
 bool xhci_usb_msc_query(uint8_t slot, uint8_t *interface_number,
                         uint8_t *bulk_in, uint8_t *bulk_out);
 bool xhci_usb_msc_is_uas(uint8_t slot);
-/* Grow/reuse the DMA staging area; return usable bytes, or zero on failure.
- * Caller serializes commands for this storage interface. */
+/* 扩大或复用 DMA 暂存区；返回可用字节数，失败时返回零。调用方负责串行化此存储接口的命令。 */
 uint32_t xhci_usb_msc_prepare_buffer(uint8_t slot, uint32_t requested);
 #define XHCI_MSC_MAX_TRANSFER (1024U * 1024U)
 bool xhci_usb_msc_recover_uas(uint8_t slot);
@@ -37,7 +36,7 @@ kstatus_t xhci_usb_msc_scsi_command(uint8_t slot, const uint8_t *command,
                                     uint32_t length, bool direction_in,
                                     uint32_t *actual);
 
-/* BOT keeps the Event Ring consumer across CBW/DATA/CSW. */
+/* BOT 会在整个 CBW/DATA/CSW 流程中保持同一个事件环消费者。 */
 kstatus_t xhci_usb_bulk_session_begin(uint8_t slot);
 void xhci_usb_bulk_session_end(uint8_t slot);
 kstatus_t xhci_usb_bulk_transfer_locked(uint8_t slot, uint8_t endpoint,

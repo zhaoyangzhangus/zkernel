@@ -59,8 +59,9 @@ static bool send_reset(e1000_state_t *state, const e1000_rx_packet_t *packet,
 
 for family, guard in enumerate(guards):
     program += f'''
-static void dispatch{family}(e1000_state_t *state, e1000_rx_packet_t packet,
+static void dispatch{family}(e1000_state_t *state, e1000_rx_packet_t input_packet,
                              int status) {{
+    e1000_rx_packet_t *packet = &input_packet;
 {guard}
     assert(status != K_EIO);
 }}
@@ -108,11 +109,12 @@ with tempfile.TemporaryDirectory(prefix='tcp-loopback-reset-') as directory:
     variants = {
         'current': program,
         'old-reset': program.replace(
-            '!e1000_tcp_self_test_peer_reply(state, &packet)', 'true'),
+            '!e1000_tcp_self_test_peer_reply(state, packet)', 'true'),
         'suppress-live': program.replace(
-            '!e1000_tcp_self_test_peer_reply(state, &packet)', 'false'),
+            '!e1000_tcp_self_test_peer_reply(state, packet)', 'false'),
     }
     for name, text in variants.items():
+        assert name == 'current' or text != program, name
         src = path / (name + '.c')
         exe = path / name
         src.write_text(text)

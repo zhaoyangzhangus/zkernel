@@ -136,9 +136,8 @@ function Wait-LatestCompletedRun([string]$AfterRunId = '') {
                 ResultPath = $resultPath
             }
         }
-        # A deployment that failed before setting BootNext leaves only a
-        # preflight directory.  Retry from the last completed result rather
-        # than mistaking that abandoned directory for a pending boot.
+        # 如果部署在设置 BootNext 前失败，只会留下预检目录。
+        # 从上一次完成的结果开始重试，避免将该废弃目录误认为待启动项。
         if (-not $pendingBoot -and $null -ne $baselineResult) {
             return $baselineResult
         }

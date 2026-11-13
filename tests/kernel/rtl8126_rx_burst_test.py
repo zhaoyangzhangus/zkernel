@@ -39,8 +39,7 @@ bool e1000_dispatch_software_queues(e1000_state_t *s){
 }
 uint64_t x86_read_tsc(void){return 1;}
 void socket_tcp_poll(uint64_t now){assert(now==1 && !pending);}
-/* The dedicated TxPoll fixture exercises the production TX helper. This
- * receive-only controller intentionally has no TX ring to recover. */
+/* 专用 TxPoll 测试夹具覆盖生产 TX 辅助函数。此接收专用控制器有意不包含待恢复的 TX 环。 */
 static void rtl8126_complete_tx(e1000_state_t *s){assert(s && !pending && !s->rtl_tx_ring);}
 ''' + receive + r'''
 int main(void){
@@ -68,7 +67,7 @@ int main(void){
  printf("RTL8126 RX burst: %u start slots, full-ring bursts, 32-packet software budget, wrap/EOR, DMA canary and rearm PASS\n",RTL8126_RING_COUNT);
 }
 '''
-# Keep the window target tied to the production socket model, not a copied size.
+# 窗口目标必须关联生产套接字模型，不能使用复制出的大小常量。
 model = (root/'kernel/net/socket_model.h').read_text()
 capacity = next(line for line in model.splitlines() if line.startswith('#define SOCKET_STREAM_TCP_CAPACITY'))
 program = program.replace('SOCKET_STREAM_TCP_CAPACITY_PLACEHOLDER', 'SOCKET_STREAM_TCP_CAPACITY')
@@ -82,7 +81,7 @@ with tempfile.TemporaryDirectory(prefix='rtl-rx-burst-') as directory:
     subprocess.run([binary],check=True,timeout=30)
     missing_flush = receive.replace('(void)rtl8126_read32(state, RTL8126_REG_INT_MASK);', '')
     assert missing_flush != receive
-    # Keep the fixture read helper referenced even in this broken variant.
+    # 即使在此错误变体中，也要保留对测试夹具读取辅助函数的引用。
     broken = program.replace(receive, missing_flush).replace(
         'int main(void){', 'int main(void){(void)rtl8126_read32;')
     subprocess.run(['cc','-std=c11','-O2','-Wall','-Wextra','-Werror',

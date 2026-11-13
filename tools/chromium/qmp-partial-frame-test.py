@@ -122,8 +122,8 @@ def main():
         print(json.dumps({'samples':len(positions),'distinct_positions':len(set(positions)),
                           'positions':positions,'pixel_oracle':'pass'},indent=2),flush=True)
     except BaseException:
-        # Best-effort context only: never replace the original oracle failure
-        # with a disconnected QMP error, nor confuse this later image with it.
+        # 这里只尽力收集上下文：绝不能用 QMP 断连错误替代原始基准失败，也不能将后续图像
+        # 与原始失败混淆。
         try:qmp.screenshot(args.evidence_dir/'chrome-partial-frame-after-failure.png')
         except Exception:pass
         raise

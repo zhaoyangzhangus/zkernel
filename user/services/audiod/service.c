@@ -67,8 +67,8 @@ __attribute__((noreturn)) static void audiod_exit(uint64_t status) {
     for (;;) __asm__ volatile ("pause");
 }
 
-/* Audio hardware is optional during boot. Keep the reason in the real-test
- * log, but never let a missing or partially supported endpoint block desktop. */
+/* 音频硬件在引导期间为可选设备。将不可用原因写入真实硬件测试日志，但绝不能让缺失或部分支持的
+ * 端点阻塞桌面启动。 */
 __attribute__((noreturn)) static void audiod_unavailable(const char *stage) {
     audiod_debug_write("OS_AUDIOD_UNAVAILABLE ");
     audiod_debug_write(stage);

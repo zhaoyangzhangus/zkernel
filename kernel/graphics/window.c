@@ -100,25 +100,6 @@ uint64_t window_surface_page_span(uint32_t width, uint32_t height) {
     return (bytes + PAGE_SIZE - 1ULL) & ~(PAGE_SIZE - 1ULL);
 }
 
-/* 窗口 surface 会在发布前完整分配后备页。客户端和合成器之后可访问任意像素，
- * 包括后续缩放才会显示的像素，而不会触发首次访问缺页。 */
-static kstatus_t window_surface_allocate(shared_section_t *section,
-                                         uint64_t bytes) {
-    if (section == 0 || section->vm_object == 0 || bytes == 0U ||
-        (bytes & (PAGE_SIZE - 1ULL)) != 0U) {
-        return K_EINVAL;
-    }
-
-    for (uint64_t offset = 0U; offset < bytes; offset += PAGE_SIZE) {
-        uint8_t *direct_page = 0;
-        kstatus_t status = vm_object_shared_page_direct(
-            section->vm_object, offset, true, &direct_page);
-        if (status != K_OK) return status;
-        (void)direct_page;
-    }
-    return K_OK;
-}
-
 /* 一次分配同时拥有两个槽位，因此缩放时无需延迟扩展任一槽位。失败时释放所有页面，
  * 不得发布后备存储不完整的 surface。 */
 static kstatus_t window_surface_create_backing(uint64_t span, uint32_t slots,
@@ -130,14 +111,9 @@ static kstatus_t window_surface_create_backing(uint64_t span, uint32_t slots,
         return K_EINVAL;
     uint64_t bytes = span * slots;
     shared_section_t *section = 0;
-    kstatus_t status = shared_section_create(bytes, &section);
+    kstatus_t status = shared_section_create_populated(bytes, &section);
     if (status != K_OK) return status;
     vm_object_mark_window_surface(section->vm_object);
-    status = window_surface_allocate(section, bytes);
-    if (status != K_OK) {
-        object_put(section);
-        return status;
-    }
     *out = section;
     return K_OK;
 }
@@ -297,7 +273,7 @@ static bool window_lifecycle_test_fail(uint32_t step, kstatus_t status) {
     return false;
 }
 
-/* REFACTOR_P7A_WINDOW_TEST_OWNER: canonical lifecycle and registry coverage. */
+/* REFACTOR_P7A_WINDOW_TEST_OWNER：规范生命周期和注册表覆盖测试。 */
 bool window_lifecycle_self_test(void) {
     process_t *owner = 0;
     window_server_window_t *first = 0;
@@ -401,7 +377,9 @@ bool window_lifecycle_self_test(void) {
     kernel_perf_emit_value("window_create_us",
                            window_tsc_to_us(telemetry_timestamp() -
                                             benchmark_start));
+#if OS_ENABLE_FRAME_TRACE
     second->surface_metrics_reported = true;
+#endif
 
     benchmark_start = telemetry_timestamp();
     compositor_frame_run();
@@ -440,9 +418,10 @@ bool window_lifecycle_self_test(void) {
     }
     resize_pages_before = vm_object_populated_pages(second->section->vm_object);
     window_lock();
-    g_window_server.resize_edges = WINDOW_RESIZE_RIGHT | WINDOW_RESIZE_BOTTOM;
+    window_input_begin_drag_locked(second->identifier, 0, 0,
+                                    WINDOW_RESIZE_RIGHT | WINDOW_RESIZE_BOTTOM);
     bool resized = window_resize_locked(second, 200, 100);
-    g_window_server.resize_edges = 0U;
+    window_input_clear_drag_locked();
     window_unlock();
     if (!resized) {
         success = window_lifecycle_test_fail(10U, K_EIO);
@@ -634,6 +613,8 @@ kstatus_t window_server_create(process_t *owner, int32_t x, int32_t y,
     }
     object_header_init(&window->object, KOBJECT_TYPE_WINDOW,
                        &g_window_object_ops);
+    /* 窗口绑定创建进程，子进程不能继承其关闭权限。 */
+    window->object.flags |= OBJECT_FLAG_NO_FORK;
     window->owner = owner;
     object_get(owner);
     window->section = section;
@@ -653,10 +634,8 @@ kstatus_t window_server_create(process_t *owner, int32_t x, int32_t y,
     window->create_tsc = create_tsc;
     window->surface_fault_count_at_create =
         vm_object_fault_count(section->vm_object);
-#endif
-    window->surface_populated_bytes = bytes * slots;
-    window->surface_populate_pending_end = 0U;
     window->surface_metrics_reported = false;
+#endif
     window->present_sequence = 0U;
     atomic_init(&window->compositor_presented_sequence, 0U);
     atomic_init(&window->registry_removed, false);
@@ -679,6 +658,7 @@ kstatus_t window_server_create(process_t *owner, int32_t x, int32_t y,
     window->event_count = 0U;
     window->event_wake_pending = false;
     wait_queue_init(&window->event_waitq);
+    wait_queue_init(&window->present_waitq);
     for (uint32_t i = 0U; i + 1U < sizeof(window->title); ++i) {
         window->title[i] = title != 0 ? title[i] : '\0';
         if (window->title[i] == '\0') break;
@@ -757,6 +737,7 @@ void window_server_handle_closed(window_server_window_t *window) {
     window_server_notify_worker();
     (void)wake_all(&window->event_waitq);
     (void)wake_all(&window->surface_waitq);
+    (void)wake_all(&window->present_waitq);
     object_notify_signaled(window);
     if (referenced) object_put(window);
 }
@@ -790,6 +771,7 @@ void window_server_close_process(process_t *owner) {
     for (uint32_t index = 0U; index < removed_count; ++index) {
         (void)wake_all(&removed[index]->event_waitq);
         (void)wake_all(&removed[index]->surface_waitq);
+        (void)wake_all(&removed[index]->present_waitq);
         object_notify_signaled(removed[index]);
         object_put(removed[index]);
     }
@@ -1220,7 +1202,7 @@ kstatus_t window_server_present(process_t *owner,
         .window = window,
         .sequence = present_sequence,
     };
-    status = wait_on_queue(&window->event_waitq,
+    status = wait_on_queue(&window->present_waitq,
                          window_present_sequence_ready,
                          &wait_context,
                          5000000000ULL);
@@ -1323,6 +1305,7 @@ kstatus_t window_server_close_owned(process_t *owner,
     window_server_notify_worker();
     (void)wake_all(&window->event_waitq);
     (void)wake_all(&window->surface_waitq);
+    (void)wake_all(&window->present_waitq);
     object_notify_signaled(window);
     object_put(window);
     return K_OK;

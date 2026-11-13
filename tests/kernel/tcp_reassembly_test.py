@@ -56,9 +56,9 @@ static void verify(unsigned size) {
 }
 int main(void) {
  unsigned max_scan_steps=0;
- // Retain the in-window prefix of a segment crossing the right edge.
- // A FIN at/outside that edge must be retransmitted after space opens;
- // it must not discard valid payload or close the stream prematurely.
+ // 保留越过右边界的数据段中仍位于窗口内的前缀。
+ // 位于边界或边界之外的 FIN 必须等窗口腾出空间后重传；不得丢弃有效负载，
+ // 也不得提前关闭数据流。
  unsigned edge_cases=0;
  for(unsigned position=0;position<16;++position)
  for(unsigned wrap=0;wrap<2;++wrap)
@@ -94,8 +94,8 @@ int main(void) {
   ++edge_cases;
  }
  printf("Receive right edge: %u partial payload/FIN, zero-window, ring/sequence wrap and OOM fallback cases passed\n",edge_cases);
- // Exhaust every ownership byte, not only empty/full fast-path cases.
- // Conflicting retransmissions must preserve all first-accepted bytes.
+ // 穷举每个字节的所有权状态，而不只测试空/满快速路径。
+ // 冲突的重传必须保留首次接收的全部字节。
  for(unsigned mask=0;mask<256;++mask)
  for(unsigned position=0;position<16;++position){
   bool notify;reset(UINT32_MAX-4,SOCKET_STREAM_BUFFER_SIZE-16+position);
@@ -112,7 +112,7 @@ int main(void) {
   assert(atomic_load(&state.stream_count)==16 && !state.tcp_rx_future_count);
   socket_stream_read_locked(&state,output,16);assert(!memcmp(output,expected,16));
  }
- // Insertion and duplicate skipping both have a bounded lock-held loop.
+ // 插入和跳过重复数据时，持锁循环次数都必须有界。
  for(unsigned position=0;position<16;++position){
   bool notify;reset(1000,SOCKET_STREAM_BUFFER_SIZE-16+position);
   unsigned before=insert_steps;
@@ -128,8 +128,8 @@ int main(void) {
   assert(bulk_calls==copies);
   assert(inject(1000,data,1,0,&notify)==K_OK && notify);verify(4096);
  }
- // A filled gap releases a large retained run. Its aligned bitmap bytes
- // should advance in groups, not hold the socket lock once per data byte.
+ // 缺口补齐后会释放一大段保留数据。位图对齐的字节应成组推进，不能每处理
+ // 一个数据字节就持有一次套接字锁。
  for(unsigned position=0;position<8;++position){
   bool notify;reset(UINT32_MAX-1000,SOCKET_STREAM_BUFFER_SIZE-8+position);
   uint32_t base=state.tcp_next_sequence;
@@ -140,8 +140,8 @@ int main(void) {
   if(scan_steps-before>max_scan_steps)max_scan_steps=scan_steps-before;
   assert(state.tcp_next_sequence==base+4096);verify(4096);
  }
- // Every FIN bit position must stop grouped advancement exactly at EOF,
- // including unaligned cursors and both ring/sequence wrap.
+ // 每种 FIN 位位置都必须让分组推进恰好停在 EOF，包括未对齐游标以及环形缓冲区/
+ // 序列号回绕的情况。
  for(unsigned position=0;position<16;++position)
  for(unsigned end=1;end<32;++end){
   bool notify;reset(UINT32_MAX-15,SOCKET_STREAM_BUFFER_SIZE-16+position);
@@ -153,8 +153,8 @@ int main(void) {
   assert(state.tcp_next_sequence==base+end+1 && atomic_load(&state.peer_closed));
   verify(end);
  }
- // Data may have been retained beyond an earlier FIN before FIN arrived.
- // Even a full bitmap byte must not publish those bytes past EOF.
+ // FIN 到达前，可能已经保留了超出 FIN 位置的数据。
+ // 即使位图字节已满，也不得将 EOF 之后的数据发布出去。
  for(unsigned end=1;end<16;++end){
   bool notify;reset(UINT32_MAX-7,SOCKET_STREAM_BUFFER_SIZE-8);
   uint32_t base=state.tcp_next_sequence;
@@ -180,8 +180,8 @@ int main(void) {
   assert(inject(base,data,size,0,&notify)==K_OK && notify);
   assert(state.tcp_next_sequence==base+16*size);verify(16*size);++cases;
  }
- // Repeated windows with shuffled arrivals and application reads exercise
- // bitmap reuse; partial duplicates must not alter first-accepted bytes.
+ // 乱序到达和应用读取交替进行，以重复使用位图；部分重复数据不得修改首次
+ // 接收的字节。
  uint32_t random=0x9215;
  for(unsigned trial=0;trial<100;++trial) {
   uint32_t base=UINT32_MAX-trial*100;bool notify;unsigned order[64];
@@ -222,8 +222,8 @@ int main(void) {
  assert(inject(1001,data,1,0,&notify)==K_EAGAIN);
  assert(inject(1000,data,32,0,&notify)==K_OK && !notify);
  assert(state.tcp_next_sequence==1032 && !atomic_load(&state.stream_count));
- // Dynamic rings exercise the variable divisor path, including a capacity
- // not divisible by eight. No advance may skip the exact wrap boundary.
+ // 动态环形缓冲区覆盖可变除数路径，包括容量不能被 8 整除的情况。
+ // 推进时不得越过精确的回绕边界。
  const unsigned capacities[]={32771,262144,4194304};
  for(unsigned c=0;c<3;++c)for(unsigned tail=1;tail<=16;++tail){
   unsigned capacity=capacities[c];reset(UINT32_MAX-1000,0);
@@ -314,8 +314,7 @@ with tempfile.TemporaryDirectory(prefix='tcp-reassembly-') as directory:
                     str(path/'test.c'),'-o',str(path/'test')],check=True)
         subprocess.run([str(path/'test')],check=True,timeout=20)
         print('Actual IPv%d receiver: cumulative ACK/window, notification and reference balance passed'%family)
-    # An implementation that rejects the whole crossing segment must fail
-    # even if its ordinary in-window, reorder and FIN tests still pass.
+    # 即使普通窗口内、乱序和 FIN 测试都通过，拒绝整个越界数据段的实现仍必须失败。
     old_edge=reassembly.replace(
         'if (distance > available) return K_EAGAIN;',
         'if (distance > available || length > available - distance || '
@@ -343,8 +342,8 @@ with tempfile.TemporaryDirectory(prefix='tcp-reassembly-') as directory:
     result=subprocess.run([str(path/'test')],capture_output=True,timeout=20)
     assert result.returncode!=0 and b'Assertion' in result.stderr
     print('Negative control rejected: failing to retain future-byte ownership breaks gap recovery')
-    # Disabling only grouped advancement retains correct data but must fail
-    # the independent loop-count bound. This gate detects a performance revert.
+    # 只禁用分组推进仍会得到正确数据，但必须违反独立的循环次数上限。
+    # 此门禁用于检测性能回退。
     slow=instrumented.replace('if ((slot & 7U) == 0U && *bits == UINT8_MAX &&',
                               'if (false && (slot & 7U) == 0U && *bits == UINT8_MAX &&')
     assert slow != instrumented
@@ -382,8 +381,8 @@ with tempfile.TemporaryDirectory(prefix='tcp-reassembly-') as directory:
     assert result.returncode!=0 and b'bulk_calls-copies<=2' in result.stderr
     print('连续乱序负载合并及重复包零复制通过；逐八字节复制负面对照被拒绝')
     if '--benchmark' in sys.argv:
-        # Same production receiver, fixed reordered payload, actual dynamic
-        # capacity. Host CPU timing is not guest NIC throughput evidence.
+        # 使用同一个生产接收器、固定的乱序负载和真实动态容量。
+        # 宿主 CPU 耗时不能作为客户机网卡吞吐量的证据。
         baseline=reassembly.replace(
             'slot += 8U;\n            if (slot == capacity) slot = 0U;',
             'slot = (slot + 8U) % capacity;').replace(

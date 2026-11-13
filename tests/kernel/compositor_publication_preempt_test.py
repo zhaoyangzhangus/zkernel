@@ -26,19 +26,26 @@ program = r'''
 static struct { uint32_t *framebuffer, *composite_framebuffer; uint32_t display_stride,display_width,display_height; } g_window_server;
 static unsigned preempt=1, yields, fences, rows, cursor_rows, motion_pumps;
 static uint64_t ticks,row_ticks;
+static unsigned clock_reads;
 static bool resched=true,wake_on_motion;
 static unsigned pending_input;
 static bool inject_request;
+static unsigned cursor_y=170,cursor_checks;
+static bool relocate_cursor;
 static uint64_t inject_at;
 static bool sched_tick_should_preempt(void) {
  if(inject_request && ticks>=inject_at)resched=true;
  return resched;
 }
 static unsigned input_core_pending(void) { return pending_input; }
-static uint64_t x86_read_tsc(void) { return ticks; }
+static uint64_t x86_read_tsc(void) { ++clock_reads; return ticks; }
 static uint64_t x86_timeout_ns_to_tsc(uint64_t ns) { return ns; }
 static uint64_t damage_pixels;
-static uint64_t compositor_publication_damage_pixels(void) { return damage_pixels; }
+static const Rect policy_damage = {0,0,1,1};
+static struct {const Rect *damage_rects;uint32_t damage_count;} g_compositor_snapshot={&policy_damage,1};
+static uint64_t compositor_publication_damage_pixels(const Rect *rects,uint32_t count) {
+ assert(rects==&policy_damage&&count==1);return damage_pixels;
+}
 static bool policy(bool commit_as_move_transaction) {
  bool allow_yield;
 ''' + policy + r'''
@@ -50,22 +57,35 @@ static void schedule(void) { assert(!preempt && resched); ++yields; }
 static void window_server_pump_publication_motion(void) {
  assert(!preempt && fences==motion_pumps+1);++motion_pumps;
  if(wake_on_motion)resched=true;
+ if(relocate_cursor){
+  unsigned stride=g_window_server.display_stride;
+  g_window_server.framebuffer[cursor_y*stride+10]=g_window_server.composite_framebuffer[cursor_y*stride+10];
+  cursor_y=900;
+  g_window_server.framebuffer[cursor_y*stride+10]=0xabcdef;
+  relocate_cursor=false;
+ }
 }
 static void sched_preempt_disable(void) { assert(!preempt); ++preempt; }
-static void compositor_copy_wc_scanline(volatile uint32_t *dst,const uint32_t *src,uint32_t pixels) {
+static void display_core_publish_xrgb8888_span(volatile uint32_t *dst,const uint32_t *src,uint32_t pixels) {
  assert(preempt==1); ++rows;
  ticks+=row_ticks;
  for (uint32_t x=0;x<pixels;++x) dst[x]=src[x];
 }
 static void window_present_cursor_prepare_rect(const Rect *rect) {
  assert(preempt==1);
- if(rect->x0<=10&&rect->x1>10&&rect->y0<=170&&rect->y1>170)
-  g_window_server.framebuffer[170*g_window_server.display_stride+10]=0xabcdef;
+ if(rect->x0<=10&&rect->x1>10&&rect->y0<=(int)cursor_y&&rect->y1>(int)cursor_y)
+  g_window_server.framebuffer[cursor_y*g_window_server.display_stride+10]=0xabcdef;
+}
+static bool window_present_cursor_bounds(Rect *bounds) {
+ return rect_clip_to_extent(10,cursor_y,11,cursor_y+1,
+  g_window_server.display_width,g_window_server.display_height,bounds);
 }
 static bool window_present_cursor_publish_span(volatile uint32_t *dst,const uint32_t *src,
- uint32_t x,uint32_t y,uint32_t pixels) {
+ uint32_t x,uint32_t y,uint32_t pixels,const Rect *cursor_bounds) {
  assert(preempt==1);
- if (y!=170 || x>10 || x+pixels<=10) return false;
+ assert(cursor_bounds&&cursor_bounds->y0==(int)cursor_y);
+ ++cursor_checks;
+ if (y!=cursor_y || x>10 || x+pixels<=10) return false;
  ++rows;ticks+=row_ticks;
  assert(dst[10-x]==0xabcdef);
  for(uint32_t i=0;i<pixels;++i)if(i!=10-x)dst[i]=src[i];
@@ -84,23 +104,23 @@ int main(void) {
  assert(policy(false) && !policy(true));
  Rect rect={0,0,width,height};
  compositor_publication_rect(&rect,policy(false));
- assert(rows==height && cursor_rows==1 && yields==7 && fences==yields && preempt==1);
+ assert(rows==height && cursor_rows==1 && cursor_checks==1 && yields==7 && fences==yields && preempt==1);
  assert(motion_pumps==yields);
  for(unsigned i=0;i<width*height;++i) assert(front[i]==(i==170*width+10?0xabcdef:back[i]));
- // Drag and tiny updates retain atomic behavior; no final-row scheduling.
+ // 拖动和微小更新仍保持原子性；不按最后一行调度。
  unsigned before=yields; compositor_publication_rect(&rect,policy(true)); assert(yields==before);
  damage_pixels=24*24;assert(!policy(false));
  rect=(Rect){0,0,24,24};compositor_publication_rect(&rect,policy(false));assert(yields==before);
  rect=(Rect){0,0,width,139};compositor_publication_rect(&rect,true);assert(yields==before);
- // Slow device memory: time, not just pixel count, bounds the input blackout.
+ // 设备内存较慢时，输入阻塞上限由耗时决定，而不只看像素数量。
  row_ticks=250000;before=yields;
  rect=(Rect){0,0,100,100};compositor_publication_rect(&rect,true);
  assert(yields-before==24 && motion_pumps==yields);
  row_ticks=0;before=yields;
  rect=(Rect){3,4,3,8};compositor_publication_rect(&rect,true);
  compositor_publication_rect(0,true);assert(yields==before && preempt==1);
- // Negative and overlarge rectangles must be clipped before pointer math.
- // Use a padded stride and canaries to catch writes outside the visible area.
+ // 计算指针前必须裁剪负值及超大矩形。
+ // 使用带填充的跨度和哨兵值检测可见区域之外的写入。
  uint32_t padded_front[8*6],padded_back[8*6];
  for(unsigned i=0;i<48;++i){padded_front[i]=0xdead;padded_back[i]=1000+i;}
  g_window_server.framebuffer=padded_front;g_window_server.composite_framebuffer=padded_back;
@@ -173,10 +193,30 @@ int main(void) {
  resched=false;pending_input=0;old_yields=yields;old_pumps=motion_pumps;
  compositor_publication_rects(strips,100,true);
  assert(yields==old_yields && motion_pumps==old_pumps);
+ /* 空闲慢设备：100 行只需起点和前 99 行的时钟采样，超时不重复读取。
+  * 同时覆盖一次矩形与碎片批次，时钟回绕仍按无符号差值判断。 */
+ for(unsigned fragmented=0;fragmented<2;++fragmented) {
+  for(unsigned wrapped=0;wrapped<2;++wrapped) {
+   row_ticks=250000;ticks=wrapped?UINT64_MAX-500000:0;
+   unsigned old_clock_reads=clock_reads;
+   old_yields=yields;old_pumps=motion_pumps;
+   if(fragmented)compositor_publication_rects(strips,100,true);
+   else {rect=(Rect){0,0,1,100};compositor_publication_rect(&rect,true);}
+   assert(clock_reads-old_clock_reads==100);
+   assert(yields==old_yields&&motion_pumps==old_pumps&&preempt==1);
+  }
+ }
  resched=true;compositor_publication_rects(strips,100,false);
  compositor_publication_rects(0,100,true);
  compositor_publication_rects(strips,0,true);
  assert(yields==old_yields && preempt==1);
+ /* 第一次输入服务把光标移到尚未复制的行；必须刷新范围，且旧位置恢复正常背景。 */
+ row_ticks=0;resched=false;pending_input=1;relocate_cursor=true;
+ rect=(Rect){0,0,width,height};unsigned old_checks=cursor_checks;
+ compositor_publication_rect(&rect,true);
+ assert(!relocate_cursor&&cursor_y==900&&cursor_checks==old_checks+1);
+ for(unsigned i=0;i<width*height;++i)
+  assert(front[i]==(i==900*width+10?0xabcdef:back[i]));
  free(front);free(back);
 }
 '''
@@ -189,6 +229,8 @@ with tempfile.TemporaryDirectory(prefix='liteos-publication-preempt-') as direct
                     str(path/'test.c'),'-o',str(path/'test')],check=True)
     subprocess.run([str(path/'test')],check=True)
     for old,new in [
+        ('        cursor_intersects = window_present_cursor_bounds(&cursor_bounds) &&',
+         '        cursor_intersects = cursor_intersects &&'),
         ('        compositor_publication_rect_budget(&rects[index], allow_yield,',
          '        budget = (compositor_publication_budget_t){0};\n        compositor_publication_rect_budget(&rects[index], allow_yield,'),
         ('if (sched_tick_should_preempt()) schedule();','schedule();'),
@@ -203,5 +245,5 @@ with tempfile.TemporaryDirectory(prefix='liteos-publication-preempt-') as direct
         result=subprocess.run([str(path/'test')],capture_output=True,
             preexec_fn=lambda:resource.setrlimit(resource.RLIMIT_CORE,(0,0)))
         assert result.returncode!=0 and b'Assertion' in result.stderr
-    print('负面对照通过：逐块重置预算、强制中途调度或忽略真实抢占请求均被拒绝')
+    print('负面对照通过：旧光标范围、逐块重置预算、强制中途调度和忽略抢占请求均被拒绝')
 print('Production publication: shared pixel/time budget across fragmented damage, demand-driven yields, idle continuous copy, input-only service, post-input wake and mid-copy preemption; fence/cursor/clip/stride and bounded slow-device cases passed')

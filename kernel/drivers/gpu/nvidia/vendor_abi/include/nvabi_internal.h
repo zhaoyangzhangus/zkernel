@@ -1,12 +1,10 @@
 #pragma once
 
 /*
- * NVIDIA 595.84 -> System ABI boundary.
+ * NVIDIA 595.84 -> System ABI 边界。
  *
- * The declarations below intentionally come from the immutable NVIDIA
- * headers.  This layer is the only place where vendor symbols are translated
- * to System primitives.  The port itself remains vendor-name free and does
- * not implement VRAM PMA, GPU VA, GMMU page tables, or GSP RPC.
+ * 以下声明有意从不可变的 NVIDIA 头文件中导入。此层是唯一将厂商符号转换为 System 原语的
+ * 位置。移植层本身不依赖厂商名称，也不实现 VRAM PMA、GPU VA、GMMU 页表或 GSP RPC。
  */
 
 #include <stdint.h>
@@ -28,9 +26,8 @@
 #define NVABI_PAGE_SIZE 4096ULL
 #define NVABI_PAGE_MASK (NVABI_PAGE_SIZE - 1ULL)
 
-/* Private descriptor for system-memory allocations returned through the
- * NVIDIA nv_alloc_pages ABI.  It carries only System CPU/system pages; it is
- * deliberately not a VRAM, GPU-VA, GMMU, or GSP object. */
+/* 通过 NVIDIA nv_alloc_pages ABI 返回的系统内存分配私有描述符。它只包含 System CPU/系统
+ * 页面；特意不将其表示为 VRAM、GPU VA、GMMU 或 GSP 对象。 */
 typedef struct nvabi_page_allocation {
     uint32_t magic;
     uint32_t page_count;
@@ -105,7 +102,7 @@ static inline void nvabi_unsupported_void(const char *function,
     nvabi_log_unsupported(function, caller_stage);
 }
 
-/* Small freestanding helpers used by ABI implementations. */
+/* ABI 实现使用的小型独立运行辅助函数。 */
 static inline size_t nvabi_strlen(const char *string) {
     size_t length = 0U;
     if (string == NULL) return 0U;
@@ -113,8 +110,8 @@ static inline size_t nvabi_strlen(const char *string) {
     return length;
 }
 
-/* Preserve the adapter's historical -1/0/1 result and null-input behavior,
- * without computing both lengths (and one of them twice) before comparing. */
+/* 保留适配器原有的 -1/0/1 返回值和空输入行为，同时避免比较前计算两边长度，
+ * 也避免重复计算其中一边的长度。 */
 static inline int nvabi_string_compare(const char *left, const char *right) {
     if (left == NULL || right == NULL) return left == right ? 0 : 1;
     const uint8_t *a = (const uint8_t *)left;

@@ -31,7 +31,7 @@ static uint32_t x86_current_cpu_index(void) { return cpu; }
 static void sched_preempt_disable(void) { ++preempt; }
 static void sched_preempt_enable(void) {
     assert(preempt);
-    /* A successor can acquire the lock immediately after release. */
+    /* 释放锁后，后继者可以立即获取该锁。 */
     if (page_mode) assert(!atomic_load(&g_page_lock.state));
     else if (atomic_load(&g_caches[selected].lock.state))
         assert(g_cache_owner[selected] == successor);
@@ -49,8 +49,8 @@ static void test_release(atomic_uint *state, unsigned value, memory_order order)
     assert(value == 0 && order == memory_order_release);
     atomic_store_explicit(state, value, order);
     if (handoff) {
-        /* Deterministic interleaving: CPU B publishes its owner before CPU A
-         * resumes the rest of cache_unlock. No host timing assumption. */
+        /* 确定性交错：CPU A 尚未继续执行 cache_unlock 的其余部分时，CPU B 已发布其所有者状态。
+         * 不依赖宿主机时序。 */
         atomic_store(state, 1);
         g_cache_owner[selected] = successor;
         handoff=false;

@@ -151,10 +151,9 @@ bool xhci_configure_hub_endpoint(xhci_state_t *state) {
             XHCI_SLOT_TT_THINK_SHIFT;
     }
 
-    /* Hub metadata is a Slot Context update.  Keep it separate from adding
-     * the interrupt endpoint, as Linux does, and clear DW3 because Device
-     * Address and Slot State are output-only fields.  QEMU rejects a combined
-     * update carrying the Addressed state with Context State Error. */
+    /* Hub 元数据属于 Slot Context 更新。按照 Linux 的做法，将其与添加中断端点分开；
+     * 并清除 DW3，因为 Device Address 和 Slot State 是只输出字段。QEMU 会以 Context
+     * State Error 拒绝携带 Addressed 状态的组合更新。 */
     input_slot[3] = 0U;
     control[0] = 0U;
     control[1] = 1U;
@@ -208,15 +207,13 @@ bool xhci_configure_hub_endpoint(xhci_state_t *state) {
     kernel_serial_write_serial_only("OS_DIAG_HUB_ENDPOINT_OK\r\n");
 
     /*
-     * V3.10.6B10B8 HUB STATUS TD LIFETIME
+     * V3.10.6B10B8 Hub 状态 TD 生命周期
      *
-     * Keep one Hub interrupt-IN TD armed from the moment the endpoint becomes
-     * RUNNING.  This is the path QEMU reliably keeps NAKed/retryable and later
-     * wakes through usb_wakeup().
+     * 端点进入 RUNNING 状态后，就保持一个 Hub interrupt-IN TD 处于挂起状态。QEMU
+     * 能可靠地让该路径保持 NAK/可重试状态，并在之后通过 usb_wakeup() 唤醒。
      *
-     * Startup PORT_RESET / ENABLE / CONNECTION changes are intentionally
-     * allowed to complete this TD.  They are drained and acknowledged at the
-     * explicit startup->runtime barrier before MSI-X runtime begins.
+     * 启动阶段的 PORT_RESET / ENABLE / CONNECTION 变化可以完成此 TD。在 MSI-X
+     * 运行时开始前，会在明确的 startup->runtime 屏障处排空并确认这些变化。
      */
     bool queued = xhci_queue_hub_status_device(state, &state->device);
     kernel_serial_write_serial_only(

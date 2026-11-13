@@ -29,9 +29,8 @@ static kstatus_t output6(void *ctx,const uint8_t *src,uint16_t sp,const uint8_t 
  return output4(ctx,1,sp,2,dp,seq,ack,flags,window,payload,n);
 }
 int main(void) {
- /* The negotiated MSS never overflows the retained storage or exceeds
-  * the current three-segment initial congestion budget. This is a memory
-  * and protocol bound, not a claim about peer delayed-ACK performance. */
+ /* 协商得到的 MSS 不会超过保留存储的容量，也不会超过当前的三个数据段初始拥塞预算。
+  * 这是内存和协议的边界，不代表对端延迟 ACK 的性能。 */
  for(unsigned family=0;family<2;++family){
   unsigned maximum=family?1440:1460;
   for(unsigned negotiated=1;negotiated<=maximum;++negotiated){

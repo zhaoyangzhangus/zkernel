@@ -13,8 +13,8 @@ except RuntimeError as error:
 end
 target remote /tmp/system-keys.sock
 python
-# One hardware address. InputEvent ABI is the 24-byte os_input_event_t prefix;
-# read metadata only, never surrounding memory or text. No deletion in stop().
+# 一个硬件地址。InputEvent ABI 是 24 字节的 os_input_event_t 前缀；
+# 只读取元数据，不读取相邻内存或文本。不要在 stop() 中删除断点。
 samples=0
 class Key(gdb.Breakpoint):
     def stop(self):

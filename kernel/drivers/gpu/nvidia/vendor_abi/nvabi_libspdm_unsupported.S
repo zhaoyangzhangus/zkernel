@@ -1,4 +1,4 @@
-/* Phase 3 fail-closed libspdm ABI boundary. Exact declarations are checked in nvabi_contracts.c. */
+/* 第 3 阶段的 libspdm ABI 安全失败边界。具体声明由 nvabi_contracts.c 检查。 */
 
     .section .text.nvabi_libspdm_unsupported,"ax",@progbits
     .extern nvabi_log_unsupported
@@ -90,7 +90,7 @@ libspdm_aead_free:
     leaq .Lnvabi_msg_libspdm_aead_free(%rip), %rdi
     leaq .Lnvabi_stage_libspdm(%rip), %rsi
     call nvabi_log_unsupported
-    # void return
+    # void 返回
     popq %rbp
     ret
     .size libspdm_aead_free, .-libspdm_aead_free
@@ -194,7 +194,7 @@ libspdm_dh_free:
     leaq .Lnvabi_msg_libspdm_dh_free(%rip), %rdi
     leaq .Lnvabi_stage_libspdm(%rip), %rsi
     call nvabi_log_unsupported
-    # void return
+    # void 返回
     popq %rbp
     ret
     .size libspdm_dh_free, .-libspdm_dh_free
@@ -246,7 +246,7 @@ libspdm_ec_free:
     leaq .Lnvabi_msg_libspdm_ec_free(%rip), %rdi
     leaq .Lnvabi_stage_libspdm(%rip), %rsi
     call nvabi_log_unsupported
-    # void return
+    # void 返回
     popq %rbp
     ret
     .size libspdm_ec_free, .-libspdm_ec_free
@@ -298,7 +298,7 @@ libspdm_ecd_free:
     leaq .Lnvabi_msg_libspdm_ecd_free(%rip), %rdi
     leaq .Lnvabi_stage_libspdm(%rip), %rsi
     call nvabi_log_unsupported
-    # void return
+    # void 返回
     popq %rbp
     ret
     .size libspdm_ecd_free, .-libspdm_ecd_free
@@ -636,7 +636,7 @@ libspdm_hmac_sha256_free:
     leaq .Lnvabi_msg_libspdm_hmac_sha256_free(%rip), %rdi
     leaq .Lnvabi_stage_libspdm(%rip), %rsi
     call nvabi_log_unsupported
-    # void return
+    # void 返回
     popq %rbp
     ret
     .size libspdm_hmac_sha256_free, .-libspdm_hmac_sha256_free
@@ -727,7 +727,7 @@ libspdm_hmac_sha3_256_free:
     leaq .Lnvabi_msg_libspdm_hmac_sha3_256_free(%rip), %rdi
     leaq .Lnvabi_stage_libspdm(%rip), %rsi
     call nvabi_log_unsupported
-    # void return
+    # void 返回
     popq %rbp
     ret
     .size libspdm_hmac_sha3_256_free, .-libspdm_hmac_sha3_256_free
@@ -818,7 +818,7 @@ libspdm_hmac_sha3_384_free:
     leaq .Lnvabi_msg_libspdm_hmac_sha3_384_free(%rip), %rdi
     leaq .Lnvabi_stage_libspdm(%rip), %rsi
     call nvabi_log_unsupported
-    # void return
+    # void 返回
     popq %rbp
     ret
     .size libspdm_hmac_sha3_384_free, .-libspdm_hmac_sha3_384_free
@@ -909,7 +909,7 @@ libspdm_hmac_sha3_512_free:
     leaq .Lnvabi_msg_libspdm_hmac_sha3_512_free(%rip), %rdi
     leaq .Lnvabi_stage_libspdm(%rip), %rsi
     call nvabi_log_unsupported
-    # void return
+    # void 返回
     popq %rbp
     ret
     .size libspdm_hmac_sha3_512_free, .-libspdm_hmac_sha3_512_free
@@ -1000,7 +1000,7 @@ libspdm_hmac_sha384_free:
     leaq .Lnvabi_msg_libspdm_hmac_sha384_free(%rip), %rdi
     leaq .Lnvabi_stage_libspdm(%rip), %rsi
     call nvabi_log_unsupported
-    # void return
+    # void 返回
     popq %rbp
     ret
     .size libspdm_hmac_sha384_free, .-libspdm_hmac_sha384_free
@@ -1091,7 +1091,7 @@ libspdm_hmac_sha512_free:
     leaq .Lnvabi_msg_libspdm_hmac_sha512_free(%rip), %rdi
     leaq .Lnvabi_stage_libspdm(%rip), %rsi
     call nvabi_log_unsupported
-    # void return
+    # void 返回
     popq %rbp
     ret
     .size libspdm_hmac_sha512_free, .-libspdm_hmac_sha512_free
@@ -1182,7 +1182,7 @@ libspdm_hmac_sm3_256_free:
     leaq .Lnvabi_msg_libspdm_hmac_sm3_256_free(%rip), %rdi
     leaq .Lnvabi_stage_libspdm(%rip), %rsi
     call nvabi_log_unsupported
-    # void return
+    # void 返回
     popq %rbp
     ret
     .size libspdm_hmac_sm3_256_free, .-libspdm_hmac_sm3_256_free
@@ -1247,7 +1247,7 @@ libspdm_rsa_free:
     leaq .Lnvabi_msg_libspdm_rsa_free(%rip), %rdi
     leaq .Lnvabi_stage_libspdm(%rip), %rsi
     call nvabi_log_unsupported
-    # void return
+    # void 返回
     popq %rbp
     ret
     .size libspdm_rsa_free, .-libspdm_rsa_free
@@ -1416,7 +1416,7 @@ libspdm_sha256_free:
     leaq .Lnvabi_msg_libspdm_sha256_free(%rip), %rdi
     leaq .Lnvabi_stage_libspdm(%rip), %rsi
     call nvabi_log_unsupported
-    # void return
+    # void 返回
     popq %rbp
     ret
     .size libspdm_sha256_free, .-libspdm_sha256_free
@@ -1507,7 +1507,7 @@ libspdm_sha3_256_free:
     leaq .Lnvabi_msg_libspdm_sha3_256_free(%rip), %rdi
     leaq .Lnvabi_stage_libspdm(%rip), %rsi
     call nvabi_log_unsupported
-    # void return
+    # void 返回
     popq %rbp
     ret
     .size libspdm_sha3_256_free, .-libspdm_sha3_256_free
@@ -1598,7 +1598,7 @@ libspdm_sha3_384_free:
     leaq .Lnvabi_msg_libspdm_sha3_384_free(%rip), %rdi
     leaq .Lnvabi_stage_libspdm(%rip), %rsi
     call nvabi_log_unsupported
-    # void return
+    # void 返回
     popq %rbp
     ret
     .size libspdm_sha3_384_free, .-libspdm_sha3_384_free
@@ -1689,7 +1689,7 @@ libspdm_sha3_512_free:
     leaq .Lnvabi_msg_libspdm_sha3_512_free(%rip), %rdi
     leaq .Lnvabi_stage_libspdm(%rip), %rsi
     call nvabi_log_unsupported
-    # void return
+    # void 返回
     popq %rbp
     ret
     .size libspdm_sha3_512_free, .-libspdm_sha3_512_free
@@ -1780,7 +1780,7 @@ libspdm_sha384_free:
     leaq .Lnvabi_msg_libspdm_sha384_free(%rip), %rdi
     leaq .Lnvabi_stage_libspdm(%rip), %rsi
     call nvabi_log_unsupported
-    # void return
+    # void 返回
     popq %rbp
     ret
     .size libspdm_sha384_free, .-libspdm_sha384_free
@@ -1871,7 +1871,7 @@ libspdm_sha512_free:
     leaq .Lnvabi_msg_libspdm_sha512_free(%rip), %rdi
     leaq .Lnvabi_stage_libspdm(%rip), %rsi
     call nvabi_log_unsupported
-    # void return
+    # void 返回
     popq %rbp
     ret
     .size libspdm_sha512_free, .-libspdm_sha512_free
@@ -1936,7 +1936,7 @@ libspdm_sm2_dsa_free:
     leaq .Lnvabi_msg_libspdm_sm2_dsa_free(%rip), %rdi
     leaq .Lnvabi_stage_libspdm(%rip), %rsi
     call nvabi_log_unsupported
-    # void return
+    # void 返回
     popq %rbp
     ret
     .size libspdm_sm2_dsa_free, .-libspdm_sm2_dsa_free
@@ -2014,7 +2014,7 @@ libspdm_sm2_key_exchange_free:
     leaq .Lnvabi_msg_libspdm_sm2_key_exchange_free(%rip), %rdi
     leaq .Lnvabi_stage_libspdm(%rip), %rsi
     call nvabi_log_unsupported
-    # void return
+    # void 返回
     popq %rbp
     ret
     .size libspdm_sm2_key_exchange_free, .-libspdm_sm2_key_exchange_free
@@ -2092,7 +2092,7 @@ libspdm_sm3_256_free:
     leaq .Lnvabi_msg_libspdm_sm3_256_free(%rip), %rdi
     leaq .Lnvabi_stage_libspdm(%rip), %rsi
     call nvabi_log_unsupported
-    # void return
+    # void 返回
     popq %rbp
     ret
     .size libspdm_sm3_256_free, .-libspdm_sm3_256_free

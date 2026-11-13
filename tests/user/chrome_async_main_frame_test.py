@@ -73,8 +73,7 @@ int main() {
  viz::BeginFrameArgs args{42};
  proxy.ScheduledActionSendBeginMainFrame(args);
  assert(host.sent==1 && proxy.commits==0 && provider.runner.tasks.size()==1);
- // A second property mutation in the same native callback must not land
- // after a premature inline commit. The posted frame sees coherent state.
+ // 同一个原生回调中的第二次属性修改不能落在过早的内联提交之后。提交的帧应观察到一致状态。
  proxy.property_a=3; proxy.property_b=9; args.sequence=99;
  provider.runner.Drain();
  assert(proxy.commits==1 && proxy.committed_a==3 && proxy.committed_b==9);

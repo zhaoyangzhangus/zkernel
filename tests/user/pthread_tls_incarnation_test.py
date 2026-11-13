@@ -78,7 +78,7 @@ int main(void){
   pthread_t r,w;assert(!pthread_create(&r,0,reader,0));assert(!pthread_create(&w,0,writer,0));
   assert(!pthread_join(r,0));assert(!pthread_join(w,0));assert(!fixture_key_delete(key));
  }
- // The invalid even token at wrap must not resurrect an old TLS slot.
+ // 回绕时无效的偶数令牌不能让旧 TLS 槽位复活。
  g_key_generation[0]=UINT32_MAX-1U;assert(!fixture_key_create(&key,0));
  assert(g_key_generation[0]==UINT32_MAX);
  assert(!fixture_setspecific(key,(void *)1));assert(!fixture_key_delete(key));

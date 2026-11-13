@@ -21,6 +21,15 @@ with tempfile.TemporaryDirectory(prefix='system-qemu-cpu-') as directory:
     assert select(all_flags+'flags : sse ssse3 popcnt\n') == baseline+',ssse3=on,popcnt=on'
     assert select('flags : ssse3_fake sse4_1_fake popcnt_fake\n') == baseline
     assert select(all_flags*4) == select(all_flags)
+    stable = 'flags : constant_tsc nonstop_tsc sse sse2\n'
+    assert select(stable, chrome=0) == baseline+',invtsc=on'
+    assert select(stable, kvm=0) == baseline
+    assert select(stable*4, chrome=0) == baseline+',invtsc=on'
+    assert select(stable+'flags : constant_tsc\n', chrome=0) == baseline
+    assert select('flags : constant_tsc_fake nonstop_tsc_fake\n', chrome=0) == baseline
+    assert select(all_flags+stable) == baseline
+    assert select(all_flags.rstrip()+' constant_tsc nonstop_tsc\n') == \
+        baseline+',ssse3=on,sse4.1=on,sse4.2=on,popcnt=on,invtsc=on'
 launcher = (root/'run-qemu.sh').read_text()
 assert '-cpu "$qemu_cpu_model"' in launcher
 assert 'if ((qemu_use_kvm)); then' in launcher

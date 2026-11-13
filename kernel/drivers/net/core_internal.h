@@ -14,9 +14,8 @@
 #define E1000_RX_STATUS_DD (1U << 0)
 #define E1000_RX_BUDGET 32U
 
-/* Cover a full 256KiB TCP window (~180 Ethernet frames) while the bounded
- * 32-packet poll batch dispatches ACKs. 256 descriptors still fit one page;
- * do not increase the per-callback software queue/latency budget with it. */
+/* 在有界的 32 个数据包轮询批次分发 ACK 期间，覆盖完整的 256 KiB TCP 窗口（约 180 个
+ * 以太网帧）。256 个描述符仍可放入一个页面；不要因此增加每次回调的软件队列/延迟预算。 */
 #define RTL8126_RING_COUNT 256U
 #define RTL8126_TX_BUFFER_SIZE 2048U
 #define RTL8126_RX_BUFFER_SIZE 16384U
@@ -91,7 +90,7 @@ typedef struct e1000_state {
     bool initialized;
     e1000_recovery_context_t recovery;
 
-    /* RTL8126 keeps its own descriptor format and ring lifetime. */
+    /* RTL8126 使用自己的描述符格式和环形缓冲区生命周期。 */
     volatile uint8_t *rtl_mmio;
     uint64_t rtl_mmio_span;
     uint8_t rtl_mmio_bar;

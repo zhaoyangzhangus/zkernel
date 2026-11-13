@@ -1,4 +1,4 @@
-# Bounded sample of successful GPU readback rectangles before native commit.
+# 在原生提交前，对成功的 GPU 读回矩形进行有界采样。
 set pagination off
 set confirm off
 python
@@ -14,7 +14,7 @@ class Damage(gdb.Breakpoint):
     def stop(self):
         root=int(gdb.parse_and_eval('$cr3')) & ~4095
         address=int(gdb.parse_and_eval('$rsi'))
-        # gfx::Rect: Point (two int32) followed by Size (two int32).
+        # gfx::Rect：先是 Point（两个 int32），再是 Size（两个 int32）。
         rect=struct.unpack('<iiii',read_user(gdb.selected_inferior(),root,address,16))
         x,y,width,height=rect
         if not(0<=x<=1920 and 0<=y<=1080 and 0<width<=1920 and 0<height<=1080):

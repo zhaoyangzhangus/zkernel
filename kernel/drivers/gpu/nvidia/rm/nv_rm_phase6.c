@@ -25,12 +25,11 @@
 #include "../../port/include/nv_port.h"
 
 /*
- * Phase 6 deliberately exercises the vendor RM resource path.  System does
- * not provide a second PMA, GPU-VA, GMMU, or GSP-RPC implementation here.
+ * 第 6 阶段特意通过厂商 RM 资源路径进行测试。System 不会在此处另行实现 PMA、GPU VA、GMMU
+ * 或 GSP RPC。
  *
- * The normal bring-up probe remains a small transfer.  The complete Phase 6
- * Gate is available only when explicitly enabled at compile time; it is never
- * enabled implicitly by the bring-up path.
+ * 常规启动探测仍只执行小规模传输。完整的第 6 阶段门控只有在编译时显式启用后才可用，绝不会由
+ * 启动路径隐式启用。
  */
 #define NV_RM_PHASE6_SMOKE_SIZE       4096ULL
 #define NV_RM_PHASE6_SMOKE_ALIGNMENT  4096ULL
@@ -267,9 +266,8 @@ static NV_STATUS nv_rm_phase6_cleanup_memory(
         video_memory == NULL)
         return NV_ERR_INVALID_ARGUMENT;
 
-    /* Reverse the resource order: CPU mappings, then memory objects.  The
-     * client/device handles stay alive so a full Gate can reuse them for the
-     * next allocation/copy/free cycle. */
+    /* 按相反顺序释放资源：先释放 CPU 映射，再释放内存对象。客户端/设备句柄保持有效，使完整门控
+     * 可以在下一轮分配/复制/释放中重复使用。 */
     if (video_memory->mapped) {
         status = rm_api->UnmapFromCpu(
             rm_api, h_client, h_device, video_memory->handle,
@@ -326,7 +324,7 @@ static NV_STATUS nv_rm_phase6_enter_vendor_scope(
     if (scope == NULL)
         return NV_ERR_INVALID_ARGUMENT;
 
-    /* The probe must not steal a lock scope owned by its caller. */
+    /* 探测过程不得窃取调用方持有的锁作用域。 */
     if (rmapiLockIsOwner() || rmGpuLocksGetOwnedMask() != 0U)
         return NV_ERR_INVALID_LOCK_STATE;
 
@@ -353,7 +351,7 @@ static NV_STATUS nv_rm_phase6_leave_vendor_scope(
         rmLocksReleaseAll();
         scope->locks_acquired = NV_FALSE;
 
-        /* Fail closed if the vendor release path left either lock owned. */
+        /* 厂商释放路径若仍持有任一锁，则安全失败。 */
         if (rmapiLockIsOwner() || rmGpuLocksGetOwnedMask() != 0U)
             status = NV_ERR_INVALID_LOCK_STATE;
     }
@@ -377,9 +375,8 @@ static NV_STATUS nv_rm_phase6_copy(CeUtils *ce_utils,
     params.pDstMemDesc = destination;
     params.length = size;
 
-    /* No completion callback is supplied: the vendor CE implementation waits
-     * for the submitted payload before returning, so comparison is meaningful
-     * and cannot be a CPU-copy or identity-success fallback. */
+    /* 不提供完成回调：厂商 CE 实现在返回前会等待已提交负载完成，因此此处的比较有效，且不会退化为
+     * CPU 复制或恒等成功回退。 */
     nv_rm_phase6_flush_cpu_access(source);
     nv_rm_phase6_flush_cpu_access(destination);
 

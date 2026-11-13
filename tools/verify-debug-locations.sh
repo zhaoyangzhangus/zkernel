@@ -87,9 +87,8 @@ if [[ -n "$benchmark_records" ]]; then
     fi
 fi
 
-# The kmalloc summary predates the generic OS_BENCH format, but it is
-# still a benchmark record.  Require the same source location so a memory
-# allocator regression can be opened at the report call site.
+# kmalloc 汇总格式早于通用 OS_BENCH 格式，但它仍是基准记录。要求记录相同的源码位置，
+# 以便在报告调用点定位内存分配器回归。
 kmalloc_records=$(grep -E '^OS_PERF_KMALLOC_OK ' "$log_path" || true)
 if [[ -n "$kmalloc_records" ]]; then
     unlocated_kmalloc=$(printf '%s\n' "$kmalloc_records" |

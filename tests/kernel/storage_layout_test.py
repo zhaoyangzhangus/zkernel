@@ -10,7 +10,7 @@ for name in ('fat32.h', 'block_device.h', 'block_cache.h'):
     assert ('LITE' + 'OS_') not in text, name
     assert ('lite' + 'os_') not in text, name
 
-# Renaming must not silently disable the existing file-lifecycle ownership gate.
+# 重命名不能悄然禁用现有的文件生命周期所有权门禁。
 verifier = (ROOT / 'tools/verify-refactor-layout.sh').read_text()
 rule = next(line for line in verifier.splitlines()
             if line.startswith('forbidden_text ') and
@@ -28,19 +28,22 @@ for declaration in ('BOOLEAN fat32_open(void) {}\n',
                             text=True)
     assert result.returncode == 1, declaration
 
-# 保留重命名前的布局基线；FAT 运行时后来明确增加可睡眠的变更互斥锁。
-# 只允许这一个新增字段的大小增量，不放宽其余字段、磁盘格式或资源上限检查。
+# 固定当前内核运行时布局，显式覆盖缓存顺序读提示和 FAT 空闲簇统计。
+# 文件条目、块设备、磁盘数据和资源上限仍使用独立的精确基线。
 SIZES = {
-    'OS_FAT32': '352840 + sizeof(io_mutex_t)', 'OS_FAT32_FILE': 560, 'OS_BLOCK_DEVICE': 88,
+    'OS_FAT32': '352864 + sizeof(io_mutex_t)', 'OS_FAT32_FILE': 560, 'OS_BLOCK_DEVICE': 88,
     'OS_BLOCK_MANAGER': 2824, 'OS_BLOCK_CACHE_ENTRY': 4120,
-    'OS_BLOCK_CACHE': 66024,
+    'OS_BLOCK_CACHE': 66040,
 }
 OFFSETS = {
     'OS_FAT32': {'Device': 0, 'BytesPerSector': 8, 'FatStartLba': 40,
-                 'Cache': 80, 'OpenFileLock': 66104, 'MutationLock': 66108,
-                 'MutationMutex': 66112,
-                 'OpenFiles': '66112 + sizeof(io_mutex_t)',
-                 'Mounted': '352832 + sizeof(io_mutex_t)'},
+                 'Cache': 80, 'OpenFileLock': 66120, 'MutationLock': 66124,
+                 'MutationMutex': 66128,
+                 'OpenFiles': '66128 + sizeof(io_mutex_t)',
+                 'FreeClusterCount': '352848 + sizeof(io_mutex_t)',
+                 'FreeClusterSearchStart': '352856 + sizeof(io_mutex_t)',
+                 'FreeClusterCountValid': '352860 + sizeof(io_mutex_t)',
+                 'Mounted': '352861 + sizeof(io_mutex_t)'},
     'OS_FAT32_FILE': {'FileSystem': 8, 'FirstCluster': 16, 'Size': 24,
                       'DirectoryLba': 40, 'DirectoryOffset': 48,
                       'CursorValid': 52, 'SeekLogical': 76,
@@ -48,8 +51,9 @@ OFFSETS = {
     'OS_BLOCK_DEVICE': {'Read': 48, 'Context': 72, 'Registered': 80},
     'OS_BLOCK_MANAGER': {'DeviceCount': 2816, 'Initialized': 2820},
     'OS_BLOCK_CACHE_ENTRY': {'Data': 24, 'LastUse': 16},
-    'OS_BLOCK_CACHE': {'Entries': 8, 'Clock': 65928, 'WaitLock': 65936,
-                       'Lock': 66016, 'Initialized': 66020},
+    'OS_BLOCK_CACHE': {'Entries': 8, 'Clock': 65928,
+                       'LastReadLba': 65936, 'LastReadValid': 65944,
+                       'WaitLock': 65952, 'Lock': 66032, 'Initialized': 66036},
 }
 code = '''
 #include <stddef.h>
@@ -68,7 +72,7 @@ for name, size in SIZES.items():
 for name, fields in OFFSETS.items():
     for field, offset in fields.items():
         code += f'CHECK(offsetof({name}, {field}) == {offset});\n'
-code += 'int main(void) { puts("Storage layout: six structures, 30 offsets, explicit runtime mutex delta and unchanged resource limits"); }\n'
+code += 'int main(void) { puts("Storage layout: six structures, exact field offsets, explicit runtime cache/FAT metadata and unchanged resource limits"); }\n'
 with tempfile.TemporaryDirectory(prefix='storage-layout-') as directory:
     binary = str(Path(directory) / 'test')
     subprocess.run(['cc', '-std=c11', '-Wall', '-Wextra', '-Werror',

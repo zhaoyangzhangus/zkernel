@@ -98,7 +98,7 @@ static bool netdb_copy_text(char *destination, size_t capacity,
     return true;
 }
 
-/* Read one whitespace-delimited token, stopping cleanly at comments. */
+/* 读取一个以空白字符分隔的词元；遇到注释时正常停止。 */
 static bool netdb_token(const char **cursor, char *token, size_t capacity) {
     const char *scan;
     size_t length = 0U;
@@ -644,9 +644,8 @@ static bool host_state_reverse(const void *address, socklen_t length,
     if (address == 0 || state == 0 ||
         (family == AF_INET && length != sizeof(struct in_addr)) ||
         (family == AF_INET6 && length != sizeof(struct in6_addr))) return false;
-    /* The non-reentrant API returns pointers into g_host_state.  Copy the
-     * caller's address before resetting that state so gethostbyaddr() can
-     * safely consume its own previous result. */
+    /* 非可重入 API 返回指向 g_host_state 的指针。重置该状态前先复制调用方地址，确保
+     * gethostbyaddr() 能安全地读取自己上次返回的结果。 */
     memcpy(address_copy, address, (size_t)(family == AF_INET ?
                                            sizeof(struct in_addr) :
                                            sizeof(struct in6_addr)));

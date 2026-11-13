@@ -62,7 +62,7 @@ void vm_unpin_user_page(page_t *page) {
     anon_page_unpin(page);
 }
 
-/* REFACTOR_P6_SHARED_OBJECT_OWNER: shared-object creation and direct access. */
+/* REFACTOR_P6_SHARED_OBJECT_OWNER：共享对象创建和直接访问。 */
 
 kstatus_t vm_object_create_shared(size_t size, vm_object_t **out) {
     if (out == 0 || size == 0 || (size & (PAGE_SIZE - 1ULL)) != 0) {

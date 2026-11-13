@@ -1,4 +1,4 @@
-/* Phase 11 Linux personality runner for the real triangle probe. */
+/* 第 11 阶段 Linux personality 真实三角形探测运行程序。 */
 #include <arch/x86_64/cpu.h>
 #include <kernel/console.h>
 #include <kernel/elf_loader.h>

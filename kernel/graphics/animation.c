@@ -102,39 +102,38 @@ static void window_departure_damage(uint32_t index) {
         window_outer_height(view->height,view->flags)+(uint32_t)(dy<0?-dy:dy));
 }
 
-void window_animation_snapshot_locked(void) {
-    g_compositor_snapshot.animation_time=x86_read_tsc();
-    g_compositor_snapshot.animation_layers=0;
-    g_compositor_snapshot.animations=false;
+/* 退场槽位由动画模块维护；帧状态由捕获方统一汇总。 */
+uint64_t window_animation_layers_locked(void) {
+    uint64_t layers=0;
     for (uint32_t i=0;i<WINDOW_SERVER_MAX_WINDOWS;++i) {
-        if (!g_window_departures[i].active) continue;
-        g_compositor_snapshot.animation_layers |= 1ULL<<i;
-        g_compositor_snapshot.animations=true;
+        if (g_window_departures[i].active) layers |= 1ULL<<i;
     }
-    if (g_compositor_snapshot.animations) g_compositor_snapshot.drag_blit_valid=false;
+    return layers;
 }
 
-void window_animation_capture_locked(compositor_window_view_t *view) {
+/* 创建与首帧提交之间不显示空表面，也不提前消耗打开动画。 */
+bool window_content_ready_locked(const window_server_window_t *window) {
+    return window && (window->controls || window->present_sequence ||
+        window->surface_content_ready);
+}
+
+bool window_animation_capture_locked(compositor_window_view_t *view, uint64_t time) {
     window_server_window_t *window=view->reference;
     view->animation_progress=WINDOW_ANIMATION_FULL;
     view->animation_kind=window->animation_restore ? WINDOW_ANIMATION_RESTORE : 0;
     view->animation_dx=window->animation_dx;
     view->animation_dy=window->animation_dy;
     if (!window->animation_seen && !window->client_show_inactive &&
-        (window->controls || window->present_sequence || window->surface_content_ready) &&
+        window_content_ready_locked(window) &&
         g_window_server.composite_framebuffer!=g_window_server.framebuffer) {
         window->animation_seen=true;
         window->animation_start=x86_read_tsc();
         atomic_store_explicit(&g_window_animation_deadline,x86_read_tsc(),memory_order_release);
     }
-    if (!window->animation_start) return;
+    if (!window->animation_start) return false;
     view->animation_progress=window_animation_progress(window->animation_start,
-        g_compositor_snapshot.animation_time < window->animation_start ? window->animation_start :
-        g_compositor_snapshot.animation_time);
-    if (view->animation_progress<WINDOW_ANIMATION_FULL) {
-        g_compositor_snapshot.animations=true;
-        g_compositor_snapshot.drag_blit_valid=false;
-    }
+        time < window->animation_start ? window->animation_start : time);
+    return view->animation_progress<WINDOW_ANIMATION_FULL;
 }
 
 /* 只有合成所有者在两帧之间回收退场视图；销毁与槽位唤醒必须在窗口锁外。 */
@@ -185,23 +184,21 @@ void window_animation_tick(void) {
     window_unlock();
 }
 
-static void window_animation_span(const compositor_window_view_t *view,Rect span) {
-    Rect saved=g_compositor_snapshot.damage_bounds;
+static void window_animation_span(Rect damage, const compositor_window_view_t *view,Rect span) {
+    Rect saved=damage;
     if (span.x0<saved.x0) span.x0=saved.x0;
     if (span.y0<saved.y0) span.y0=saved.y0;
     if (span.x1>saved.x1) span.x1=saved.x1;
     if (span.y1>saved.y1) span.y1=saved.y1;
     if (rect_is_empty(span)) return;
-    g_compositor_snapshot.damage_bounds=span;
-    compositor_draw_window_locked(view);
-    g_compositor_snapshot.damage_bounds=saved;
+    compositor_draw_window_locked(span, view);
 }
 
 /* 合成器单所有者的有界条带暂存，仅供关闭淡出保留底图；不复制整张 Surface。 */
 static uint32_t g_window_fade_background[8192];
 
-static void compositor_animation_fade(const compositor_window_view_t *view) {
-    Rect saved=g_compositor_snapshot.damage_bounds,clip;
+static void compositor_animation_fade(Rect damage, const compositor_window_view_t *view) {
+    Rect saved=damage,clip;
     if (!rect_clip_to_extent(view->x,view->y,
             (int64_t)view->x+window_outer_width(view->width,view->flags),
             (int64_t)view->y+window_outer_height(view->height,view->flags),
@@ -223,8 +220,8 @@ static void compositor_animation_fade(const compositor_window_view_t *view) {
                 for (uint32_t x=0;x<width;++x)
                     g_window_fade_background[y*width+x]=g_window_server.composite_framebuffer[
                         (uint64_t)(top+y)*g_window_server.display_stride+left+x];
-            g_compositor_snapshot.damage_bounds=(Rect){left,top,left+(int32_t)width,top+(int32_t)height};
-            compositor_draw_window_locked(view);
+            Rect band={left,top,left+(int32_t)width,top+(int32_t)height};
+            compositor_draw_window_locked(band, view);
             for (uint32_t y=0;y<height;++y)
                 for (uint32_t x=0;x<width;++x) {
                     volatile uint32_t *pixel=g_window_server.composite_framebuffer+
@@ -236,11 +233,10 @@ static void compositor_animation_fade(const compositor_window_view_t *view) {
         }
         left+=(int32_t)width;
     }
-    g_compositor_snapshot.damage_bounds=saved;
 }
 
 /* 合成器以圆角展开/收拢揭示真实窗口内容；不重分配 Surface，也不向应用发送伪造的 resize。 */
-void compositor_animation_window(const compositor_window_view_t *view) {
+void compositor_animation_window(Rect damage, const compositor_window_view_t *view) {
     uint32_t progress=view->animation_progress;
     compositor_window_view_t restored;
     if (view->animation_kind==WINDOW_ANIMATION_RESTORE) {
@@ -249,9 +245,9 @@ void compositor_animation_window(const compositor_window_view_t *view) {
         restored.y+=(int32_t)((int64_t)view->animation_dy*(WINDOW_ANIMATION_FULL-progress)/WINDOW_ANIMATION_FULL);
         view=&restored;
     }
-    if (progress>=WINDOW_ANIMATION_FULL) {compositor_draw_window_locked(view);return;}
+    if (progress>=WINDOW_ANIMATION_FULL) {compositor_draw_window_locked(damage, view);return;}
     if (!progress) return;
-    if (view->animation_kind==WINDOW_ANIMATION_CLOSE) {compositor_animation_fade(view);return;}
+    if (view->animation_kind==WINDOW_ANIMATION_CLOSE) {compositor_animation_fade(damage, view);return;}
     uint32_t outer_w=window_outer_width(view->width,view->flags);
     uint32_t outer_h=window_outer_height(view->height,view->flags);
     uint32_t w=(uint32_t)((uint64_t)outer_w*progress/WINDOW_ANIMATION_FULL);
@@ -268,23 +264,22 @@ void compositor_animation_window(const compositor_window_view_t *view) {
             end=clip.y1<y+h-radius?clip.y1:(int32_t)(y+h-radius);
         Rect span;
         if (rect_clip_to_extent(x+inset,row,x+w-inset,end,g_window_server.display_width,
-                g_window_server.display_height,&span)) window_animation_span(view,span);
+                g_window_server.display_height,&span)) window_animation_span(damage, view,span);
         row=end;
     }
 }
 
-void compositor_animation_layers(void) {
-    uint64_t layers=g_compositor_snapshot.animation_layers;
+void compositor_animation_layers(Rect damage, uint64_t layers, uint64_t time) {
     while (layers) {
         uint32_t index=(uint32_t)__builtin_ctzll(layers);
         layers &= layers-1U;
         compositor_window_view_t view=g_window_departures[index].view;
-        uint32_t elapsed=window_animation_progress(g_window_departures[index].start,g_compositor_snapshot.animation_time);
+        uint32_t elapsed=window_animation_progress(g_window_departures[index].start,time);
         view.animation_progress=(uint32_t)((uint64_t)view.animation_progress*(WINDOW_ANIMATION_FULL-elapsed)/WINDOW_ANIMATION_FULL);
         if (view.animation_kind==WINDOW_ANIMATION_MINIMIZE) {
             view.x+=(int32_t)((int64_t)g_window_departures[index].target_dx*elapsed/WINDOW_ANIMATION_FULL);
             view.y+=(int32_t)((int64_t)g_window_departures[index].target_dy*elapsed/WINDOW_ANIMATION_FULL);
         }
-        compositor_animation_window(&view);
+        compositor_animation_window(damage, &view);
     }
 }

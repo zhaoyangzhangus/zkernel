@@ -65,8 +65,8 @@ def snapshot():
                         sources.append('%#x:%s' % (queue,symbol))
                     text+=' queues='+str(sources)
                 print(text)
-                # A blocked syscall keeps its entry frame at the kernel stack top.
-                # Read it without changing CR3 or the stopped CPU's registers.
+                # 阻塞的系统调用会将入口栈帧保留在内核栈顶。
+                # 读取时不能更改 CR3 或已暂停 CPU 的寄存器。
                 try:
                     frame=cast(int(thread['kernel_stack_top'])-gdb.lookup_type('arch_trap_frame_t').sizeof,'arch_trap_frame_t')
                     if (int(frame['cs']) == 0x23 and int(thread['state']) == 1

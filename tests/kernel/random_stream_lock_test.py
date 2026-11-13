@@ -47,7 +47,7 @@ static kstatus_t copy_to_user(void *p,const void *s,size_t n) {
  }
  memcpy(p,s,n);return K_OK;
 }
-/* Independent scalar oracle preserving the pre-refactor stream/carry rule. */
+/* 独立的标量基准，保留重构前的流/进位规则。 */
 static uint32_t rol(uint32_t x,unsigned n) { return (x<<n)|(x>>(32-n)); }
 static void quarter(uint32_t *w,unsigned a,unsigned b,unsigned c,unsigned d) {
  w[a]+=w[b];w[d]=rol(w[d]^w[a],16);w[c]+=w[d];w[b]=rol(w[b]^w[c],12);

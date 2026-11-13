@@ -46,7 +46,7 @@ int main(void) {
     assert(g_syscall_delays[1].number==232 && g_syscall_delays[0].number==202);
     syscall_record_delay(174,175,202,0x4000,128,0,200000000);
     assert(g_syscall_delays[2].tid==175 && g_syscall_delays[0].tid==126);
-    /* Native fork must never alias Linux lstat's syscall number 6. */
+    /* 原生 fork 绝不能与 Linux lstat 的系统调用编号 6 重叠。 */
     syscall_record_delay(125,148,(1ULL<<63)|6,0,0,380,285000000);
     syscall_record_delay(125,148,6,0,0,-2,11000000);
     assert(g_syscall_delays[3].number==((1ULL<<63)|6));

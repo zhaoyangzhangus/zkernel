@@ -117,7 +117,7 @@ static void section(unsigned s,uint64_t base,uint64_t n) {
  assert(g_sections[s].pages);
 }
 int main(void) {
- /* A maximum Buddy block in the last section: no per-page section scan. */
+ /* 最后一个段中的最大 Buddy 块：无需逐页扫描段。 */
  g_section_count=64;
  for(unsigned s=0;s<63;++s)section(s,1+s*2,1);
  section(63,262144,262144);
@@ -129,7 +129,7 @@ int main(void) {
  printf("512-page unpinned group: section inspections 32768 -> 64\n");
  for(unsigned order=0;order<4;++order)assert(check_prepare(262144,order)==64);
  printf("512-page group preparation: section inspections 36864 -> 64\n");
- /* Pin each head/tail position individually, then all slots simultaneously. */
+ /* 分别固定每个头部/尾部位置，然后同时固定所有槽位。 */
  for(unsigned i=0;i<512;++i) {
   g_sections[63].pages[i].flags|=PAGE_PINNED;
   check_pinned(262144,3);
@@ -141,15 +141,15 @@ int main(void) {
  assert(page_for_address(262144*PAGE_SIZE)==g_sections[63].pages);
  assert(!page_for_address(262144*PAGE_SIZE+1));assert(!page_for_pfn(UINT64_MAX));
  release();
- /* Adjacent physical ranges, disjoint metadata, deliberately unordered. */
+ /* 物理范围相邻、元数据互不重叠，并有意打乱顺序。 */
  g_section_count=3;section(0,108,8);section(1,100,8);section(2,119,13);
  for(unsigned o=0;o<=6;++o)for(unsigned f=0;f<2;++f)
   check(&g_sections[1].pages[3],o,f);
  release();
- /* Random non-overlapping layouts include holes and crossing boundaries. */
+ /* 随机且互不重叠的布局包含空洞和跨界情况。 */
  unsigned random=0x12345678;
- /* Allocated Buddy blocks have no physical holes; metadata arrays can still
-  * be split inside a slot. Preserve its head across every such split. */
+ /* 已分配的 Buddy 块在物理内存中没有空洞；元数据数组仍可能在槽位内部拆分。
+  * 每次拆分都要保留其头部。 */
  for(unsigned trial=0;trial<1000;++trial) {
   g_section_count=8;uint64_t base=1000;
   for(unsigned s=0;s<8;++s) {

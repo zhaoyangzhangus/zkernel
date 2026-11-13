@@ -33,7 +33,7 @@ void sched_preempt_enable(void) {assert(depth);--depth;}
 void *queue_copy(void *out,const void *in,size_t n) {
     assert(depth);copied+=n;memcpy(out,in,n);
     if(inject_fault){
-        /* Corrupt one push only, so the pop cannot undo the fault. */
+        /* 只破坏一次 push，这样 pop 就不能抵消该错误。 */
         ((unsigned char *)out)[inject_fault==1 ? n-1 : 0]^=1;
         inject_fault=0;
     }
@@ -82,8 +82,8 @@ int main(void) {
     assert(e1000_packet_queue_self_test());
     assert(allocations==4 && allocations==releases && !owned_queue);
     puts("RX boot self-test: allocation failure, balanced cleanup, payload/metadata corruption and clean rerun passed");
-    /* Reuse every slot after a full-sized packet, then shrink the payload.
-     * Verify exact copy bounds: no stale queue tail escapes into the output. */
+    /* 收到满尺寸数据包后重用每个槽位，再缩短负载。
+     * 验证精确复制边界：队列中残留的尾部数据不能泄露到输出中。 */
     e1000_queue_init(&queue);
     size_t header=offsetof(e1000_rx_packet_t,payload);
     for(unsigned length=0;length<=SOCKET_MAX_PAYLOAD;++length) {
@@ -105,8 +105,8 @@ int main(void) {
     for(unsigned length=0;length<=SOCKET_MAX_PAYLOAD;++length) {
         e1000_rx_packet_t p=packet(length),out;
         p.payload_length=length;
-        /* Exact-sized allocation lets ASan catch any speculative tail read.
-         * Metadata's inline payload deliberately differs from the DMA bytes. */
+        /* 精确大小的分配可让 ASan 捕获任何推测性尾部读取。
+         * 元数据中的内嵌负载与 DMA 字节有意设置为不同内容。 */
         uint8_t *dma=length ? malloc(length) : 0;
         if(length){assert(dma);memset(dma,0x5a,length);}
         memset(&out,0xa5,sizeof(out));

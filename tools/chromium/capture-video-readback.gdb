@@ -1,5 +1,5 @@
-# Capture borrowed decoder output, before Chrome's NV12 copy or composition.
-# Offset is specific to the verified post-SDK Chrome executable below.
+# 在 Chrome 执行 NV12 复制或合成前，捕获借用的解码器输出。
+# 此偏移仅适用于下方已验证的 SDK 后 Chrome 可执行文件。
 set pagination off
 set confirm off
 python
@@ -70,7 +70,7 @@ def completed():
 
 class EncodedPacket(gdb.Breakpoint):
     def __init__(self):
-        # Decode+0x23b: immediately before send_(decoder,data,size,pts).
+        # Decode+0x23b：紧邻 send_(decoder,data,size,pts) 调用之前。
         super().__init__('*0x45948a7b',type=gdb.BP_HARDWARE_BREAKPOINT)
         self.count=0
         self.total=0
@@ -108,7 +108,7 @@ class EncodedPacket(gdb.Breakpoint):
 
 class DecodedFrame(gdb.Breakpoint):
     def __init__(self):
-        # Drain+0x5a: receive_ has returned, decoded is still at rbp-0x60.
+        # Drain+0x5a：receive_ 已返回，decoded 仍位于 rbp-0x60。
         super().__init__('*0x4594840a', type=gdb.BP_HARDWARE_BREAKPOINT)
         self.count = 0
 
@@ -138,8 +138,7 @@ class DecodedFrame(gdb.Breakpoint):
             print('MAPPED_COPY_MATCH index=%d equal=%s'%(self.count,same),flush=True)
             if same: mapped_matches+=1
             mapped_pixels=None
-        # Lossless grayscale (Y) is sufficient to inspect white timestamp
-        # strokes against black; no conversion/compositor is involved.
+        # 无损灰度（Y）足以检查黑底上的白色时间戳笔画；不涉及色彩转换或合成器。
         path = destination / ('%s-%02d.pgm' % (capture_prefix,self.count))
         path.write_bytes(('P5\n%d %d\n255\n' % (width,rows)).encode()+pixels)
         print('DECODED_FRAME index=%d pts_us=%d size=%dx%d stride=%d path=%s' %

@@ -13,8 +13,8 @@ except RuntimeError as error:
 end
 target remote /tmp/system-keys.sock
 python
-# Four hardware addresses; first browser present can include earlier damage.
-# This localizes stages, not exact UI latency: hardware stops perturb timing.
+# 使用四个硬件地址；浏览器首次呈现的内容可能包含此前的损伤区域。
+# 本脚本用于定位阶段，不能测得精确 UI 延迟：硬件断点会影响计时。
 started=None
 owner=None
 browser_pid=None
@@ -35,7 +35,7 @@ class Input(gdb.Breakpoint):
         global started
         if started is not None or int(gdb.parse_and_eval('$rdi'))==0:return False
         event=gdb.parse_and_eval('(input_event_t*)$rdi').dereference()
-        # USB HID keyboard T usage, not an evdev code. No text is inspected.
+        # 这是 USB HID 键盘 T 用法值，不是 evdev 代码。不会检查任何文本。
         if int(event['type'])!=1 or int(event['code'])!=0x17 or int(event['value'])!=1:return False
         started=time.monotonic()
         print('INPUT_CORE_T_PRESS',flush=True)

@@ -11,7 +11,7 @@
 #define OS_PIPE_BUF            4096U
 #define OS_PIPE_DEFAULT_SIZE   65536U
 
-/* Result bits returned by WAIT_ONE/WAIT_MANY for a pipe endpoint. */
+/* WAIT_ONE/WAIT_MANY 为管道端点返回的结果位。 */
 #define OS_PIPE_WAIT_READABLE  (1U << 0)
 #define OS_PIPE_WAIT_HUP       (1U << 1)
 #define OS_PIPE_WAIT_WRITABLE  (1U << 2)

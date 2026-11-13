@@ -77,21 +77,18 @@ void *phys_to_direct(paddr_t pa);
 paddr_t direct_to_phys(const void *va);
 
 void *kmalloc(size_t size, uint32_t flags);
-/* Exclusively owned large allocation only. Grow within its existing physical
- * block without allocation/copy; initialize new bytes like kmalloc and move
- * the trailing guard. False leaves the allocation unchanged (also on shrink
- * or for small allocations). The pointer must be a live kmalloc allocation. */
+/* 仅适用于独占的大块分配。在现有物理块内扩展，不分配或复制内存；新增字节按 kmalloc 的方式
+ * 初始化，并移动尾部保护区。返回 false 时分配保持不变（收缩或小块分配也如此）。指针必须指向
+ * 有效的 kmalloc 分配。 */
 bool kmalloc_try_grow(void *pointer, size_t size);
-/* Best-effort interrupt-safe small allocation from existing global slabs.
- * Never initializes, waits for a lock, touches CPU magazines or allocates pages.
- * NULL also means cache contention/exhaustion. Release in thread context. */
+/* 尽力从现有全局 slab 中执行中断安全的小块分配。绝不初始化、等待锁、访问 CPU 缓存或分配页面。
+ * 返回 NULL 也表示缓存竞争或耗尽。应在线程上下文中释放。 */
 void *kmalloc_try_cached(size_t size, uint32_t flags);
 void *kzalloc(size_t size, uint32_t flags);
 void kfree(void *ptr);
 void *vmalloc(size_t size);
 void vfree(void *ptr);
-/* Map caller-owned physical pages into the kernel vmalloc arena.  The
- * mapping does not take ownership of the pages; vfree only tears down the
- * virtual mapping for this form. */
+/* 将调用方拥有的物理页面映射到内核 vmalloc 区域。映射不会取得页面所有权；此形式下，vfree 只会
+ * 拆除虚拟映射。 */
 kstatus_t vmalloc_map_pages(page_t *const *pages, uint32_t page_count,
                             uint32_t cache_mode, void **out);

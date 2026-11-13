@@ -17,8 +17,7 @@ make = (ROOT / 'makefile').read_text()
 assert '.globl user_init_service' in assembly
 assert '\nuser_init_service:' in assembly
 assert '$$NF == "user_init_service"' in make
-# These offsets were measured before the namespace migration. They are ABI,
-# not regenerated expectations derived from the structure under test.
+# 这些偏移量在命名空间迁移前测量，属于 ABI；不是根据被测结构重新生成的预期值。
 OFFSETS = {
     'Magic': 0, 'Version': 8, 'Size': 12, 'Flags': 16,
     'KernelPhysicalBase': 24, 'KernelVirtualBase': 32, 'KernelSize': 40,

@@ -146,8 +146,7 @@ with tempfile.TemporaryDirectory(prefix='net-rx-init-') as directory:
                             preexec_fn=lambda: resource.setrlimit(resource.RLIMIT_CORE, (0, 0)))
     assert result.returncode == -signal.SIGABRT and 'zeroed==' in result.stderr, result
     print('Negative control rejected: clearing the full receive payload exceeds initialization budget')
-    # Preserve copy sizes but corrupt a metadata field: byte-count checks alone
-    # must not let an address regression pass the receive optimization gate.
+    # 保留复制大小但破坏一个元数据字段：仅检查字节数不能让地址回归通过接收优化门禁。
     corrupt = program.replace('packet.source_address = view.source_address;',
                               'packet.source_address = view.destination_address;')
     assert corrupt != program

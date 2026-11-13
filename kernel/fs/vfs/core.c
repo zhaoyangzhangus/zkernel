@@ -1894,8 +1894,7 @@ kstatus_t vfs_open_kernel(const char *path, uint32_t flags, uint32_t mode,
         if (mount_status != K_OK) return mount_status;
     }
     /* 根 FAT 挂载覆盖磁盘路径，但其下精确匹配的内存后端
-     * /native remain valid namespace entries.  Look them up when the
-     * mounted filesystem did not provide the requested path. */
+     * /native 仍是有效的命名空间条目。挂载的文件系统未提供请求路径时，再从此处查找。 */
     if (vnode == 0) {
         vfs_lock();
         vnode = vfs_find_node_locked(path);
@@ -1912,7 +1911,7 @@ kstatus_t vfs_open_kernel(const char *path, uint32_t flags, uint32_t mode,
         }
         vfs_unlock();
     }
-    /* /tmp is an implicit volatile directory so that callers can create
+    /* /tmp 是隐式易失目录，调用方可借此创建临时文件，而无需持久文件系统。 */
     * 可提供没有根映像持久目录项的临时文件。首次以 O_DIRECTORY 打开时创建其目录 vnode；
     * 否则 stat 和父目录检查会认为它存在，而 open("/tmp") 却返回 ENOENT。 */
     if (vnode == 0 && (flags & VFS_OPEN_DIRECTORY) != 0U &&

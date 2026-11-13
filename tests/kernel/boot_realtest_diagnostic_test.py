@@ -14,7 +14,7 @@ decoded = ''.join(bytes(char,'ascii').decode('unicode_escape') for char in chars
 assert decoded == '\\log\\realtest.log', decoded
 assert "'log\\realtest.log'" in (ROOT / 'tools/collect-realtest-log.ps1').read_text()
 for source in (realtest,boot):
-    # Persisted firmware identity stays compatible while the log path changes.
+    # 固件持久化身份保持兼容，同时调整日志路径。
     assert '0x4C495445U, 0x4F53U, 0x5254U' in source
     assert "'L', 'i', 't', 'e', 'O', 'S', 'R', 'e', 'a', 'l', 'T', 'e', 's', 't'" in source
 helpers = realtest[realtest.index('static void append_text('):realtest.index('bool realtest_enabled(')]

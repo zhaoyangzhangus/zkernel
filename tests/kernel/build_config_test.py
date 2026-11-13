@@ -41,7 +41,7 @@ def inspect_recipe(values, nvidia):
         assert macros['OS_NVIDIA_PHASE5'] == '1'
     else:
         assert 'OS_NVIDIA_PHASE5' not in macros
-    # Exercise the actual -D arguments in the preprocessor, not only strings.
+    # 在预处理器中实际测试 -D 参数，而不只是检查字符串。
     checks = '\n'.join(f'#if OS_{name} != {value}\n#error {name}\n#endif'
                        for name, value in values.items())
     checks += '\n#if OS_KERNEL_BUILD != 1\n#error kernel_mode\n#endif\n'

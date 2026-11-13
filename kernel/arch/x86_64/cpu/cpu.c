@@ -166,6 +166,23 @@ uint32_t x86_cpu_preempt_disable_count(uint32_t cpu_index) {
 }
 
 
+/* 已知虚拟机通过通用频率叶报告虚拟 TSC 的 kHz；不把宿主核心频率当作 TSC。 */
+static uint64_t cpu_tsc_hypervisor_hz(uint32_t maximum_basic) {
+    uint32_t eax, ebx, ecx, edx;
+    if (maximum_basic < 1U) return 0U;
+    cpuid(1U, 0U, &eax, &ebx, &ecx, &edx);
+    if ((ecx & (1U << 31)) == 0U) return 0U;
+    cpuid(0x40000000U, 0U, &eax, &ebx, &ecx, &edx);
+    if (eax < 0x40000010U || eax >= 0x40000100U) return 0U;
+    /* 厂商签名依次为 EBX、ECX、EDX：KVM、VMware 和 QEMU TCG。 */
+    bool known = (ebx == 0x4b4d564bU && ecx == 0x564b4d56U && edx == 0x0000004dU) ||
+        (ebx == 0x61774d56U && ecx == 0x4d566572U && edx == 0x65726177U) ||
+        (ebx == 0x54474354U && ecx == 0x43544743U && edx == 0x47435447U);
+    if (!known) return 0U;
+    cpuid(0x40000010U, 0U, &eax, &ebx, &ecx, &edx);
+    return eax >= 10000U && eax <= 10000000U ? (uint64_t)eax * 1000ULL : 0U;
+}
+
 static uint8_t cpu_pit_read(uint16_t port) {
     uint8_t value;
     __asm__ volatile ("inb %w1, %0" : "=a"(value) : "d"(port));
@@ -234,6 +251,8 @@ void x86_cpu_detect_features(void) {
                 ((uint64_t)crystal_hz * numerator) / denominator;
         }
     }
+    if (x86_boot_cpu_features.tsc_hz == 0)
+        x86_boot_cpu_features.tsc_hz = cpu_tsc_hypervisor_hz(maximum_basic);
     if (x86_boot_cpu_features.tsc_hz == 0 && maximum_basic >= 0x16U) {
         uint32_t base_mhz;
         cpuid(0x16U, 0U, &base_mhz, &ebx, &ecx, &edx);

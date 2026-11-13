@@ -7,24 +7,11 @@
 /* REFACTOR_FS_VFS_USER_API_OWNER：用户指针到内核路径的适配层。 */
 static bool vfs_copy_path_from_user(const char __user *source,
                                     char destination[VFS_PATH_LIMIT]) {
-    if (source == 0) return false;
-    for (size_t i = 0; i + 1U < VFS_PATH_LIMIT;) {
-        uintptr_t address = (uintptr_t)source;
-        if (i > UINTPTR_MAX - address) return false;
-        address += i;
-        /* 绝不跨页复制：当前页中的终止 NUL 不应要求下一用户页也可访问。 */
-        size_t chunk = PAGE_SIZE - (address & (PAGE_SIZE - 1U));
-        size_t remaining = VFS_PATH_LIMIT - 1U - i;
-        if (chunk > remaining) chunk = remaining;
-        if (copy_from_user(destination + i, (const void __user *)address,
-                           chunk) != K_OK) return false;
-        for (size_t j = 0; j < chunk; ++j) {
-            if (destination[i + j] == 0) return i + j != 0;
-        }
-        i += chunk;
-    }
+    /* 保留路径的非空和长度限制，实际用户访存统一使用按页复制。 */
+    kstatus_t status = copy_string_from_user(destination, source,
+                                             VFS_PATH_LIMIT - 1U);
     destination[VFS_PATH_LIMIT - 1U] = 0;
-    return false;
+    return status == K_OK && destination[0] != 0;
 }
 
 /* 相对路径使用一次工作目录快照，按真实路径顺序展开链接及“..”。 */

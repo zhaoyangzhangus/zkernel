@@ -17,7 +17,7 @@
 
 #define MAP_FAILED ((void *)-1)
 
-/* Linux memfd compatibility used by V8's shared wasm mapping path. */
+/* V8 共享 wasm 映射路径使用的 Linux memfd 兼容接口。 */
 #ifndef MFD_CLOEXEC
 #define MFD_CLOEXEC 0x0001U
 #endif

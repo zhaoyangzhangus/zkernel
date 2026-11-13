@@ -49,10 +49,8 @@ typedef struct nv_gpu_device {
 } nv_gpu_device_t;
 
 /*
- * Copy of the firmware framebuffer description used by the NVIDIA OS ABI.
- * The vendor RM asks the host OS for this information while deciding whether
- * BAR1 contains a client-owned UEFI console.  Keep only validated scalar
- * values here; the RM never receives a boot-info pointer.
+ * NVIDIA OS ABI 使用的固件帧缓冲区描述副本。厂商 RM 会向宿主 OS 查询此信息，以确定 BAR1 是否
+ * 包含由客户端拥有的 UEFI 控制台。此处只保留经过验证的标量值；RM 永远不会收到引导信息指针。
  */
 typedef struct nv_rm_screen_info {
     uint64_t physical_base;

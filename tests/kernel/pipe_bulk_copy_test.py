@@ -6,7 +6,7 @@ import tempfile
 root = Path(__file__).resolve().parents[2]
 source = (root/'kernel/ipc/pipe.c').read_text()
 begin = source.index('static void pipe_copy_in(')
-end = source.index('\nkstatus_t pipe_create(', begin)
+end = source.index('/* 在谓词内完成传输', begin)
 functions = source[begin:end]
 program = r'''
 #include <assert.h>

@@ -120,7 +120,7 @@ void object_notify_signaled(void *p) {
  assert(atomic_load(&e->object.refs.value)>=1);++notifications;
 }
 static void close_peer_during_wake(wait_queue_t *q) {
- /* Last external reference disappears between data publication and notify. */
+ /* 最后一个外部引用在发布数据和发送通知之间消失。 */
  if(q==&live_state->read_waitq) {
   assert(atomic_load(&reader->object.refs.value)==2);
   object_put(reader);reader=0;
@@ -141,12 +141,12 @@ static void make_pipe(void) {
 }
 static void release_pair(void) { object_put(reader);object_put(writer);reader=writer=0;live_state=0; }
 static void arrive(void *context) {
- assert(context==reader->state);uint8_t byte=42;uint64_t bytes=0;
+ assert(((pipe_read_context_t *)context)->state==reader->state);uint8_t byte=42;uint64_t bytes=0;
  assert(pipe_write(writer,&byte,1,0,&bytes)==K_OK && bytes==1);
 }
 static void steal(void *context) {
- assert(context==reader->state);uint8_t byte=0;uint64_t bytes=0;
- assert(pipe_read(reader,&byte,1,0,&bytes)==K_OK && bytes==1 && byte==42);
+ assert(((pipe_read_context_t *)context)->state==reader->state);uint8_t byte=0;uint64_t bytes=0;
+ assert(pipe_read(reader,&byte,1,0,&bytes)==K_ETIMEDOUT && !bytes);
 }
 static void free_one(void *context) {
  pipe_write_context_t *w=context;assert(w->state==reader->state);
@@ -155,17 +155,17 @@ static void free_one(void *context) {
 }
 static void take_free_space(void *context) {
  pipe_write_context_t *w=context;assert(w->state==reader->state);
- uint64_t bytes;assert(pipe_write(writer,input,OS_PIPE_BUF,0,&bytes)==K_OK && bytes==OS_PIPE_BUF);
+ uint64_t bytes;assert(pipe_write(writer,input,OS_PIPE_BUF,0,&bytes)==K_ETIMEDOUT && !bytes);
 }
 static void close_writer(void *context) {
- assert(context==reader->state);object_put(writer);writer=0;
+ assert(((pipe_read_context_t *)context)->state==reader->state);object_put(writer);writer=0;
 }
 static void close_reader(void *context) {
  pipe_write_context_t *w=context;assert(w->state==reader->state);
  object_put(reader);reader=0;
 }
 static void shutdown_local_reader(void *context) {
- assert(context==reader->state);assert(pipe_shutdown(reader)==K_OK);
+ assert(((pipe_read_context_t *)context)->state==reader->state);assert(pipe_shutdown(reader)==K_OK);
 }
 static void shutdown_local_writer(void *context) {
  pipe_write_context_t *w=context;assert(w->state==writer->state);
@@ -199,8 +199,8 @@ int main(void) {
   assert(allocations==frees);
  }
  fail_at=0;make_pipe();uint64_t bytes=99;
- // Only empty -> readable needs a direct-reader wake; poll notifications
- // must still be emitted for every write, including a nonempty ring.
+ // 只有从空变为可读时才需要直接唤醒读取者；每次写入都必须发送 poll 通知，
+ // 包括环形队列非空时。
  unsigned transition_wakes=read_wakes,transition_notify=notifications;
  for(unsigned i=0;i<1000;++i) {
   assert(pipe_write(writer,input,1,0,&bytes)==K_OK && bytes==1);
@@ -226,26 +226,26 @@ int main(void) {
  size_t old_count=reader->state->count;
  assert(pipe_write(writer,input,OS_PIPE_BUF,0,&bytes)==K_ETIMEDOUT && !bytes);
  assert(reader->state->count==old_count);
- before_wait=free_one;
+ before_wait=free_one;start=locks;
  assert(pipe_write(writer,input,OS_PIPE_BUF,123,&bytes)==K_OK && bytes==OS_PIPE_BUF);
- assert(waits==before+1 && reader->state->count==OS_PIPE_DEFAULT_SIZE);
+ assert(waits==before+1 && locks==start+3 && reader->state->count==OS_PIPE_DEFAULT_SIZE);
  assert(pipe_read(reader,output,1,0,&bytes)==K_OK && bytes==1);
  assert(pipe_write(writer,input,OS_PIPE_DEFAULT_SIZE+1,0,&bytes)==K_OK && bytes==1);
  assert(pipe_read(reader,output,sizeof(output),0,&bytes)==K_OK && bytes==OS_PIPE_DEFAULT_SIZE);
  before=waits;start=locks;
  assert(pipe_read(reader,output,1,0,&bytes)==K_ETIMEDOUT && !bytes);
  assert(waits==before && locks==start+1);
- before_wait=arrive;
+ before_wait=arrive;start=locks;
  assert(pipe_read(reader,output,1,123,&bytes)==K_OK && bytes==1 && output[0]==42);
- assert(waits==before+1);
+ assert(waits==before+1 && locks==start+3);
  before_wait=arrive;after_ready=steal;
- assert(pipe_read(reader,output,1,123,&bytes)==K_ETIMEDOUT && !bytes);
- assert(waits==before+3);
- // A competing atomic writer consumes newly available space before copying.
+ assert(pipe_read(reader,output,1,123,&bytes)==K_OK && bytes==1 && output[0]==42);
+ assert(waits==before+2);
+ // 谓词已完成原子写入，竞争者不能抢走刚释放的空间。
  assert(pipe_write(writer,input,OS_PIPE_DEFAULT_SIZE-OS_PIPE_BUF+1,0,&bytes)==K_OK);
  before_wait=free_one;after_ready=take_free_space;before=waits;
- assert(pipe_write(writer,input,OS_PIPE_BUF,123,&bytes)==K_ETIMEDOUT && !bytes);
- assert(waits==before+2 && reader->state->count==OS_PIPE_DEFAULT_SIZE);
+ assert(pipe_write(writer,input,OS_PIPE_BUF,123,&bytes)==K_OK && bytes==OS_PIPE_BUF);
+ assert(waits==before+1 && reader->state->count==OS_PIPE_DEFAULT_SIZE);
  release_pair();
  make_pipe();before_wait=close_writer;
  unsigned reads=read_wakes,writes=write_wakes;
@@ -260,7 +260,7 @@ int main(void) {
  assert(read_wakes==reads && write_wakes==writes+1);
  assert(pipe_wait_value(writer)&PIPE_WAIT_ERROR);object_put(writer);writer=0;
  assert(read_wakes==reads+1 && write_wakes==writes+1);
- // Endpoint references, EOF after draining and ordinary mixed FIFO I/O.
+ // 端点引用、排空后的 EOF，以及普通的混合 FIFO I/O。
  make_pipe();object_get(writer);object_put(writer);
  assert(writer->state->writers==1);
  unsigned rng=7;size_t count=0;
@@ -296,7 +296,7 @@ int main(void) {
  assert(!memcmp(output,fifo,count));
  assert(pipe_read(reader,output,1,0,&bytes)==K_OK && !bytes);
  object_put(reader);reader=0;
- // Pinning before wake must keep either peer alive through the notification.
+ // 唤醒前先固定引用，确保通知期间任一对端都保持有效。
  make_pipe();unsigned notified=notifications;close_on_wake=true;
  assert(pipe_write(writer,input,1,0,&bytes)==K_OK && bytes==1 && !reader);
  assert(notifications==notified+2 && writer->state->readers==0);
@@ -330,12 +330,12 @@ int main(void) {
  for(unsigned i=0;i<4;++i) {assert(!pthread_join(producers[i],0));assert(received[i]==1000);}
  assert(reader->state->count==0 && atomic_load(&writer->object.refs.value)==1);
  release_pair();
- // Nested peer destruction must not release the outer destructor's storage.
+ // 嵌套销毁对端时，不得释放外层析构函数使用的存储。
  make_pipe();close_on_wake=true;
  object_put(reader);reader=0;
  assert(!writer && !close_on_wake && allocations==frees);live_state=0;
- // Concurrent last-reference drops must broadcast once per direction and
- // release the shared ring exactly once, including nested peer destruction.
+ // 并发释放最后一个引用时，每个方向只能广播一次，并且共享环形队列只能释放一次，
+ // 包括嵌套销毁对端的情况。
  for(unsigned cycle=0;cycle<2000;++cycle) {
   make_pipe();reads=read_wakes;writes=write_wakes;
   atomic_store(&destroy_ready,0);atomic_store(&destroy_go,false);
@@ -387,7 +387,7 @@ static void send_fragment(unsigned n, unsigned fds) {
  linux_unix_channel_commit_write(&ancillary_channel,bytes);
 }
 static void ancillary_arrives_while_waiting(void *context) {
- assert(context==reader->state);
+ assert(((pipe_read_context_t *)context)->state==reader->state);
  send_fragment(3,0);send_fragment(4,1);send_fragment(2,2);
 }
 static size_t invalid_limit(void *context,size_t available) {
@@ -397,8 +397,8 @@ static void ancillary_boundary_tests(void) {
  uint64_t bytes;linux_unix_ancillary_record_t record={0};
  memset(&ancillary_channel,0,sizeof(ancillary_channel));
  spinlock_init(&ancillary_channel.lock);make_pipe();
- /* The old pre-wait snapshot has no records and allows all nine bytes.
-  * Arrival while the reader sleeps must not make it consume/close both FDs. */
+ /* 旧的等待前快照没有记录，并允许全部九个字节。
+  * 读取者休眠时发生数据到达，不得导致两个文件描述符都被读取或关闭。 */
  assert(linux_unix_channel_read_limit(&ancillary_channel,9)==9);
  before_wait=ancillary_arrives_while_waiting;
  assert(pipe_read_limited(reader,output,9,123,&bytes,
@@ -441,18 +441,18 @@ with tempfile.TemporaryDirectory(prefix='liteos-pipe-io-') as directory:
                    input=actual, text=True, check=True)
         return subprocess.run([binary],capture_output=True,text=True,timeout=60)
     result=run(code);assert result.returncode==0,result.stderr;print(result.stdout.strip())
-    negative=code.replace('size_t bounded = limit(context, amount);',
-                          'size_t bounded = amount; (void)context;')
+    negative=code.replace('size_t bounded = read->limit(read->limit_context, amount);',
+                          'size_t bounded = amount;')
     assert negative!=code
     result=run(negative);assert result.returncode!=0,result.stderr
     print('Negative control rejected: stale pre-wait boundary loses ancillary FDs')
-    negative=code.replace('if (wake_readers) (void)wake_all(&state->read_waitq);',
-                          '(void)wake_all(&state->read_waitq); (void)wake_readers;')
+    negative=code.replace('if (write.wake_readers) (void)wake_all(&write.state->read_waitq);',
+                          '(void)wake_all(&write.state->read_waitq);')
     assert negative!=code
     result=run(negative);assert result.returncode!=0,result.stderr
     print('Negative control rejected: redundant direct-reader wakes on nonempty writes')
-    negative=code.replace('if (wake_readers) (void)wake_all(&state->read_waitq);',
-                          '(void)wake_readers;')
+    negative=code.replace('if (write.wake_readers) (void)wake_all(&write.state->read_waitq);',
+                          '(void)write.wake_readers;')
     result=run(negative);assert result.returncode!=0,result.stderr
     print('Negative control rejected: missing empty-to-readable wake')
     negative=code.replace('    memset(state, 0, __builtin_offsetof(pipe_state_t, endpoints));','')

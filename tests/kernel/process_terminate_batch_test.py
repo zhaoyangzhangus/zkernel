@@ -56,7 +56,7 @@ int main(void) {
   for(unsigned i=0;i<n+2;++i) {
    threads[i]=(thread_t){.tid=i+1,.refs=1};atomic_init(&threads[i].state,i==n+1?THREAD_DEAD:0);
   }
-  // Caller and an already-dead sibling remain in every scan but are never pinned.
+  // 调用者和已退出的同级进程仍会出现在每次扫描中，但绝不会被固定引用。
   process.threads.next=&threads[n].process_node;
   list_head_t *tail=&threads[n].process_node;
   for(unsigned i=0;i<n;++i) {
@@ -71,7 +71,7 @@ int main(void) {
   if(!detach)assert(visits==(n+2)*locks);
   ++cases;
  }
- // Highest representable ID is processed once, without overflowing the cursor.
+ // 可表示的最大 ID 只处理一次，游标不会溢出。
  detach=false;held=locks=pins=peak=visits=terminated=0;last=0;
  threads[0]=(thread_t){.tid=UINT64_MAX,.refs=1};atomic_init(&threads[0].state,0);
  process.threads.next=&threads[0].process_node;threads[0].process_node.next=&process.threads;

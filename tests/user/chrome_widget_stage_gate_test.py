@@ -44,15 +44,15 @@ with tempfile.TemporaryDirectory(prefix='system-widget-gate-') as directory:
     run('unrelated diagnostics\n', 1)
     assert subprocess.run(['bash', str(SCRIPT)], capture_output=True).returncode == 2
     assert subprocess.run(['bash', str(SCRIPT), str(log)+'.missing'], capture_output=True).returncode == 2
-    # A complete valid trace must return without waiting for the log's EOF.
+    # 完整且有效的跟踪记录必须立即返回，不得等待日志到达 EOF。
     fifo = Path(directory)/'live-log'
     os.mkfifo(fifo)
     release = threading.Event()
     def writer():
         try:
             with fifo.open('w') as stream:
-                # Fill block-buffered awk implementations. The checker can
-                # close early while this producer is still writing padding.
+                # 填满使用块缓冲的 awk 实现。当检查器仍在提前关闭时，此生产者还会
+                # 继续写入填充数据。
                 stream.write('\n'.join('OS_' + stage for stage in STAGES)+'\n' + 'noise\n'*200000)
                 stream.flush()
                 release.wait(5)

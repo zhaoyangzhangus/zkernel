@@ -41,8 +41,8 @@ with tempfile.TemporaryDirectory(prefix='liteos-host-multi-cache-') as directory
     (base / 'second.h').write_text('#define SECOND 11\n')
     run()
     assert status() == 18
-    # Chrome's launcher fixture includes its implementation directly. Its
-    # .c dependency must invalidate the target without being linked twice.
+    # Chrome 启动器测试夹具会直接包含其实现文件。其 .c 依赖必须使目标失效，但不能
+    # 被重复链接。
     (base / 'included.c').write_text('#include "implementation.c"\nint main(void){return implementation();}\n')
     (base / 'implementation.c').write_text('int implementation(void){return 4;}\n')
     with (base / 'Makefile').open('a') as stream:

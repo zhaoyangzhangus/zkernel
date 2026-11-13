@@ -15,6 +15,5 @@
 #define PTE_NO_EXECUTE        (1ULL << 63)
 #define PTE_ADDRESS_MASK      0x000FFFFFFFFFF000ULL
 
-/* arch/x86_64/mm/page_table.c owns its serialization lock; MMU init only
- * initializes it. */
+/* 序列化锁由 arch/x86_64/mm/page_table.c 持有；MMU 初始化只负责初始化该锁。 */
 void x86_page_table_arch_init(void);

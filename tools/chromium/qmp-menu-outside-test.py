@@ -47,8 +47,7 @@ with tempfile.TemporaryDirectory(prefix='system-menu-outside-') as directory:
         return button,namespace['menu_is_painted'](w,pixels)
     move(*point);time.sleep(.3);baseline,painted=frame();assert not painted
     png('baseline')
-    # Prove that the baseline is actually unhovered. A previously stuck
-    # highlight must not become the reference and make this test pass.
+    # 验证基线状态确实未悬停。先前卡住的高亮不能成为参考状态并导致测试误通过。
     move(928,72);time.sleep(.35);hovered,_=frame()
     hover_difference=sum(abs(a-b)>8 for a,b in zip(baseline,hovered))/len(baseline)
     assert hover_difference>.05, f'Baseline already highlighted or hover broken: {hover_difference:.3f}'
@@ -69,6 +68,6 @@ with tempfile.TemporaryDirectory(prefix='system-menu-outside-') as directory:
                 raise RuntimeError(f'Outside click: menu_visible={painted}, button_difference={difference:.3f}')
             png('closed');print(json.dumps({'target':args.target,'cycle':cycle+1,'button_difference':difference,'menu_closed':True}),flush=True)
     finally:
-        # Do not leave a failed native click or open menu affecting the next test.
+        # 不要让失败的原生点击或仍打开的菜单影响下一个测试。
         command('input-send-event',{'events':[{'type':'btn','data':{'button':'left','down':False}}]})
         command('send-key',{'keys':[{'type':'qcode','data':'esc'}],'hold-time':40})

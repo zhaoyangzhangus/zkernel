@@ -180,9 +180,8 @@ required_stages=(
 )
 
 if [[ "$verification_mode" == interactive ]]; then
-    # This mode is opt-in: never infer success from a missing self-test.
-    # The kernel must explicitly confirm both interactive-only skips and
-    # the real desktop/display publication boundaries instead.
+    # 此模式需显式启用：绝不能根据缺失的自测推断成功。
+    # 内核必须明确确认仅交互式跳过项，以及真实桌面/显示发布边界。
     interactive_markers=()
     for marker in "${required_markers[@]}"; do
         case "$marker" in
@@ -205,8 +204,7 @@ fi
 
 missing=()
 has_record() {
-    # Required records contain literal space-separated fields. Never accept a
-    # success token embedded in a legacy name or a longer field value.
+    # 必需记录包含用空格分隔的字面字段。绝不能接受嵌在旧名称或更长字段值中的成功标记。
     grep -Eq -- "(^|[[:space:]])${1}([[:space:]]|$)" "$log_path"
 }
 for marker in "${required_markers[@]}"; do
@@ -220,9 +218,8 @@ for marker in "${required_stages[@]}"; do
     fi
 done
 
-# Keep the detailed operational checks above, but make the phase list itself
-# come from the roadmap manifest.  This prevents a newly added phase from
-# being accepted by the static checker while disappearing from stage-sanity.
+# 保留上方详细的操作检查，但阶段清单本身应来自路线图清单。
+# 这样可以避免静态检查器接受新阶段，而 stage-sanity 中却遗漏它。
 while IFS='|' read -r family phase serial_name owner_source; do
     [[ -n "$family" && "${family:0:1}" != "#" ]] || continue
     if ! has_record "OS_STAGE phase=$serial_name"; then
@@ -230,13 +227,13 @@ while IFS='|' read -r family phase serial_name owner_source; do
     fi
 done < "$contracts_path"
 
-# Match diagnostic tokens, not prefixes or text embedded in a different name.
-# An optional whitespace-separated host timestamp does not change the record.
+# 匹配完整诊断标记，而不是前缀或嵌在其他名称中的文本。
+# 可选的空白分隔宿主时间戳不会改变记录含义。
 loader_failure_pattern='(^|[[:space:]])OS_DIAG_RT_FAIL([[:space:]]|$)'
 libc_failure_pattern='(^|[[:space:]])OS_LIBC_TEST_(DETAIL_)?FAIL([[:space:]]|$)'
 stage_failure_pattern='(^|[[:space:]])OS_STAGE_FAIL([[:space:]]|$)'
 
-# A successful boot marker must not mask a failed runtime subtest.
+# 启动成功标记不能掩盖运行时子测试失败。
 if grep -Eq -- "$loader_failure_pattern" "$log_path"; then
     echo "stage verification: dynamic loader failed in $log_path" >&2
     grep -E -- 'OS_DIAG_RT_(FAIL|PROTECT_)' "$log_path" >&2 || true
@@ -255,8 +252,8 @@ if grep -Eq -- "$stage_failure_pattern" "$log_path"; then
     exit 1
 fi
 
-# A stage without a source location is not actionable in a debugger.  Keep
-# the complete log on disk, but report only the offending records here.
+# 阶段记录没有源码位置时，无法在调试器中采取行动。磁盘上保留完整日志，但此处只报告
+# 有问题的记录。
 unlocated_stages=$(grep -E '^OS_STAGE(_FAIL)? phase=' "$log_path" |
     grep -Ev ' loc=kernel/[^[:space:]]+:[0-9]+([[:space:]]|$)' || true)
 if [[ -n "$unlocated_stages" ]]; then
@@ -265,12 +262,9 @@ if [[ -n "$unlocated_stages" ]]; then
     exit 1
 fi
 
-# A syntactically valid location is not enough: a stale path or an out-of-date
-# line number makes a debug build impossible to navigate.  Resolve every
-# location against the current source tree and require the recorded source
-# line to contain the stage publication call (or its small helper wrapper).
-# Failure helpers carry the call-site through a local *_fail macro, so accept
-# that wrapper spelling as well.
+# 仅有语法有效的位置还不够：过期路径或过时行号会使调试构建无法定位。对照当前源码树解析
+# 每个位置，并要求记录的源码行包含阶段发布调用（或其轻量辅助包装器）。
+# 失败辅助函数通过本地 *_fail 宏保留调用位置，因此也接受该包装器形式。
 stage_locations=$(sed -nE '/^OS_STAGE(_FAIL)? phase=/ s/.* loc=([^[:space:]]*).*/\1/p' \
     "$log_path" | sort -u)
 location_errors=0

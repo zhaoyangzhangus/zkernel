@@ -51,7 +51,7 @@ static UINT32 fat32_extent_length(const OS_FAT32 *fs,UINT32 cluster,UINT32 maxim
 static BOOLEAN fat32_read_sector(const OS_FAT32 *fs, UINT64 lba, UINT8 *buffer) {
     return block_cache_read((OS_BLOCK_CACHE*)&fs->Cache,lba,buffer);
 }
-''' + source[begin:end] + r'''
+''' + source[source.index('static void fat32_extend_seek_hint('):source.index('static BOOLEAN locate_file_cluster(')] + source[begin:end] + r'''
 int main(void) {
     OS_BLOCK_DEVICE disk={.Registered=1,.BlockSize=512,.BlockCount=4096,
                              .Read=disk_read,.Write=disk_write};
@@ -72,7 +72,7 @@ int main(void) {
     assert(!block_cache_read_range(&fs.Cache,64,0,out));
     fail_read=1;assert(!block_cache_read_range(&fs.Cache,200,2,out));
     fail_read=0;
-    /* A failed backend read must release the lock and preserve dirty data. */
+    /* 后端读取失败时必须释放锁并保留脏数据。 */
     assert(block_cache_read_range(&fs.Cache,100,1,out) && out[0]==0xa5);
     assert(block_cache_flush(&fs.Cache));
     assert(block_cache_destroy(&fs.Cache));

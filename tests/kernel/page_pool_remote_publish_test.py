@@ -49,8 +49,8 @@ void free_block_locked(page_t *page,uint8_t order){
  assert(locked&&page==pages&&order==6&&publication_complete);++freed;
 }
 ''' + by_id + lists + r'''
-/* Producer 2 arrives immediately after the consumer takes the first mask,
- * before it applies those bits. Its new node must survive for the next drain. */
+/* 消费者取走第一个掩码后、应用其位之前，生产者 2 立即到达。
+ * 它的新节点必须保留到下一次排空。 */
 static uint64_t exchange_with_producer(atomic_uint_fast64_t *mask,uint64_t value,
                                       memory_order order){
  uint64_t bits=atomic_exchange_explicit(mask,value,order);
@@ -91,13 +91,13 @@ int main(void){
  for(unsigned active=0;active<2;++active)
  for(unsigned two=0;two<2;++two){
   reset(active,two,irq);
-  /* Producer 1 pauses between bitmap publication and inbox publication. */
+  /* 生产者 1 在发布位图和发布收件箱之间暂停。 */
   assert(atomic_fetch_or(&groups[0].remote_mask,1ULL<<3)==0);
   if(two)assert(atomic_fetch_or(&groups[0].remote_mask,1ULL<<7)!=0);
   pool_drain_cpu(0);
   assert(!freed&&!locked&&irq_enabled==(bool)irq&&groups[0].owner_cpu==0);
   assert(atomic_load(&groups[0].remote_mask)==((1ULL<<3)|(two?(1ULL<<7):0)));
-  /* Resume the sole notifier. The group can now be consumed and recycled. */
+  /* 恢复唯一的通知者。现在可以消费并回收该组。 */
   publication_complete=true;pool_remote_notify(0,PAGE_ZONE_NORMAL,0,0,&groups[0]);
   pool_drain_cpu(0);
   assert(freed==1&&groups[0].owner_cpu==UINT16_MAX&&!locked);

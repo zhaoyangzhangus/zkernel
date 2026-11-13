@@ -86,8 +86,7 @@ while node != registry and node not in seen and len(seen) < 256:
                   (int(frame['vector']),int(frame['rax']),int(frame['rip']),int(frame['rbp']),
                    ','.join('%#x'%int(frame[k]) for k in ('rdi','rsi','rdx','r10','r8','r9'))))
             if executable_ranges and process['name'].string() == 'chrome' and int(frame['rax']) == 202:
-                # Candidates only, not a call-stack unwind. Do not print
-                # arbitrary stack bytes, which may contain user text.
+                # 仅列出候选项，不展开调用栈。不要打印任意栈字节，其中可能包含用户文本。
                 for stack_offset in range(0, 1024, 8):
                     try:
                         value = user_word(process, int(frame['rsp']) + stack_offset)

@@ -110,9 +110,8 @@ static uint64_t pci_bar_length_from_masks(uint32_t mask_low,
         uint64_t mask = (uint64_t)low_mask | ((uint64_t)mask_high << 32);
         return mask != 0U ? (~mask + 1ULL) : 0U;
     }
-    /* A 32-bit BAR is sized in a 32-bit address space.  Promote only after
-     * the complement and add have wrapped at 32 bits; promoting first turns
-     * a normal 64 MiB BAR into 0xffffffff04000000. */
+    /* 32 位 BAR 必须在 32 位地址空间中确定大小。按 32 位回绕完成取反和加法后再提升
+     * 位宽；若先提升，一个普通的 64 MiB BAR 会变成 0xffffffff04000000。 */
     return low_mask != 0U ? (uint64_t)(~low_mask + 1U) : 0U;
 }
 
@@ -125,9 +124,8 @@ static bool read_bar(const x86_acpi_ecam_t *segment, pci_device_t *device,
                                      device->function, offset);
     if (low == UINT32_MAX || low == 0U) return true;
 
-    /* PCI BAR sizing is only defined while I/O and memory decoding are off.
-     * Firmware often leaves xHCI enabled for boot-media access; probing an
-     * active BAR can otherwise return its live address instead of the mask. */
+    /* 只有关闭 I/O 和内存解码时，PCI BAR 大小探测才有定义。固件常为启动介质访问保持
+     * xHCI 启用；探测活动 BAR 可能返回其当前地址，而不是掩码。 */
     saved_command = pci_config_read32(segment, device->bus, device->slot,
                                       device->function, 4U);
     if (saved_command != UINT32_MAX &&
@@ -178,9 +176,8 @@ static bool read_bar(const x86_acpi_ecam_t *segment, pci_device_t *device,
     }
     uint64_t length = pci_bar_length_from_masks(mask_low, mask_high,
                                                 memory, is_64);
-    /* Some firmware leaves an unassigned 64-bit BAR at the top of the
-     * physical address space. Treat that BAR as absent instead of allowing
-     * its wrapped range to abort enumeration of unrelated devices. */
+    /* 部分固件会将未分配的 64 位 BAR 留在物理地址空间顶部。将此类 BAR 视为不存在，
+     * 避免其回绕后的范围导致其他设备枚举中止。 */
     if (length != 0 && address > UINT64_MAX - (length - 1ULL)) {
         address = 0;
         length = 0;
@@ -191,9 +188,8 @@ static bool read_bar(const x86_acpi_ecam_t *segment, pci_device_t *device,
 }
 
 static void read_msix(const x86_acpi_ecam_t *segment, pci_device_t *device) {
-    /* Header Type bit 7 marks a multifunction device; only the low seven
-     * bits select the header layout.  Treating 0x80 as an unsupported header
-     * hides the capability list on multifunction AMD xHCI functions. */
+    /* Header Type 的第 7 位表示多功能设备；只有低 7 位决定头部布局。若将 0x80
+     * 当作不支持的头部，多功能 AMD xHCI 功能的能力列表就会被隐藏。 */
     if ((device->status & PCI_STATUS_CAP_LIST) == 0 ||
         (device->header_type & 0x7FU) != 0U) {
         return;
@@ -541,7 +537,7 @@ static kstatus_t pci_set_intx_disabled(pci_device_t *device, bool disabled) {
     command = (uint16_t)command_status;
     if (disabled) command |= (uint16_t)PCI_COMMAND_INTX_DISABLE;
     else command &= (uint16_t)~PCI_COMMAND_INTX_DISABLE;
-    /* The upper half is PCI Status (write-1-to-clear); never write it back. */
+    /* 高 16 位是 PCI Status（写 1 清除）；绝不能将其写回。 */
     return pci_device_config_write32(device, PCI_COMMAND_OFFSET, command);
 }
 
@@ -656,7 +652,7 @@ kstatus_t pci_msix_configure(pci_device_t *device, uint16_t entry,
         apic_id > 0xFFU || entry >= device->msix_table_size) return K_EINVAL;
     kstatus_t status;
 
-    /* A function must not have MSI and MSI-X active at the same time. */
+    /* 同一个功能不得同时启用 MSI 和 MSI-X。 */
     if (device->msi_capability != 0U &&
         pci_set_msi_enabled(device, false) != K_OK) return K_EIO;
     status = pci_set_msix_enabled(device, false, true);
@@ -698,7 +694,7 @@ kstatus_t pci_msi_configure(pci_device_t *device, uint32_t apic_id,
                                                  0U) != K_OK) return K_EIO;
     if (pci_device_config_write32(device, data_offset,
                                   (uint32_t)vector) != K_OK) return K_EIO;
-    /* Enable one MSI vector and disable legacy INTx for this function. */
+    /* 为此功能启用一个 MSI 向量，并禁用传统 INTx 中断。 */
     control &= (uint16_t)~(0x7U << 4);
     control |= 1U;
     if (pci_device_config_write32(device, device->msi_capability,
@@ -786,13 +782,11 @@ bool pci_ecam_self_test(void) {
             uint16_t entries;
             if (pci_msix_table(device, &table, &entries) != K_OK ||
                 table.value == 0 || entries != device->msix_table_size) {
-                /* MSI-X is optional. Some firmware exposes a stale capability
-                 * on an otherwise usable device; keep the device enumerable
-                 * and let its driver choose another interrupt path. */
+                /* MSI-X 是可选功能。部分固件会在其他方面可用的设备上暴露过期能力；
+                 * 保持设备可枚举，并让其驱动选择其他中断路径。 */
                 g_pci_last_error = 0x500U | (i & 0xFFU);
-                /* Keep xHCI's raw capability for the dedicated MSI-X
-                 * diagnostic; its controller must not be silently downgraded
-                 * before we know whether the table or the config write fails. */
+                /* 为专用 MSI-X 诊断保留 xHCI 原始能力；在确认是表还是配置写入失败前，
+                 * 不得静默降低控制器的能力。 */
                 if (device->class_code != 0x0CU || device->subclass != 0x03U ||
                     device->prog_if != 0x30U) {
                     ((pci_device_t *)device)->msix_capability = 0U;

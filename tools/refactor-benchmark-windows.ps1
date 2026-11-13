@@ -86,8 +86,8 @@ function Stop-NativeRun([System.Diagnostics.Process]$runner,
         }
     }
 
-    # A wrapper may have been terminated between Start-Process and its child
-    # creation. Re-scan so a failed round cannot leak a QEMU process.
+    # 包装器可能在 Start-Process 启动后、创建子进程前被终止。重新扫描进程，避免失败轮次
+    # 遗留 QEMU 进程。
     foreach ($record in @(Get-MatchingQemu $buildName)) {
         Stop-Process -Id ([int]$record.ProcessId) -Force -ErrorAction SilentlyContinue
     }
@@ -164,8 +164,8 @@ function Get-MetricStats([UInt64[]]$values) {
 }
 
 function Invoke-StageVerification([string]$relativeLogPath) {
-    # Pass project-relative paths to MSYS bash.  An absolute Windows path is
-    # rewritten as C:Users... by argument conversion before the shell sees it.
+    # 向 MSYS bash 传递项目相对路径。绝对 Windows 路径会在 shell 读取前被参数转换改写为
+    # C:Users...。
     & bash $verifyLocationsScript $kernelRelative $relativeLogPath
     if ($LASTEXITCODE -ne 0) {
         throw "Stage/DWARF location verification failed for $relativeLogPath."
@@ -187,9 +187,8 @@ for ($run = 1; $run -le $Runs; ++$run) {
     $runError = $null
 
     try {
-        # The launcher truncates the file as well, but it is started
-        # asynchronously. Removing both files prevents stale markers from
-        # satisfying this round's polling loop.
+        # 启动器也会截断该文件，但它是异步启动的。先删除两个文件，避免过期标记满足本轮
+        # 的轮询条件。
         Remove-Item -LiteralPath $serialLog -Force -ErrorAction SilentlyContinue
         Remove-Item -LiteralPath $savedLog -Force -ErrorAction SilentlyContinue
 
@@ -208,10 +207,9 @@ for ($run = 1; $run -le $Runs; ++$run) {
         $runner = Start-Process -FilePath powershell.exe -WindowStyle Hidden -PassThru `
             -ArgumentList $qemuArguments
 
-        # Seconds is the fixed duration of a benchmark round, not merely a
-        # boot-marker timeout. Keep QEMU alive after the runtime/window/network
-        # markers so a post-boot freeze is observable and every round has the
-        # same wall-clock workload window.
+        # Seconds 是基准测试轮次的固定时长，而不只是启动标记超时时间。运行时/窗口/网络
+        # 标记出现后仍保持 QEMU 运行，以便观察启动后的卡死情况，并确保每轮工作负载的
+        # 墙上时钟时长相同。
         $deadline = (Get-Date).AddSeconds($Seconds)
         while ((Get-Date) -lt $deadline) {
             if (Test-Path -LiteralPath $serialLog) {

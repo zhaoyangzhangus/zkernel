@@ -58,7 +58,7 @@ static kstatus_t wait_on_queue(wait_queue_t *queue,bool (*predicate)(void*),void
  assert(target && queue==&target->event_waitq && target->refs==2);
  if(mode==3)return K_ECANCELED;
  if(atomic_load(&target->registry_removed)){assert(predicate(context));return K_OK;}
- // Empty/spurious checks do not need the registry once a reference is held.
+ // 持有引用后，空队列/伪唤醒检查不再需要注册表。
  g_window_server.scene.count=0;
  for(unsigned i=0;i<100;++i)assert(!predicate(context));
  if(mode==0)return K_ETIMEDOUT;
@@ -82,7 +82,7 @@ int main(void){
  assert(!window_is_signaled(NULL));assert(!window_is_signaled(&w));
  w.event_count=1;assert(window_is_signaled(&w));w.event_count=0;
  atomic_store(&w.registry_removed,true);assert(window_is_signaled(&w));
- // Readiness uses the removal marker even with an unrelated/absent registry.
+ // 即使注册表无关或不存在，就绪状态仍使用移除标记判断。
  g_window_server.scene.count=64;memset(g_window_server.scene.children,0,sizeof(g_window_server.scene.children));
  for(unsigned i=0;i<100000;++i)assert(window_is_signaled(&w));
  initialized=false;assert(!window_is_signaled(&w));initialized=true;
@@ -105,12 +105,12 @@ int main(void){
  setup(&w,&owner);lookup_closes=true;out=unchanged;
  assert(window_server_event_read(&owner,7,&out,1000)==K_ECANCELED && gets==released_refs);
  assert(!memcmp(&out,&unchanged,sizeof(out)));
- // Immediate reads retain existing FIFO, ownership filtering and wrap behavior.
+ // 立即读取仍保留现有 FIFO 顺序、所有权筛选和回绕行为。
  setup(&w,&owner);w.event_read=63;w.event_count=2;
  assert(window_server_event_read(&owner,7,&out,0)==K_OK && out.input.timestamp==456);
  assert(window_server_event_read(&owner,7,&out,0)==K_OK && out.input.timestamp==123);
  assert(!waits && !gets && w.event_read==1 && !w.event_count);
- // Identifier zero still waits across all windows of the calling process.
+ // 标识符为零时仍会等待调用进程的所有窗口。
  setup(&w,&owner);mode=4;
  assert(window_server_event_read(&owner,0,&out,1000)==K_OK && !gets && !released_refs && waits==1);
  puts("Window reads: constant-time readiness, 100000 HUP checks, spurious wakes, close races, ownership, timeout, FIFO wrap and any-window reads passed");

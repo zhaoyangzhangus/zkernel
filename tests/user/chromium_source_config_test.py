@@ -89,7 +89,7 @@ with tempfile.TemporaryDirectory(prefix='chromium-source-config-') as directory:
         try: run_test(TESTS[0],root)
         except RuntimeError as error: assert 'still live' in str(error)
         else: raise AssertionError('unterminated test treated as stopped')
-# Keep the current coverage floor while allowing new regressions to be added.
+# 保持当前覆盖率下限，同时允许添加新的回归测试。
 assert len(TESTS)==len(set(TESTS))>=40
 assert 'user/chrome_server_frame_test.py' in TESTS
 assert 'user/chrome_guest_library_policy_test.py' in TESTS

@@ -34,7 +34,7 @@ with tempfile.TemporaryDirectory(prefix='elf runtime ') as directory:
         assert (result.returncode == 0) == ok, result.stdout + result.stderr
     run(True)
     original = app.read_bytes()
-    # Both names have the fragments accepted by the former substring checks.
+    # 这两个名称都包含旧子串检查所接受的片段。
     for before, after in ((b'/lib/ld-system.so.1', b'/lib/xx-system.so.1'),
                           (b'libgraphics.so.1', b'libgraphics.so.9')):
         assert before in original and len(before) == len(after)
@@ -45,13 +45,13 @@ with tempfile.TemporaryDirectory(prefix='elf runtime ') as directory:
     library.write_bytes(original_library.replace(b'libgraphics.so.1', b'libgraphics.so.9'))
     run(False)
     library.write_bytes(original_library)
-    # Section names and section headers are not part of runtime identity.
+    # 节名称和节头不属于运行时身份的一部分。
     stripped = bytearray(original)
     struct.pack_into('<Q', stripped, 40, 0)
     struct.pack_into('<HHH', stripped, 58, 0, 0, 0)
     app.write_bytes(stripped)
     elf.verify(loader, library, app, 'libgraphics.so.1')
-    # Verify malformed PT_INTERP, program and dynamic string bounds directly.
+    # 直接验证格式错误的 PT_INTERP、程序段和动态字符串边界。
     phoff = struct.unpack_from('<Q', original, 32)[0]
     phsize, phnum = struct.unpack_from('<HH', original, 54)
     programs = [(phoff + i * phsize, struct.unpack_from('<IIQQQQQQ', original,
@@ -80,7 +80,7 @@ with tempfile.TemporaryDirectory(prefix='elf runtime ') as directory:
         else:
             raise AssertionError('malformed ELF accepted')
     app.write_bytes(original)
-    # Similar exported names must not satisfy a required symbol.
+    # 名称相似的导出符号不能满足必需符号的检查。
     library.write_bytes(original_library.replace(b'gfx_clear\0', b'gfx_cleax\0'))
     run(False)
     library.write_bytes(original_library)
@@ -90,7 +90,7 @@ with tempfile.TemporaryDirectory(prefix='elf runtime ') as directory:
     subprocess.run(['cc', '-fPIC', '-ffreestanding', '-c', str(source), '-o', str(obj)], check=True)
     subprocess.run(['ld', '-shared', '--hash-style=sysv', '-soname', 'libgraphics.so.1',
                     str(obj), '-o', str(library)], check=True)
-    # Former grep(gfx_clear) accepted gfx_clear_extra despite no exact export.
+    # 旧的 grep(gfx_clear) 即使找不到完全匹配的导出项，也会接受 gfx_clear_extra。
     run(False)
     library.write_bytes(original_library)
     fake = base / 'prefix-library'

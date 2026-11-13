@@ -1,4 +1,4 @@
-/* Phase 3 fail-closed nvlink ABI boundary. Exact declarations are checked in nvabi_contracts.c. */
+/* 第 3 阶段的 nvlink ABI 安全失败边界。具体声明由 nvabi_contracts.c 检查。 */
 
     .section .text.nvabi_nvlink_unsupported,"ax",@progbits
     .extern nvabi_log_unsupported
@@ -25,7 +25,7 @@ nvlink_acquireLock:
     leaq .Lnvabi_msg_nvlink_acquireLock(%rip), %rdi
     leaq .Lnvabi_stage_nvlink(%rip), %rsi
     call nvabi_log_unsupported
-    # void return
+    # void 返回
     popq %rbp
     ret
     .size nvlink_acquireLock, .-nvlink_acquireLock
@@ -51,7 +51,7 @@ nvlink_assert:
     leaq .Lnvabi_msg_nvlink_assert(%rip), %rdi
     leaq .Lnvabi_stage_nvlink(%rip), %rsi
     call nvabi_log_unsupported
-    # void return
+    # void 返回
     popq %rbp
     ret
     .size nvlink_assert, .-nvlink_assert
@@ -64,7 +64,7 @@ nvlink_free:
     leaq .Lnvabi_msg_nvlink_free(%rip), %rdi
     leaq .Lnvabi_stage_nvlink(%rip), %rsi
     call nvabi_log_unsupported
-    # void return
+    # void 返回
     popq %rbp
     ret
     .size nvlink_free, .-nvlink_free
@@ -77,7 +77,7 @@ nvlink_freeLock:
     leaq .Lnvabi_msg_nvlink_freeLock(%rip), %rdi
     leaq .Lnvabi_stage_nvlink(%rip), %rsi
     call nvabi_log_unsupported
-    # void return
+    # void 返回
     popq %rbp
     ret
     .size nvlink_freeLock, .-nvlink_freeLock
@@ -168,7 +168,7 @@ nvlink_releaseLock:
     leaq .Lnvabi_msg_nvlink_releaseLock(%rip), %rdi
     leaq .Lnvabi_stage_nvlink(%rip), %rsi
     call nvabi_log_unsupported
-    # void return
+    # void 返回
     popq %rbp
     ret
     .size nvlink_releaseLock, .-nvlink_releaseLock
@@ -181,7 +181,7 @@ nvlink_sleep:
     leaq .Lnvabi_msg_nvlink_sleep(%rip), %rdi
     leaq .Lnvabi_stage_nvlink(%rip), %rsi
     call nvabi_log_unsupported
-    # void return
+    # void 返回
     popq %rbp
     ret
     .size nvlink_sleep, .-nvlink_sleep

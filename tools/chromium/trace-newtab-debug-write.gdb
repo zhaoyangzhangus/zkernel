@@ -13,7 +13,7 @@ except RuntimeError as error:
 end
 target remote /tmp/system-keys.sock
 python
-# Classify bounded diagnostic prefixes only; do not log user strings/URLs.
+# 仅对有界的诊断前缀进行分类；不要记录用户字符串或 URL。
 owner = None
 samples = 0
 def tid():

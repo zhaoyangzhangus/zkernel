@@ -30,7 +30,7 @@ static void printf_append_text(console_printf_buffer_t *buffer,
 static void printf_append_unsigned(console_printf_buffer_t *buffer,
                                    uint64_t value, uint32_t base,
                                    bool uppercase) {
-    /* 20 decimal digits plus one spare slot for the conversion loop. */
+    /* 20 位十进制数字，再加上转换循环所需的一个备用位置。 */
     char digits[CONSOLE_PRINTF_MAX_DIGITS];
     uint32_t count = 0U;
     const char *alphabet = uppercase ? "0123456789ABCDEF" :
@@ -47,7 +47,7 @@ static void printf_append_signed(console_printf_buffer_t *buffer, int64_t value)
     uint64_t magnitude;
     if (value < 0) {
         printf_append_char(buffer, '-');
-        /* Avoid signed overflow for INT64_MIN. */
+        /* 避免 INT64_MIN 导致有符号整数溢出。 */
         magnitude = (uint64_t)(-(value + 1)) + 1U;
     } else {
         magnitude = (uint64_t)value;
@@ -156,8 +156,8 @@ static int console_vprintf_to(const char *format, va_list arguments,
     char output[CONSOLE_PRINTF_BUFFER_SIZE] = {0};
     size_t length;
 
-    /* Most existing boot diagnostics are printf("%s", text).  Preserve the
-     * single-sink semantics while avoiding an unnecessary bounded copy. */
+    /* 现有的大多数启动诊断都使用 printf("%s", text)。保留单一输出目标的语义，
+     * 同时避免不必要的有界复制。 */
     if (format != 0 && format[0] == '%' && format[1] == 's' &&
         format[2] == 0) {
         const char *text;

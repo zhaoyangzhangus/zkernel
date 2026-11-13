@@ -42,7 +42,7 @@ static void sched_preempt_enable(void) {
  assert(depth==1 && !held);--depth;
  if(hook_at_enable && --hook_at_enable==0) {
   ++hook_calls;
-  /* Another size finishes immediately after this caller drops its lock. */
+  /* 此调用者释放锁后，另一个尺寸的请求会立即完成。 */
   assert(ascii_font_copy_cache(63,62,hook_pixels,sizeof(hook_pixels)));verify(63,62,hook_pixels);
  }
 }
@@ -149,8 +149,7 @@ with tempfile.TemporaryDirectory(prefix='liteos-font-publication-') as directory
     result=run(negative)
     assert result.returncode!=0 and 'locks==2' in result.stderr,result.stderr
     print('Negative control rejected: redundant publication/copy lock cycle')
-    # Reproduce the old post-publication check independently of lock-count
-    # assertions: a different face can win immediately after publication.
+    # 独立复现旧的发布后检查，不依赖锁计数断言：发布完成后，其他字体也可能立即胜出。
     deferred='''    font_user_cache_unlock();
     font_user_cache_lock();
     if (g_ascii_font_user_width != width || g_ascii_font_user_height != height) {

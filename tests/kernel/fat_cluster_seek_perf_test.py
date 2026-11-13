@@ -6,7 +6,9 @@ import tempfile
 
 root = pathlib.Path(__file__).resolve().parents[2]
 source = (root / 'kernel/fs/nativefs/file_lifecycle.c').read_text()
+helper_start = source.index('static void fat32_extend_seek_hint(')
 begin = source.index('static BOOLEAN locate_file_cluster(')
+helper = source[helper_start:begin]
 function = source[begin:source.index('static BOOLEAN count_file_clusters(', begin)]
 scan = '''        UINT32 hints = file->SeekIndexValid;
         while (hints != 0U) {
@@ -70,9 +72,8 @@ static BOOLEAN fat32_read_next_cluster(const OS_FAT32*f,UINT32 c,UINT32*out){
 '''
 main = r'''
 int main(void){
- /* All one-bit masks, dense/empty masks and random masks. Compare every
-  * resulting cache byte and physical result with the original ascending
-  * 32-slot scan, including ties and unordered logical hints. */
+ /* 覆盖单比特掩码、稠密/空掩码和随机掩码。将每个缓存字节及物理结果与原有的
+  * 32 槽递增扫描比较，包括相同距离和无序逻辑提示。 */
  UINT32 random=19;
  unsigned long visits=0,reference_visits=0,calculations=0,reference_calculations=0;
  OS_FAT32 small_fs={.ClusterCount=128,.BytesPerSector=512,.SectorsPerCluster=8};
@@ -144,7 +145,7 @@ int main(void){
  }
  printf("alternating 128 lookups: %lu FAT links\n",walks);
  assert(walks<=12287);
- /* A resize/reopen invalidates CursorValid: stale hints must not survive. */
+ /* 调整大小或重新打开会使 CursorValid 失效：过期提示不得残留。 */
  file.CursorValid=0;
  file.SeekIndexValid=UINT32_MAX;
  for(unsigned i=0;i<32;++i) {
@@ -156,7 +157,7 @@ int main(void){
  }
  assert(locate_file_cluster(&file,4096,&out));assert(out==8194);
  assert(file.SeekCacheCount==1 && file.SeekCacheNext==1);
- /* Exercise eviction and backward seeks, checking every resolved cluster. */
+ /* 覆盖逐出和向后查找，并检查每个解析出的簇。 */
  UINT32 seed=17;
  walks=0;
  for(unsigned i=0;i<2000;++i){
@@ -166,11 +167,9 @@ int main(void){
   assert(file.SeekCacheCount<=8 && file.SeekCacheNext<8);
  }
  printf("randomized 2000 lookups: %lu FAT links\n",walks);
- /* Preserve the current random-read baseline while extending seek caching.
-  * Sequential/alternating tests alone conceal repeated long chain walks. */
+ /* 扩展查找缓存时保留当前随机读取基线。仅测试顺序/交替访问会掩盖重复遍历长簇链的问题。 */
  assert(walks<1715559UL/4);
- /* Empty/small files, large sizes and changed interval widths must never
-  * reuse physical checkpoints after cursor invalidation. */
+ /* 游标失效后，空文件/小文件、大文件和变化的区间宽度都不得复用物理检查点。 */
  const UINT64 sizes[]={0,1,4096,8192ULL*4096,UINT64_MAX};
  for(unsigned mode=0;mode<sizeof(sizes)/sizeof(sizes[0]);++mode) {
   file.Size=sizes[mode]; file.CursorValid=0;
@@ -189,8 +188,8 @@ int main(void){
   assert(out==2+target+(target/4)*4);
  }
  puts("mixed contiguous extents: 2000 random physical mappings passed");
- /* With both hint caches populated, repeated hits must preserve every cache
-  * byte, issue no FAT reads, and avoid all 32+8 hint probes. */
+ /* 两种提示缓存都已填充时，重复命中必须保留每个缓存字节、不发出 FAT 读取，
+  * 并跳过全部 32+8 次提示探测。 */
  assert(locate_file_cluster(&file,8191,&out));
  assert(file.SeekCacheCount==8);
  OS_FAT32_FILE before=file;
@@ -211,8 +210,8 @@ int main(void){
  assert(locate_file_cluster(&file,8187,&out));
  assert(out==2+8187+(8187/4)*4 && hint_visits>0);
  puts("outside-extent forward/backward requests retain seek-hint scans");
- /* Inclusive low/exclusive high boundaries, empty files, physical range
-  * rejection and logical positions near UINT32_MAX retain their guards. */
+ /* 覆盖低端包含/高端不包含边界、空文件、物理范围拒绝以及接近 UINT32_MAX 的
+  * 逻辑位置，确认防护条件仍有效。 */
  file=(OS_FAT32_FILE){.FileSystem=&fs,.FirstCluster=2,.CursorValid=1,
   .CursorLogicalStart=UINT32_MAX-3,.CursorPhysicalStart=2,.CursorLength=4};
  for(unsigned i=0;i<4;++i) {
@@ -235,7 +234,7 @@ with tempfile.TemporaryDirectory(prefix='liteos-fat-seek-') as directory:
     subprocess.run(['cc', '-O2', '-Wall', '-Wextra', '-Werror',
                     '-fsanitize=address,undefined', '-fno-pie', '-no-pie',
                     '-x', 'c', '-', '-o', str(binary)],
-                   input=harness + function + reference + main, text=True, check=True)
+                   input=harness + helper + function + reference + main, text=True, check=True)
     subprocess.run([str(binary)], check=True, timeout=60)
     # 负对照只移除当前区间的快速命中路径，必须触发重复探测断言。
     guard = function.index('    if (file->CursorValid &&')
@@ -247,7 +246,7 @@ with tempfile.TemporaryDirectory(prefix='liteos-fat-seek-') as directory:
     subprocess.run(['cc', '-O2', '-Wall', '-Wextra', '-Werror',
                     '-fsanitize=address,undefined', '-fno-pie', '-no-pie',
                     '-x', 'c', '-', '-o', str(control)],
-                   input=harness + previous + reference + control_main, text=True, check=True)
+                   input=harness + helper + previous + reference + control_main, text=True, check=True)
     result = subprocess.run([str(control)], capture_output=True, text=True, timeout=60)
     assert result.returncode == 42, result.stdout + result.stderr
     print('Negative control rejects the previous repeated hint scans')

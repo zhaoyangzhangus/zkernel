@@ -6,7 +6,7 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[2]
 source = (ROOT / 'kernel/drivers/gpu/nvidia/rm/nv_rm_workqueue.c').read_text()
 assert 'liteos' not in source.lower()
-# Vendor and kernel headers are replaced only at the host fixture boundary.
+# 仅在宿主测试夹具边界替换供应商头文件和内核头文件。
 source = '\n'.join(line for line in source.splitlines() if not line.startswith('#include'))
 code = r'''
 #include <assert.h>

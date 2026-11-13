@@ -367,7 +367,7 @@ install_data() {
 }
 
 mkdir -p "$esp_dir/EFI/OS/fonts"
-# Fail closed while replacing a payload, including a Vulkan-to-software
+# 替换负载时遇到任何问题都应失败关闭，包括从 Vulkan 切换到软件渲染的情况。
 # 切换。暂存失败时不能让旧 GPU 配置仍附着在新替换的二进制上；最终配置会在下方提交。
 install_data "$project_root/assets/chrome/gpu-staging.conf" "$stage_dir/gpu-mode"
 install_executable "$launcher_source" "$stage_dir/chrome-start"

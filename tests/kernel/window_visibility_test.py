@@ -83,8 +83,7 @@ int main(void) {
  assert(!(w.flags&OS_WINDOW_VISIBLE));
  assert(window_server_set_internal(&owner,&w,0,0,1,false,true)==0);
  assert((w.flags&OS_WINDOW_VISIBLE) && !w.client_hidden);
- /* The generic hide path must relinquish capture too, without marking the
-    client hidden or changing its position. */
+ /* 通用隐藏路径也必须释放捕获，但不能标记客户区为隐藏，也不能更改其位置。 */
  w.client_pointer_capture=true;w.client_button_capture=true;
  w.control_hover=8;w.control_pressed=8;w.control_hover_damage=(Rect){1,2,30,40};
  assert(window_server_set_internal(0,&w,10,20,0,true,false)==0);
@@ -95,7 +94,7 @@ int main(void) {
  assert(w.flags&OS_WINDOW_VISIBLE);
  assert(window_server_set_internal(&owner,&w,0,0,2,false,true)==K_EINVAL);
  assert(window_server_set_internal(&owner,&w,0,0,4,false,true)==K_EINVAL);
- /* An inactive first frame must preserve focus, including the later PRESENT. */
+ /* 首帧非活动时必须保留焦点，包括之后的 PRESENT 操作。 */
  w.present_sequence=0; g_window_server.focused_identifier=7;
  assert(window_server_set_internal(&owner,&w,0,0,3,false,true)==0);
  assert(w.client_show_inactive && !(w.flags&OS_WINDOW_VISIBLE));
@@ -106,7 +105,7 @@ int main(void) {
  assert(g_window_server.focused_identifier==7);
  assert(window_server_set_internal(&owner,&w,0,0,1,false,true)==0);
  assert(!w.client_show_inactive && g_window_server.focused_identifier==3);
- /* Hiding an active window must not fall back to an inactive popup. */
+ /* 隐藏活动窗口时不能回退到非活动弹出窗口。 */
  window_server_window_t popup={.owner=&owner,.identifier=8,
    .flags=OS_WINDOW_VISIBLE,.client_show_inactive=true};
  g_window_server.scene.count=2;g_window_server.scene.children[1]=&popup;

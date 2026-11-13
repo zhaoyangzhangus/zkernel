@@ -7,7 +7,7 @@
 
 #include "internal.h"
 
-/* REFACTOR_P8_NVME_IO_OWNER: request preparation, submission, cancellation and pending release. */
+/* REFACTOR_P8_NVME_IO_OWNER：请求准备、提交、取消和待处理资源释放。 */
 
 nvme_pending_io_t *nvme_pending_for_id_locked(nvme_queue_t *queue,
                                                        uint16_t command_id) {

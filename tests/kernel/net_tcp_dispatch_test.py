@@ -41,8 +41,7 @@ static bool send_reply(e1000_state_t *s, const e1000_rx_packet_t *p,
 #define e1000_tcp_loopback_peer_ack(...) false
 #define e1000_tcp_loopback_peer_ack6(...) false
 #define net_device_send(...) (assert(frame_length == 1), K_OK)
-/* Keep the actual SYN output branch and its locals compiled, while the wire
- * builders themselves are covered by the window-scale and reply tests. */
+/* 保留实际的 SYN 输出分支及其局部变量参与编译；线路构造器本身由窗口缩放和回复测试覆盖。 */
 #define BUILD() ((void)frame, (void)scale, frame_length = 1, K_OK)
 #define net_tcp_build_ipv4_scaled(...) BUILD()
 #define net_tcp_build_ipv6_scaled(...) BUILD()

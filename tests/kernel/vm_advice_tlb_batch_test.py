@@ -138,7 +138,7 @@ with tempfile.TemporaryDirectory(prefix='vm-advice-tlb-') as directory:
     def no_core():resource.setrlimit(resource.RLIMIT_CORE,(0,0))
     negative=subprocess.run([str(binary)],capture_output=True,timeout=10,preexec_fn=no_core)
     assert negative.returncode!=0 and b'batches==1' in negative.stderr
-    # Both success and partial-retirement failures must release after unlock.
+    # 成功和部分回收失败都必须先解锁再释放资源。
     reordered=advice.replace(
         'map_unlock(space);\n    anon_page_release_retired(retired);',
         'anon_page_release_retired(retired);\n    map_unlock(space);')

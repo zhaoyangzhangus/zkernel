@@ -233,9 +233,31 @@ typedef struct vm_clone_entry {
     rb_node_t index_node;
 } vm_clone_entry_t;
 
-static kstatus_t clone_anon_cached(rb_root_t *cache,
+typedef struct vm_clone_cache {
+    rb_root_t index;
+    vm_clone_entry_t *entries;
+    size_t capacity, used;
+} vm_clone_cache_t;
+
+/* 尚未克隆对象时在映射锁外预留数组；每个 VMA 最多需要两个对象槽位。
+ * 别名仍共用一个索引条目，数组仅作为本次 fork 的临时容量上限。 */
+static kstatus_t clone_cache_reserve(vm_clone_cache_t *cache, size_t needed) {
+    if (needed <= cache->capacity) return K_OK;
+    if (needed > SIZE_MAX / sizeof(*cache->entries)) return K_ENOMEM;
+    size_t target = cache->capacity <= SIZE_MAX / sizeof(*cache->entries) / 2U ?
+                    cache->capacity * 2U : needed;
+    if (target < needed) target = needed;
+    vm_clone_entry_t *entries = kmalloc(target * sizeof(*entries), 0U);
+    if (entries == 0) return K_ENOMEM;
+    if (cache->entries != 0) kfree(cache->entries);
+    cache->entries = entries;
+    cache->capacity = target;
+    return K_OK;
+}
+
+static kstatus_t clone_anon_cached(vm_clone_cache_t *cache,
                                   vm_object_t *source, vm_object_t **out) {
-    rb_node_t **link = &cache->root;
+    rb_node_t **link = &cache->index.root;
     rb_node_t *parent = 0;
     while (*link != 0) {
         vm_clone_entry_t *entry = (vm_clone_entry_t *)
@@ -249,34 +271,25 @@ static kstatus_t clone_anon_cached(rb_root_t *cache,
             return K_OK;
         }
     }
-    vm_clone_entry_t *entry = kmalloc(sizeof(*entry), 0);
-    if (entry == 0) return K_ENOMEM;
+    if (cache->used == cache->capacity) return K_ENOMEM;
+    vm_clone_entry_t *entry = &cache->entries[cache->used];
     kstatus_t status = vm_object_clone_anon(source, out);
-    if (status != K_OK) {
-        kfree(entry);
-        return status;
-    }
+    if (status != K_OK) return status;
+    ++cache->used;
     entry->source = source;
     entry->copy = *out;
     rb_tree_node_init(&entry->index_node);
     rb_tree_set_parent(&entry->index_node, parent);
     rb_tree_set_color(&entry->index_node, RB_TREE_RED);
     *link = &entry->index_node;
-    rb_tree_insert_rebalance(cache, &entry->index_node);
+    rb_tree_insert_rebalance(&cache->index, &entry->index_node);
     return K_OK;
 }
 
-/* 私有平衡树：后序释放为线性复杂度，递归深度受红黑树高度限制。条目借用活动子进程 VMA 的引用。 */
-static void clone_cache_release_node(rb_node_t *node) {
-    if (node == 0) return;
-    clone_cache_release_node(node->left);
-    clone_cache_release_node(node->right);
-    kfree((uint8_t *)node - __builtin_offsetof(vm_clone_entry_t, index_node));
-}
-
-static void clone_cache_release(rb_root_t *cache) {
-    clone_cache_release_node(cache->root);
-    cache->root = 0;
+/* 条目借用子空间引用，只需在锁外释放整个临时数组。 */
+static void clone_cache_release(vm_clone_cache_t *cache) {
+    if (cache->entries != 0) kfree(cache->entries);
+    *cache = (vm_clone_cache_t){0};
 }
 
 kstatus_t vm_space_clone_cow(vm_space_t *source, vm_space_t **out) {
@@ -285,11 +298,45 @@ kstatus_t vm_space_clone_cow(vm_space_t *source, vm_space_t **out) {
     uint64_t areas_copied = 0, ptes_visited = 0;
     bool protection_changed = false;
     bool cow_metadata_changed = false;
-    rb_root_t clone_cache = {0};
+    vm_clone_cache_t clone_cache = {0};
     vm_space_t *child = 0;
     kstatus_t status = vm_space_create(&child);
     if (status != K_OK) return status;
-    map_lock(source);
+    vm_area_t *spares = 0;
+    size_t capacity = 0U;
+    for (;;) {
+        map_lock(source);
+        size_t needed = 0U, object_slots = 0U;
+        for (list_head_t *item = source->area_list.next;
+             item != &source->area_list; item = item->next) {
+            vm_area_t *area = area_from_list(item);
+            ++needed;
+            if ((area->flags & VM_MAP_PRIVATE) != 0 && area->object != 0 &&
+                area->object->type == VM_OBJECT_ANON) ++object_slots;
+            if (area->private_object != 0) ++object_slots;
+        }
+        if (needed <= capacity && object_slots <= clone_cache.capacity) break;
+        map_unlock(source);
+        status = clone_cache_reserve(&clone_cache, object_slots);
+        if (status != K_OK) goto reserve_failed;
+        /* 锁外预留空白 VMA，不借用源节点。重新加锁后核实当前数量，
+         * 并发增长时按倍数补足；数量减少留下的节点在发布后释放。 */
+        size_t target = capacity;
+        if (needed > capacity) {
+            target = capacity <= SIZE_MAX / 2U ? capacity * 2U : needed;
+            if (target < needed) target = needed;
+        }
+        while (capacity < target) {
+            vm_area_t *copy = area_allocate();
+            if (copy == 0) {
+                status = K_ENOMEM;
+                goto reserve_failed;
+            }
+            copy->ordered_node.next = (list_head_t *)spares;
+            spares = copy;
+            ++capacity;
+        }
+    }
     uint64_t locked = x86_read_tsc();
 
     /*
@@ -299,11 +346,8 @@ kstatus_t vm_space_clone_cow(vm_space_t *source, vm_space_t **out) {
     for (list_head_t *item = source->area_list.next; item != &source->area_list;
          item = item->next) {
         vm_area_t *area = area_from_list(item);
-        vm_area_t *copy = area_allocate();
-        if (copy == 0) {
-            status = K_ENOMEM;
-            break;
-        }
+        vm_area_t *copy = spares;
+        spares = (vm_area_t *)copy->ordered_node.next;
         copy->start = area->start;
         copy->end = area->end;
         copy->object_offset = area->object_offset;
@@ -312,10 +356,6 @@ kstatus_t vm_space_clone_cow(vm_space_t *source, vm_space_t **out) {
         if ((area->flags & VM_MAP_PRIVATE) != 0 && area->object != 0 &&
             area->object->type == VM_OBJECT_ANON) {
             status = clone_anon_cached(&clone_cache, area->object, &copy->object);
-            if (status != K_OK) {
-                kfree(copy);
-                break;
-            }
         } else {
             copy->object = area->object;
             vm_object_get(copy->object);
@@ -325,7 +365,8 @@ kstatus_t vm_space_clone_cow(vm_space_t *source, vm_space_t **out) {
                                        &copy->private_object);
         }
         if (status != K_OK) {
-            area_release(copy);
+            /* 半成品仍归子空间所有，解锁后统一销毁对象和 VMA。 */
+            list_add_before(&child->area_list, &copy->ordered_node);
             break;
         }
         list_add_before(&child->area_list, &copy->ordered_node);
@@ -374,25 +415,19 @@ kstatus_t vm_space_clone_cow(vm_space_t *source, vm_space_t **out) {
             if ((area->prot & VM_PROT_WRITE) != 0) {
                 for (uint64_t va = area->start; va < area->end; va += PAGE_SIZE) {
                     vaddr_t resident;
-                    kstatus_t scan = x86_next_present_page(
-                        source->root_table, (vaddr_t)va, area->end, &resident);
-                    if (scan == K_ENOENT) break;
-                    if (scan != K_OK) {
-                        status = scan;
+                    bool changed = false;
+                    kstatus_t protect = x86_protect_next_user_page_deferred(
+                        source->root_table, (vaddr_t)va, area->end,
+                        hardware_flags(area->prot, true), X86_CACHE_WB,
+                        &resident, &changed);
+                    protection_changed |= changed;
+                    if (protect == K_ENOENT) break;
+                    if (protect != K_OK) {
+                        status = protect;
                         break;
                     }
                     va = resident;
                     ++ptes_visited;
-                    bool changed = false;
-                    kstatus_t protect = x86_protect_user_page_deferred(source->root_table,
-                                                          (vaddr_t)va,
-                                                          hardware_flags(area->prot, true),
-                                                          X86_CACHE_WB, &changed);
-                    protection_changed |= changed;
-                    if (protect != K_OK && protect != K_ENOENT) {
-                        status = protect;
-                        break;
-                    }
                 }
             }
             if (status != K_OK) break;
@@ -462,6 +497,11 @@ kstatus_t vm_space_clone_cow(vm_space_t *source, vm_space_t **out) {
     /* Fork 会改变父进程的权限/COW 标志，但不会改变其 VMA 边界或地址索引摘要。下方设置 *out 前，子进程
      * 仍为私有状态；构建其索引时无需延长父进程的抢占保护。 */
     if (status == K_OK) rebuild_area_tree(child);
+    while (spares != 0) {
+        vm_area_t *copy = spares;
+        spares = (vm_area_t *)copy->ordered_node.next;
+        kfree(copy);
+    }
     /* 缓存条目借用对象引用，并且仅属于此次 fork。分配缓存不必延长源映射的抢占保护；记账完成前要保留
      * 子进程 VMA 引用。 */
     clone_cache_release(&clone_cache);
@@ -484,4 +524,14 @@ kstatus_t vm_space_clone_cow(vm_space_t *source, vm_space_t **out) {
     }
     *out = child;
     return K_OK;
+
+reserve_failed:
+    while (spares != 0) {
+        vm_area_t *copy = spares;
+        spares = (vm_area_t *)copy->ordered_node.next;
+        kfree(copy);
+    }
+    clone_cache_release(&clone_cache);
+    vm_space_put(child);
+    return status;
 }

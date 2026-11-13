@@ -39,7 +39,7 @@ int main(void) {
     arch_trap_frame_t frame={0};
     process_t process={0}; process.pid=91;
     thread.process=&process;
-    /* Boot self-tests may use tid zero without any real saved user frame. */
+    /* 启动自测可能使用 tid 0，且不存在真实保存的用户栈帧。 */
     atomic_init(&thread.state,THREAD_BLOCKED);
     scheduler_trace_notify(&thread);
     scheduler_trace_ready(&cpu,&thread);
@@ -104,6 +104,7 @@ int main(void) {
     current_cpu=3; tlb_active=false;
     now=21000100; scheduler_trace_run(&thread);
     assert(g_sched_wake_delays[0].total_ns==21000000);
+    assert(g_sched_wake_totals[0]==1 && g_sched_wake_totals[1]==21000000 && g_sched_wake_totals[2]==20000000);
     assert(g_sched_wake_delays[0].notify_to_ready_ns==1000000);
     assert(g_sched_wake_delays[0].notify_to_publish_ns==400);
     assert(g_sched_wake_delays[0].publish_to_ready_ns==999600);
@@ -130,6 +131,7 @@ int main(void) {
     now+=100; scheduler_trace_ready(&cpu,&thread);
     now+=100; scheduler_trace_publish(&thread); /* Consumer can beat producer. */
     now+=100; scheduler_trace_run(&thread);
+    assert(g_sched_wake_totals[0]==2 && g_sched_wake_totals[1]==21000350 && g_sched_wake_totals[2]==20000200);
     assert(g_sched_wake_delays[0].total_ns==21000000);
     atomic_store(&thread.block_epoch,5);
     frame.rdi=9; now=35000000; scheduler_trace_notify(&thread);
@@ -150,10 +152,10 @@ int main(void) {
     scheduler_trace_notify(&thread); assert(g_sched_wake_trace.epoch==3);
     assert(atomic_flag_test_and_set(&g_sched_wake_trace_guard));
     atomic_flag_clear(&g_sched_wake_trace_guard);
-    /* Never read a return frame from a nonblocked thread. */
+    /* 绝不能从未阻塞的线程读取返回栈帧。 */
     atomic_store(&thread.state,THREAD_RUNNING);thread.kernel_stack_top=0;
     scheduler_trace_notify(&thread);assert(g_sched_wake_trace.epoch==3);
-    // Disabled, wrong CPU and busy observer must never disturb a live trace.
+    // 禁用状态、错误 CPU 和忙碌的观察者都不得干扰正在进行的跟踪。
     g_sched_wake_trace_tid=0;uint64_t observed=g_sched_wake_trace.interrupt;
     scheduler_trace_reschedule_interrupt(0);assert(g_sched_wake_trace.interrupt==observed);
     g_sched_wake_trace_tid=126;
@@ -162,8 +164,8 @@ int main(void) {
     scheduler_trace_reschedule_interrupt(0);assert(g_sched_wake_trace.interrupt==observed);
     assert(atomic_flag_test_and_set(&g_sched_wake_trace_guard));
     atomic_flag_clear(&g_sched_wake_trace_guard);
-    /* Inbox sampling observes the pre-READY phase, not ordinary FAIR queue
-       waiting, and preserves the interrupted hardware frame for symbolizing. */
+    /* 收件箱采样观察 READY 之前的阶段，而不是普通 FAIR 队列等待时间，并保留被中断的
+     * 硬件栈帧供符号解析使用。 */
     g_sched_wake_trace=(sched_wake_trace_t){.tid=126,.epoch=9,.published=1000,
                                           .source_cpu=3,.target_cpu=0};
     current_cpu=1; sched_trace_inbox_stall(20001000,0xabcdef,0x202);
@@ -203,8 +205,7 @@ int main(void) {
     assert(g_sched_ipi_send[0]==2000); /* Probe enabled after this send began. */
     now=4001;scheduler_trace_reschedule_send(0,1,false,4);
     assert(g_sched_ipi_send[0]==4000 && g_sched_ipi_send[5]==0 && g_sched_ipi_send[6]==4);
-    /* Finer opt-in sampling captures short waits without changing ownership,
-       epoch handling, or the historical default threshold. */
+    /* 启用更精细的采样后可以捕获短等待，同时不改变所有权、周期处理或历史默认阈值。 */
     g_sched_wake_trace_threshold_ns=1000000;
     g_sched_wake_trace=(sched_wake_trace_t){0};
     thread.kernel_stack_top=(uintptr_t)&frame+sizeof(frame);

@@ -185,8 +185,7 @@ static void rename_writeback_failure_test(void) {
         UINT32 size = 0U;
         make_disk();
         if (scenario == 3U) {
-            /* Fill all remaining slots to force allocation and linking of
-             * another directory cluster before rename publication. */
+            /* 填满剩余槽位，强制在发布重命名之前分配并链接另一个目录簇。 */
             for (UINT32 slot = 1U; slot < 16U; ++slot) {
                 UINT8 *entry = disk + 7U * 512U + slot * 32U;
                 memcpy(entry, "FILL0000TXT", 11U);
@@ -200,8 +199,7 @@ static void rename_writeback_failure_test(void) {
                                      read_disk, write_disk, 0, disk, &device));
         assert(fat32_init(&fat, device));
         assert(fat32_open(&fat, source, &file));
-        /* An open destination cannot yet be detached. Refuse it without
-         * changing either payload or the open source coordinates. */
+        /* 打开的目标文件尚不能分离。拒绝操作时不得更改其内容，也不得更改打开源文件的坐标。 */
         if (failure == 0U) {
             assert(fat32_create_path(&fat, "protected.txt", 0));
             assert(fat32_write_path(&fat, "protected.txt", 0U, "keep!", 5U, &size));
@@ -242,16 +240,15 @@ static void rename_writeback_failure_test(void) {
         assert(fat32_close(file));
         assert(fat32_destroy(&fat));
         if (scenario == 3U && failure != 0U) {
-            /* Cluster 4 was free before directory extension. Both FAT
-             * copies and the original parent link must be restored. */
+            /* 扩展目录前簇 4 处于空闲状态。必须还原 FAT 的两个副本和原父目录链接。 */
             assert(disk[512U + 16U] == 0 && disk[1024U + 16U] == 0);
-            /* FAT accepts every value from 0x0FFFFFF8 through 0x0FFFFFFF
-             * as end-of-chain; recovery may normalize the original marker. */
+            /* FAT 将 0x0FFFFFF8 到 0x0FFFFFFF 的所有值都视为链尾；恢复时可以规范化
+             * 原标记值。 */
             assert(disk[512U + 24U] >= 0xF8 && disk[512U + 25U] == 0xFF &&
                    disk[512U + 26U] == 0xFF && (disk[512U + 27U] & 0x0F) == 0x0F);
             assert(memcmp(disk + 512U + 24U, disk + 1024U + 24U, 4U) == 0);
         }
-        /* Reload through a fresh cache to verify recovery reached the media. */
+        /* 通过新缓存重新加载，确认恢复结果已写入介质。 */
         fat = (OS_FAT32){0};
         assert(fat32_init(&fat, device));
         assert(fat32_stat_path(&fat, retained, &info));
@@ -272,8 +269,8 @@ static void replacement_corrupt_chain_test(void) {
         OS_FAT32 fat = {0}; OS_FAT32_FILE *file = 0;
         UINT8 before[TEST_SECTORS * 512U];
         make_disk();
-        /* hello starts at 3, Long File Name starts at 5. Both already
-         * contain valid data. Build shared tails or malformed cycles. */
+        /* hello 从簇 3 开始，Long File Name 从簇 5 开始，两者都已有有效数据。
+         * 构造共享尾部或格式错误的循环链。 */
         for (UINT32 copy = 1U; copy <= 2U; ++copy) {
             UINT8 *table = disk + copy * 512U;
             if (scenario == 0U) put32(table + 3U * 4U, 5U);
@@ -338,7 +335,7 @@ static void replacement_writeback_test(void) {
             if (failure == 0U) { assert(replaced); writes = write_count; assert(writes); }
             else { assert(!replaced); ++failures; assert(file->DirectoryLba == old_lba && file->DirectoryOffset == old_offset); }
             for (UINT32 copy = 0U; copy < fat.FatCount; ++copy) {
-                /* This fixture has one FAT sector per copy. */
+                /* 此测试夹具的每份 FAT 只有一个扇区。 */
                 UINT8 *entry = disk + (fat.FatStartLba + copy) * 512U + retired_cluster * 4U;
                 UINT32 value = (UINT32)entry[0] | ((UINT32)entry[1] << 8U) |
                     ((UINT32)entry[2] << 16U) | ((UINT32)(entry[3] & 15U) << 24U);
@@ -603,7 +600,7 @@ int main(void) {
         !fat32_remove_path(&fat, "folder/child.bin") ||
         !fat32_remove_path(&fat, "folder") ||
         !fat32_remove_path(&fat, "new.bin")) return 5;
-    /* Cached-handle read/write/truncate coherence, as used by VFS. */
+    /* 测试 VFS 使用的缓存句柄读/写/截断一致性。 */
     OS_FAT32_FILE *coherent = 0;
     char current[32] = {0};
     const char manifest[] = "MANIFEST-000001\n";

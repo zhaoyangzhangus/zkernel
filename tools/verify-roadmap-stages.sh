@@ -107,8 +107,8 @@ while IFS='|' read -r family phase serial_name owner_source; do
         failures=$((failures + 1))
     fi
 
-    # Match a location-aware stage macro invocation in the declared Owner,
-    # rather than accepting a bare enum mention in a comment or header.
+    # 在声明的 Owner 中匹配带有位置信息的阶段宏调用，
+    # 不接受仅在注释或头文件中提到枚举值的情况。
     call_pattern="(kernel_debug_stage|debug_trace_stage)(_[[:alnum:]_]+)?[[:space:]]*\\(${symbol}"
     if ! grep -Eq -- "$call_pattern" "$owner_source"; then
         printf 'roadmap stage verification: no publication call for %s in %s\n' \
@@ -141,10 +141,9 @@ if [[ ! -f "$elf_path" || ! -f "$log_path" ]]; then
     exit 2
 fi
 
-# Keep runtime coverage driven by the same manifest as the source contract.
-# This prevents a newly added phase from becoming statically locatable while
-# silently disappearing from the QEMU log.  The detailed verifier below still
-# checks the exact boot sequence and every record's source line.
+# 运行时覆盖范围与源码契约使用同一份清单。
+# 这样可以避免新增阶段虽然能在源码中定位，却悄然未出现在 QEMU 日志中。
+# 下方的详细校验仍会检查准确的启动顺序及每条记录的源码行号。
 runtime_contract_errors=0
 while IFS='|' read -r family phase serial_name owner_source; do
     [[ -n "$family" && "${family:0:1}" != "#" ]] || continue
@@ -161,10 +160,8 @@ while IFS='|' read -r family phase serial_name owner_source; do
             "$serial_name" >&2
         runtime_contract_errors=$((runtime_contract_errors + 1))
     fi
-    # The manifest names the first debugger entry point for the phase.  Require
-    # that file to appear in the runtime record set as well; a location in an
-    # unrelated helper is useful for tracing, but cannot replace the Owner
-    # boundary declared by the roadmap.
+    # 清单为该阶段指定了调试器的首个入口点。运行时记录中也必须包含该文件；
+    # 在无关辅助程序中的位置虽有助于跟踪，却不能替代路线图声明的 Owner 边界。
     owner_records=$(printf '%s\n' "$phase_records" |
         grep -F " loc=${owner_source}:" || true)
     if [[ -z "$owner_records" ]]; then

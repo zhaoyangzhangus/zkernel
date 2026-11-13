@@ -50,19 +50,19 @@ int main(void) {
     assert(!window_present_sequence_ready(&context));
     atomic_store(&window.compositor_presented_sequence, 6);
     assert(!window_present_sequence_ready(&context));
-    /* Close-before-ACK must be persistent, including waiter registration
-     * after the close wakeup. It must not forge a displayed sequence. */
+    /* ACK 前关闭必须保持为终态，包括关闭唤醒后才注册等待者的情况。
+     * 不得伪造已显示序列号。 */
     atomic_store_explicit(&window.registry_removed, true, memory_order_release);
     assert(window_present_sequence_ready(&context));
     assert(window_present_sequence_ready(&context));
     assert(atomic_load(&window.compositor_presented_sequence)==6);
     assert(window_present_wait_result(&window,K_OK)==K_ECANCELED);
     assert(window_present_wait_result(&window,K_ETIMEDOUT)==K_ETIMEDOUT);
-    /* Already-completed display followed by close is also safely terminal. */
+    /* 显示已完成后再关闭，也应安全地进入终态。 */
     atomic_store(&window.compositor_presented_sequence, 7);
     assert(window_present_sequence_ready(&context));
     assert(window_present_wait_result(&window,K_OK)==K_ECANCELED);
-    /* A separate live window retains its actual display-fence contract. */
+    /* 独立的活动窗口仍保留其真实的显示栅栏约定。 */
     atomic_store(&window.registry_removed, false);
     assert(window_present_sequence_ready(&context));
     assert(window_present_wait_result(&window,K_OK)==K_OK);

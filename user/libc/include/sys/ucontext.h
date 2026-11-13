@@ -2,9 +2,8 @@
 
 #include <signal.h>
 
-/* Minimal x86_64 ucontext layout used by portable stack-reporting code.  The
- * kernel's native signal frame is intentionally opaque to user code; these
- * fields provide the conventional POSIX names needed by Chromium/Abseil. */
+/* 可移植栈报告代码使用的最小 x86_64 ucontext 布局。内核原生信号帧特意对用户代码保持不透明；
+ * 这些字段提供 Chromium/Abseil 所需的常规 POSIX 名称。 */
 typedef long greg_t;
 typedef greg_t gregset_t[23];
 

@@ -73,9 +73,8 @@ if (-not (Test-Path -LiteralPath $abiRoot -PathType Container)) {
     Fail-Gate 'vendor ABI source root is missing'
 }
 
-# Phase 3 is downstream of every earlier phase.  This invokes the previous
-# Gate, including the production kernel and port test, before touching the
-# Phase 3 build graph.
+# 阶段 3 位于所有前序阶段之后。在处理阶段 3 的构建依赖图前，
+# 先执行前一阶段的 Gate，包括生产内核和端口测试。
 $p2Args = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $phase2Gate, '-Make', $Make)
 $p2Output = @(& powershell.exe @p2Args 2>&1 | ForEach-Object { $_.ToString() })
 $p2ExitCode = $LASTEXITCODE
@@ -185,8 +184,8 @@ Write-Output 'ABI_COMPILE=PASS'
 Write-Output 'NVIDIA_RM_OS_LINK=PASS'
 Write-Output 'UNRESOLVED_REQUIRED=0'
 
-# nvabi_misc.c is reserved for the small, explicitly classified leftovers;
-# the large categories live in their own adapters or fail-closed units.
+# nvabi_misc.c 留给数量较少且经过明确分类的剩余项目；
+# 较大的类别由各自的适配器或安全失败单元处理。
 $miscLines = @(Get-Content -LiteralPath $miscSource | Where-Object {
     $trimmed = $_.Trim()
     $trimmed -and -not $trimmed.StartsWith('//') -and
@@ -200,9 +199,8 @@ if ($miscLines.Count -gt 100 -or $miscText -notmatch '(?i)capability' -or
 }
 Write-Output 'NVABI_MISC=PASS'
 
-# Every unsupported assembly entry must log its symbol/stage and then use a
-# typed failure representation.  Literal zero return values are allowed only
-# for bool/pointer declarations; a literal success status is rejected.
+# 每个不支持的汇编入口都必须记录其符号和阶段，然后使用类型匹配的失败表示。
+# 仅 bool/指针声明允许直接返回 0；直接返回成功状态会被拒绝。
 $unsupportedFiles = @(Get-ChildItem -LiteralPath $abiRoot -File -Filter '*_unsupported.S' | Sort-Object Name)
 if ($unsupportedFiles.Count -ne 5) { Fail-Gate 'unexpected unsupported ABI file set' }
 foreach ($file in $unsupportedFiles) {

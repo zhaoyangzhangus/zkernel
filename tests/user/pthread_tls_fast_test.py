@@ -106,7 +106,7 @@ int main(void) {
     assert(fixture_key_delete(stable)==0 && !g_main_thread.specific[stable]);
     assert(fixture_key_create(&stable,0)==0 && !fixture_getspecific(stable));
     self_mode=1;
-    /* A metadata owner delayed on another CPU must not stop TLS access. */
+    /* 元数据所有者在另一个 CPU 上延迟时，不得阻止 TLS 访问。 */
     unsigned before=atomic_load(&lock_calls); g_key_lock=1;
     assert(fixture_setspecific(stable,(void *)654)==0);
     assert(fixture_getspecific(stable)==(void *)654);

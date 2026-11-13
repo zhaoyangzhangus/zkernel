@@ -8,6 +8,7 @@ io = (root / 'kernel/fs/vfs/file_io.c').read_text()
 read = io[io.index('static kstatus_t vfs_read_backend_chunk('):
           io.index('kstatus_t vfs_read_kernel(')]
 fat = (root / 'kernel/fs/nativefs/file_lifecycle.c').read_text()
+helper = fat[fat.index('static void fat32_extend_seek_hint('):fat.index('static BOOLEAN locate_file_cluster(')]
 fat = fat[fat.index('static UINT64 fat32_contiguous_extent_bytes('):fat.index('static BOOLEAN fat32_write_locked(')]
 prefix = r'''
 #include <assert.h>
@@ -74,7 +75,7 @@ static BOOLEAN fat32_read_sector(const OS_FAT32 *fs,UINT64 lba,UINT8 *out){
 static UINT32 fat32_extent_length(const OS_FAT32 *fs,UINT32 cluster,UINT32 maximum){
  (void)fs;(void)cluster;(void)maximum;return 1U;
 }
-''' + fat + r'''
+''' + helper + fat + r'''
 static kstatus_t read_backend(void *ctx,uint64_t offset,void *out,size_t size,uint64_t *bytes){
  assert(held);++backend_calls;UINT32 count=0;
  if(!fat32_read(ctx,offset,out,(UINT32)size,&count))return K_EIO;

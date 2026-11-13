@@ -14,7 +14,7 @@
 #define kernel_frame_trace_emit_value(name, value) \
     kernel_perf_emit_value((name), (value))
 #else
-/* Keep diagnostics and their argument evaluation out of the normal hot path. */
+/* 正常热路径上不输出诊断，也不计算诊断参数。 */
 #define kernel_frame_trace_emit_scope(name, start_tsc) ((void)0)
 #define kernel_frame_trace_emit_value(name, value) ((void)0)
 #endif

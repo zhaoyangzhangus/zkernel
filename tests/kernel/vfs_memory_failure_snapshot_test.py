@@ -47,7 +47,7 @@ int main(void) {
                            __ATOMIC_ACQUIRE)==1);
     for(unsigned i=0;i<8;++i)
         assert(!pthread_create(&competitors[i],0,later,0));
-    /* Competitors must finish even while the snapshot owner is held here. */
+    /* 即使此处仍持有快照所有者，竞争者也必须能够完成。 */
     for(unsigned i=0;i<8;++i)assert(!pthread_join(competitors[i],0));
     assert(__atomic_load_n(&stats_calls,__ATOMIC_RELAXED)==1);
     __atomic_store_n(&release_stats,1U,__ATOMIC_RELEASE);
@@ -62,7 +62,7 @@ int main(void) {
     assert(g_vfs_memory_allocation_failure.total_pages==1000);
     assert(g_vfs_memory_allocation_failure.free_pages==750);
     assert(g_vfs_memory_allocation_failure.stats_status==0);
-    /* No active writers: simulate a fresh boot with unavailable page stats. */
+    /* 没有活动写入者：模拟刚启动且页面统计信息不可用的情况。 */
     memset(&g_vfs_memory_allocation_failure,0,
            sizeof(g_vfs_memory_allocation_failure));
     fail_stats=true;

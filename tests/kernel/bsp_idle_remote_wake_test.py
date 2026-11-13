@@ -5,8 +5,8 @@ import tempfile
 
 root = Path(__file__).resolve().parents[2]
 source = (root/'kernel/init/runtime.c').read_text()
-start = source.index('        if (x86_smp_take_reschedule_request()',
-                     source.index('/* Remote wakes are still'))
+halt = source.index('"sti; hlt"', source.index('uint32_t reported_ipv4'))
+start = source.index('        if (x86_smp_take_reschedule_request()', halt)
 end = source.index('        /* Persist post-desktop', start)
 program = r'''
 #include <stdbool.h>
@@ -33,7 +33,7 @@ int main(void) {
     idle_dispatch(); assert(dispatches==1);
     runnable=1; idle_dispatch(); assert(dispatches==2 && runs==2);
     pending=true; idle_dispatch(); assert(dispatches==3 && runs==2);
-    /* Every remote wake must dispatch without waiting for a timer or keyboard. */
+    /* 每次远端唤醒都必须立即分发，不能等待定时器或键盘事件。 */
     for (unsigned i=0;i<1000;++i) {
         pending=true; inbox=1; idle_dispatch();
         assert(!pending && !inbox && !runnable);
@@ -50,13 +50,12 @@ with tempfile.TemporaryDirectory(prefix='liteos-bsp-wake-') as directory:
     subprocess.run([str(path/'test')],check=True)
 print('BSP idle: empty rq with remote wake, local ready, empty request, quiet idle and 1000 wake cycles passed')
 
-# Exercise the actual sleep boundary too, not only dispatch after HLT.
-# An IPI deferred by a device's preemption guard leaves a level request;
-# another producer coalesces into it and need not send a second interrupt.
+# 同时测试实际的休眠边界，而不只是 HLT 之后的分发。设备抢占保护区延迟 IPI 时会保留一个电平请求；
+# 其他生产者可与该请求合并，无需再发送第二个中断。
 start = source.index('        __asm__ volatile ("sti; hlt"', source.index('uint32_t reported_ipv4'))
 end = source.index('        /* Persist post-desktop', start)
 body = source[start:end]
-# Include the pre-sleep check once the production fix exists.
+# 生产修复完成后，将睡眠前检查纳入测试。
 boundary = source.rfind('        __asm__ volatile ("cli"', source.index('uint32_t reported_ipv4'), start)
 if boundary >= 0:
     body = source[boundary:end]
@@ -84,7 +83,7 @@ static bool sched_try_run_ready(void) {
     return false;
 }
 static void sleep_irq(void) {
-    /* STI's interrupt shadow makes STI;HLT indivisible for this race. */
+    /* STI 的中断屏蔽窗口使 STI;HLT 在此竞争场景中不可分割。 */
     assert((!pending && !runnable) || hardware_ipi);
     ++sleeps; irq_enabled=true; hardware_ipi=false;
 }

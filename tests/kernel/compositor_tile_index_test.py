@@ -34,7 +34,9 @@ typedef struct {
 } compositor_snapshot_t;
 static compositor_snapshot_t g_compositor_snapshot;
 static struct { unsigned display_width,display_height; } g_window_server={1920,1080};
-static unsigned floor_index,removed_id,expected_count,expected_ids[4],metadata_ids[4],builds,puts,releases;
+static unsigned bounds_calls;
+static Rect *shared_bounds;
+static unsigned floor_index,removed_id,expected_count,expected_ids[4],metadata_ids[4],builds,plans,puts,releases;
 static unsigned document_puts,document_mask;
 static void window_control_document_put(void *document){
  unsigned id=(unsigned)(uintptr_t)document;assert(id>=1&&id<=4&&!(document_mask&(1U<<id)));
@@ -45,9 +47,10 @@ static unsigned compositor_snapshot_tiles_to_rects(compositor_snapshot_t *s,unsi
  (void)n;s->damage_rects[0]=(Rect){0,0,64,64};return 1;
 }
 static void compositor_collapse_drag_damage(compositor_snapshot_t *s){(void)s;}
-static unsigned compositor_snapshot_occlusion_floor(compositor_snapshot_t *s){(void)s;return floor_index;}
-static bool compositor_view_intersects_snapshot_damage(compositor_window_view_t *v,compositor_snapshot_t *s){
- (void)s;return v->identifier!=removed_id;
+static bool compositor_snapshot_damage_bounds(compositor_snapshot_t *s,Rect *b){++bounds_calls;shared_bounds=b;*b=s->damage_rects[0];return true;}
+static unsigned compositor_snapshot_occlusion_floor(compositor_snapshot_t *s,Rect *b){assert(bounds_calls==1&&b==shared_bounds);(void)s;return floor_index;}
+static bool compositor_view_intersects_snapshot_damage(compositor_window_view_t *v,compositor_snapshot_t *s,Rect *b){
+ assert(bounds_calls==1&&b==shared_bounds);(void)s;return v->identifier!=removed_id;
 }
 static void object_put(void *p){assert(p);++puts;}
 static bool compositor_tile_metadata_build(compositor_snapshot_t *s){
@@ -58,13 +61,14 @@ static bool compositor_tile_metadata_build(compositor_snapshot_t *s){
  return true;
 }
 static bool compositor_build_render_plan(compositor_snapshot_t *s){
- assert(builds==1);for(unsigned i=0;i<s->window_count;i++)assert(metadata_ids[i]==s->windows[i].identifier);
+ ++plans;assert(builds==1);for(unsigned i=0;i<s->window_count;i++)assert(metadata_ids[i]==s->windows[i].identifier);
  return true;
 }
 ''' + release + '\n' + function + r'''
 static void run(unsigned floor,unsigned remove,unsigned drag,bool animated){
  memset(&g_compositor_snapshot,0,sizeof(g_compositor_snapshot));
- builds=puts=releases=document_puts=document_mask=caption_mask=0;floor_index=floor;removed_id=remove;expected_count=0;
+ bounds_calls=0;shared_bounds=0;
+ builds=plans=puts=releases=document_puts=document_mask=caption_mask=0;floor_index=floor;removed_id=remove;expected_count=0;
  g_compositor_snapshot.window_count=4;g_compositor_snapshot.damage_count=1;
  g_compositor_snapshot.dragging_identifier=drag;
  g_compositor_snapshot.animations=animated;
@@ -76,7 +80,7 @@ static void run(unsigned floor,unsigned remove,unsigned drag,bool animated){
    .caption=(void*)(uintptr_t)(i+1)};
   if((animated||i>=floor)&&(id!=remove||id==drag))expected_ids[expected_count++]=id;
  }
- compositor_snapshot_plan();assert(builds==1&&puts==4-expected_count&&releases==puts);
+ compositor_snapshot_plan();assert(bounds_calls==1);assert(builds==1&&plans==1&&puts==4-expected_count&&releases==puts);
  assert(document_puts==puts&&caption_mask==document_mask);
  for(unsigned i=0;i<expected_count;++i){
   compositor_window_view_t *view=g_compositor_snapshot.windows+i;
@@ -109,10 +113,16 @@ with tempfile.TemporaryDirectory(prefix='liteos-tile-index-') as directory:
                str(fixture), '-o', str(binary)]
     subprocess.run(command, check=True)
     subprocess.run([str(binary)], check=True)
-    # The previous ordering must fail the same compacted-index contract.
+    # 之前的排序方式必须违反相同的压缩索引约定。
     broken = harness.replace('(void)compositor_tile_metadata_build(snapshot);', '')
     broken = broken.replace('first_window_index =',
                             '(void)compositor_tile_metadata_build(snapshot);\n    first_window_index =', 1)
+    fixture.write_text(broken)
+    subprocess.run(command, check=True)
+    assert subprocess.run([str(binary)], stderr=subprocess.DEVNULL).returncode != 0
+    # 动画帧也必须进入计划构建器，由所有者统一清理旧计划状态。
+    broken = harness.replace('(void)compositor_build_render_plan(snapshot);',
+                             'if (!snapshot->animations) (void)compositor_build_render_plan(snapshot);')
     fixture.write_text(broken)
     subprocess.run(command, check=True)
     assert subprocess.run([str(binary)], stderr=subprocess.DEVNULL).returncode != 0

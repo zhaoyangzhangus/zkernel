@@ -2,7 +2,7 @@
 
 #include <stdint.h>
 
-/* Minimal x86_64 ELF ABI used by Chromium's async-safe symbolizer. */
+/* Chromium 异步信号安全符号化器使用的最小 x86_64 ELF ABI。 */
 typedef uint16_t Elf64_Half;
 typedef int16_t Elf64_SHalf;
 typedef uint32_t Elf64_Word;
@@ -72,7 +72,7 @@ typedef struct {
     } d_un;
 } Elf64_Dyn;
 
-/* ELF note header used by build-id readers. */
+/* build-id 读取器使用的 ELF note 头部。 */
 typedef struct {
     Elf64_Word n_namesz;
     Elf64_Word n_descsz;

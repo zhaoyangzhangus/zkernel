@@ -20,7 +20,7 @@ int main(void) {
             uint64_t expected=base+i*UINT64_C(1000000000)*rates[r][1]/rates[r][0];
             uint64_t deadline=video_pacing_advance(&p,now);
             assert(deadline==expected);
-            /* Rendering takes 2ms; the next interval must not accumulate it. */
+            /* 渲染耗时 2ms；下一个间隔不能累加这段时间。 */
             now=deadline+2000000;
             assert(video_pacing_timeout(deadline,deadline)==0);
             assert(video_pacing_timeout(deadline,deadline-1)==1);

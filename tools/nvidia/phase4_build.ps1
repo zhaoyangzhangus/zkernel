@@ -57,9 +57,8 @@ if (-not (Test-Path -LiteralPath $phase3Gate -PathType Leaf)) {
     throw "P3 Gate is missing: $phase3Gate"
 }
 
-# A Phase 4 build is downstream of the completed Phase 3 Gate.  The Gate
-# performs the P2 Gate and revalidates the immutable vendor graph before this
-# script is allowed to link any RM object into a kernel image.
+# 阶段 4 构建依赖已完成的阶段 3 Gate。该 Gate 会执行 P2 Gate 并重新校验
+# 不可变的供应商依赖图，之后本脚本才能将 RM 对象链接进内核映像。
 $gateArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $phase3Gate,
               '-Make', $Make)
 $gateOutput = @(& powershell.exe @gateArgs 2>&1 |
@@ -78,12 +77,10 @@ Require-File $linkerScript 'Phase 4 linker script'
 
 $makeArguments = @("BUILD=$Build")
 if ($RealTest) {
-    # Real-test images need serial evidence and the FAT32 log path.  Keep this
-    # opt-in so the normal System build remains byte-for-byte out of scope for
-    # the Phase 4 hardware preparation path.
-    # OS_REALTEST changes compiled code, while the shared make dependency
-    # stamps do not encode every CFLAGS value.  Force a clean target rebuild so
-    # a reused Build directory cannot mix ordinary and real-test objects.
+    # 实机测试映像需要串口证据和 FAT32 日志路径。将其设为显式选项，
+    # 这样阶段 4 硬件准备流程就不会逐字节改变常规 System 构建。
+    # OS_REALTEST 会改变编译出的代码，而共享 make 依赖戳不会记录每个 CFLAGS 值。
+    # 因此强制干净地重建目标，避免复用 Build 目录时混入普通对象和实机测试对象。
     $makeArguments = @('-B') + $makeArguments
     $makeArguments += @(
         'DEBUG=2',
@@ -99,9 +96,9 @@ else {
 $previousMakeErrorActionPreference = $ErrorActionPreference
 $ErrorActionPreference = 'Continue'
 try {
-    # Windows PowerShell can surface native stderr warnings as terminating
-    # NativeCommandError records under Stop.  Capture them and judge the
-    # production build by make's exit code, as done for the ABI compilers.
+    # 在 Stop 模式下，Windows PowerShell 可能会将原生命令的 stderr 警告
+    # 作为终止性的 NativeCommandError 记录处理。捕获这些记录，并像 ABI 编译器
+    # 那样根据 make 的退出码判断生产构建结果。
     $makeOutput = @(& $Make @makeArguments 2>&1 |
         ForEach-Object { $_.ToString() })
     $makeExitCode = $LASTEXITCODE
@@ -115,11 +112,10 @@ if ($makeExitCode -ne 0) {
     throw "$buildKind build failed"
 }
 
-# A native Windows build emits PE/COFF kernel objects.  They are suitable for
-# the normal PE kernel link, but converting each relocatable object to ELF
-# loses the section-relative addends used by local .bss/.rdata references.
-# Build the Phase 4 System object graph directly as ELF instead; the native
-# build above remains the source of the UEFI loader and ESP payload.
+# Windows 原生构建生成 PE/COFF 内核对象，可用于常规 PE 内核链接；但将每个
+# 可重定位对象转换为 ELF 会丢失本地 .bss/.rdata 引用所用的段相对加数。
+# 因此直接以 ELF 构建阶段 4 的 System 对象图；上面的原生构建仍用于生成
+# UEFI 加载器和 ESP 内容。
 $elfKernelExtraCFlags = '-mcmodel=kernel'
 if ($RealTest) {
     $elfKernelExtraCFlags += ' -DOS_NVIDIA_REALTEST_NO_DESKTOP=1'
@@ -170,15 +166,14 @@ if ($systemFiles.Count -eq 0) { throw 'production kernel object directory is emp
 
 $systemObjects = New-Object 'System.Collections.Generic.List[string]'
 foreach ($file in $systemFiles) {
-    # These objects are produced by x86_64-elf-gcc and already carry ELF
-    # relocations.  Do not pass them through the PE objcopy backend.
+    # 这些对象由 x86_64-elf-gcc 生成，已经包含 ELF 重定位。不要使用 PE objcopy
+    # 后端处理它们。
     [void]$systemObjects.Add($file.FullName.Replace('\', '/'))
 }
 
-# The vendor source include graph intentionally selects src/nvidia's Unix
-# nv.h.  The kernel-open OS interface header is reserved for the ABI objects;
-# mixing its generated rs_access.h with the RM NVOC headers changes the type
-# graph and is rejected by the compiler.
+# 供应商源码的包含依赖图有意选择 src/nvidia 中的 Unix 版 nv.h。kernel-open
+# 操作系统接口头文件专供 ABI 对象使用；将其生成的 rs_access.h 与 RM NVOC
+# 头文件混用会改变类型依赖图，并被编译器拒绝。
 $cpuOpsysHeader = Join-Path $vendorSourceRoot 'src\common\sdk\nvidia\inc\cpuopsys.h'
 $rmIncludesRelative = @(
     'src\nvidia\kernel\inc',
@@ -287,10 +282,9 @@ if ($workQueueExitCode -ne 0 -or
     throw 'Phase 4 System workqueue adapter compilation failed'
 }
 
-# Recompile the 11 linkable ABI adapters with the kernel code model.  Phase 3
-# intentionally compiles them as a relocatable ABI probe; their absolute
-# diagnostic-string relocations are not valid once the final Phase 4 image is
-# placed at System' high-half address.
+# 使用内核代码模型重新编译这 11 个可链接 ABI 适配器。阶段 3 有意将它们编译为
+# 可重定位 ABI 探测程序；最终阶段 4 映像放置在 System 高半区地址后，
+# 其中绝对地址的诊断字符串重定位将不再有效。
 $abiIncludeArgs = @(
     ('-I' + (Join-Path $repoRoot 'include')),
     ('-I' + (Join-Path $repoRoot 'kernel\drivers\gpu\nvidia\port\include')),

@@ -83,7 +83,7 @@ int main(void) {
    }
   }
  }
- /* Failed and short writeback cannot consume the retained dirty mark. */
+ /* 写回失败或写回长度不足时，不得清除保留的脏标记。 */
  entries[0].dirty=true;vfs_page_cache_copy_in(&vnode,5,input,1);
  vfs_vnode_lock(&vnode);fail=1;
  assert(vfs_page_cache_flush_entry(&vnode,&backend,&entries[0],0,0)==K_EIO && entries[0].dirty);
@@ -92,11 +92,10 @@ int main(void) {
  short_write=0;
  assert(vfs_page_cache_flush_entry(&vnode,&backend,&entries[0],0,0)==K_OK && !entries[0].dirty);
  vfs_vnode_unlock(&vnode);
- /* No destination means no successful full-page replacement. */
+ /* 目标不存在时，不算成功替换整页。 */
  entries[0].page=0;entries[0].dirty=true;
  vfs_page_cache_copy_in(&vnode,0,input,PAGE_SIZE);assert(entries[0].dirty);
- /* Covering the valid EOF prefix is not a full-page replacement. Keeping
-  * the mark is conservative; writeback still persists only valid bytes. */
+ /* 覆盖 EOF 前的有效前缀不等于替换整页。保留脏标记更稳妥；写回仍只持久化有效字节。 */
  entries[0].page=memory;vnode.size=17;
  memset(disk,0x11,sizeof(disk));memset(memory,0x22,sizeof(memory));
  memcpy(disk,input,17);vfs_page_cache_copy_in(&vnode,0,input,17);
@@ -112,8 +111,7 @@ int main(void) {
  uint64_t size=vnode.size;vfs_page_cache_copy_in(&vnode,UINT64_MAX-3,input,8);
  assert(vnode.size==size && !vnode_depth && !backend_depth);
  free(cache.expanded_buckets);
- /* Large independent writes visit only resident entries, including holes,
-  * partial edge pages, absent destinations and indices outside the range. */
+ /* 大范围独立写入只遍历驻留项，并覆盖空洞、边缘部分页、缺失目标和范围外索引。 */
  const unsigned resident[]={0,1,31,511,2047,2048};
  const size_t wide=8U*1024*1024;
  uint8_t *large=malloc(wide+PAGE_SIZE);assert(large);
@@ -145,9 +143,8 @@ int main(void) {
   }
   ++sparse_cases;
  }
- /* Preserve ascending per-page memmove semantics when source bytes are
-  * themselves cached destination bytes. Reverse resident-list order would
-  * silently change which bytes later pages consume. */
+ /* 当源字节本身也是缓存中的目标字节时，仍须保持按页递增的 memmove 语义。
+  * 若反向遍历驻留列表，会悄然改变后续页面读取的字节。 */
  uint8_t alias[40*PAGE_SIZE],oracle[sizeof(alias)];
  const unsigned indices[]={2,3,20},slots[]={1,2,19};
  for(unsigned shift=0;shift<3;++shift){
@@ -174,9 +171,8 @@ int main(void) {
  vfs_page_cache_t empty={0};vnode_t ev={&backend,&empty,0};lookups=0;
  vfs_page_cache_copy_in(&ev,0,large,wide);
  assert(ev.size==wide && !lookups && !vnode_depth);
- /* Exercise both adaptive branches around 16 pages, the density cutoff,
-  * inline/expanded hash buckets and large file offsets. The oracle uses
-  * byte intervals independently of the production traversal. */
+ /* 覆盖 16 页附近的两种自适应分支、密度阈值、内嵌/扩展哈希桶及大文件偏移。
+  * 基准使用独立于生产遍历逻辑的字节区间计算。 */
  const unsigned counts[]={0,1,6,68,1025},spans[]={1,16,17,256,257};
  const unsigned shifts[]={0,3,PAGE_SIZE-1};unsigned adaptive_cases=0;
  for(unsigned c=0;c<5;++c)for(unsigned high=0;high<2;++high){
@@ -210,8 +206,8 @@ int main(void) {
   }
   free(dc.expanded_buckets);free(de);free(dm);
  }
- /* Last valid file page: end == UINT64_MAX leaves its final byte outside
-  * the write. Even invalid cache indices must not wrap to file offset 0. */
+ /* 最后一个有效文件页：当 end == UINT64_MAX 时，末尾字节不在写入范围内。
+  * 即使缓存索引无效，也不得回绕到文件偏移 0。 */
  for(unsigned edge=0;edge<2;++edge){
   uint8_t top_data[2][PAGE_SIZE];memset(top_data,0x35,sizeof(top_data));
   vfs_page_cache_t tc={0};vfs_cached_page_t te[2];
@@ -229,8 +225,7 @@ int main(void) {
   }
   assert(te[0].dirty && te[1].dirty);
  }
- /* Independent interval oracle for both sides of the alias subtraction,
-  * including exact adjacency (not overlap) and a missing destination. */
+ /* 使用独立区间基准覆盖别名扣除的两侧，包括恰好相邻（不重叠）以及目标缺失。 */
  const unsigned memory_offsets[]={0,PAGE_SIZE,10*PAGE_SIZE,30*PAGE_SIZE};
  const unsigned source_offsets[]={0,1,PAGE_SIZE-1,PAGE_SIZE,PAGE_SIZE+1,
                                    10*PAGE_SIZE-1,10*PAGE_SIZE,31*PAGE_SIZE};

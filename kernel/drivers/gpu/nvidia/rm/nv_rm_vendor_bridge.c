@@ -19,9 +19,8 @@
 #define OS_NVIDIA_PREFER_MSI 0
 #endif
 
-/* 595.84's immutable Linux MSI-X path caps the GPU at this many vectors
- * (NV_RM_MAX_MSIX_LINES).  The RM ISR is shared here because the vendor
- * entry point does not consume the Linux IRQ number. */
+/* 不可变的 595.84 Linux MSI-X 路径将 GPU 向量数限制在 NV_RM_MAX_MSIX_LINES。
+ * 此处由 RM ISR 共享处理，因为厂商入口不使用 Linux IRQ 编号。 */
 #define NV_RM_MSIX_ENTRY_LIMIT 8U
 
 #include <arch/x86_64/cpu.h>
@@ -57,11 +56,9 @@
 extern kstatus_t nv_rm_vendor_phase6_probe(nv_state_t *state);
 #endif
 
-/* Keep the kernel-open OS interface header out of this translation unit.
- * Its rs_access.h and the RM NVOC headers are generated from distinct vendor
- * include roots and cannot be included together.  These are the only two
- * OS-interface entry points used by this bridge, declared with their exact
- * vendor ABI types. */
+/* 不要在此编译单元中包含内核打开文件用的 OS 接口头文件。其 rs_access.h 与 RM NVOC
+ * 头文件来自不同的厂商 include 根目录，不能同时包含。此桥接层只使用这两个 OS 接口入口，
+ * 并按厂商 ABI 的准确类型声明。 */
 extern void *NV_API_CALL os_pci_init_handle(NvU32, NvU8, NvU8, NvU8,
                                              NvU16 *, NvU16 *);
 extern void NV_API_CALL os_pci_remove(void *);
@@ -130,8 +127,8 @@ static void nv_rm_vendor_irq_top(void *argument)
     atomic_fetch_add_explicit(&context->irq_top_hits, 1U,
                               memory_order_relaxed);
 
-    /* rm_isr() is the vendor top-half entry.  It owns interrupt pending
-     * inspection and returns the exact bottom-half requirement. */
+    /* rm_isr() 是厂商的中断顶半部入口。它负责检查待处理中断，并返回是否确实需要运行
+     * 底半部。 */
     if (rm_isr(context->isr_stack, context->state, &need_bottom_half)) {
         atomic_fetch_add_explicit(&context->irq_rm_handled_hits, 1U,
                                   memory_order_relaxed);
@@ -151,8 +148,8 @@ static void nv_rm_vendor_irq_bottom_half(void *argument)
     if (context == NULL)
         return;
 
-    /* Drain coalesced vendor requests before publishing the queue slot as
-     * idle.  The final pending check closes the IRQ/worker hand-off race. */
+    /* 将合并的厂商请求全部处理后，再将队列槽位发布为空闲状态。最后一次待处理检查用于
+     * 关闭 IRQ 与工作线程交接时的竞争窗口。 */
     for (;;) {
         if (!atomic_exchange_explicit(&context->irq_bottom_pending, false,
                                       memory_order_acq_rel))
@@ -177,10 +174,8 @@ static void nv_rm_vendor_drain_irq_work(nv_rm_vendor_context_t *context)
 
     while (atomic_load_explicit(&context->irq_bottom_queued,
                                 memory_order_acquire)) {
-        /* RM probing currently precedes scheduler worker startup.  If an
-         * early vendor path requested a bottom half, execute queued work in
-         * the existing deferred runner while teardown keeps the RM state
-         * alive. */
+        /* 当前 RM 探测先于调度器工作线程启动。如果厂商早期路径请求执行底半部，则在拆除流程
+         * 保持 RM 状态有效期间，使用现有的延迟执行器运行排队任务。 */
         if (!deferred_worker_started() && deferred_run(64U) != 0U)
             continue;
         __asm__ volatile ("pause");
@@ -225,8 +220,8 @@ static kstatus_t nv_rm_vendor_start_irq(
 
     apic_id = x86_current_apic_id();
 
-    /* Match the vendor PCI path's MSI-X preference, but use one real vector
-     * for the RM interrupt stream.  MSI remains an explicit fallback. */
+    /* 遵循厂商 PCI 路径对 MSI-X 的优先选择，但 RM 中断流只使用一个真实向量。MSI 仍是
+     * 显式的回退方式。 */
     if (!OS_NVIDIA_PREFER_MSI && device->msix_capability != 0U &&
         device->msix_table_size != 0U) {
         status = nv_port_irq_init(&context->irq, device, true, 0U, apic_id,
@@ -234,10 +229,9 @@ static kstatus_t nv_rm_vendor_start_irq(
         if (status == K_OK)
             status = nv_port_irq_start(&context->irq);
         if (status == K_OK) {
-            /* NVIDIA's 595.84 Linux path enables all supported MSI-X table
-             * entries before registering the RM ISR.  Keep the System
-             * handler shared, but program every entry that the vendor path
-             * would request so any GPU interrupt source can reach it. */
+            /* NVIDIA 595.84 Linux 路径会在注册 RM ISR 前启用所有受支持的 MSI-X 表项。
+             * System 仍共用一个处理程序，但会配置厂商路径请求的所有表项，使任何 GPU
+             * 中断源都能到达该处理程序。 */
             paddr_t table = {0};
             uint16_t entries = 0U;
             uint16_t active_entries = 0U;
@@ -322,11 +316,9 @@ static void nv_rm_vendor_cleanup(nv_rm_vendor_context_t *context)
     if (context == NULL)
         return;
 
-    /* Match the immutable 595.84 Linux teardown order: disable the running
-     * adapter while its RM interrupt path is still available, then tear down
-     * the IRQ, and only then release the adapter state.  A failed
-     * rm_init_adapter() is not a successful adapter and must not be passed to
-     * rm_shutdown_adapter(). */
+    /* 遵循不可变的 595.84 Linux 拆除顺序：先在 RM 中断路径仍可用时禁用运行中的适配器，
+     * 再拆除 IRQ，最后释放适配器状态。rm_init_adapter() 失败意味着适配器未成功初始化，
+     * 不得将其传递给 rm_shutdown_adapter()。 */
     if (context->adapter_initialized)
         rm_disable_adapter(context->stack, context->state);
 
@@ -335,9 +327,8 @@ static void nv_rm_vendor_cleanup(nv_rm_vendor_context_t *context)
     if (context->adapter_initialized)
         rm_shutdown_adapter(context->stack, context->state);
 
-    /* Phase 4 keeps only the real vendor OBJGPU discovery object alive.  It
-     * must be deleted before the private RM and global RM state are released;
-     * GSP bootstrap and the full adapter path begin in Phase 5. */
+    /* 第 4 阶段只保留真实的厂商 OBJGPU 发现对象。释放私有 RM 和全局 RM 状态前，必须先
+     * 删除该对象；GSP 引导和完整适配器路径从第 5 阶段开始。 */
     if (context->phase4_gpu != NULL) {
         objDelete(context->phase4_gpu);
         context->phase4_gpu = NULL;
@@ -440,10 +431,8 @@ static kstatus_t nv_rm_vendor_fill_pci(const pci_device_t *device,
 
     state->regs = &state->bars[0];
     state->fb = &state->bars[1];
-    /* System has no GPU IOVA-remap domain at this boundary.  Zero is a
-     * valid vendor vaspace id, not the sentinel for a direct-physical PCIe
-     * path; leave GMMU/VA ownership with NVIDIA by passing the exact vendor
-     * "no domain" value. */
+    /* 在此边界处，System 没有 GPU IOVA 重映射域。0 是有效的厂商 vaspace ID，不能作为
+     * 直接物理 PCIe 路径的哨兵值；传递厂商定义的准确“无域”值，将 GMMU/VA 所有权留给 NVIDIA。 */
     state->iovaspace_id = NV_IOVA_DOMAIN_NONE;
     state->cpu_numa_node_id = (NvS32)-1;
 #if OS_NVIDIA_PHASE5
@@ -552,9 +541,8 @@ static void nv_rm_vendor_log_hal_state(const nv_state_t *state)
         gpu_arch != NULL ? (unsigned)gpu_arch->chipImpl : 0U);
 }
 
-/* Phase 4 stops at the real vendor OBJGPU/NVOC/HAL discovery boundary.  The
- * object is not inserted into gpumgr's handle table and is deleted by the
- * normal reverse teardown path.  Phase 5 owns the adapter/GSP transition. */
+/* 第 4 阶段止于真实的厂商 OBJGPU/NVOC/HAL 发现边界。该对象不会插入 gpumgr 句柄表，
+ * 而是由常规逆序拆除路径删除。适配器/GSP 转换由第 5 阶段负责。 */
 static kstatus_t nv_rm_vendor_create_phase4_gpu(
     nv_rm_vendor_context_t *context)
 {
@@ -578,9 +566,8 @@ static kstatus_t nv_rm_vendor_create_phase4_gpu(
     if (gpu_arch == NULL)
         return K_EIO;
 
-    /* 595.84's generated host NVOC graph maps the physical-PF discovery
-     * variant to PF_KERNEL_ONLY.  This selects the vendor GB205 HAL only; it
-     * does not load firmware, start GSP, or issue an RPC. */
+    /* 595.84 生成的主机 NVOC 图会将物理 PF 发现变体映射到 PF_KERNEL_ONLY。此操作只会
+     * 选择厂商 GB205 HAL，不会加载固件、启动 GSP 或发送 RPC。 */
     create_status = objCreate(&probe_gpu, sys, OBJGPU,
                               gpu_arch->chipArch,
                               gpu_arch->chipImpl,
@@ -623,10 +610,9 @@ static void nv_rm_vendor_set_result(nv_rm_vendor_context_t *context,
                                     nv_rm_vendor_result_t *result)
 {
     nv_priv_t *private_state = (nv_priv_t *)NV_GET_NV_PRIV(context->state);
-    /* Phase 4 deliberately reports the real discovery object constructed by
-     * nv_rm_vendor_create_phase4_gpu().  private_state->pGpu belongs to the
-     * later adapter path and may be the vendor's pre-attach placeholder; it
-     * is not the object whose PF_KERNEL_ONLY NVOC/HAL binding we just proved. */
+    /* 第 4 阶段特意报告由 nv_rm_vendor_create_phase4_gpu() 构造的真实发现对象。
+     * private_state->pGpu 属于后续适配器路径，可能只是厂商预先挂接的占位对象；它不是刚刚
+     * 验证过 PF_KERNEL_ONLY NVOC/HAL 绑定的对象。 */
     OBJGPU *gpu = context != NULL ? context->phase4_gpu : NULL;
     GpuArch *gpu_arch = gpu != NULL ? gpu->pGpuArch : NULL;
 
@@ -643,21 +629,18 @@ static void nv_rm_vendor_set_result(nv_rm_vendor_context_t *context,
     if (gpu == NULL || gpu_arch == NULL)
         return;
 
-    /* chipInfo is populated by gpuPostConstruct, which is intentionally a
-     * later Phase 5 boundary.  The architecture facts used here come from
-     * the vendor GpuArch selected by the immutable HAL manager. */
+    /* chipInfo 由 gpuPostConstruct 填充，该调用特意留在后续第 5 阶段边界。此处使用的架构
+     * 信息来自不可变 HAL 管理器选出的厂商 GpuArch。 */
     result->chip_arch = gpu_arch->chipArch;
     result->chip_impl = gpu_arch->chipImpl;
     result->hal_impl = gpu->halImpl;
-    /* GpuArch stores the PMC_BOOT_42 architecture code (0x1b for GB200),
-     * while GPU_ARCHITECTURE_BLACKWELL_GB2XX is the separate published
-     * architecture encoding (0x1b0).  Use the value actually returned by the
-     * immutable vendor HAL lookup at this boundary. */
+    /* GpuArch 保存 PMC_BOOT_42 架构代码（GB200 为 0x1b），而
+     * GPU_ARCHITECTURE_BLACKWELL_GB2XX 是单独发布的架构编码（0x1b0）。此边界应使用
+     * 不可变厂商 HAL 查找实际返回的值。 */
     result->blackwell = result->chip_arch == NV_PMC_BOOT_42_ARCHITECTURE_GB200;
     result->gb205 = result->chip_impl == GPU_IMPLEMENTATION_GB205;
-    /* The private-state HAL flags are set by the later adapter path.  Phase 4
-     * stops after this real OBJGPU NVOC/HAL binding, so the vendor HAL object
-     * and its resolved GB205 implementation are the valid evidence here. */
+    /* 私有状态中的 HAL 标志由后续适配器路径设置。第 4 阶段在真实 OBJGPU NVOC/HAL 绑定后
+     * 就会停止，因此此处有效的依据是厂商 HAL 对象及其解析出的 GB205 实现。 */
     result->hal_valid = gpu->pHal != NULL && gpu->halImpl == HAL_IMPL_GB205;
     kernel_serial_printf_serial_only(
         "OS_NVIDIA_PHASE4_RESULT gpu=%llx arch=%llx hal=%llx pga=%llx impl=%x flags=%x valid=%u blackwell=%u gb205=%u\r\n",
@@ -672,9 +655,8 @@ static void nv_rm_vendor_set_result(nv_rm_vendor_context_t *context,
         result->gb205 ? 1U : 0U);
 }
 
-/* One boot snapshot, retained in RAM after failure cleanup. No serial or
- * per-frame output: phase, preemption gate, APIC, top/handled/bottom IRQs,
- * pending bottom half and failed bottom-half scheduling. */
+/* 保存在 RAM 中的一份启动快照，在故障清理后仍会保留。不输出串口日志或逐帧信息：
+ * 记录阶段、抢占门控、APIC、IRQ 顶半部/已处理/底半部、待处理底半部及底半部调度失败。 */
 static volatile uint32_t g_nv_rm_boot_diagnostic[8];
 
 static bool nv_rm_vendor_init_adapter(nv_rm_vendor_context_t *context)
@@ -682,10 +664,9 @@ static bool nv_rm_vendor_init_adapter(nv_rm_vendor_context_t *context)
     uint64_t cpu_flags;
     bool ready;
 
-    /* The interactive boot path skips user-mode self-tests and can arrive
-     * with IF clear.  RM's real interrupt verification requires interrupts,
-     * after the handler and MSI/MSI-X table have been installed.  RM also
-     * waits on semaphores/workers, so this must remain a sleepable context. */
+    /* 交互式启动会跳过用户态自检，因此 IF 可能仍为清除状态。安装处理程序和 MSI/MSI-X
+     * 表后，RM 的真实中断验证需要开启中断。RM 还会等待信号量和工作线程，因此此处必须处于
+     * 可休眠上下文。 */
     g_nv_rm_boot_diagnostic[0] = 1U;
     g_nv_rm_boot_diagnostic[1] = sched_preempt_disabled() ? 1U : 0U;
     g_nv_rm_boot_diagnostic[2] = x86_current_apic_id();
@@ -764,11 +745,9 @@ kstatus_t nv_rm_vendor_start(const pci_device_t *device,
         return K_EIO;
     }
     context->rm_initialized = true;
-    /* The Linux frontend initializes these per-device RM locks before
-     * rm_is_supported_device().  System cannot call nv_lock_init_locks(),
-     * because that wrapper owns Linux-only nv_linux_state_t storage; the
-     * vendor RM event-lock entry points are the portable part of the same
-     * lifecycle and operate directly on nv_state_t. */
+    /* Linux 前端会在调用 rm_is_supported_device() 前初始化这些设备级 RM 锁。System 不能
+     * 调用 nv_lock_init_locks()，因为该包装函数拥有仅供 Linux 使用的 nv_linux_state_t
+     * 存储；厂商 RM 事件锁入口是相同生命周期中可移植的部分，可直接操作 nv_state_t。 */
     if (!rm_init_event_locks(context->stack, context->state)) {
         kernel_serial_write_serial_only(
             "OS_NVIDIA_EVENT_LOCKS_FAILED\r\n");
@@ -866,9 +845,8 @@ void nv_rm_vendor_stop(void *opaque_context)
 }
 
 typedef struct nv_rm_vendor_frontend_file {
-    /* This is the exact vendor-visible prefix used by nv_get_file_private.
-     * The Linux-only wrapper is deliberately not imported; the RM ABI only
-     * consumes this per-file state at this boundary. */
+    /* 这是 nv_get_file_private 使用的厂商可见前缀。此处特意不导入仅供 Linux 使用的包装函数；
+     * RM ABI 在此边界只会使用此文件级状态。 */
     nv_file_private_t vendor_private;
     nv_rm_vendor_context_t *context;
     bool control;
@@ -876,17 +854,16 @@ typedef struct nv_rm_vendor_frontend_file {
     struct nv_rm_vendor_frontend_file *control_file;
     NvU32 *attached_gpus;
     NvU32 attached_gpu_words;
-    /* System owns the file lifetime, so retain the vendor mapping-context
-     * shape without importing nv_linux_file_private_t.  The list is used only
-     * for RM-validated mmap contexts; it never represents VRAM or GPU VA. */
+    /* 文件生命周期由 System 管理，因此保留厂商映射上下文的结构，但不导入
+     * nv_linux_file_private_t。此列表只用于 RM 验证过的 mmap 上下文，不表示 VRAM 或 GPU VA。 */
     nv_alloc_mapping_list_node_t *mapping_list;
     spinlock_t mapping_lock;
     nv_port_event_source_t *event_source;
     struct nv_rm_vendor_frontend_file *event_next;
 } nv_rm_vendor_frontend_file_t;
 
-/* Static zero is the unlocked atomic spinlock state. Every access saves IRQ
- * state so a callback cannot interrupt a registration/removal lock owner. */
+/* 静态零值表示原子自旋锁处于未锁定状态。每次访问都会保存 IRQ 状态，避免回调中断正在
+ * 执行注册/移除操作的锁所有者。 */
 #define NV_RM_EVENT_BUCKETS 64U
 typedef struct nv_rm_event_bucket {
     nv_port_spinlock_t lock;
@@ -896,12 +873,11 @@ static nv_rm_event_bucket_t g_nv_rm_event_buckets[NV_RM_EVENT_BUCKETS];
 
 static nv_rm_event_bucket_t *nv_rm_vendor_event_bucket(const void *private_data) {
     uintptr_t key = (uintptr_t)private_data;
-    /* Ignore allocation alignment and mix page bits. Computing a bucket must
-     * never dereference a possibly retired vendor-private pointer. */
+    /* 忽略分配对齐信息并混合页面位。计算桶索引时绝不能解引用可能已回收的厂商私有指针。 */
     key = (key >> 4) ^ (key >> 12) ^ (key >> 20);
     return &g_nv_rm_event_buckets[key & (NV_RM_EVENT_BUCKETS - 1U)];
 }
-/* Quiet, debugger-readable counters; never format logs in the IRQ callback. */
+/* 静默且可由调试器读取的计数器；绝不在 IRQ 回调中格式化日志。 */
 static atomic_uint_fast64_t g_nv_rm_event_posts;
 static atomic_uint_fast64_t g_nv_rm_event_drops;
 static atomic_uint_fast64_t g_nv_rm_event_reports;
@@ -934,8 +910,8 @@ void NV_API_CALL nv_post_event(nv_event_t *event, NvHandle handle,
     };
     nv_rm_event_bucket_t *bucket = nv_rm_vendor_event_bucket(event->nvfp);
     uint64_t flags = nv_port_spin_lock_irqsave(&bucket->lock);
-    /* Never dereference event->nvfp: it can be a retired address. Rechecking
-     * active under registration protection rejects stale events after reuse. */
+    /* 绝不解引用 event->nvfp：它可能已是回收后的地址。在注册保护下重新检查 active，
+     * 可拒绝复用后到达的过期事件。 */
     if (__atomic_load_n(&event->active, __ATOMIC_ACQUIRE) != 0) {
         for (nv_rm_vendor_frontend_file_t *file = bucket->files;
              file != NULL; file = file->event_next) {
@@ -947,9 +923,8 @@ void NV_API_CALL nv_post_event(nv_event_t *event, NvHandle handle,
             break;
         }
     }
-    /* Do not object_put here: dropping the last source reference in a hard
-     * interrupt could call the heap destructor. Removal instead waits for
-     * this protected callback before releasing the owner in thread context. */
+    /* 此处不要调用 object_put：在硬中断中释放最后一个源引用可能调用堆析构函数。
+     * 移除操作会先等待此受保护回调结束，再在线程上下文中释放所有者。 */
     nv_port_spin_unlock_irqrestore(&bucket->lock, flags);
 }
 
@@ -972,9 +947,8 @@ NvS32 NV_API_CALL nv_get_event(nv_file_private_t *private_data,
         break;
     }
     nv_port_spin_unlock_irqrestore(&bucket->lock, flags);
-    /* This ioctl runs in thread context. Pin only the independently owned
-     * source: close may now retire the file, but the queue remains alive.
-     * Neither payload freeing nor a final destructor holds the registry lock. */
+    /* 此 ioctl 在线程上下文中运行。只固定独立拥有的事件源：此时关闭操作可以回收文件，
+     * 但队列仍保持有效。释放负载和调用最终析构函数时都不持有注册表锁。 */
     if (source != NULL) {
         status = nv_port_event_source_take(source, &record, &more);
         object_put(nv_port_event_source_wait_object(source));
@@ -1067,10 +1041,9 @@ static void nv_rm_vendor_frontend_security(
 }
 
 /*
- * 595.84's osapi.c calls this after the real RM has validated a CPU mapping.
- * The Linux implementation stores the node in nv_linux_file_private_t.  That
- * wrapper is intentionally not present in System; keep the same ownership and
- * duplicate-rejection rules on the System frontend object instead.
+ * 真实 RM 验证 CPU 映射后，595.84 的 osapi.c 会调用此函数。Linux 实现会将节点保存在
+ * nv_linux_file_private_t 中。System 特意不引入该包装类型；改由 System 前端对象遵循相同的
+ * 所有权和重复项拒绝规则。
  */
 NV_STATUS NV_API_CALL nv_add_mapping_context_to_file(
     nv_state_t *nv,
@@ -1090,11 +1063,9 @@ NV_STATUS NV_API_CALL nv_add_mapping_context_to_file(
     if (nv == NULL || nvuap == NULL)
         return NV_ERR_INVALID_ARGUMENT;
 
-    /* RmCreateMmapContextLocked switches pNv to nv_get_ctl_state() for
-     * system-memory allocations and passes the resolved allocation private
-     * object.  System shares the live nv_state_t between control and actual
-     * files, so pAllocPriv is the authoritative discriminator here; the RM
-     * control flag remains valid for the vendor's explicit control paths. */
+    /* 对系统内存分配，RmCreateMmapContextLocked 会将 pNv 切换为 nv_get_ctl_state()，并传入
+     * 已解析的分配私有对象。System 在控制文件和实际设备文件之间共用活动 nv_state_t，因此
+     * pAllocPriv 是此处的权威判别依据；RM 控制标志仍适用于厂商显式指定的控制路径。 */
     control_device = ((nv->flags & NV_FLAG_CONTROL) != 0 ||
                       pAllocPriv != NULL) ? NV_TRUE : NV_FALSE;
     vendor_private = nv_get_file_private((NvS32)fd, control_device,
@@ -1105,8 +1076,8 @@ NV_STATUS NV_API_CALL nv_add_mapping_context_to_file(
         return NV_ERR_INVALID_ARGUMENT;
     }
 
-    /* vendor_private is the first member by contract, so this conversion is
-     * the inverse of nv_frontend_file_vendor_private(). */
+    /* 根据约定，vendor_private 是首个成员，因此此处转换与
+     * nv_frontend_file_vendor_private() 互为逆操作。 */
     file = (nv_rm_vendor_frontend_file_t *)vendor_private;
     if (file->context == NULL || file->context->state == NULL ||
         (control_device == NV_FALSE && file->context->state != nv)) {
@@ -1122,10 +1093,8 @@ NV_STATUS NV_API_CALL nv_add_mapping_context_to_file(
     __builtin_memset(node, 0, sizeof(*node));
 
     if (control_device != NV_FALSE) {
-        /* Control-device mappings are RM system-memory allocations.  Keep
-         * the vendor private allocation handle and page index exactly as the
-         * immutable implementation does; no System memory manager substitute
-         * is introduced here. */
+        /* 控制设备映射属于 RM 系统内存分配。完全按照不可变实现保留厂商私有分配句柄和页面索引；
+         * 此处不引入 System 内存管理器作为替代。 */
         if (pAllocPriv == NULL) {
             kfree(node);
             status = NV_ERR_INVALID_ARGUMENT;
@@ -1134,7 +1103,7 @@ NV_STATUS NV_API_CALL nv_add_mapping_context_to_file(
         node->context.alloc = pAllocPriv;
         node->context.page_index = pageIndex;
     } else {
-        /* Actual-device mappings carry the RM-validated aperture ranges. */
+        /* 实际设备映射携带经 RM 验证的显存窗口范围。 */
         if (nvuap->memArea.numRanges == 0U ||
             nvuap->memArea.pRanges == NULL ||
             nvuap->memArea.numRanges >
@@ -1156,9 +1125,8 @@ NV_STATUS NV_API_CALL nv_add_mapping_context_to_file(
                          (size_t)nvuap->memArea.numRanges *
                              sizeof(MemoryRange));
 
-        /* NUMA-backed mappings transfer a page array in the Linux driver.
-         * System currently has no NUMA online state, but copy it when the RM
-         * supplies one so the context remains self-contained. */
+        /* Linux 驱动会在 NUMA 后备映射中转移页面数组。System 当前没有 NUMA 在线状态，
+         * 但如果 RM 提供该数组，仍需复制它，以保持上下文自包含。 */
         if (nvuap->page_array != NULL && nvuap->num_pages != 0U) {
             if (nvuap->num_pages >
                 (NvU64)(SIZE_MAX / sizeof(NvU64))) {
@@ -1276,10 +1244,8 @@ void *nv_rm_vendor_ctl_state(void)
     const nv_gpu_device_t *gpu = nv_rm_driver_current();
     nv_rm_vendor_context_t *context;
 
-    /* This is the System equivalent of the vendor Linux control device's
-     * NV_STATE_PTR(&nv_ctl_device).  The state is returned only while the
-     * real RM/GSP instance is published as ready; callers must fail closed
-     * when the device is not live. */
+    /* 这相当于厂商 Linux 控制设备上的 NV_STATE_PTR(&nv_ctl_device)。只有真实 RM/GSP 实例
+     * 已发布为就绪状态时才返回该状态；设备未运行时，调用方必须安全失败。 */
     if (gpu == NULL || gpu->state != NV_GPU_GSP_READY ||
         gpu->vendor_context == NULL)
         return NULL;
@@ -1297,9 +1263,8 @@ kstatus_t nv_rm_vendor_frontend_register_fd(void *opaque_file,
     nv_rm_vendor_frontend_file_t *control_file =
         (nv_rm_vendor_frontend_file_t *)opaque_control_file;
 
-    /* Mirror the immutable Linux frontend's relationship rules: the target
-     * must be a control node, both handles must belong to the same RM
-     * instance, and a file may have only one control link. */
+    /* 遵循不可变 Linux 前端的关联规则：目标必须是控制节点，两个句柄必须属于同一个 RM
+     * 实例，且一个文件只能关联一个控制节点。 */
     if (file == NULL || control_file == NULL || file == control_file ||
         file->context == NULL || file->context != control_file->context ||
         !control_file->control || file->control_file != NULL ||
@@ -1314,9 +1279,8 @@ kstatus_t nv_rm_vendor_frontend_register_fd(void *opaque_file,
 static void nv_rm_vendor_frontend_import_host_memory(
     nv_rm_vendor_frontend_file_t *file, NVOS32_PARAMETERS *heap)
 {
-    /* escape.c's RmCreateOsDescriptor pins user memory before the core heap
-     * call. Passing a raw virtual address straight to the core is not an
-     * OS_PAGE_ARRAY descriptor, and the core correctly rejects it. */
+    /* escape.c 中的 RmCreateOsDescriptor 会在调用核心堆函数前固定用户内存。直接向核心传递原始
+     * 虚拟地址并不构成 OS_PAGE_ARRAY 描述符，因此核心会正确地拒绝它。 */
     NvP64 original = heap->data.AllocOsDesc.descriptor;
     NvU32 original_type = heap->data.AllocOsDesc.descriptorType;
     NvU64 limit = heap->data.AllocOsDesc.limit;
@@ -1354,8 +1318,7 @@ static void nv_rm_vendor_frontend_import_host_memory(
     Nv04VidHeapControlWithSecInfo(heap, security);
     if (heap->status != NV_OK)
         (void)os_unlock_user_pages(pages, page_array, flags);
-    /* Do not expose the kernel's page-array pointer in the user packet.
-     * On success the RM owns that pinned payload until resource destruction. */
+    /* 不要在用户数据包中暴露内核页面数组指针。成功后，RM 会持有该固定负载，直到资源销毁。 */
     heap->data.AllocOsDesc.descriptor = original;
     heap->data.AllocOsDesc.descriptorType = original_type;
 }
@@ -1388,14 +1351,13 @@ kstatus_t nv_rm_vendor_frontend_ioctl(void *opaque_file, uint32_t request,
     case NV_ESC_RM_GET_EVENT_DATA:
     case NV_ESC_ALLOC_OS_EVENT:
     case NV_ESC_FREE_OS_EVENT: {
-        /* The immutable RM OS layer owns the event list, client association,
-         * active/reference state and validation. Do not fabricate an event
-         * handle or report success without executing that implementation. */
+        /* 不可变的 RM OS 层负责管理事件列表、客户端关联、活动/引用状态和校验。若未执行该实现，
+         * 不得伪造事件句柄或报告成功。 */
         uint32_t expected_size = number == NV_ESC_RM_GET_EVENT_DATA ?
             sizeof(NVOS41_PARAMETERS) : number == NV_ESC_ALLOC_OS_EVENT ?
             sizeof(nv_ioctl_alloc_os_event_t) : sizeof(nv_ioctl_free_os_event_t);
-        /* 595.84 accepts OS events on actual-device fds too; Vulkan creates
-         * a registered nvidia0 fd for its queue event notifications. */
+        /* 595.84 也允许在实际设备 fd 上创建 OS 事件；Vulkan 会创建已注册的 nvidia0 fd，
+         * 用于队列事件通知。 */
         if (argument_size != expected_size)
             return K_EINVAL;
         nvidia_stack_t *stack = nv_rm_vendor_frontend_stack_create();
@@ -1478,9 +1440,8 @@ kstatus_t nv_rm_vendor_frontend_ioctl(void *opaque_file, uint32_t request,
         if (!file->control || argument_size != sizeof(*release))
             return K_EINVAL;
 
-        /* This is the real 595.84 NV04_FREE entry point.  The vendor RM
-         * performs handle validation, locking, and object destruction; the
-         * frontend only supplies the Linux user-parameter security context. */
+        /* 这是 595.84 的真实 NV04_FREE 入口。厂商 RM 负责校验句柄、加锁和销毁对象；前端只提供
+         * Linux 用户参数安全上下文。 */
         {
             API_SECURITY_INFO sec_info = {0};
             sec_info.privLevel = RS_PRIV_LEVEL_USER_ROOT;
@@ -1495,9 +1456,8 @@ kstatus_t nv_rm_vendor_frontend_ioctl(void *opaque_file, uint32_t request,
         if (!file->control || argument_size != sizeof(*allocation))
             return K_EINVAL;
 
-        /* Keep the exact 595.84 NV01_ALLOC_OBJECT path.  Resource-class
-         * validation, handle allocation, locking, and any GSP work remain in
-         * the immutable RM implementation. */
+        /* 保留 595.84 原有的 NV01_ALLOC_OBJECT 路径。资源类校验、句柄分配、加锁及所需的 GSP
+         * 操作仍由不可变 RM 实现负责。 */
         {
             API_SECURITY_INFO sec_info;
             nv_rm_vendor_frontend_security(file, &sec_info);
@@ -1510,9 +1470,8 @@ kstatus_t nv_rm_vendor_frontend_ioctl(void *opaque_file, uint32_t request,
         if (!file->control || argument_size != sizeof(*control))
             return K_EINVAL;
 
-        /* This is the real 595.84 NV04_CONTROL entry point.  Its immutable
-         * implementation copies and validates the pointed-to RM parameters,
-         * takes the required RM locks, and performs any GSP transaction. */
+        /* 这是 595.84 的真实 NV04_CONTROL 入口。不可变实现会复制并校验指向的 RM 参数、获取
+         * 所需 RM 锁，并执行必要的 GSP 事务。 */
         {
             API_SECURITY_INFO sec_info = {0};
             nv_rm_vendor_frontend_security(file, &sec_info);
@@ -1525,9 +1484,8 @@ kstatus_t nv_rm_vendor_frontend_ioctl(void *opaque_file, uint32_t request,
             (nv_ioctl_nvos02_parameters_with_fd *)argument;
         NVOS02_PARAMETERS *allocation = &api->params;
 
-        /* NV_ESC_RM_ALLOC_MEMORY is an actual-device ioctl in 595.84.  The
-         * fd is part of the immutable wrapper because the RM registers the
-         * resulting system-memory mapping against that exact Linux file. */
+        /* 在 595.84 中，NV_ESC_RM_ALLOC_MEMORY 是实际设备 ioctl。fd 属于不可变包装层的一部分，
+         * 因为 RM 会针对该 Linux 文件注册生成的系统内存映射。 */
         if (file->control || file->minor != 0U ||
             argument_size != sizeof(*api))
             return K_EINVAL;
@@ -1537,9 +1495,8 @@ kstatus_t nv_rm_vendor_frontend_ioctl(void *opaque_file, uint32_t request,
             NvU32 flags = allocation->flags;
             nv_rm_vendor_frontend_security(file, &sec_info);
             Nv01AllocMemoryWithSecInfo(allocation, sec_info);
-            /* Mirror escape.c: immediate system allocations also register a
-             * context on the supplied mmap fd. Without this step allocation
-             * succeeds but the subsequent control-node mmap is rejected. */
+            /* 遵循 escape.c：立即系统内存分配也要在给定的 mmap fd 上注册上下文。缺少这一步，
+             * 分配虽然成功，后续控制节点 mmap 仍会被拒绝。 */
             if (allocation->hClass == NV01_MEMORY_SYSTEM &&
                 !FLD_TEST_DRF(OS02, _FLAGS, _ALLOC, _NONE, flags) &&
                 !FLD_TEST_DRF(OS02, _FLAGS, _MAPPING, _NO_MAP, flags) &&
@@ -1606,9 +1563,8 @@ kstatus_t nv_rm_vendor_frontend_ioctl(void *opaque_file, uint32_t request,
         if (!file->control || argument_size != sizeof(*update))
             return K_EINVAL;
 
-        /* This escape is intentionally the same OS-interface call used by
-         * immutable 595.84 escape.c.  It updates RM's own mapping record; no
-         * System mapping, VRAM, GPU-VA, or GMMU state is synthesized here. */
+        /* 此扩展入口特意调用与不可变 595.84 escape.c 相同的 OS 接口函数。它会更新 RM 自有的
+         * 映射记录；此处不会生成 System 映射、VRAM、GPU VA 或 GMMU 状态。 */
         update->status = rm_update_device_mapping_info(
             update->hClient, update->hDevice, update->hMemory,
             NvP64_VALUE(update->pOldCpuAddress),
@@ -1618,8 +1574,7 @@ kstatus_t nv_rm_vendor_frontend_ioctl(void *opaque_file, uint32_t request,
     case NV_ESC_RM_IDLE_CHANNELS: {
         NVOS30_PARAMETERS *idle = (NVOS30_PARAMETERS *)argument;
 
-        /* The immutable escape.c path is control-device-only and reports
-         * operation errors through NVOS30_PARAMETERS.status. */
+        /* 不可变的 escape.c 路径仅适用于控制设备，并通过 NVOS30_PARAMETERS.status 报告操作错误。 */
         if (!file->control || argument_size != sizeof(*idle))
             return K_EINVAL;
 
@@ -1635,9 +1590,8 @@ kstatus_t nv_rm_vendor_frontend_ioctl(void *opaque_file, uint32_t request,
             (nv_ioctl_nvos33_parameters_with_fd *)argument;
         NVOS33_PARAMETERS *mapping = &api->params;
 
-        /* Keep the 595.84 escape.c ordering.  The RM owns the memory-object
-         * validation and CPU mapping; the fd wrapper is only used to attach
-         * the resulting mmap context to the requesting actual file. */
+        /* 保持 595.84 escape.c 的操作顺序。RM 负责校验内存对象并建立 CPU 映射；fd 包装层只用于
+         * 将生成的 mmap 上下文关联到请求操作的实际文件。 */
         if (!file->control || argument_size != sizeof(*api))
             return K_EINVAL;
 
@@ -1683,9 +1637,8 @@ kstatus_t nv_rm_vendor_frontend_ioctl(void *opaque_file, uint32_t request,
         NVOS64_PARAMETERS *allocation = (NVOS64_PARAMETERS *)argument;
         if (argument_size != sizeof(*allocation))
             return K_EINVAL;
-        /* Match 595.84 escape.c: event classes may be allocated on actual
-         * GPU fds. Other resources, including root clients, remain ctl-only.
-         * RM still validates the client, parent and event parameters. */
+        /* 遵循 595.84 escape.c：事件类对象可以在实际 GPU fd 上分配。其他资源（包括根客户端）
+         * 仍只能通过控制节点操作。RM 仍会验证客户端、父对象和事件参数。 */
         if (!file->control &&
             allocation->hClass != NV01_EVENT &&
             allocation->hClass != NV01_EVENT_OS_EVENT &&
@@ -1693,12 +1646,9 @@ kstatus_t nv_rm_vendor_frontend_ioctl(void *opaque_file, uint32_t request,
             allocation->hClass != NV01_EVENT_KERNEL_CALLBACK_EX)
             return K_EINVAL;
 
-        /* NV_ESC_RM_ALLOC with a 48-byte payload is the vendor
-         * NV04_ALLOC_WITH_ACCESS entry point.  The P3 vendor closure retains
-         * the WithSecInfo export, so use that exact immutable 595.84 RM API
-         * with the Linux user-parameter security context.  The vendor
-         * implementation performs pointer copying, resource validation,
-         * locking, and any required firmware interaction. */
+        /* 负载为 48 字节的 NV_ESC_RM_ALLOC 是厂商 NV04_ALLOC_WITH_ACCESS 入口。P3 厂商闭包保留了
+         * WithSecInfo 导出符号，因此应使用不可变 595.84 RM API，并附带 Linux 用户参数安全上下文。
+         * 厂商实现负责复制指针内容、校验资源、加锁及执行所需的固件交互。 */
         {
             API_SECURITY_INFO sec_info;
             nv_rm_vendor_frontend_security(file, &sec_info);
@@ -1711,9 +1661,8 @@ kstatus_t nv_rm_vendor_frontend_ioctl(void *opaque_file, uint32_t request,
         if (!file->control || argument_size != sizeof(*heap))
             return K_EINVAL;
 
-        /* Keep the legacy heap ABI in the vendor RM.  This includes the
-         * vendor's OS-descriptor path; System does not reimplement its memory
-         * manager or translate the RM's heap/GPU-address operations. */
+        /* 旧版堆 ABI 仍由厂商 RM 负责，包括厂商的 OS 描述符路径。System 不会重新实现其内存管理器，
+         * 也不会转换 RM 的堆/GPU 地址操作。 */
         {
             API_SECURITY_INFO sec_info;
             nv_rm_vendor_frontend_security(file, &sec_info);
@@ -1729,9 +1678,8 @@ kstatus_t nv_rm_vendor_frontend_ioctl(void *opaque_file, uint32_t request,
         if (!file->control || argument_size != sizeof(*duplicate))
             return K_EINVAL;
 
-        /* Object duplication is a real RM resource operation.  Let the
-         * immutable 595.84 implementation validate handles, permissions and
-         * locking rather than manufacturing a destination handle. */
+        /* 对象复制属于真实的 RM 资源操作。应由不可变的 595.84 实现校验句柄、权限和锁，而不是
+         * 伪造目标句柄。 */
         {
             API_SECURITY_INFO sec_info;
             nv_rm_vendor_frontend_security(file, &sec_info);
@@ -1746,9 +1694,8 @@ kstatus_t nv_rm_vendor_frontend_ioctl(void *opaque_file, uint32_t request,
         nvidia_stack_t *stack;
         NV_STATUS vendor_status = NV_OK;
 
-        /* The immutable Linux frontend accepts a non-empty NvU32 array only
-         * on the control node and permits this relationship to be installed
-         * once per file. */
+        /* 不可变的 Linux 前端只允许在控制节点上提交非空 NvU32 数组，并且每个文件只能安装一次
+         * 此关联。 */
         if (!file->control || argument_size == 0U ||
             argument_size % sizeof(NvU32) != 0U ||
             file->attached_gpus != NULL)
@@ -1759,10 +1706,9 @@ kstatus_t nv_rm_vendor_frontend_ioctl(void *opaque_file, uint32_t request,
             return K_ENOMEM;
         __builtin_memcpy(gpu_ids, argument, argument_size);
 
-        /* nvidia_dev_get() in the Linux layer resolves each non-zero ID and
-         * increments the RM external-client count.  System has one published
-         * PCIe GPU, so validate every non-zero entry against that real RM
-         * identity and invoke the retained RM operation for each occurrence. */
+        /* Linux 层的 nvidia_dev_get() 会解析每个非零 ID，并递增 RM 外部客户端计数。System
+         * 只发布一块 PCIe GPU，因此需使用真实 RM 标识校验每个非零条目，并对每个条目调用保留的
+         * RM 操作。 */
         stack = nv_rm_vendor_frontend_stack_create();
         if (stack == NULL) {
             kfree(gpu_ids);
@@ -1809,9 +1755,8 @@ kstatus_t nv_rm_vendor_frontend_ioctl(void *opaque_file, uint32_t request,
         nvidia_stack_t *stack;
         NV_STATUS vendor_status;
 
-        /* NUMA_INFO is an actual-device query.  System has no Linux NUMA
-         * memory hotplug layer, so the adapter reports the real RM NUMA
-         * placement while truthfully keeping the host NUMA state disabled. */
+        /* NUMA_INFO 用于查询实际设备。System 没有 Linux NUMA 内存热插拔层，因此适配器会报告
+         * RM 返回的真实 NUMA 位置，同时如实保持宿主 NUMA 状态为禁用。 */
         if (file->control || file->minor != 0U ||
             argument_size != sizeof(*numa_info) ||
             numa_info->offline_addresses.numEntries >
@@ -1830,9 +1775,8 @@ kstatus_t nv_rm_vendor_frontend_ioctl(void *opaque_file, uint32_t request,
         return vendor_status == NV_OK ? K_OK : K_EBUSY;
     }
     default:
-        /* P8 deliberately exposes only operations backed by a real RM or a
-         * validated PCI register aperture.  Unsupported RM ioctls must not
-         * become fake success while the later userspace phases are absent. */
+        /* P8 特意只公开由真实 RM 或经验证的 PCI 寄存器窗口支持的操作。后续用户态阶段尚未实现时，
+         * 不支持的 RM ioctl 不能伪装成成功。 */
         return K_ENOSYS;
     }
 }
@@ -1870,9 +1814,8 @@ kstatus_t nv_rm_vendor_frontend_mmap(void *opaque_file, uint64_t offset,
         uint64_t page_count;
         NV_STATUS vendor_status;
 
-        /* A control-node mmap is valid only after RM has attached a system
-         * allocation context to this exact file.  No physical-address
-         * fabrication is permitted for this path. */
+        /* 只有 RM 已将系统分配上下文关联到此文件后，控制节点 mmap 才有效。此路径不允许伪造
+         * 物理地址。 */
         if (!has_context || context.alloc == NULL || offset != 0U ||
             (length & (PAGE_SIZE - 1ULL)) != 0U || length == 0U)
             return K_EINVAL;
@@ -1894,10 +1837,8 @@ kstatus_t nv_rm_vendor_frontend_mmap(void *opaque_file, uint64_t offset,
         uint64_t mapping_size;
         uint64_t page_count;
 
-        /* For an actual device node the immutable Linux helper maps the
-         * RM-validated MemoryArea.  The ranges are the physical aperture
-         * facts returned by RM; this frontend does not allocate VRAM, create
-         * GPU VA, program GMMU state, or manufacture a bus address. */
+        /* 对于实际设备节点，不可变 Linux 辅助函数会映射经 RM 验证的 MemoryArea。范围信息是 RM
+         * 返回的物理窗口事实；此前端不会分配 VRAM、创建 GPU VA、配置 GMMU 状态或伪造总线地址。 */
         if (context.alloc != NULL || offset != 0U ||
             (length & (PAGE_SIZE - 1ULL)) != 0U || length == 0U ||
             !nv_rm_vendor_frontend_memarea_size(&context.memArea,
@@ -1946,8 +1887,8 @@ kstatus_t nv_rm_vendor_frontend_mmap(void *opaque_file, uint64_t offset,
             regs->cpu_address, regs->size, offset, length))
         return K_EINVAL;
 
-    /* This is the real PCI register aperture reported by RM, never BAR1/FB
-     * and never an arbitrary physical address.  VRAM mapping belongs to RM. */
+    /* 这是 RM 报告的真实 PCI 寄存器窗口，绝不是 BAR1/FB，也不是任意物理地址。VRAM 映射由 RM
+     * 负责。 */
     mapping->physical = paddr_make(offset);
     mapping->length = length;
     mapping->cache_mode = X86_CACHE_UC;
@@ -2007,12 +1948,11 @@ void nv_rm_vendor_frontend_close(void *opaque_file)
 }
 
 /*
- * NVKMS RM bridge
+ * NVKMS RM 桥接层
  * ----------------
  *
- * The official 595.84 NVKMS objects call this path for every RM operation.
- * Keep the operation dispatch in the immutable vendor implementation;
- * System supplies only the temporary vendor stack and lifetime serialization.
+ * 官方 595.84 NVKMS 对象会通过此路径执行所有 RM 操作。操作分发仍由不可变的厂商实现负责；
+ * System 只提供临时厂商栈和生命周期串行化。
  */
 kstatus_t nv_rm_vendor_kms_call_rm(void *opaque_context, void *ops)
 {
@@ -2036,8 +1976,8 @@ kstatus_t nv_rm_vendor_kms_call_rm(void *opaque_context, void *ops)
         return K_ENOMEM;
     }
 
-    /* This is the exact official RMAPI dispatcher.  It owns the operation
-     * switch, RM/API locking, and all VRAM/GPUVA/GMMU/GSP implementation. */
+    /* 这是官方 RMAPI 分发函数，负责选择操作、管理 RM/API 锁，并实现所有 VRAM/GPUVA/GMMU/GSP
+     * 功能。 */
     rm_kernel_rmapi_op(stack, ops);
     kfree(stack);
 
@@ -2070,8 +2010,8 @@ kstatus_t nv_rm_vendor_kms_open_gpu(void *opaque_context, uint32_t gpu_id,
         return K_EOVERFLOW;
     }
 
-    /* KAPI uses reset_aware=TRUE.  User/core NVKMS opens use FALSE and must
-     * participate in the vendor RM external-client reset protection count. */
+    /* KAPI 使用 reset_aware=TRUE。用户态/核心 NVKMS 打开句柄时使用 FALSE，必须参与厂商 RM
+     * 外部客户端复位保护计数。 */
     if (!reset_aware) {
         stack = nv_rm_vendor_frontend_stack_create();
         if (stack == NULL) {
@@ -2170,6 +2110,6 @@ bool nv_rm_vendor_kms_allow_write_combining(void *opaque_context)
         !context->adapter_initialized)
         return false;
 
-    /* Keep the official RM policy as the source of truth. */
+    /* 以官方 RM 策略作为唯一可信来源。 */
     return rm_disable_iomap_wc() == NV_FALSE;
 }

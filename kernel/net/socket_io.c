@@ -401,8 +401,8 @@ static kstatus_t socket_send_async_common(socket_t *socket, const void *buffer, 
         return K_EPIPE;
     }
 
-    /* length is bounded by SOCKET_MAX_PAYLOAD above. Do not allocate or clear
-     * the unused maximum payload for every small asynchronous send. */
+    /* 上方已将 length 限制在 SOCKET_MAX_PAYLOAD 以内。小型异步发送无需每次都分配或
+     * 清零未使用的最大负载空间。 */
     request = (socket_async_send_t *)kmalloc(sizeof(*request) + length, 0);
     if (request == 0) return K_ENOMEM;
     socket_zero(request, sizeof(*request));
@@ -424,7 +424,7 @@ static kstatus_t socket_send_async_common(socket_t *socket, const void *buffer, 
     request->user_key = user_key;
     request->request_id = socket_next_async_request_id();
     socket_copy(request->payload, buffer, length);
-    /* The worker may finish and free request immediately after publication. */
+    /* 发布后，工作线程可能立即完成并释放请求。 */
     uint64_t assigned_id = request->request_id;
     if (!deferred_schedule(socket_async_send_work, request)) {
         object_put(completion_port);

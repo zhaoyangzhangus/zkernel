@@ -58,7 +58,7 @@ static void *worker(void *unused) {
     return 0;
 }
 int main(void) {
-    /* Holding one field must not block acquiring the other. */
+    /* 持有一个字段的锁不能阻止获取另一个字段。 */
     fat32_open_files_lock(&fs);fat32_mutation_lock(&fs);
     assert(fs.OpenFileLock==1 && fs.MutationLock==1);
     fat32_open_files_unlock(&fs);assert(!fs.OpenFileLock && fs.MutationLock==1);

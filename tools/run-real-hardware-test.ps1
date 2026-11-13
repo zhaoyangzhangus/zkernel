@@ -360,8 +360,8 @@ elseif ($NvidiaPhase8) {
     }
 }
 elseif ($NvidiaPhase9) {
-    # Phase 9 keeps the verified P8 kernel/RM/GSP image and adds only the
-    # matching 595.84 Linux userspace closure plus its loader probe.
+    # Phase 9 保留已验证的 P8 内核/RM/GSP 镜像，只添加匹配的 595.84 Linux 用户态依赖闭包
+    # 及其加载器探测。
     $espPath = Join-Path $projectRoot 'build\nvidia\phase9\esp'
     if ($ReuseNvidiaPhase9Build) {
         foreach ($required in @(
@@ -387,8 +387,7 @@ elseif ($NvidiaPhase9) {
     }
 }
 elseif ($NvidiaPhase10) {
-    # Phase 10 keeps the verified P9 driver/userspace closure and adds only
-    # the real EGL device/context acceptance probe.
+    # Phase 10 保留已验证的 P9 驱动/用户态依赖闭包，只添加真实的 EGL 设备/上下文验收探测。
     $espPath = Join-Path $projectRoot 'build\nvidia\phase10\esp'
     if ($ReuseNvidiaPhase10Build) {
         foreach ($required in @(
@@ -414,8 +413,8 @@ elseif ($NvidiaPhase10) {
     }
 }
 elseif ($NvidiaPhase11) {
-    # Phase 11 keeps the verified P10 EGL/userspace closure and adds only the
-    # real triangle/readback probe and its matching kernel runner.
+    # Phase 11 保留已验证的 P10 EGL/用户态依赖闭包，只添加真实三角形/读回探测及其对应的
+    # 内核运行器。
     $espPath = Join-Path $projectRoot 'build\nvidia\phase11\esp'
     if ($ReuseNvidiaPhase11Build) {
         foreach ($required in @(
@@ -441,8 +440,8 @@ elseif ($NvidiaPhase11) {
     }
 }
 elseif ($NvidiaCubeDemo) {
-    # The cube demo reuses the verified Phase 12 kernel and GLVND closure,
-    # replacing only the userspace test image in its own incremental ESP.
+    # 立方体演示复用已验证的 Phase 12 内核和 GLVND 依赖闭包，只在其独立的增量 ESP 中替换
+    # 用户态测试镜像。
     $espPath = Join-Path $projectRoot 'build\nvidia\cube-demo\esp'
     if ($ReuseNvidiaCubeDemoBuild) {
         foreach ($required in @(
@@ -468,8 +467,8 @@ elseif ($NvidiaCubeDemo) {
     }
 }
 elseif ($NvidiaPhase12) {
-    # Phase 12 keeps the verified P11 EGL/GL closure and adds the CPU
-    # glReadPixels -> shared System window surface -> compositor bridge.
+    # Phase 12 保留已验证的 P11 EGL/GL 依赖闭包，并添加 CPU
+    # glReadPixels -> 共享 System 窗口表面 -> 合成器桥接。
     $espPath = Join-Path $projectRoot 'build\nvidia\phase12\esp'
     if ($ReuseNvidiaPhase12Build) {
         foreach ($required in @(
@@ -495,8 +494,8 @@ elseif ($NvidiaPhase12) {
     }
 }
 elseif ($NvidiaPhaseW3) {
-    # W3 uses the verified Phase 9 ESP for the loader, matching GSP firmware,
-    # and 595.84 user assets, then replaces only the W3 REALTEST kernel.
+    # W3 使用已验证的 Phase 9 ESP 中的加载器、匹配的 GSP 固件和 595.84 用户态资源，
+    # 然后只替换 W3 REALTEST 内核。
     $espPath = Join-Path $projectRoot 'build\nvidia\phase-w3\esp'
     if ($ReuseNvidiaPhaseW3Build) {
         foreach ($required in @(

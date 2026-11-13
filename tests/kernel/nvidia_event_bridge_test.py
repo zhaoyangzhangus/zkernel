@@ -138,7 +138,7 @@ int main(void) {
  assert(!pthread_join(post,NULL)&&!pthread_join(remove,NULL)&&atomic_load(&removed));
  sa.closed=true;n=sa.notifications;nv_post_event(&event,1,2,3,4,1);assert(sa.notifications==n);
  assert(nv_rm_vendor_frontend_poll_state(&a,false)==2);
- /* Address reuse after cleanup: an inactive old event cannot target new state. */
+ /* 清理后地址被重用：已失效的旧事件不能指向新状态。 */
  a.event_source=&sb;nv_rm_vendor_event_register(&a);event.active=0;
  nv_post_event(&event,1,2,3,4,1);assert(!sb.notifications);
  nv_rm_vendor_event_unregister(&a);nv_rm_vendor_event_unregister(&b);
@@ -152,8 +152,8 @@ int main(void) {
  pending=99;
  assert(nv_get_event(&c.vendor_private,&out,&pending)==NV_ERR_GENERIC&&!pending);
  assert(sc.refs==0&&sc.gets==1&&sc.puts==2);
- /* Exercise collisions and every registered-file match, then unlink both
-  * interior and head nodes without disturbing neighbors. */
+ /* 覆盖冲突和所有已注册文件匹配情况，然后分别解除链表中部和头部节点的链接，不能
+  * 影响相邻节点。 */
  nv_rm_vendor_frontend_file_t files[256]={0};
  nv_port_event_source_t sources[256]={0};
  unsigned occupancy[NV_RM_EVENT_BUCKETS]={0};

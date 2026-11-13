@@ -34,7 +34,7 @@ static vm_area_t *area_from_list(list_head_t *item) {
     return (vm_area_t *)((char *)item-__builtin_offsetof(vm_area_t,ordered_node));
 }
 void *kmalloc(size_t size,uint32_t flags) {
-    (void)flags;assert(locked);
+    assert(!flags&&!locked);
     if((int)allocations++==fail_alloc)return 0;
     return malloc(size);
 }
@@ -52,8 +52,8 @@ static kstatus_t sync_file(void *mapping,uint64_t first,uint64_t count) {
     assert(atomic_load(&objects[i].refs.value)>0);
     ++calls;
     if(unmap_during_sync&&calls==1) {
-        /* All three mappings disappear during the first blocking callback.
-         * Poison the old list/VMA storage so a resumed traversal is invalid. */
+        /* 第一次阻塞回调期间，三个映射全部消失。
+         * 将旧链表/VMA 存储设为毒值，使恢复后的遍历失效。 */
         map_lock(&space);list_init(&space.area_list);
         memset(areas,0xa5,sizeof(areas));map_unlock(&space);
         for(unsigned j=0;j<3;++j)vm_object_put(&objects[j]);
@@ -78,16 +78,16 @@ static void reset(void) {
     }
 }
 int main(void) {
-    for(int fail=-1;fail<3;++fail) {
+    for(int fail=-1;fail<4;++fail) {
         reset();fail_alloc=fail;
         assert(vm_sync(&space,0x10000,3*PAGE_SIZE,OS_VM_SYNC_SYNC)==(fail<0?K_OK:K_ENOMEM));
-        assert(!locked&&calls==(fail<0?3:0)&&frees==(unsigned)(fail<0?3:fail));
+        assert(!locked&&calls==(fail<0?3:0)&&frees==(unsigned)(fail<0?4:fail));
         for(unsigned j=0;j<3;++j)assert(atomic_load(&objects[j].refs.value)==1);
     }
     for(int fail=-1;fail<=3;++fail) {
         reset();unmap_during_sync=true;fail_callback=fail;
         assert(vm_sync(&space,0x10000,3*PAGE_SIZE,OS_VM_SYNC_SYNC)==(fail>0?K_EIO:K_OK));
-        assert(calls==(unsigned)(fail>0?fail:3)&&frees==3&&!locked);
+        assert(calls==(unsigned)(fail>0?fail:3)&&frees==4&&!locked);
         for(unsigned j=0;j<3;++j)assert(!atomic_load(&objects[j].refs.value));
     }
     reset();areas[2].flags=VM_MAP_GUARD;

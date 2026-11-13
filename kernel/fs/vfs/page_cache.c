@@ -454,30 +454,30 @@ kstatus_t vfs_read_cached_kernel(file_t *file, void *buffer, size_t length,
     kstatus_t result = K_OK;
     vnode_t *vnode = file->vnode;
     bool locked = false;
+    vfs_cached_page_t *lookahead = 0;
     unsigned batch_pages = 0U;
     while (copied < length) {
         /* 连续常驻页共用短批次保护；最多复制 16 页，缺页前立即释放锁。 */
         if (!locked) {
             vfs_vnode_lock(vnode);
             locked = true;
+            lookahead = 0;
             batch_pages = 0U;
         }
         uint64_t position = file->position;
-        if (position >= vnode->size) {
-            vfs_vnode_unlock(vnode);
-            break;
-        }
+        if (position >= vnode->size) break;
         /* 常驻可执行页无需分配，也无需额外执行 get/unlock/relock 往返。复制期间持续持有
          * vnode 保护锁，避免写入/截断在下方更改借用的页面。即使命中缓存，也保留 page_get 的验证。 */
         vfs_backend_node_t *backend = vnode->fs_private;
         if (vnode->object.type != KOBJECT_TYPE_VNODE ||
             backend == 0 || backend->read == 0) {
-            vfs_vnode_unlock(vnode);
             result = K_EINVAL;
             break;
         }
-        vfs_cached_page_t *cached = vfs_page_cache_lookup(
+        /* 不连续的下一页已经查过；仅在同一次持锁期间借用，解锁后必须重新查找。 */
+        vfs_cached_page_t *cached = lookahead != 0 ? lookahead : vfs_page_cache_lookup(
             (vfs_page_cache_t *)vnode->page_cache, position / PAGE_SIZE);
+        lookahead = 0;
         page_t *page = cached != 0 ? cached->page : 0;
         if (cached == 0) {
             vfs_vnode_unlock(vnode);
@@ -497,33 +497,53 @@ kstatus_t vfs_read_cached_kernel(file_t *file, void *buffer, size_t length,
             batch_pages = 0U;
         }
         if (page == 0) {
-            vfs_vnode_unlock(vnode);
             result = K_EIO;
             break;
         }
         uint8_t *source = phys_to_direct(page_to_phys(page));
         if (source == 0) {
-            vfs_vnode_unlock(vnode);
             result = K_EIO;
             break;
         }
         size_t offset = position & (PAGE_SIZE - 1ULL);
-        size_t chunk = PAGE_SIZE - offset;
-        if (chunk > length - copied) chunk = length - copied;
         /* 文件所有权保证借用的缓存页保持存活。复制时与缓存更新串行化，并在后备 I/O 后重新检查 EOF。 */
-        if (position >= vnode->size) {
-            vfs_vnode_unlock(vnode);
-            break;
+        if (position >= vnode->size) break;
+        size_t remaining = length - copied;
+        if (remaining > vnode->size - position) remaining = vnode->size - position;
+        size_t chunk = PAGE_SIZE - offset;
+        if (chunk > remaining) chunk = remaining;
+        unsigned span_pages = 1U;
+        /* 只合并已常驻且直接映射地址连续的页面；缺页、坏页和不连续页留给下一轮处理，
+         * 保持错误前的读取进度。复制和页检查共享 vnode 锁，整个批次最多触及 16 页。 */
+        while (chunk < remaining && batch_pages + span_pages < 16U) {
+            vfs_cached_page_t *next = vfs_page_cache_lookup(
+                (vfs_page_cache_t *)vnode->page_cache,
+                position / PAGE_SIZE + span_pages);
+            if (next == 0) break;
+            lookahead = next;
+            if (next->page == 0) break;
+            uintptr_t distance = (uintptr_t)span_pages * PAGE_SIZE;
+            if ((uintptr_t)source > UINTPTR_MAX - distance) break;
+            void *next_source = phys_to_direct(page_to_phys(next->page));
+            if (next_source == 0 ||
+                (uintptr_t)next_source != (uintptr_t)source + distance) break;
+            lookahead = 0;
+            size_t extension = remaining - chunk;
+            if (extension > PAGE_SIZE) extension = PAGE_SIZE;
+            chunk += extension;
+            ++span_pages;
         }
-        if (chunk > vnode->size - position) chunk = vnode->size - position;
         __builtin_memcpy((uint8_t *)buffer + copied, source + offset, chunk);
         file->position = position + chunk;
         copied += chunk;
-        if (++batch_pages == 16U || copied == length) {
+        batch_pages += span_pages;
+        if (batch_pages == 16U || copied == length) {
             vfs_vnode_unlock(vnode);
             locked = false;
         }
     }
+    /* EOF 和错误出口共用清理；缺页加载失败时锁已在 I/O 前释放。 */
+    if (locked) vfs_vnode_unlock(vnode);
     *bytes = copied;
     vfs_file_position_unlock(file);
     return result;

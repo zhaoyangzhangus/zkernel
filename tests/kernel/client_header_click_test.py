@@ -84,8 +84,7 @@ int main(void) {
   assert(window.client_button_capture&&!g_window_server.title_pressed_client);
   assert(replay(&window,&up)); // No synthetic replay or guessed title drag.
  }
- // Keeping the opt-in across a frame-mode switch must not steal a native
- // caption press into implicit client capture.
+ // 切换边框模式时保留启用选项，不得把原生标题栏按下事件误转为隐式客户区捕获。
  window.flags=2|16|OS_WINDOW_EXPLICIT_MOVE_RESIZE;
  window.client_button_capture=false;
  assert(stage(&window,&down)&&!window.client_button_capture);

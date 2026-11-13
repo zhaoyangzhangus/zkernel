@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Production epoll description lifecycle, fork aliases and teardown races."""
 from pathlib import Path
+import resource
+import signal
 import subprocess
 import tempfile
 root = Path(__file__).resolve().parents[2]
@@ -9,6 +11,9 @@ types = source[source.index('typedef struct linux_epoll_watch {'):
                source.index('typedef struct linux_eventfd_object {')]
 helpers = source[source.index('static void linux_description_put('):
                  source.index('static const object_ops_t g_linux_epoll_ops')]
+probe = 'linux_epoll_watch_t *watch = &epoll->watches[index];'
+assert helpers.count(probe) == 1
+helpers = helpers.replace(probe, '++prune_slot_visits; ' + probe)
 adopt = source[source.index('static void linux_epoll_watch_adopt('):
                source.index('static int64_t linux_epoll_ctl(')]
 entry_put = source[source.index('static void linux_fd_entry_put(linux_fd_entry_t *entry) {'):
@@ -37,7 +42,7 @@ code = r'''
 #define K_EINVAL -22
 #define K_ENOMEM -12
 typedef int kstatus_t;
-#define LINUX_MAX_EPOLL_WATCHES 8
+#define LINUX_MAX_EPOLL_WATCHES 512
 enum { LINUX_FD_UNUSED, LINUX_FD_FILE, LINUX_FD_PROC, LINUX_FD_NVIDIA,
        LINUX_FD_PIPE, LINUX_FD_SOCKET, LINUX_FD_UNIX_SOCKET,
        LINUX_FD_WINDOW, LINUX_FD_EVENTFD, LINUX_FD_EPOLL, LINUX_FD_CONSOLE, LINUX_FD_NULL };
@@ -51,6 +56,7 @@ typedef struct { spinlock_t lock; linux_fd_entry_t entries[8]; } linux_fd_table_
 typedef struct { uint64_t pid; linux_fd_table_t linux_fds; } process_t;
 typedef struct { uint32_t events; uint64_t data; } linux_epoll_event_t;
 static atomic_uint allocations;
+static unsigned prune_slot_visits;
 static void spinlock_init(spinlock_t *l) { assert(!pthread_mutex_init(l,NULL)); }
 static void spinlock_lock(spinlock_t *l) { assert(!pthread_mutex_lock(l)); }
 static void spinlock_unlock(spinlock_t *l) { assert(!pthread_mutex_unlock(l)); }
@@ -140,6 +146,25 @@ int main(void) {
  spinlock_unlock(&epoll->lock);linux_epoll_watch_put(&removed);
  assert(parent.description->watches==epoll->watches+1);
  alias_put(&parent);object_put(epoll);assert(!allocations && !atomic_load(&event.refs));
+ /* 同一描述的重复注册与其他描述交错排列，关闭时只扫描一次，且保留其他监听项。 */
+ for(unsigned stride=1;stride<=8;stride*=2) {
+  object_header_t second={0};atomic_init(&second.refs,1);
+  atomic_store(&event.refs,1);parent.description=new_description();epoll=new_epoll();
+  linux_fd_entry_t unrelated={.private_data=&second,.kind=LINUX_FD_EVENTFD,
+                             .description=new_description()};
+  for(unsigned i=0;i<LINUX_MAX_EPOLL_WATCHES;++i)
+   attach(epoll,i,i%stride?&unrelated:&parent,4+i);
+  prune_slot_visits=0;uint64_t sequence=epoll->control_sequence;
+  alias_put(&parent);
+  assert(prune_slot_visits<=LINUX_MAX_EPOLL_WATCHES);
+  assert(epoll->control_sequence-sequence==LINUX_MAX_EPOLL_WATCHES/stride);
+  assert(!atomic_load(&event.refs));
+  for(unsigned i=0;i<LINUX_MAX_EPOLL_WATCHES;++i)
+   assert(epoll->watches[i].used==(i%stride!=0));
+  alias_put(&unrelated);assert(!epoll->watch_limit&&!atomic_load(&second.refs));
+  object_put(epoll);assert(!allocations);
+ }
+ puts("Last-close pruning: 512 duplicate interests use 512 instead of 131328 slot visits; mixed descriptions survive PASS");
  for(unsigned i=0;i<1000;++i) {
   atomic_store(&event.refs,1);parent.description=new_description();epoll=new_epoll();
   attach(epoll,0,&parent,4);
@@ -148,11 +173,9 @@ int main(void) {
   assert(!pthread_join(a,NULL));assert(!pthread_join(b,NULL));
  assert(!allocations && !atomic_load(&event.refs));
  }
- /* Exercise the actual descriptor install/lookup/fork/dup/exec/exit paths,
-  * not only synthetic external-reference operations. */
+ /* 覆盖真实的描述符安装/查找/fork/dup/exec/exit 路径，而不只是模拟外部引用操作。 */
  process_t p={0},c={0};linux_fd_table_init(&p.linux_fds);linux_fd_table_init(&c.linux_fds);
- /* Allocation failure must not publish a descriptor or consume its caller's
-  * object reference. A full table must free newly allocated metadata. */
+ /* 分配失败时不得发布描述符，也不得消耗调用者的对象引用。表已满时必须释放新分配的元数据。 */
  atomic_store(&event.refs,1);fail_description_allocation=true;
  assert(linux_fd_install(&p,4,0,&event,LINUX_FD_EVENTFD,0)==K_ENOMEM);
  assert(p.linux_fds.entries[4].kind==LINUX_FD_UNUSED);
@@ -184,3 +207,13 @@ with tempfile.TemporaryDirectory(prefix='liteos-epoll-fork-') as directory:
     subprocess.run(['cc', '-Wall', '-Wextra', '-Werror', '-fsanitize=address,undefined',
                     '-pthread', '-x', 'c', '-', '-o', binary], input=code, text=True, check=True)
     subprocess.run([binary], check=True)
+    # 恢复每次删除后从零扫描，必须触发有界扫描断言。
+    marker = 'uint32_t index = next_index; index < epoll->watch_limit;'
+    assert code.count(marker) == 1
+    negative = code.replace(marker, 'uint32_t index = 0U * next_index; index < epoll->watch_limit;')
+    subprocess.run(['cc', '-Wall', '-Wextra', '-Werror', '-fsanitize=address,undefined',
+                    '-pthread', '-x', 'c', '-', '-o', binary], input=negative, text=True, check=True)
+    result = subprocess.run([binary],capture_output=True,text=True,timeout=30,
+        preexec_fn=lambda:resource.setrlimit(resource.RLIMIT_CORE,(0,0)))
+    assert result.returncode == -signal.SIGABRT and 'prune_slot_visits<=LINUX_MAX_EPOLL_WATCHES' in result.stderr
+    print('负面对照通过：恢复 epoll 删除后的从头查找会超出单次扫描预算')

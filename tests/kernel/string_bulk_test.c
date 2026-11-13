@@ -29,7 +29,7 @@ static double seconds(void) {
     return now.tv_sec + now.tv_nsec / 1e9;
 }
 
-/* Original production loop, with the same non-SIMD compilation flags. */
+/* 原始生产循环，并使用相同的非 SIMD 编译标志。 */
 __attribute__((noinline))
 static void scalar_copy(unsigned char *out, const unsigned char *in,
                         size_t length) {
@@ -55,7 +55,7 @@ int main(void) {
             for (unsigned direction=0; direction<2; ++direction) {
                 for (unsigned i=0;i<8192;++i) overlap[i]=expected[i]=(unsigned char)(i*37+11);
                 size_t s=direction ? shift : 0, d=direction ? 0 : shift;
-                /* Reference reads from the original source, before any write. */
+                /* 参考结果从原始源数据读取，且在任何写入之前完成。 */
                 for (size_t i=0;i<length;++i) expected[d+i]=(unsigned char)((s+i)*37+11);
                 assert(liteos_memmove(overlap+d,overlap+s,length)==overlap+d);
                 for (unsigned i=0;i<8192;++i) assert(overlap[i]==expected[i]);
@@ -76,8 +76,8 @@ int main(void) {
     }
     for (size_t n = 0; n < sizeof(lengths) / sizeof(lengths[0]); ++n) {
         size_t length = lengths[n];
-        /* Start/end against PROT_NONE guards detect overreads/overwrites.
-         * Every offset mod 8 is covered independently on both operands. */
+        /* 起始/结束位置都紧邻 PROT_NONE 保护区，用于检测越界读写。
+         * 两个操作数分别覆盖所有模 8 偏移。 */
         for (unsigned s = 0; s < 16; ++s) {
             for (unsigned d = 0; d < 16; ++d) {
                 if (length + s > 4096 || length + d > 4096) continue;
@@ -107,8 +107,8 @@ int main(void) {
             }
         }
     }
-    /* Same-page overlaps against both guards, including sub-word gaps.
-     * Whole-page comparison also proves bytes outside the move untouched. */
+    /* 同页重叠场景紧邻两侧保护区，并覆盖小于一个字的间隔。
+     * 整页比较还能证明移动范围以外的字节未被修改。 */
     unsigned char snapshot[4096];
     for (unsigned gap=1;gap<32;++gap) {
         for (unsigned direction=0;direction<2;++direction) {

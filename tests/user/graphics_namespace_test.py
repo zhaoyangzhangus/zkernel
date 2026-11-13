@@ -23,7 +23,7 @@ assert '$(BUILD)/esp/lib/libgraphics.so.1: $(DYNAMIC_GFX_LIBRARY_ELF)' in make
 assert 'libliteosgfx' not in make
 assert '--soname libsystemc.so.1' in make
 assert '$(BUILD)/esp/lib/libsystemc.so.1: $(DYNAMIC_LIBC_ELF)' in make
-# Current browser and native applications deploy only neutral runtime names.
+# 当前浏览器和原生应用只部署中性的运行时名称。
 assert '$(BUILD)/esp/lib/libliteosc.so.1' not in make
 assert '$(BUILD)/esp/lib/ld-linux-liteos.so.1' not in make
 assert '$(BUILD)/esp/lib/ld-linux-system.so.1' in make

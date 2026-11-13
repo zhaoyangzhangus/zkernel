@@ -42,11 +42,13 @@ void kernel_serial_write_serial_only(const char *text) {
     assert(strlen(text) < sizeof(output)); strcpy(output,text); ++serial_calls;
 }
 static uint32_t g_debug_udp_dispatch_logs;
-static struct { uint32_t source_address, destination_address; uint16_t source_port, destination_port; } packet;
+typedef struct { uint32_t source_address, destination_address; uint16_t source_port, destination_port; } diagnostic_packet_t;
+static diagnostic_packet_t packet_storage;
 static kstatus_t status;
 static uint32_t g_debug_udp_inject_logs, destination_address, count;
 static uint16_t destination_port;
 static void dispatch(void) {
+    diagnostic_packet_t *packet = &packet_storage;
 ''' + branch + r'''
 }
 static void inject_missing(void) {
@@ -56,8 +58,8 @@ static void inject_received(void) {
 ''' + inject_branches[1] + r'''
 }
 int main(void) {
-    packet.source_address = 0x0a000202; packet.source_port = 12345;
-    packet.destination_address = 0x0a00020f; packet.destination_port = 53;
+    packet_storage.source_address = 0x0a000202; packet_storage.source_port = 12345;
+    packet_storage.destination_address = 0x0a00020f; packet_storage.destination_port = 53;
     status = K_EIO; dispatch();
     assert(!strcmp(output,"OS_UDP_DISPATCH src=a000202:12345 dst=a00020f:53 status=-5\r\n"));
     status = K_OK;
@@ -67,8 +69,8 @@ int main(void) {
     for (unsigned i = 0; i < 1000; ++i) dispatch();
     assert(serial_calls == 128 && g_debug_udp_dispatch_logs == 128);
     g_debug_udp_dispatch_logs = 0;
-    packet.source_address = packet.destination_address = UINT32_MAX;
-    packet.source_port = packet.destination_port = UINT16_MAX;
+    packet_storage.source_address = packet_storage.destination_address = UINT32_MAX;
+    packet_storage.source_port = packet_storage.destination_port = UINT16_MAX;
     status = K_ENOENT; dispatch();
     assert(!strcmp(output,"OS_UDP_DISPATCH src=ffffffff:65535 dst=ffffffff:65535 status=-2\r\n"));
     destination_address = 0x0a00020f; destination_port = 53; count = 7;

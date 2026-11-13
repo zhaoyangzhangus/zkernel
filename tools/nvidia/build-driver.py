@@ -75,7 +75,7 @@ class FileDigests:
 
     def __call__(self, path):
         raw_path = os.fspath(path)
-        # Single-flight: compiler workers share many of the same headers.
+        # 单飞机制：多个编译工作线程会共享许多头文件。
         with self.lock:
             path = self.paths.get(raw_path)
             if path is None:
@@ -99,9 +99,9 @@ class FileDigests:
         raise RuntimeError('input changed during checksum: ' + str(path))
 
     def validate(self):
-        # Frozen input snapshots are validated before publishing any driver.
-        # Editing a header during the build aborts, rather than certifying an
-        # object whose dependencies were checked against another generation.
+        # 发布任何驱动之前都要验证冻结的输入快照。
+        # 若构建期间头文件发生更改，则中止构建，而不是为依赖关系基于其他版本检查过的
+        # 对象签发有效标记。
         with self.lock:
             for path, (fingerprint, _digest) in self.cache.items():
                 if self.fingerprint(path) != fingerprint:
@@ -163,8 +163,7 @@ def compiler_identity(compiler):
 
 @functools.lru_cache(maxsize=128)
 def _compiler_identity(compiler, _executable, _fingerprint):
-    # Keep the existing receipt format, but refresh when PATH or the actual
-    # executable changes, including a replacement with restored mtime.
+    # 保留现有回执格式，但当 PATH 或实际可执行文件发生变化时刷新，包括替换后恢复原时间戳的情况。
     return subprocess.check_output([compiler, '--version'], text=True)
 
 
@@ -196,7 +195,7 @@ def compile_one(record, digest=sha, input_digest=None):
     if result.returncode:
         raise RuntimeError(str(source) + '\n' + result.stdout[-12000:])
     dep_text = Path(str(output) + '.d').read_text().replace('\\\n', '')
-    # All generated inputs use whitespace-free repository-relative paths.
+    # 所有生成输入都使用不含空白的仓库相对路径。
     deps = dep_text.split(':', 1)[1].split('\n', 1)[0].split()
     dependencies = {str((ROOT / p).resolve()): input_digest(ROOT / p) for p in deps}
     dependencies[source_path] = input_digest(source_path)
@@ -239,7 +238,7 @@ def main():
     verify_vendor(digests)
     generated = out / 'generated/g_nvid_string.c'
     write_changed(generated, 'const char NVRM_ID[] = "nvidia id: UNIX Open Kernel Module for kernel RM, baseline 595.84";\nconst char *const pNVRM_ID = NVRM_ID + 11;\n')
-    # Relative paths also keep dependency files portable after USB migration.
+    # 使用相对路径也能让依赖文件在 USB 迁移后保持可移植。
     vendor = SOURCE.relative_to(ROOT)
     inc = ['-I' + str(vendor / p) for p in INCLUDES]
     base = ['-include', str(vendor / 'src/common/sdk/nvidia/inc/cpuopsys.h'),
@@ -293,7 +292,7 @@ def main():
     objects = []
     for source, obj, _compiler, _flags in records:
         if source.name.endswith('_unsupported.S'):
-            # Fail-closed placeholders must never shadow a real current adapter.
+            # 失败关闭的占位项绝不能遮蔽实际存在的当前适配器。
             weak = weaken_object(obj, args.objcopy)
             objects.append(str(weak))
         else:
@@ -310,7 +309,7 @@ def main():
             or previous.get('output') != sha(target)):
         subprocess.run([args.ld, '-r', '-o', str(target) + '.tmp', '@' + str(response)],
                        check=True, cwd=ROOT)
-        # RM carries libc fallbacks; the kernel's implementations own these.
+        # RM 自带 libc 回退实现；这些函数由内核实现提供。
         subprocess.run([args.objcopy, '--weaken-symbol=memcpy', '--weaken-symbol=memset',
                         str(target) + '.tmp'], check=True)
         digests.validate()

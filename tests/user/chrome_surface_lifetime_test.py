@@ -135,7 +135,7 @@ int main(){
  auto replaced=f.RegisterWindow(7,pixels,sizeof(pixels),{16,16});assert(!newer->registered&&replaced->registered);
  next->PresentCanvas(gfx::Rect(0,0,16,16));assert(nativeguest::calls==before);
  f.UnregisterWindow(7);f.UnregisterWindow(7);
- // No external state owner: unlock must still use a live mutex after erase.
+ // 没有外部状态所有者时，擦除对象后解锁仍必须使用有效互斥锁。
  f.RegisterWindow(7,pixels,sizeof(pixels),{16,16});f.UnregisterWindow(7);
  nativeguest::block=false;
  for(int i=0;i<1000;i++){
@@ -172,8 +172,8 @@ int main(){
  gpu->ResizeCanvas({16,16},1);assert(!nativeguest::leased&&nativeguest::cancels==4);
  assert(gpu->GetCanvas());gpu.reset();assert(!nativeguest::leased&&nativeguest::cancels==5);
  gpu=f.CreateCanvasForWidget(7);gpu->ResizeCanvas({16,16},1);assert(gpu->GetCanvas());
- // Exercise the real Ozone -> software renderer policy on alternating slots.
- // Only one pixel is logically damaged, but every new slot must be repainted.
+ // 在交替槽位上测试真实的 Ozone -> 软件渲染器策略。
+ // 虽然逻辑上只损坏一个像素，但每个新槽位都必须重新绘制。
  viz::SoftwareOutputDeviceOzone device{gpu.get()};
  viz::SoftwareRenderer renderer{&device};
  for(uint32_t generation=1;generation<=2000;++generation){
@@ -188,8 +188,8 @@ int main(){
  viz::SoftwareOutputDeviceOzone legacy{next.get()};
  viz::SoftwareRenderer legacy_renderer{&legacy};
  assert(!legacy.RequiresFullPaint()&&legacy_renderer.CanPartialSwap());
- // Kernel resize can precede the UI-thread geometry notification. Only a
- // well-formed different-sized lease is retryable; malformed metadata is not.
+ // 内核调整大小可能早于 UI 线程的几何通知。只有格式正确且尺寸不同的租约可重试；
+ // 元数据格式错误时不能重试。
  nativeguest::begin_width=32;nativeguest::begin_stride=128;
  assert(!gpu->GetCanvas()&&gpu->CanvasFrameNeedsRetry()&&!nativeguest::leased);
  nativeguest::begin_stride=64;
@@ -201,8 +201,7 @@ int main(){
  f.UnregisterWindow(7);unsigned cancelled=nativeguest::cancels;
  nativeguest::leased=false; // Kernel window close cancels independently.
  gpu.reset();assert(nativeguest::cancels==cancelled); // No stale fd command.
- // Opted-in GPU-style partial writes still publish complete frames on both
- // alternating slots, without allocating another pixel buffer.
+ // 启用 GPU 式部分写入后，两个交替槽位仍须发布完整帧，且不分配额外像素缓冲区。
  auto partial_state=f.RegisterWindow(7,pair,sizeof(pair),{16,16},true);
  auto partial=f.CreateCanvasForWidget(7);
  partial->EnablePartialFrameUpdates();
@@ -241,8 +240,8 @@ int main(){
   auto* front=reinterpret_cast<uint32_t*>(pair+nativeguest::front*4096);
   assert(std::equal(oracle.begin(),oracle.end(),front));
  }
- // Full-width strips at nonzero y must coalesce without touching the rows
- // before/after the strip. This also checks a full-frame repair after abort.
+ // y 非零处的全宽条带必须合并，且不能触碰条带前后的行。
+ // 这里也会检查中止后进行整帧修复的情况。
  for(unsigned generation=0;generation<8;++generation){
   unsigned copies=base::repair_copies;uint64_t bytes=base::repair_bytes;
   p=static_cast<uint32_t*>(partial->GetCanvas()->pixels);
@@ -261,8 +260,7 @@ int main(){
   auto* front=reinterpret_cast<uint32_t*>(pair+nativeguest::front*4096);
   assert(std::equal(oracle.begin(),oracle.end(),front));
  }
- // Abort after a partially overwriting readback. A different next damage
- // rectangle must not leave the cancelled pixels behind.
+ // 读回部分覆盖后中止。下一次损坏矩形不同，也不能残留已取消操作写入的像素。
  p=static_cast<uint32_t*>(partial->GetCanvas()->pixels);p[203]=0xdead;
  partial->CancelCanvasFrame();
  unsigned abort_copies=base::repair_copies;
@@ -279,8 +277,7 @@ int main(){
  p=static_cast<uint32_t*>(partial->GetCanvas()->pixels);
  assert(std::equal(oracle.begin(),oracle.end(),p));
  partial->CancelCanvasFrame();
- // A producer unknown to this state advances the token: reject a partial
- // baseline and request full damage rather than showing stale pixels.
+ // 此状态未知的生产者推进了令牌：拒绝部分基线并请求整帧更新，不能显示过期像素。
  ++nativeguest::acquires;
  assert(!partial->GetCanvas()&&partial->CanvasFrameNeedsRetry());
  assert(partial->RequiresFullFrame());
@@ -288,7 +285,7 @@ int main(){
  std::copy(oracle.begin(),oracle.end(),p);
  assert(partial->PresentCanvasChecked(gfx::Rect(0,0,16,16)));
  assert(!partial->RequiresFullFrame());
- // UI resize while a canvas lease is retained is also retryable.
+ // 保留画布租约期间发生 UI 调整大小时，也允许重试。
  assert(partial->GetCanvas());partial_state->size={8,8};
  assert(!partial->GetCanvas()&&partial->CanvasFrameNeedsRetry());
  partial_state->size={16,16};partial_state->has_presented=false;
@@ -301,8 +298,8 @@ int main(){
  for(unsigned slot=0;slot<2;++slot)for(unsigned offset=1024;offset<4096;++offset)
   assert(pair[slot*4096+offset]==0); // Allocation/row canaries untouched.
  partial.reset();f.UnregisterWindow(7);
- // The UI and GPU have different queues. Neither an old GPU viewport nor a
- // new GPU viewport may undo the authoritative native window geometry.
+ // UI 和 GPU 使用不同队列。无论旧 GPU 视口还是新 GPU 视口，都不能覆盖权威的
+ // 原生窗口几何信息。
  auto raced_state=f.RegisterWindow(7,pair,sizeof(pair),{16,16},true);
  auto raced=f.CreateCanvasForWidget(7);raced->EnablePartialFrameUpdates();
  raced->ResizeCanvas({16,16},1);
@@ -320,8 +317,7 @@ int main(){
  assert(raced->PresentCanvasChecked(gfx::Rect(0,0,32,16)));
  assert(!raced->RequiresFullFrame());
  raced.reset();f.UnregisterWindow(7);
- // Bad allocation metadata must be rejected BEFORE BEGIN, without obtaining
- // a lease or dereferencing any forged address.
+ // 错误的分配元数据必须在 BEGIN 之前拒绝；不能获取租约，也不能解引用伪造地址。
  for(unsigned fault=0;fault<5;++fault){
   auto invalid_state=f.RegisterWindow(7,pair,sizeof(pair),{16,16},true);
   auto invalid=f.CreateCanvasForWidget(7);

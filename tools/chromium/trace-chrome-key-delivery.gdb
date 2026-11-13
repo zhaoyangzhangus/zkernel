@@ -13,8 +13,8 @@ except RuntimeError as error:
 end
 target remote /tmp/system-keys.sock
 python
-# Keyboard diagnostic only, for synthetic Ctrl+T; never capture text. Stops
-# perturb timing. Three hardware addresses, no software patches or BP deletion.
+# 仅用于合成 Ctrl+T 的键盘诊断；绝不捕获文本。断点暂停会影响计时。使用三个硬件地址，
+# 不做软件补丁，也不删除断点。
 started = None
 tab_started = None
 browser_pid = None
@@ -28,7 +28,7 @@ def current():
 class KeyEntry(gdb.Breakpoint):
     def stop(self):
         global started
-        # CreateEvent ABI verified in this guarded binary: this=rdi,input=rsi.
+        # 已在此受保护的二进制中验证 CreateEvent ABI：this=rdi，input=rsi。
         data = bytes(gdb.selected_inferior().read_memory(int(gdb.parse_and_eval('$rsi')),24))
         kind,flags,code,value = struct.unpack_from('<HHIi',data,12)
         if kind != 1 or code not in (0xe0,0xe4,0x17):

@@ -6,9 +6,10 @@ import tempfile
 
 root = Path(__file__).resolve().parents[2]
 source = (root / 'kernel/graphics/present_cursor.c').read_text()
-blend = source[source.index('static uint32_t cursor_blend_xrgb('):source.index('bool window_present_cursor_into_buffer(')]
+blend = source[source.index('static void cursor_publish_box('):source.index('bool window_present_cursor_into_buffer(')]
 functions = source[source.index('bool window_present_cursor_into_buffer('):source.index('void compositor_present_cursor_direct(')]
-overlay = source[source.index('bool window_present_cursor_overlay('):]
+record = source[source.index('void window_present_cursor_record('):source.index('bool window_present_self_test(')]
+overlay = source[source.index('void compositor_present_cursor_direct('):]
 assert 'scanline[' not in source
 program = r'''
 #include <assert.h>
@@ -16,6 +17,16 @@ program = r'''
 #include <stdint.h>
 #include <string.h>
 #include <kernel/rect.h>
+#include <kernel/control_raster.h>
+static uint32_t cursor_blend_xrgb(uint32_t under,uint32_t color) {
+ unsigned alpha=color>>24U;
+ if(!alpha)return under;
+ uint32_t out=0;
+ for(unsigned shift=0;shift<24;shift+=8)
+  out|=(( ((under>>shift)&255U)*(255U-alpha)+
+           ((color>>shift)&255U)*alpha+127U)/255U)<<shift;
+ return out;
+}
 #define WINDOW_CURSOR_WIDTH 4U
 #define WINDOW_CURSOR_HEIGHT 4U
 static uint32_t front[10*8], scene[10*8], writes[10*8];
@@ -40,7 +51,7 @@ static int window_cursor_hotspot_y(unsigned s){return s?2:1;}
 static uint32_t window_cursor_pixel(unsigned s,unsigned x,unsigned y){
  assert(x<4&&y<4);return ((x+y)%3==0?0U:(x+y)%3==1?0x80000000U:0xff000000U)|0x00eeddccU|s;
 }
-static void compositor_present_cursor_direct(bool force){assert(!force);++initialized;}
+static void compositor_present_cursor_direct(bool force);
 static void display_core_publish_xrgb8888_span(volatile uint32_t *d,const uint32_t *s,uint32_t n){
  assert(d>=front&&d+n<=front+80);++span_calls;
  for(uint32_t i=0;i<n;++i){++writes[d+i-front];d[i]=s[i];}
@@ -48,7 +59,8 @@ static void display_core_publish_xrgb8888_span(volatile uint32_t *d,const uint32
 static void display_core_publish_xrgb8888_pixel(volatile uint32_t *d,uint32_t pixel){
  assert(d>=front&&d<front+80);++pixel_calls;++writes[d-front];*d=pixel;
 }
-''' + blend + functions + overlay + r'''
+''' + blend + functions + record + overlay.replace('void compositor_present_cursor_direct(bool force) {',
+    'static void compositor_present_cursor_direct(bool force) {\n    ++initialized;') + r'''
 int main(void){
  g_window_server.framebuffer=front;g_window_server.composite_framebuffer=scene;
  g_window_server.display_width=8;g_window_server.display_height=6;g_window_server.display_stride=10;
@@ -59,6 +71,14 @@ int main(void){
   g_window_server.presented_pointer_x=px;g_window_server.presented_pointer_y=py;
   g_window_server.presented_cursor_shape=shape;
   int left=(int)px-window_cursor_hotspot_x(shape),top=(int)py-window_cursor_hotspot_y(shape);
+  Rect bounds={-99,-99,-99,-99};
+  bool visible=left<8&&left+4>0&&top<6&&top+4>0;
+  assert(window_present_cursor_bounds(&bounds)==visible);
+  assert(!window_present_cursor_bounds(0));
+  if(visible){
+   assert(bounds.x0==(left<0?0:left)&&bounds.y0==(top<0?0:top));
+   assert(bounds.x1==(left+4>8?8:left+4)&&bounds.y1==(top+4>6?6:top+4));
+  }else assert(bounds.x0==-99&&bounds.y0==-99&&bounds.x1==-99&&bounds.y1==-99);
   for(unsigned i=0;i<80;++i){front[i]=0xdeadbeef;scene[i]=0x00335577+i+pass;writes[i]=0;}
   uint32_t original_scene[80];
   memcpy(original_scene,scene,sizeof(scene));
@@ -71,7 +91,7 @@ int main(void){
    assert(writes[y*10+x]==(unsigned)in);
   }
   for(unsigned y=0;y<6;++y){
-   if(!window_present_cursor_publish_span(front+y*10,scene+y*10,0,y,8))
+   if(!window_present_cursor_publish_span(front+y*10,scene+y*10,0,y,8,visible?&bounds:0))
     display_core_publish_xrgb8888_span(front+y*10,scene+y*10,8);
   }
   for(unsigned y=0;y<8;++y)for(unsigned x=0;x<10;++x){
@@ -106,11 +126,10 @@ int main(void){
   int left=(int)px-window_cursor_hotspot_x(shape),top=(int)py-window_cursor_hotspot_y(shape);
   int old_left=(int)old_x-window_cursor_hotspot_x(old_shape);
   int old_top=(int)old_y-window_cursor_hotspot_y(old_shape);
-  int64_t out_left=-999,out_top=-999,out_right=-999,out_bottom=-999;
-  assert(window_present_cursor_overlay(false,&out_left,&out_top,&out_right,&out_bottom)==changed);
+  compositor_present_cursor_direct(false);
+  assert(g_window_server.presented_pointer_valid && g_window_server.presented_pointer_x==px &&
+         g_window_server.presented_pointer_y==py && g_window_server.presented_cursor_shape==shape);
   assert(!preempt&&!locked);
-  if(changed)assert(out_left==left&&out_top==top&&out_right==left+4&&out_bottom==top+4);
-  else assert(out_left==-999&&out_top==-999&&out_right==-999&&out_bottom==-999);
   unsigned expected_spans=0,expected_pixels=0;
   for(int y=0;y<6;++y){
    if(old_left<8&&old_left+4>0&&y>=old_top&&y<old_top+4)++expected_spans;
@@ -129,6 +148,22 @@ int main(void){
   ++moves;
  }
  assert(moves==57600);
+ /* 合并后的真实入口仍区分位置未变、强制重绘和不支持直接输出的路径。 */
+ for(unsigned i=0;i<80;++i)front[i]=scene[i]=0x00554400+i;
+ g_window_server.presented_pointer_valid=false;
+ g_window_server.pointer_x=g_window_server.pointer_y=3;current_shape=0;
+ compositor_present_cursor_direct(false);
+ span_calls=pixel_calls=0;
+ compositor_present_cursor_direct(false);
+ assert(!span_calls&&!pixel_calls&&!preempt&&!locked);
+ compositor_present_cursor_direct(true);
+ assert(span_calls==4&&pixel_calls==16&&!preempt&&!locked);
+ span_calls=pixel_calls=0;native=true;
+ compositor_present_cursor_direct(true);native=false;
+ assert(!span_calls&&!pixel_calls&&!preempt&&!locked);
+ g_window_server.composite_framebuffer=front;
+ compositor_present_cursor_direct(true);
+ assert(!span_calls&&!pixel_calls&&!preempt&&!locked);
 }
 '''
 with tempfile.TemporaryDirectory(prefix='cursor-box-') as directory:

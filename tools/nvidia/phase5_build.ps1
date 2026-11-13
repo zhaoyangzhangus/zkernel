@@ -117,9 +117,8 @@ if (@($vendorDiff | Where-Object { $_.Trim() }).Count -ne 0) {
     throw "vendor source tree is modified: $($vendorDiff[0])"
 }
 
-# Phase 5 is downstream of the already passed Phase 4 hardware gate.  Reuse
-# its recorded real-machine log instead of invoking the full Phase 4/P3
-# build chain again.
+# 阶段 5 依赖已通过的阶段 4 硬件 Gate。复用其中记录的实机日志，
+# 不再重新执行完整的阶段 4/P3 构建链。
 $priorLogsRoot = Join-Path $repoRoot 'build-realtest\real-hardware'
 $priorLogs = @()
 if (Test-Path -LiteralPath $priorLogsRoot -PathType Container) {
@@ -352,8 +351,8 @@ if (@($undefined | Where-Object { $_.Trim() }).Count -ne 0) {
     throw "Phase 5 kernel has unresolved symbols: $($undefined[0])"
 }
 
-# Build the Phase 5 ESP from the already-built Phase 4 ESP using the same
-# content-addressed copy rule used for the physical boot-disk deployment.
+# 使用与物理启动盘部署相同的内容寻址复制规则，
+# 从已构建的阶段 4 ESP 生成阶段 5 ESP。
 $script:stageCopied = 0
 $script:stageSkipped = 0
 Copy-DirectoryContents (Join-Path $phase4Root 'esp') $phase5Esp

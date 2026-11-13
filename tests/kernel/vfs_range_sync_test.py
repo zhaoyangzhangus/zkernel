@@ -78,12 +78,12 @@ int main(void) {
   assert(entries[19999].dirty && entries[20000+count].dirty);
   printf("%u-page sync: list visits=%u hash visits=%u\n",count,list_visits,visits);
  }
- /* Empty index buckets are valid holes, not backend writes. */
+ /* 空索引桶是有效空槽，不是后端写入操作。 */
  visits=list_visits=0;unsigned hole_writes=writes;
  assert(vfs_page_cache_flush_locked(&vnode,100000,32)==K_OK);
  assert(!list_visits && writes==hole_writes && visits<=128);
- /* Indexed multi-page failure retains failed/unvisited dirty pages; retry
-  * writes only the remaining range, without flushing adjacent pages. */
+ /* 带索引的多页写入失败时，保留写入失败或尚未访问的脏页；重试只写剩余范围，不刷新
+  * 相邻页面。 */
  fail_at=writes+5;
  assert(vfs_page_cache_flush_locked(&vnode,30000,32)==K_EIO);
  assert(!locks && !entries[30003].dirty && entries[30004].dirty && entries[30031].dirty);
@@ -108,7 +108,7 @@ int main(void) {
  assert(list_visits==65536);
  for(unsigned i=0;i<65536;++i) assert(!entries[i].dirty);
  assert(!locks); free(cache.expanded_buckets);
- /* A range wider than a small cache should still use one list walk. */
+ /* 范围大于小型缓存时，仍应只遍历一次链表。 */
  cache=(vfs_page_cache_t){0};
  for(unsigned i=0;i<8;++i) {entries[i]=(vfs_cached_page_t){.index=i,.dirty=true};
   vfs_page_cache_insert(&cache,&entries[i]);}

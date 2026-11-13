@@ -1,4 +1,4 @@
-/* Phase 3 fail-closed NVIDIA NVSwitch OS ABI boundary. Exact declarations are checked in nvabi_contracts.c. */
+/* 第 3 阶段的 NVIDIA NVSwitch OS ABI 安全失败边界。具体声明由 nvabi_contracts.c 检查。 */
 
     .section .text.nvabi_nvswitch_unsupported,"ax",@progbits
     .extern nvabi_log_unsupported
@@ -51,7 +51,7 @@ nvswitch_os_assert_log:
     leaq .Lnvabi_msg_nvswitch_os_assert_log(%rip), %rdi
     leaq .Lnvabi_stage_nvswitch(%rip), %rsi
     call nvabi_log_unsupported
-    # void return
+    # void 返回
     popq %rbp
     ret
     .size nvswitch_os_assert_log, .-nvswitch_os_assert_log
@@ -64,7 +64,7 @@ nvswitch_os_free:
     leaq .Lnvabi_msg_nvswitch_os_free(%rip), %rdi
     leaq .Lnvabi_stage_nvswitch(%rip), %rsi
     call nvabi_log_unsupported
-    # void return
+    # void 返回
     popq %rbp
     ret
     .size nvswitch_os_free, .-nvswitch_os_free
@@ -77,7 +77,7 @@ nvswitch_os_free_contig_memory:
     leaq .Lnvabi_msg_nvswitch_os_free_contig_memory(%rip), %rdi
     leaq .Lnvabi_stage_nvswitch(%rip), %rsi
     call nvabi_log_unsupported
-    # void return
+    # void 返回
     popq %rbp
     ret
     .size nvswitch_os_free_contig_memory, .-nvswitch_os_free_contig_memory
@@ -233,7 +233,7 @@ nvswitch_os_mem_write32:
     leaq .Lnvabi_msg_nvswitch_os_mem_write32(%rip), %rdi
     leaq .Lnvabi_stage_nvswitch(%rip), %rsi
     call nvabi_log_unsupported
-    # void return
+    # void 返回
     popq %rbp
     ret
     .size nvswitch_os_mem_write32, .-nvswitch_os_mem_write32
@@ -285,7 +285,7 @@ nvswitch_os_override_platform:
     leaq .Lnvabi_msg_nvswitch_os_override_platform(%rip), %rdi
     leaq .Lnvabi_stage_nvswitch(%rip), %rsi
     call nvabi_log_unsupported
-    # void return
+    # void 返回
     popq %rbp
     ret
     .size nvswitch_os_override_platform, .-nvswitch_os_override_platform
@@ -298,7 +298,7 @@ nvswitch_os_print:
     leaq .Lnvabi_msg_nvswitch_os_print(%rip), %rdi
     leaq .Lnvabi_stage_nvswitch(%rip), %rsi
     call nvabi_log_unsupported
-    # void return
+    # void 返回
     popq %rbp
     ret
     .size nvswitch_os_print, .-nvswitch_os_print
@@ -337,7 +337,7 @@ nvswitch_os_report_error:
     leaq .Lnvabi_msg_nvswitch_os_report_error(%rip), %rdi
     leaq .Lnvabi_stage_nvswitch(%rip), %rsi
     call nvabi_log_unsupported
-    # void return
+    # void 返回
     popq %rbp
     ret
     .size nvswitch_os_report_error, .-nvswitch_os_report_error
@@ -363,7 +363,7 @@ nvswitch_os_sleep:
     leaq .Lnvabi_msg_nvswitch_os_sleep(%rip), %rdi
     leaq .Lnvabi_stage_nvswitch(%rip), %rsi
     call nvabi_log_unsupported
-    # void return
+    # void 返回
     popq %rbp
     ret
     .size nvswitch_os_sleep, .-nvswitch_os_sleep

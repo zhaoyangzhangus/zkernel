@@ -3,8 +3,7 @@
 #include <netinet/in.h>
 #include <sys/socket.h>
 
-/* Legacy resolver interfaces are still used by a large amount of portable
- * software.  They share the same address representation as getaddrinfo(). */
+/* 大量可移植软件仍在使用旧版名称解析器接口。它们与 getaddrinfo() 使用相同的地址表示形式。 */
 #ifndef MAXHOSTNAMELEN
 #define MAXHOSTNAMELEN 256
 #endif

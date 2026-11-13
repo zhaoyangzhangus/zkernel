@@ -51,8 +51,8 @@ function Resolve-Executable([string]$explicitPath, [string[]]$names) {
     return $null
 }
 
-# Put the native GNU tools first.  Windows ships a different find.exe in
-# system32; GNU make uses find when it expands source manifests.
+# 将原生 GNU 工具放在前面。Windows 在 system32 中提供了不同的 find.exe；GNU make 展开
+# 源清单时会调用 find。
 $nativeBinCandidates = @(
     'C:\Program Files\w64devkit\bin',
     'C:\w64devkit\bin',
@@ -138,9 +138,8 @@ function Test-WindowsExecutable([string]$path) {
     }
 }
 
-# A build directory produced by WSL contains Linux host helpers.  Remove only
-# those generated helpers so make rebuilds them with w64devkit; target image
-# objects are still reusable because they use the same MinGW object format.
+# WSL 生成的构建目录包含 Linux 宿主辅助工具。只移除这些生成的辅助工具，让 make 使用
+# w64devkit 重新构建；目标镜像对象仍可重用，因为它们采用相同的 MinGW 对象格式。
 $hostHelpers = @(
     (Join-Path $buildDirectory 'build-id.exe'),
     (Join-Path $buildDirectory 'make-init-image.exe'),

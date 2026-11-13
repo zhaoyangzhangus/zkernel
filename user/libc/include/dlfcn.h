@@ -2,7 +2,7 @@
 
 /* Chromium POSIX 代码使用的动态加载器接口。System 当前通过进程加载器解析自身共享对象；
  * 这些取值使标准接口保持源代码兼容，而其余加载器
- * entry points are added to the libc ABI. */
+ * 加入 libc ABI 的动态加载入口。 */
 #define RTLD_LAZY   0x0001
 #define RTLD_NOW    0x0002
 #define RTLD_LOCAL  0x0000

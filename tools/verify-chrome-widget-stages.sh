@@ -20,7 +20,7 @@ required_markers=(
     SURFACE_PRESENT
 )
 
-# One scan of complete whitespace-delimited records from the current runtime.
+# 对当前运行时中完整的空白分隔记录只扫描一次。
 awk -v stages="${required_markers[*]}" '
 function ordered(s, previous, line) {
     previous = 0
@@ -44,7 +44,7 @@ BEGIN {
             if (!(key in first_line)) {
                 first_line[key] = NR
                 ++seen_count
-                # First occurrences cannot be changed by later log data.
+                # 后续日志不能改变首次出现的记录。
                 if (seen_count == count && ordered()) exit 0
             }
         }

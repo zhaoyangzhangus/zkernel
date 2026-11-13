@@ -123,8 +123,8 @@ int main(void) {
         t=(thread_t){.owner_cpu=0,.migration_pending=true,.untouched=29};
         atomic_init(&t.state,state);t.affinity.bits[0]=1;before=t;
         mask=(cpumask_t){0};mask.bits[cpu/64]=1ULL<<(cpu%64);
-        /* Revalidate selected targets for offline races; undiscovered-only
-         * masks report no selection without publishing a fallback CPU. */
+        /* 重新验证选中目标，处理 CPU 下线竞争；只包含未发现 CPU 的掩码应报告未选中，
+         * 且不得发布回退 CPU。 */
         offline_cpu=cpu<g_cpu_count?cpu:UINT32_MAX;
         target_cpu=cpu<g_cpu_count?cpu:current_cpu;
         select_found=cpu<g_cpu_count;
@@ -134,7 +134,7 @@ int main(void) {
         assert(!push_calls&&!migrate_calls&&!ipi_calls&&!irq_depth);++cases;
     }
     offline_cpu=UINT32_MAX;select_found=true;
-    /* Self-mask aliasing uses exactly the validated snapshot. */
+    /* 自身掩码别名操作恰好使用经过验证的快照。 */
     for(unsigned cpu=0;cpu<4;++cpu) {
         t=(thread_t){.owner_cpu=cpu,.untouched=19};atomic_init(&t.state,THREAD_NEW);
         t.affinity.bits[0]=1ULL<<cpu;before=t;reset();

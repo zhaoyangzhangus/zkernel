@@ -49,8 +49,8 @@ int main(void){
         }
     }
     cycle_length=0;
-    /* Exhaust every six-node FAT graph against an independent visited-set
-     * oracle. Production uses no visited set and must agree from each start. */
+    /* 对照独立的已访问集合基准，穷举所有六节点 FAT 图。生产实现不使用已访问集合，
+     * 但从每个起点得到的结果都必须一致。 */
     OS_FAT32 small={6};arbitrary=1;
     for(UINT32 encoded=0;encoded<117649;++encoded){
         UINT32 digits=encoded;

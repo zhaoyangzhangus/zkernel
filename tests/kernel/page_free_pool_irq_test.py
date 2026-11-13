@@ -75,7 +75,7 @@ int main(void) {
         assert(irq_enabled==initial_irq&&preempt_depth==initial_depth);
         ++cases;
     }
-    /* All nonzero orders now bypass CPU pools and return directly to Buddy. */
+    /* 所有非零阶现在都会绕过 CPU 池，直接归还给 Buddy。 */
     assert(old_unprotected==0&&PAGE_POOL_SMALL_MAX_ORDER==0);
     printf("Nonzero page free: %u actual orders/CPUs/nested-preempt/IRQ/fallback cases; exact old pool/Buddy routing, every state restored; %u old unmasked pool calls rejected\n",cases,old_unprotected);
 }

@@ -15,14 +15,13 @@ previous_critical = r'''bool deferred_schedule_critical(deferred_work_fn_t funct
     uint64_t flags;
 
     /*
-     * This single slot is deliberately reserved for the xHCI MSI-X worker.
-     * Its caller owns a coalescing queued bit, so a READY/RUNNING item is
-     * already sufficient to cover every later interrupt.  Do not turn this
-     * into a shared fallback queue without adding per-source ownership.
+     * 此槽位专门保留给 xHCI MSI-X 工作线程。
+     * 调用方负责合并 queued 位，因此 READY/RUNNING 项已足以覆盖后续所有中断。
+     * 除非为每个来源增加独立所有权，否则不得将其改成共享后备队列。
      *
-     * Publication now shares deferred_lock with the worker's sleep handshake.
-     * That is what closes the EMPTY->BLOCKED lost-wakeup window for the
-     * emergency slot as well as the normal ring.
+     * 发布操作现在与工作线程的睡眠握手共用 deferred_lock。
+     * 这样既能关闭紧急槽位的 EMPTY->BLOCKED 丢失唤醒窗口，也能关闭普通环形队列的
+     * 同类窗口。
      */
     if (function == 0 || !deferred_init()) return false;
 

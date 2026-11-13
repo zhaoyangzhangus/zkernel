@@ -16,7 +16,9 @@ base=['make','-f','tools/host-tests.mk','-n','host-regression-test']
 result=subprocess.run(base,cwd=root,text=True,capture_output=True,timeout=10)
 assert result.returncode==0,result.stderr
 assert all(count==1 for count in Counter(planned_scripts(result.stdout)).values())
-assert planned_scripts(result.stdout).count('tests/kernel/gop_cursor_publication_test.py')==1
+for name in ('compositor_publication_inputs', 'framebuffer_cache', 'compositor_intersection', 'compositor_pipeline_profile', 'gop_cursor_publication', 'compositor_cursor_clip', 'decoration_blend',
+             'display_backend_publication', 'display_initialization', 'display_gop_movsb'):
+    assert planned_scripts(result.stdout).count('tests/kernel/'+name+'_test.py')==1
 assert 'cc -O2 -Wall -Wextra -Werror -fsanitize=address,undefined' in result.stdout
 assert '-o build/message-box-test.exe' in result.stdout
 assert '-o /message-box-test.exe' not in result.stdout
@@ -28,7 +30,8 @@ shared_suites={
     'background-cleanup-regression-test':('net_reap_fairness','scheduler_command_release','device_async_init'),
     'scheduler-regression-test':('scheduler_command_release',),
     'taskmgr-regression-test':('nv_port_thread_lifetime','task_monitor'),
-    'nvidia-deployment-test':('device_async_init','nv_port_thread_lifetime'),
+    'nvidia-deployment-test':('device_async_init','nv_port_thread_lifetime','nvidia_boot_order'),
+    'audio-regression-test':('nvidia_boot_order',),
 }
 for suite,names in shared_suites.items():
     standalone=subprocess.run(['make','-f','tools/host-tests.mk','-n',suite],
@@ -53,11 +56,13 @@ lifecycle=subprocess.run(['make','-f','tools/host-tests.mk','-n','lifecycle-regr
 assert lifecycle.returncode==0,lifecycle.stderr
 lifecycle_tests=re.findall(r'tests/kernel/[A-Za-z0-9_]+_test\.py',lifecycle.stdout)
 expected_lifecycle={test.relative_to(root).as_posix()
-                    for pattern in ('wait_*_test.py','handle_*_test.py')
+                    for pattern in ('wait_*_test.py','handle_*_test.py','linux_epoll_*_test.py',
+                                    'futex_*_test.py','pipe_*_test.py')
                     for test in root.glob('tests/kernel/'+pattern)}
 expected_lifecycle.update(f'tests/kernel/{name}_test.py' for name in (
     'process_empty_exit','process_exit_cascade','process_terminate_batch',
     'task_monitor','thread_monitor_cursor','mutex_pi_lifecycle',
+    'message_port_io','completion_port_io',
     'background_cleanup','deferred_startup','deferred_lock','exec_background_release',
     'net_reap_fairness','scheduler_command_release','device_async_init'))
 assert len(lifecycle_tests)==len(set(lifecycle_tests))
@@ -157,7 +162,7 @@ for assignment,message in (('HOSTCC=','HOSTCC must not be empty'),('BUILD=','BUI
 result=subprocess.run([*base,'HOSTCC=custom-compiler'],cwd=root,text=True,capture_output=True,timeout=10)
 assert result.returncode==0 and 'custom-compiler -O2' in result.stdout,result
 print('Host test entrypoint: standalone defaults, canonical output, overrides and empty-variable rejection passed')
-print('Shared regressions: five cross-suite fixtures retain standalone coverage; both parallel goal orders have no duplicate expanded script paths')
+print('Shared regressions: six cross-suite fixtures retain standalone coverage; both parallel goal orders have no duplicate expanded script paths')
 print(f'Lifecycle entrypoint: all {len(lifecycle_tests)} termination/wait fixtures and real object waits run once; missing fixture fails closed')
 print(f'VFS entrypoint: all {len(vfs_tests)} fixtures scheduled exactly once, including combined goals')
 print(f'Network entrypoint: all {len(network_tests)} fixtures scheduled exactly once, including combined goals')

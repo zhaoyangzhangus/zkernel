@@ -13,14 +13,14 @@ except RuntimeError as error:
 end
 target remote /tmp/system-keys.sock
 python
-# Four hardware addresses, no temporary return breakpoint. These are entry
-# timelines, not function durations or CPU benchmarks. Only the browser that
-# received NewTab is attributed; child/background frames cannot satisfy paint.
+# 使用四个硬件地址，不设置临时返回断点。这些是入口时间线，
+# 不是函数耗时或 CPU 基准。只记录收到 NewTab 的浏览器；
+# 子进程或后台帧不能算作已完成绘制。
 started=None
 browser=None
 samples=0
-# Browser UI uses LayerTreeHost::CreateSingleThreaded, unlike renderer's
-# ProxyMain. Choose adjacent stages without exceeding four hardware slots.
+# 浏览器 UI 使用 LayerTreeHost::CreateSingleThreaded，与渲染进程的 ProxyMain 不同。
+# 选择相邻阶段时，硬件断点槽位不得超过四个。
 mode=os.environ.get('OS_COMMIT_STAGE','activation')
 stages={
     'activation':((0x4d35aea0,'BEGIN_MAIN_FRAME'),(0x4d2ba3c0,'ACTIVATE_SYNC_TREE')),

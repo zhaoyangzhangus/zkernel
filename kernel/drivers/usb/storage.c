@@ -107,13 +107,12 @@ static bool usb_msc_manager_init_once(void) {
 }
 
 /*
- * BOT is strictly single-command-at-a-time for one interface.  `busy` used to
- * behave like a try-lock, so a second filesystem request racing the current
- * request was reported as an I/O error.  That is especially easy to hit while
- * the desktop loads files and writes state concurrently.
+ * 对单个接口而言，BOT 严格要求同一时间只能执行一条命令。过去 `busy` 的行为类似尝试加锁，
+ * 因此第二个与当前请求竞争的文件系统请求会被报告为 I/O 错误。桌面同时加载文件和写入状态时，
+ * 尤其容易遇到这种情况。
  *
- * Wait for the current BOT transaction instead.  Do not disable preemption
- * here: the owner may be running on this CPU and must be allowed to complete.
+ * 改为等待当前 BOT 事务完成。此处不要禁用抢占：事务所有者可能正在此 CPU 上运行，
+ * 必须允许它完成操作。
  */
 static bool usb_msc_enter(usb_msc_device_t *device) {
     uint64_t deadline;
@@ -150,7 +149,7 @@ static bool usb_msc_enter(usb_msc_device_t *device) {
         __asm__ volatile ("pause");
     }
 
-    /* Detach can race the acquisition.  Never start a new command offline. */
+    /* 分离操作可能与获取过程竞争。设备离线后绝不启动新命令。 */
     if (!atomic_load_explicit(&device->online, memory_order_acquire)) {
         atomic_store_explicit(&device->busy_owner_cpu, UINT32_MAX,
                               memory_order_release);
@@ -200,7 +199,7 @@ static kstatus_t usb_msc_bot_locked(usb_msc_device_t *device,
     cbw.command_length = command_length;
     for (uint32_t i = 0U; i < command_length; ++i) cbw.command[i] = command[i];
 
-    /* Keep one Event Ring consumer for the complete CBW -> DATA -> CSW triplet. */
+    /* 整个 CBW -> DATA -> CSW 流程始终由同一个事件环消费者处理。 */
     status = xhci_usb_bulk_session_begin(device->slot);
     if (status != K_OK) return status;
 
@@ -340,9 +339,8 @@ static BOOLEAN usb_msc_block_io(VOID *context, UINT64 lba,
     uint32_t maximum = capacity / device->block_size;
     if (maximum > UINT16_MAX) maximum = UINT16_MAX;
     if (maximum == 0U) { usb_msc_leave(device); return 0; }
-    /* One SCSI request for the largest contiguous run the transport can
-     * accept. xHCI chains DMA segments without copying eligible buffers.
-     * Each command releases the event-ring lock for HID progress. */
+    /* 每次 SCSI 请求都覆盖传输层可接受的最大连续范围。符合条件的缓冲区由 xHCI
+     * 链接 DMA 段传输，无需复制。每条命令都会释放事件环锁，让 HID 设备继续处理。 */
     for (uint32_t i = 0U; ok && i < count;) {
         uint32_t chunk = count - i;
         if (chunk > maximum) chunk = maximum;
@@ -501,11 +499,11 @@ static void usb_msc_attach_work(void *argument) {
 /*
  * OS_USB_ROOT_PATCH_V1
  *
- * Boot can need the same USB Mass Storage device that UEFI used to load
- * BOOTX64.EFI before the persistent deferred worker has started.
+ * 持久延迟工作线程启动前，引导过程可能需要访问 UEFI 用于加载 BOOTX64.EFI 的
+ * 同一个 USB 大容量存储设备。
  *
- * The normal hotplug path remains deferred.  This helper reuses the exact
- * same SCSI/BOT attach routine synchronously during root discovery.
+ * 普通热插拔路径仍然采用延迟处理。此辅助函数在根设备发现期间同步调用完全相同的
+ * SCSI/BOT 连接流程。
  */
 bool usb_msc_attach(uint8_t slot) {
     if (slot == 0U) return false;

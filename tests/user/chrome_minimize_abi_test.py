@@ -16,7 +16,7 @@ program = r'''
 #include <initializer_list>
 #include "uapi/window.h"
 #include "uapi/window_state.h"
-// The native header uses C11 spelling; keep the same checks with host g++.
+// 原生头文件使用 C11 写法；在宿主 g++ 下也执行相同检查。
 #define _Static_assert static_assert
 #include "uapi/linux_abi.h"
 #undef _Static_assert

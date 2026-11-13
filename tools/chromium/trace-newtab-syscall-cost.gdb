@@ -13,8 +13,8 @@ except RuntimeError as error:
 end
 target remote /tmp/system-keys.sock
 python
-# Two hardware addresses; selected UI thread only, for the synchronous NewTab
-# call. Outer runner MUST disable the selector after terminal debugger cleanup.
+# 两个硬件地址；仅针对选定的 UI 线程及其同步 NewTab 调用。
+# 外层运行程序必须在调试器完成清理后禁用选择器。
 owner = None
 started = None
 memory = gdb.selected_inferior()

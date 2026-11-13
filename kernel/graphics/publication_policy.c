@@ -1,17 +1,16 @@
+#include <kernel/display.h>
 #include <kernel/sched.h>
 #include <arch/x86_64/cpu.h>
 #include "internal.h"
 
 /* REFACTOR_P7A_PUBLICATION_OWNER：损坏区域和扫描输出发布策略。 */
 
-uint64_t compositor_publication_damage_pixels(void) {
+uint64_t compositor_publication_damage_pixels(const Rect *rects, uint32_t count) {
     uint64_t pixels = 0U;
 
-    for (uint32_t region = 0U;
-         region < g_compositor_snapshot.damage_count;
-         ++region) {
-        const Rect *rect =
-            &g_compositor_snapshot.damage_rects[region];
+    if (rects == 0) return 0U;
+    for (uint32_t region = 0U; region < count; ++region) {
+        const Rect *rect = &rects[region];
         uint32_t width;
         uint32_t height;
         uint64_t area;
@@ -53,6 +52,10 @@ static void compositor_publication_rect_budget(const Rect *rect,
             &clipped)) return;
     rect = &clipped;
     window_present_cursor_prepare_rect(rect);
+    /* 普通扫描线不必重复计算光标几何；输入服务后刷新，跟随本帧中的光标移动。 */
+    Rect cursor_bounds = {0};
+    bool cursor_intersects = window_present_cursor_bounds(&cursor_bounds) &&
+        rect_intersects(*rect, cursor_bounds);
 
     width =
         rect->x1 -
@@ -64,31 +67,30 @@ static void compositor_publication_rect_budget(const Rect *rect,
         budget->started = true;
     }
 
+    /* 显示几何和场景映射在发布期间保持不变，每个矩形只解析一次。
+     * 用整数递增行偏移，避免在最后一行之后构造越过缓冲区末尾的指针。 */
+    const uint32_t stride = g_window_server.display_stride;
+    volatile uint32_t *framebuffer = g_window_server.framebuffer;
+    const uint32_t *scene =
+        (const uint32_t *)(uintptr_t)g_window_server.composite_framebuffer;
+    uint64_t offset = (uint64_t)(uint32_t)rect->y0 * stride + (uint32_t)rect->x0;
+
     for (uint32_t row = (uint32_t)rect->y0;
          row < (uint32_t)rect->y1;
-         ++row) {
-        volatile uint32_t *destination =
-            g_window_server.framebuffer +
-            (uint64_t)row * g_window_server.display_stride +
-            rect->x0;
+         ++row, offset += stride) {
+        volatile uint32_t *destination = framebuffer + offset;
+        const uint32_t *source = scene + offset;
 
-        /*
-         * 此路径保证 composite_framebuffer 是私有保留式 WB 场景；直接帧缓冲后备路径
-         * 不会调用 compositor_commit_snapshot()。
-         */
-        const uint32_t *source =
-            (const uint32_t *)(uintptr_t)(
-                g_window_server.composite_framebuffer +
-                (uint64_t)row * g_window_server.display_stride +
-                rect->x0);
-
-        if (!window_present_cursor_publish_span(
+        if (!cursor_intersects || row < (uint32_t)cursor_bounds.y0 ||
+            row >= (uint32_t)cursor_bounds.y1 ||
+            !window_present_cursor_publish_span(
                 destination,
                 source,
                 rect->x0,
                 row,
-                width)) {
-            compositor_copy_wc_scanline(
+                width,
+                &cursor_bounds)) {
+            display_core_publish_xrgb8888_span(
                 destination,
                 source,
                 width);
@@ -101,17 +103,18 @@ static void compositor_publication_rect_budget(const Rect *rect,
         budget->pixels +=
             width;
 
-        if ((final_rect && row + 1U >= (uint32_t)rect->y1) ||
-            (budget->pixels < WINDOW_COMPOSITOR_PUBLICATION_YIELD_PIXELS &&
-             x86_read_tsc() - budget->start < budget->duration)) {
-            continue;
-        }
+        if (final_rect && row + 1U >= (uint32_t)rect->y1) continue;
+        /* 同一预算检查共用一次时钟采样；空闲时直接用它开启下一预算，
+         * 避免慢设备超过时间预算后再次读取时钟。输入处理后仍重新计时。 */
+        uint64_t now = x86_read_tsc();
+        if (budget->pixels < WINDOW_COMPOSITOR_PUBLICATION_YIELD_PIXELS &&
+            now - budget->start < budget->duration) continue;
 
         /* 没有调度请求或输入时继续完成当前帧，避免主动切走后长期暴露半更新画面。
          * 检查预算保持有界，定时器/唤醒发布抢占请求后仍能及时交出 CPU。 */
         if (!sched_tick_should_preempt() && input_core_pending() == 0U) {
             budget->pixels = 0U;
-            budget->start = x86_read_tsc();
+            budget->start = now;
             continue;
         }
 
@@ -130,6 +133,9 @@ static void compositor_publication_rect_budget(const Rect *rect,
         /* 输入处理可能新唤醒线程；在允许抢占的状态下重新检查实际调度请求。 */
         if (sched_tick_should_preempt()) schedule();
         sched_preempt_disable();
+
+        cursor_intersects = window_present_cursor_bounds(&cursor_bounds) &&
+            rect_intersects(*rect, cursor_bounds);
 
         budget->pixels = 0U;
         budget->start = x86_read_tsc();
@@ -188,9 +194,7 @@ static void compositor_publication_drag_exposure_rect(
  * 这并不能让 GOP 实现原子更新；完整方案仍是原生扫描输出/翻页。这只是针对 GOP 的低成本
  * 正确性改进。
  */
-void compositor_publication_drag_old_exposure(void) {
-    const compositor_snapshot_t *snapshot =
-        &g_compositor_snapshot;
+void compositor_publication_drag_old_exposure(const compositor_snapshot_t *snapshot) {
 
     int64_t old_left;
     int64_t old_top;
@@ -207,7 +211,7 @@ void compositor_publication_drag_old_exposure(void) {
     int64_t overlap_right;
     int64_t overlap_bottom;
 
-    if (!snapshot->drag_blit_valid ||
+    if (snapshot == 0 || !snapshot->drag_blit_valid ||
         snapshot->drag_width == 0U ||
         snapshot->drag_height == 0U) {
         return;

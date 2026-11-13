@@ -60,7 +60,7 @@ int main(void){
  for(unsigned c=0;c<sizeof(counts)/sizeof(counts[0]);++c)
  for(unsigned done=0;done<=counts[c];++done){
   unsigned count=counts[c];
-  /* Unsubmitted slots carry stale OWN/data; neither is TX progress. */
+  /* 未提交槽位可能带有过期的 OWN/数据；这两者都不代表 TX 已推进。 */
   memset(ring,0xa5,sizeof(ring));
   s.rtl_tx_clean=origin;s.rtl_tx_pending=count;
   s.rtl_tx_next=(origin+count)%RTL8126_RING_COUNT;
@@ -78,16 +78,15 @@ int main(void){
   for(unsigned repeat=0;repeat<3;++repeat)rtl8126_complete_tx(&s);
   assert(bells==before);++cases;
  }
- /* A clear OWN after an owned head is not contiguous completion. */
+ /* 已有 OWN 的队首之后出现 OWN 清除，不代表形成了连续完成。 */
  memset(ring,0,sizeof(ring));s.rtl_tx_clean=255;s.rtl_tx_next=2;s.rtl_tx_pending=3;
  ring[255].options1=RTL8126_DESC_OWN;ring[1].options1=RTL8126_DESC_OWN;
  bells=0;rtl8126_complete_tx(&s);assert(!bells && s.rtl_tx_pending==3 && s.rtl_tx_clean==255);
  ring[255].options1=0;rtl8126_complete_tx(&s);
  assert(bells==1 && s.rtl_tx_pending==1 && s.rtl_tx_clean==1);
  ring[1].options1=0;rtl8126_complete_tx(&s);assert(bells==1 && !s.rtl_tx_pending);
- /* A producer wins the race with the deferred completion worker. It must
-  * notify the hardware about the completion it consumes, not silently
-  * erase the worker's evidence that an older packet still needs a kick. */
+ /* 生产者赢得了与延迟完成工作线程的竞争。它必须通知硬件自己消费的完成事件，
+  * 不能悄然清除工作线程记录的“旧数据包仍需触发”信息。 */
  memset(ring,0,sizeof(ring));s.rtl_tx_clean=0;s.rtl_tx_next=2;s.rtl_tx_pending=2;
  ring[0].options1=60U;ring[1].options1=RTL8126_DESC_OWN|60U;
  bells=syncs=0;
@@ -95,8 +94,8 @@ int main(void){
  assert(s.rtl_tx_clean==1 && s.rtl_tx_pending==2 && s.rtl_tx_next==3);
  assert(bells==2); /* One completion notification and one new submission. */
  rtl8126_complete_tx(&s);assert(bells==2 && s.rtl_tx_pending==2);
- /* Real producer fills the ring, applies pressure without overwriting it,
-  * reclaims before producer reuse, and survives repeated full wraps. */
+ /* 真实生产者填满环形队列，在施加压力时不覆盖数据，并在生产者重用前回收空间；
+  * 多次完整回绕后仍须正常工作。 */
  for(unsigned origin=0;origin<RTL8126_RING_COUNT;++origin){
   memset(ring,0,sizeof(ring));s.rtl_tx_clean=s.rtl_tx_next=origin;s.rtl_tx_pending=0;
   s.rtl_tx_count=0;bells=0;
@@ -106,8 +105,8 @@ int main(void){
    memcpy(saved,ring,sizeof(ring));unsigned before=bells;
    assert(send(&s)==K_EAGAIN && !memcmp(saved,ring,sizeof(ring)) && bells==before);
    for(unsigned n=0;n<RTL8126_RING_COUNT;++n)ring[n].options1 &= ~RTL8126_DESC_OWN;
-   /* No completion callback: the next producer must retire the old full
-    * ring before reusing a descriptor whose OWN hardware cleared. */
+   /* 没有完成回调时，下一个生产者必须先回收旧的满队列，再重用 OWN 已被硬件清除的
+    * 描述符。 */
   }
   rtl8126_complete_tx(&s);
   assert(!s.rtl_tx_pending && s.rtl_tx_clean==origin);

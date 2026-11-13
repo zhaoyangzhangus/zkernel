@@ -92,7 +92,7 @@ int main(void) {
    for(uint64_t p=0;p<=end+64;p+=64)for(unsigned order=0;order<6;++order)check(p,order);
   }
  }
- // Duplicate starts/endpoints must choose the first owner, even when its ID is invalid.
+ // 起点/终点重复时必须选择第一个所有者，即使其 ID 无效也一样。
  g_section_count=3;g_pool_base_group_count=8;g_pool_group_count=48;
  g_pool_sections[0]=(page_pool_section_t){64,0,3};
  g_pool_sections[1]=(page_pool_section_t){64,3,3};

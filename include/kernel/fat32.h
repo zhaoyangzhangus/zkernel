@@ -6,7 +6,7 @@
 #include "io_mutex.h"
 #include <uapi/file.h>
 
-/* FAT32 owns its path and open-file boundary; VFS consumes these APIs. */
+/* FAT32 自行管理路径和打开文件边界；VFS 通过这些 API 访问它。 */
 #define OS_FAT32_PATH_LENGTH 256U
 #define OS_FAT32_MAX_OPEN_FILES 512U
 
@@ -74,8 +74,8 @@ BOOLEAN fat32_stat_path(OS_FAT32 *filesystem, const CHAR8 *path,
                                 os_file_info_t *info);
 BOOLEAN fat32_enumerate_path(OS_FAT32 *filesystem, const CHAR8 *path,
                                      UINT32 index, os_file_info_t *info);
-/* Visit at most limit entries in one traversal. A false visitor result stops
- * immediately; end-of-directory/read failure retains already visited entries. */
+/* 单次遍历最多访问 limit 个条目。访问器返回 false 时立即停止；到达目录末尾或读取失败时，
+ * 保留此前已访问的条目。 */
 typedef BOOLEAN (*fat32_directory_visitor_t)(VOID *context,
                                                    const os_file_info_t *info);
 VOID fat32_visit_directory(OS_FAT32 *filesystem, const CHAR8 *path,
@@ -84,8 +84,7 @@ VOID fat32_visit_directory(OS_FAT32 *filesystem, const CHAR8 *path,
 BOOLEAN fat32_read_path(OS_FAT32 *filesystem, const CHAR8 *path,
                                 UINT64 offset, VOID *buffer, UINT32 capacity,
                                 UINT32 *read_size);
-/* Read through an already-open FAT file so sequential callers retain the
- * cluster cursor across backend/page-cache requests. */
+/* 通过已打开的 FAT 文件读取，使顺序调用方能在后端/页缓存请求之间保留簇游标。 */
 BOOLEAN fat32_read_file(OS_FAT32_FILE *file, UINT64 offset,
                                 VOID *buffer, UINT32 capacity,
                                 UINT32 *read_size);

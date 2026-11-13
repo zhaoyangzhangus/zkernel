@@ -107,8 +107,8 @@ int main(){
  assert(c->acquires==empty_acquires);
  d.surface.allowed=false;d.Present(std::nullopt,0,0);
  assert(d.result==gfx::SwapResult::SWAP_FAILED&&c->presents==presents);
- // A failed GPU read can already have modified destination pixels outside
- // the next damage rectangle. Recovery must restore the complete surface.
+ // GPU 读取失败时，可能已经修改了下一损坏矩形之外的目标像素。
+ // 恢复时必须还原整个表面。
  assert(c->storage[1]==0xdead);
  d.surface.allowed=true;d.Present(gfx::Rect(5,6,7,8),0,0);
  assert(d.result==gfx::SwapResult::SWAP_ACK&&c->presents==presents+1);
@@ -125,8 +125,8 @@ int main(){
  d.Present(gfx::Rect(1,1,2,2),0,0);assert(c->last.width()==10&&c->last.height()==10);
  assert(d.starts==d.finishes&&d.result==gfx::SwapResult::SWAP_ACK);
  c->full_frame=true;
- // Native resize notification / back-slot availability can lag GPU reshape.
- // Reshape must not acquire the slot or declare the GPU context lost.
+ // 原生调整大小通知/后备槽位可用状态可能晚于 GPU reshape。
+ // reshape 不得获取该槽位，也不得宣告 GPU 上下文丢失。
  c->alive=false;c->retry=true;unsigned acquires=c->acquires;
  assert(d.Reshape({{10,10},1,true})&&c->acquires==acquires);
  d.Present(std::nullopt,0,0);
@@ -141,7 +141,7 @@ int main(){
  d.Present(std::nullopt,0,0);
  assert(d.result==gfx::SwapResult::SWAP_NAK_RECREATE_BUFFERS);
  assert(present_logs==1);
- // Count actual production readback rectangles, not elapsed host/GPU time.
+ // 统计生产环境实际读回的矩形数量，而不是宿主/GPU 耗时。
  c->retry=false;c->present_allowed=true;c->full_frame=false;
  assert(d.Reshape({{1920,1080},1,true}));d.Present(std::nullopt,0,0);
  uint64_t pixels_before=d.surface.pixels_read;

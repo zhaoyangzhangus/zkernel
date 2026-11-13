@@ -19,7 +19,7 @@ static void write_msr(uint32_t index, uint64_t value) {
 }
 
 static void x86_program_pat(void) {
-    /* PAT indexes 0/1/2/3 remain WB/WC/UC-/UC for all MMU callers. */
+    /* 对所有 MMU 调用方，PAT 索引 0/1/2/3 始终对应 WB/WC/UC-/UC。 */
     const uint64_t pat = 0x0007010600070106ULL;
     if (read_msr(IA32_PAT) != pat) {
         __asm__ volatile ("wbinvd" : : : "memory");
@@ -34,7 +34,7 @@ void x86_paging_arch_init(void) {
 }
 
 void x86_paging_arch_init_secondary(void) {
-    /* PAT is per logical CPU; APs do not inherit the BSP's MSR value. */
+    /* PAT 是每个逻辑 CPU 独有的；AP 不会继承 BSP 的 MSR 值。 */
     x86_program_pat();
 }
 

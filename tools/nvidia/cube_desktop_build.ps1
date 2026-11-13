@@ -160,8 +160,8 @@ $compilerPath = (Get-Command $Compiler -ErrorAction Stop).Source
 $linkerPath = (Get-Command $Linker -ErrorAction Stop).Source
 $makePath = (Get-Command $Make -ErrorAction Stop).Source
 
-# Only these objects are rebuilt with OS_REALTEST=0.  Everything else,
-# including the immutable 595.84 vendor objects, is reused from Phase 12.
+# 仅使用 OS_REALTEST=0 重建这些对象。其他所有内容（包括不可修改的 595.84 供应商对象）
+# 都从 Phase 12 复用。
 $desktopObjectNames = @(
     'context.o',
     'entry.o',

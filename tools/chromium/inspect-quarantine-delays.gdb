@@ -36,14 +36,14 @@ def word(process, address):
         0xffff800000000000 + physical, 8)), 'little')
 
 symbols = {}
-# This guest loader maps the canonical Chrome PIE at 0x40000000. Symbols must
-# come from the exact staged executable; do not use while another build runs.
+# 此客户机加载器将规范 Chrome PIE 映射到 0x40000000。符号必须来自精确暂存的可执行文件；
+# 其他构建正在运行时不要使用此脚本。
 with subprocess.Popen(['nm', '-an', executable],
                       stdout=subprocess.PIPE, text=True) as process:
     for line in process.stdout:
         fields = line.split()
         if len(fields) == 3:
-            # Classify legacy staged binaries without changing their addresses.
+            # 对旧版暂存二进制分类，但不更改其地址。
             name = fields[2].replace('g_liteos_quarantine_', 'g_platform_quarantine_').replace(
                 'g_liteos_sampled_free_', 'g_platform_sampled_free_')
             if 'g_platform_quarantine_' in name or 'g_platform_sampled_free_' in name:

@@ -5,8 +5,8 @@
 
 #include "internal.h"
 
-/* REFACTOR_P8_XHCI_CORE_OWNER: controller initialization, teardown, and the
- * explicit private boundaries shared by the xHCI protocol Owners. */
+/* REFACTOR_P8_XHCI_CORE_OWNER：控制器初始化、拆除，以及 xHCI 协议所有者共用的
+ * 明确私有边界。 */
 
 #define XHCI_CONFIG            0x38U
 #define XHCI_USBSTS           0x04U
@@ -35,8 +35,7 @@ void xhci_hid_controller_set_active(bool active) {
     g_xhci_hid_active = active;
 }
 
-/* Keep the Hub and event-dispatch reverse dependencies explicit.  The
- * callbacks are private contracts, not a second public driver API. */
+/* 显式声明 Hub 和事件分发的反向依赖。这些回调属于私有约定，不是另一套公开驱动 API。 */
 bool xhci_restart_hub_status_endpoint(xhci_state_t *state,
                                        xhci_device_context_t *hub);
 bool xhci_publish_working_device(xhci_state_t *state);
@@ -65,10 +64,9 @@ const xhci_event_dispatch_ops_t g_xhci_event_dispatch_ops = {
     .hub_runtime = &g_xhci_hub_runtime_ops,
 };
 
-/* REFACTOR_P8_XHCI_EVENT_LOCK_OWNER: one preemption-safe owner for the
- * controller event stream shared by synchronous transfers and deferred IRQ
- * processing. Interrupts stay enabled so xHCI completion delivery remains
- * possible while a synchronous caller polls the event ring. */
+/* REFACTOR_P8_XHCI_EVENT_LOCK_OWNER：为同步传输和延迟 IRQ 处理共用的控制器事件流
+ * 指定一个可防抢占的所有者。保持中断开启，使同步调用方轮询事件环时，xHCI 仍可
+ * 投递完成事件。 */
 #define X86_RFLAGS_INTERRUPT (1ULL << 9)
 
 static uint64_t xhci_event_save_flags(void) {
@@ -225,9 +223,8 @@ bool xhci_core_initialize(xhci_state_t *state, const pci_device_t *pci) {
     return true;
 }
 
-/* xHCI commands need a running controller, so Slot teardown precedes the
- * controller halt and ring/MMIO release. Preserve the original failure code
- * if cleanup is entered after an earlier initialization error. */
+/* xHCI 命令需要控制器处于运行状态，因此先拆除 Slot，再停止控制器并释放环和 MMIO。
+ * 如果此前初始化已失败，进入清理流程时应保留原始错误码。 */
 bool xhci_core_destroy(xhci_state_t *state) {
     if (state == 0) return false;
 

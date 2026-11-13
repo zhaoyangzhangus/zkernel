@@ -13,8 +13,8 @@ except RuntimeError as error:
 end
 target remote /tmp/system-keys.sock
 python
-# Localization only: hardware stops perturb elapsed time. At most four
-# addresses (two entries and their returns); never delete BPs in stop().
+# 仅用于定位：硬件断点会影响经过时间。最多使用四个地址
+#（两个入口及其返回）；绝不要在 stop() 中删除断点。
 started = None
 input_kind = os.environ.get('OS_INPUT_TRACE', 'newtab')
 if input_kind not in ('newtab','address','addressrelease'):

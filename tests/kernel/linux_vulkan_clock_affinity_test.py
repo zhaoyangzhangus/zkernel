@@ -82,8 +82,8 @@ with tempfile.TemporaryDirectory(prefix='vulkan-clock-affinity-') as directory:
     base=Path(directory); (base/'test.c').write_text(code)
     subprocess.run(['cc','-std=c11','-Wall','-Wextra','-Werror',str(base/'test.c'),'-o',str(base/'test')],check=True)
     subprocess.run([str(base/'test')],check=True)
-    # Prove the new RAW assertions detect the exact missing-adapter regression,
-    # rather than passing because the fixture accepts every clock identifier.
+    # 验证新的 RAW 断言可以检测到特定的适配器缺失回归，而不是因为测试夹具接受所有
+    # 时钟标识符而误通过。
     raw_adapter='    if (clock_id == 4U) clock_id = OS_LINUX_CLOCK_MONOTONIC;'
     assert code.count(raw_adapter)==1
     (base/'old.c').write_text(code.replace(raw_adapter,''))

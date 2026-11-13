@@ -23,11 +23,13 @@ static void nv_port_event_append_locked(nv_port_event_queue_t *queue,
     }
 }
 
-kstatus_t nv_port_event_post(nv_port_event_queue_t *queue,
-                             const nv_port_event_record_t *record) {
+/* 普通和中断发布共享入队事务；IRQ 只使用现有缓存容量，不进行阻塞分配。 */
+static kstatus_t nv_port_event_post_internal(nv_port_event_queue_t *queue,
+    const nv_port_event_record_t *record, bool irq, bool *notify) {
+    if (notify != NULL) *notify = false;
     if (queue == NULL) return K_EINVAL;
     nv_port_event_node_t *node = NULL;
-    if (record != NULL) {
+    if (record != NULL && !irq) {
         node = kmalloc(sizeof(*node), 0U);
         if (node == NULL) return K_ENOMEM;
         node->record = *record;
@@ -39,23 +41,8 @@ kstatus_t nv_port_event_post(nv_port_event_queue_t *queue,
         if (node != NULL) kfree(node);
         return K_EBADF;
     }
-    nv_port_event_append_locked(queue, node);
-    nv_port_spin_unlock_irqrestore(&queue->lock, flags);
-    return K_OK;
-}
-
-kstatus_t nv_port_event_post_irq(nv_port_event_queue_t *queue,
-                                 const nv_port_event_record_t *record) {
-    if (queue == NULL) return K_EINVAL;
-    uint64_t flags = nv_port_spin_lock_irqsave(&queue->lock);
-    if (queue->closed) {
-        nv_port_spin_unlock_irqrestore(&queue->lock, flags);
-        return K_EBADF;
-    }
-    nv_port_event_node_t *node = NULL;
-    if (record != NULL) {
-        /* Nonblocking cache try-lock cannot invert the heap/queue lock order.
-         * Check close before allocating: no heap free is needed in IRQ context. */
+    if (record != NULL && irq) {
+        /* 先检查关闭状态，保证中断路径不需要释放新分配的节点。 */
         node = kmalloc_try_cached(sizeof(*node), 0U);
         if (node == NULL) {
             nv_port_spin_unlock_irqrestore(&queue->lock, flags);
@@ -64,9 +51,22 @@ kstatus_t nv_port_event_post_irq(nv_port_event_queue_t *queue,
         node->record = *record;
         node->next = NULL;
     }
+    /* 无载荷事件只有一个待消费标志，重复发布无需重复唤醒。
+     * 带载荷事件仍逐条入队和通知，不改变记录顺序或数量。 */
+    if (notify != NULL) *notify = record != NULL || !queue->dataless_pending;
     nv_port_event_append_locked(queue, node);
     nv_port_spin_unlock_irqrestore(&queue->lock, flags);
     return K_OK;
+}
+
+kstatus_t nv_port_event_post(nv_port_event_queue_t *queue,
+                             const nv_port_event_record_t *record) {
+    return nv_port_event_post_internal(queue, record, false, NULL);
+}
+
+kstatus_t nv_port_event_post_irq(nv_port_event_queue_t *queue,
+                                 const nv_port_event_record_t *record) {
+    return nv_port_event_post_internal(queue, record, true, NULL);
 }
 
 kstatus_t nv_port_event_take(nv_port_event_queue_t *queue,
@@ -128,8 +128,7 @@ struct nv_port_event_source {
 
 static bool nv_port_event_source_signaled(const void *object) {
     nv_port_event_source_t *source = (nv_port_event_source_t *)object;
-    /* A readiness predicate must not consume a notification. The descriptor
-     * adapter consumes dataless state only when actually reporting readiness. */
+    /* 就绪谓词不得消费通知。只有描述符适配器实际报告就绪状态时，才会消费无数据状态。 */
     return nv_port_event_poll(&source->queue, false) != 0U;
 }
 
@@ -165,14 +164,19 @@ void *nv_port_event_source_wait_object(nv_port_event_source_t *source) {
     return source;
 }
 
+static kstatus_t nv_port_event_source_post_internal(nv_port_event_source_t *source,
+    const nv_port_event_record_t *record, bool irq) {
+    if (source == NULL) return K_EINVAL;
+    bool notify;
+    kstatus_t status = nv_port_event_post_internal(&source->queue, record, irq, &notify);
+    /* 调用方持有 source 引用；解锁后仅通知这个对象的订阅者。 */
+    if (status == K_OK && notify) object_notify_changed(source);
+    return status;
+}
+
 kstatus_t nv_port_event_source_post(nv_port_event_source_t *source,
                                     const nv_port_event_record_t *record) {
-    if (source == NULL) return K_EINVAL;
-    kstatus_t status = nv_port_event_post(&source->queue, record);
-    /* The caller holds a source reference across the unlocked notification.
-     * Wake only this object's subscribers, never the global signal queue. */
-    if (status == K_OK) object_notify_changed(source);
-    return status;
+    return nv_port_event_source_post_internal(source, record, false);
 }
 
 kstatus_t nv_port_event_source_take(nv_port_event_source_t *source,
@@ -183,10 +187,7 @@ kstatus_t nv_port_event_source_take(nv_port_event_source_t *source,
 
 kstatus_t nv_port_event_source_post_irq(nv_port_event_source_t *source,
                                         const nv_port_event_record_t *record) {
-    if (source == NULL) return K_EINVAL;
-    kstatus_t status = nv_port_event_post_irq(&source->queue, record);
-    if (status == K_OK) object_notify_changed(source);
-    return status;
+    return nv_port_event_source_post_internal(source, record, true);
 }
 
 uint32_t nv_port_event_source_poll(nv_port_event_source_t *source,

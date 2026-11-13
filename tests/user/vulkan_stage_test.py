@@ -21,7 +21,7 @@ with tempfile.TemporaryDirectory(prefix='vulkan-stage-') as directory:
     link(root, [leaf])
     catalog = {root.name: root, leaf.name: leaf}
     assert stage.closure(catalog, [root.name]) == catalog
-    # dlopen modules must be included even though neither root references them.
+    # 即使两个根文件都未引用 dlopen 模块，也必须将其纳入。
     runtime_catalog = dict(catalog, **{'libvulkan.so.1': root,
                                      'libGLX_nvidia.so.0': root,
                                      'libEGL.so.1': root,
@@ -52,7 +52,7 @@ with tempfile.TemporaryDirectory(prefix='vulkan-stage-') as directory:
         raise AssertionError('accepted missing transitive dependency')
     except RuntimeError as error:
         assert leaf.name in str(error)
-    # Re-link leaf to form a genuine ELF dependency cycle.
+    # 重新链接叶节点，构造真实的 ELF 依赖循环。
     link(leaf, [root])
     assert stage.closure(catalog, [root.name]) == catalog
 print('Vulkan staging closure: actual ELF recursion, duplicate roots, cycles and '

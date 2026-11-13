@@ -1,4 +1,5 @@
 #include "internal.h"
+#include <kernel/string.h>
 
 /* REFACTOR_P7A_WINDOW_EVENT_OWNER：队列存储、事件转换和解锁后的唤醒发布。 */
 
@@ -162,9 +163,28 @@ static bool window_event_discard_motion_locked(window_server_window_t *window) {
         const os_window_event_t *event=window->events+slot;
         if(event->identifier!=window->identifier || event->type!=OS_WINDOW_EVENT_CONTROL ||
             event->control.action!=OS_CONTROL_MOVE)continue;
-        for(uint32_t next=offset+1U;next<window->event_count;++next) {
-            uint32_t from=(window->event_read+next)%WINDOW_EVENT_CAPACITY;
-            window->events[slot]=window->events[from];slot=from;
+        /* 后缀最多跨越一次环尾，分段移动，避免逐事件计算环形下标。 */
+        uint32_t remaining = window->event_count - offset - 1U;
+        /* 极短后缀直接复制，避免分段计算和函数调用开销。 */
+        if (remaining <= 2U) {
+            for (uint32_t next = 0U; next < remaining; ++next) {
+                uint32_t from = (slot + 1U) % WINDOW_EVENT_CAPACITY;
+                window->events[slot] = window->events[from];
+                slot = from;
+            }
+        } else {
+            uint32_t contiguous = WINDOW_EVENT_CAPACITY - slot - 1U;
+            if (contiguous > remaining) contiguous = remaining;
+            if (contiguous != 0U)
+                memmove(window->events + slot, window->events + slot + 1U,
+                        contiguous * sizeof(window->events[0]));
+            if (remaining > contiguous) {
+                window->events[WINDOW_EVENT_CAPACITY - 1U] = window->events[0];
+                uint32_t wrapped = remaining - contiguous - 1U;
+                if (wrapped != 0U)
+                    memmove(window->events, window->events + 1U,
+                            wrapped * sizeof(window->events[0]));
+            }
         }
         window->event_write=(window->event_write+WINDOW_EVENT_CAPACITY-1U)%WINDOW_EVENT_CAPACITY;
         --window->event_count;
@@ -184,6 +204,16 @@ static os_window_event_t *window_event_reserve_locked(window_server_window_t *wi
     *queued = (os_window_event_t){0};
     queued->identifier = window->identifier;
     return queued;
+}
+
+/* 只检查同一窗口的队尾，合并不能越过任何其他类型的事件。 */
+static os_window_event_t *window_event_tail_locked(window_server_window_t *window,
+                                                   uint32_t type) {
+    if (window->event_count == 0U) return 0;
+    uint32_t slot = (window->event_write + WINDOW_EVENT_CAPACITY - 1U) %
+                    WINDOW_EVENT_CAPACITY;
+    os_window_event_t *event = &window->events[slot];
+    return event->identifier == window->identifier && event->type == type ? event : 0;
 }
 
 static void window_event_commit_locked(window_server_window_t *window) {
@@ -230,11 +260,9 @@ void window_enqueue_control_event_locked(window_server_window_t *window,
         .code=input->code, .value=input->value, .action=action, .flags=input->flags};
     if (!window_control_event_metadata_locked(window, target, &control)) return;
     /* MOVE 是客户端坐标快照。仅覆盖队尾同目标、同修饰状态的连续移动，绝不跨越点击等屏障。 */
-    if (action == OS_CONTROL_MOVE && window->event_count) {
-        uint32_t slot=(window->event_write+WINDOW_EVENT_CAPACITY-1U)%WINDOW_EVENT_CAPACITY;
-        os_window_event_t *last=window->events+slot;
-        if (last->identifier == window->identifier && last->type == OS_WINDOW_EVENT_CONTROL &&
-            last->control.action == OS_CONTROL_MOVE && last->control.target == target &&
+    if (action == OS_CONTROL_MOVE) {
+        os_window_event_t *last = window_event_tail_locked(window, OS_WINDOW_EVENT_CONTROL);
+        if (last != 0 && last->control.action == OS_CONTROL_MOVE && last->control.target == target &&
             last->control.tree_revision == control.tree_revision &&
             last->control.node_index == control.node_index &&
             last->control.user_data == control.user_data &&
@@ -279,39 +307,21 @@ void window_enqueue_minimized_event_locked(window_server_window_t *window) {
 void window_enqueue_resize_event_locked(window_server_window_t *window) {
     if (window == 0) return;
     /* 连续的调整大小事件会合并为最新几何信息，但不会跨越中间的输入、关闭或最小化事件。 */
-    if (window->event_count != 0U) {
-        uint32_t slot = (window->event_write + WINDOW_EVENT_CAPACITY - 1U) %
-                        WINDOW_EVENT_CAPACITY;
-        os_window_event_t *queued = &window->events[slot];
-        if (queued->identifier == window->identifier &&
-            queued->type == OS_WINDOW_EVENT_RESIZE) {
-            queued->resize.width = window->width;
-            queued->resize.height = window->height;
-            queued->resize.buffer_size = window->buffer_size;
-            queued->resize.reserved = 0U;
-            return;
-        }
-    }
-    os_window_event_t *queued = window_event_reserve_locked(window);
+    os_window_event_t *queued = window_event_tail_locked(window, OS_WINDOW_EVENT_RESIZE);
+    bool append = queued == 0;
+    if (append) queued = window_event_reserve_locked(window);
     queued->type = OS_WINDOW_EVENT_RESIZE;
     queued->resize.width = window->width;
     queued->resize.height = window->height;
     queued->resize.buffer_size = window->buffer_size;
-    window_event_commit_locked(window);
+    queued->resize.reserved = 0U;
+    if (append) window_event_commit_locked(window);
 }
 
 void window_enqueue_moved_event_locked(window_server_window_t *window) {
     if (window == 0) return;
-    os_window_event_t *queued = 0;
     /* 绝不跨越输入事件进行合并：客户端坐标属于事件流在该位置对应的几何信息。 */
-    if (window->event_count != 0U) {
-        uint32_t slot = (window->event_write + WINDOW_EVENT_CAPACITY - 1U) %
-                        WINDOW_EVENT_CAPACITY;
-        if (window->events[slot].identifier == window->identifier &&
-            window->events[slot].type == OS_WINDOW_EVENT_MOVED) {
-            queued = &window->events[slot];
-        }
-    }
+    os_window_event_t *queued = window_event_tail_locked(window, OS_WINDOW_EVENT_MOVED);
     bool append = queued == 0;
     if (append) queued = window_event_reserve_locked(window);
     queued->type = OS_WINDOW_EVENT_MOVED;

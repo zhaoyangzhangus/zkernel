@@ -183,9 +183,8 @@ static bool font_rasterize_from_parser(const ascii_font_parser_t *parser,
         if (points[index].y < min_y) min_y = points[index].y;
         if (points[index].y > max_y) max_y = points[index].y;
     }
-    /* Lines, implied midpoints and quadratic curves stay within their
-     * control-point bounds. Keep the boundary pixel conservatively; all
-     * samples outside this rectangle necessarily have zero coverage. */
+    /* 线段、推定中点和二次曲线都位于控制点边界内。边界像素按保守方式保留；此矩形
+     * 之外的所有采样点覆盖率必定为零。 */
     uint32_t x_begin = min_x > 0 ? (uint32_t)min_x / 65536U : 0U;
     uint32_t y_begin = min_y > 0 ? (uint32_t)min_y / 65536U : 0U;
     uint32_t x_end = max_x >= 0 ? (uint32_t)max_x / 65536U + 1U : 0U;
@@ -258,8 +257,8 @@ static bool font_build_cache(uint32_t width, uint32_t height,
             &g_ascii_font_parser, character);
         uint8_t *destination = scaled +
             (uint64_t)(character - ASCII_FONT_FIRST) * glyph_bytes;
-        /* A decoded glyph writes every pixel, including an empty outline.
-         * Decode failure writes none; only that slot needs blank fallback. */
+        /* 解码成功的字形会写入每个像素，包括空轮廓。解码失败时不会写入任何像素；
+         * 只有对应槽位需要使用空白字形作为回退。 */
         if (!font_rasterize_glyph(glyph, destination, width, height))
             memset(destination, 0, (size_t)glyph_bytes);
     }
@@ -413,8 +412,8 @@ bool ascii_font_copy_cache(uint32_t width, uint32_t height,
     font_user_cache_unlock();
     if (!font_build_cache(width, height, &candidate, &cache_bytes)) return false;
 
-    /* A competing builder may have published the same face. Reuse it or
-     * publish ours, and finish copying before another size can replace it. */
+    /* 其他构建者可能已发布相同字型。复用已有字型或发布当前字型，并在其他字号替换前
+     * 完成复制。 */
     font_user_cache_lock();
     if (g_ascii_font_user_scaled == 0 ||
         g_ascii_font_user_width != width ||

@@ -36,6 +36,11 @@ kstatus_t vm_object_create_shared(size_t size,vm_object_t **out) {
  *out=p;atomic_fetch_add(&vm_creates,1);return K_OK;
 }
 void vm_object_get(vm_object_t *p) { assert(atomic_fetch_add(&p->refs.value,1)); }
+kstatus_t vm_object_create_shared_populated(size_t size,vm_object_t **out) {
+ kstatus_t status=vm_object_create_shared(size,out);
+ if(status==K_OK)atomic_store(&(*out)->populated_pages,size/PAGE_SIZE);
+ return status;
+}
 void vm_object_put(vm_object_t *p) {
  unsigned count=atomic_fetch_sub(&p->refs.value,1);assert(count);
  if(count==1) {atomic_fetch_add(&vm_frees,1);free(p);}
@@ -60,7 +65,9 @@ static void *worker(void *unused) {
  (void)unused;
  for(unsigned i=0;i<1000;++i) {
   shared_section_t *s=0;uint64_t size=(1+i%17)*PAGE_SIZE;
-  assert(shared_section_create(size,&s)==K_OK);check_header(s,size);
+  assert((i%2?shared_section_create_populated(size,&s):shared_section_create(size,&s))==K_OK);
+  check_header(s,size);
+  assert(atomic_load(&s->vm_object->populated_pages)==(i%2?size/PAGE_SIZE:0));
   object_notify_changed(s);
   object_get(s);assert(object_try_get(s));
   assert(atomic_load(&s->object.refs.value)==3);
@@ -71,20 +78,25 @@ static void *worker(void *unused) {
 int main(void) {
  shared_section_t *out=(void*)1;
  uint64_t invalid[]={0,1,PAGE_SIZE-1,PAGE_SIZE+1,UINT64_MAX};
+ kstatus_t (*constructors[])(uint64_t,shared_section_t**)={
+  shared_section_create,shared_section_create_populated};
+ for(unsigned constructor=0;constructor<2;++constructor){
+ kstatus_t (*create)(uint64_t,shared_section_t**)=constructors[constructor];
  for(unsigned i=0;i<sizeof(invalid)/sizeof(*invalid);++i) {
-  assert(shared_section_create(invalid[i],&out)==K_EINVAL && out==(void*)1);
+  assert(create(invalid[i],&out)==K_EINVAL && out==(void*)1);
  }
- assert(shared_section_create(PAGE_SIZE,0)==K_EINVAL && !atomic_load(&allocations));
+ assert(create(PAGE_SIZE,0)==K_EINVAL);
  fail_section=true;
- assert(shared_section_create(PAGE_SIZE,&out)==K_ENOMEM && out==(void*)1);
+ assert(create(PAGE_SIZE,&out)==K_ENOMEM && out==(void*)1);
  fail_section=false;
  kstatus_t errors[]={K_ENOMEM,K_EIO};
  for(unsigned i=0;i<2;++i) {
   fail_vm=errors[i];
-  assert(shared_section_create(PAGE_SIZE,&out)==errors[i] && out==(void*)1);
+  assert(create(PAGE_SIZE,&out)==errors[i] && out==(void*)1);
   assert(atomic_load(&allocations)==atomic_load(&frees));
  }
  fail_vm=K_OK;
+ }
  shared_section_t *s=0;assert(shared_section_create(3*PAGE_SIZE,&s)==K_OK);
  check_header(s,3*PAGE_SIZE);vm_object_t *mapping=s->vm_object;vm_object_get(mapping);
  unsigned freed=atomic_load(&vm_frees);

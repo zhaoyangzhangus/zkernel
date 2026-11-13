@@ -2,7 +2,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-/* Chromium window_control_*_old.icon (12px variant), Linux MD captions.
+/* Chromium window_control_*_old.icon 的 Linux MD 标题按钮（12px 变体）。
  * Copyright 2016 The Chromium Authors
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions are met:

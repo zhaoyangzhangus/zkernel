@@ -64,8 +64,8 @@ static void object_put(void *object) {
     atomic_fetch_add_explicit(&thread->puts,1,memory_order_relaxed);
 }
 '''
-# Negative control keeps writes mutex-serialized to avoid test-side C data races,
-# but forces both old unsynchronized admission checks to observe count zero.
+# 负对照仍用互斥锁串行化写入，避免测试自身发生 C 数据竞争，
+# 但会强制两个旧的未同步准入检查都观察到计数为零。
 negative = production.replace('scheduler_thread_mailbox_lock(thread);', '(void)thread;')
 negative = negative.replace('scheduler_thread_mailbox_unlock(thread);', '(void)thread;')
 negative = negative.replace('bool was_empty =',

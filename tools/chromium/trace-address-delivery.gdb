@@ -13,8 +13,8 @@ except RuntimeError as error:
 end
 target remote /tmp/system-keys.sock
 python
-# One click only, four hardware addresses total. Host timings are diagnostic:
-# hardware stops perturb execution. No input strings, URLs or buffers are read.
+# 只执行一次点击，总共使用四个硬件地址。宿主侧时间仅供诊断：硬件断点会扰乱执行。
+# 不读取任何输入字符串、URL 或缓冲区。
 started = None
 browser_pid = None
 present_started = None

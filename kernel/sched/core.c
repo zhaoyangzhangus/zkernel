@@ -43,6 +43,8 @@ static volatile uint64_t g_sched_wake_trace_tid;
 static volatile uint64_t g_sched_wake_trace_threshold_ns = 10000000ULL;
 static sched_wake_trace_t g_sched_wake_trace;
 static volatile sched_wake_delay_t g_sched_wake_delays[16];
+/* 仅诊断启用时累计样本数、通知到运行总耗时、就绪到运行耗时；不受慢样本阈值影响。 */
+static volatile uint64_t g_sched_wake_totals[3];
 static atomic_flag g_sched_wake_trace_guard = ATOMIC_FLAG_INIT;
 static volatile uint64_t g_sched_preempt_callers[MAX_CPUS];
 /* READY 状态下采样到的最长间隔：持续时间、所属 tid/pid、系统调用、抢占状态、
@@ -262,6 +264,9 @@ static void scheduler_trace_run(thread_t *thread) {
         trace.epoch == atomic_load_explicit(&thread->block_epoch, memory_order_relaxed)) {
         uint64_t now=x86_read_tsc();
         uint64_t total=x86_tsc_to_ns(now-trace.notified);
+        g_sched_wake_totals[0]++;
+        g_sched_wake_totals[1] += total;
+        g_sched_wake_totals[2] += x86_tsc_to_ns(now-trace.ready);
         if (total >= scheduler_trace_threshold_ns()) {
             for (size_t index=0;index<16;++index) {
                 if (g_sched_wake_delays[index].tid &&
@@ -1433,6 +1438,18 @@ static void scheduler_command_drain_overflow_local(
                                        ring->slots, SCHED_CMD_OVERFLOW_MASK);
 }
 
+/* 调用方持有线程邮箱锁。迁移转发复用原节点和引用，不依赖有界命令环。 */
+static void scheduler_remote_wake_link(scheduler_cpu_t *cpu, thread_t *thread) {
+    thread_t *head = atomic_load_explicit(&cpu->remote_wake_head,
+                                          memory_order_acquire);
+    do {
+        thread->remote_wake_next = head;
+    } while (!atomic_compare_exchange_weak_explicit(
+        &cpu->remote_wake_head, &head, thread,
+        memory_order_release, memory_order_acquire));
+    atomic_store_explicit(&cpu->command_pending, true, memory_order_release);
+}
+
 static bool scheduler_remote_wake_publish(scheduler_cpu_t *cpu,
                                            thread_t *thread, uint32_t epoch) {
     if (!object_try_get(thread)) return false;
@@ -1450,15 +1467,8 @@ static bool scheduler_remote_wake_publish(scheduler_cpu_t *cpu,
         return true;
     }
     atomic_store_explicit(&thread->remote_wake_queued, true, memory_order_relaxed);
-    thread_t *head = atomic_load_explicit(&cpu->remote_wake_head,
-                                          memory_order_acquire);
-    do {
-        thread->remote_wake_next = head;
-    } while (!atomic_compare_exchange_weak_explicit(
-        &cpu->remote_wake_head, &head, thread,
-        memory_order_release, memory_order_acquire));
+    scheduler_remote_wake_link(cpu, thread);
     scheduler_thread_mailbox_unlock(thread);
-    atomic_store_explicit(&cpu->command_pending, true, memory_order_release);
     return true;
 }
 
@@ -1470,14 +1480,25 @@ static void scheduler_remote_wake_drain(uint32_t cpu_id, scheduler_cpu_t *cpu) {
         /* 先获取快照并完成处理，再释放节点供后续复用。 */
         thread_t *next = thread->remote_wake_next;
         uint32_t epoch = thread->remote_wake_epoch;
-        if (thread->owner_cpu == cpu_id) {
-            (void)scheduler_complete_wake_local(cpu, thread, epoch, true);
+        uint32_t target = thread->owner_cpu;
+        if (target != cpu_id && scheduler_cpu_available(target) &&
+            atomic_load_explicit(&thread->state, memory_order_acquire) == THREAD_BLOCKED &&
+            atomic_load_explicit(&thread->block_epoch, memory_order_acquire) == epoch) {
+            /* 所属 CPU 已改变；清除 queued 会永久丢失此次通知，必须沿迁移后的归属转发。 */
+            scheduler_remote_wake_link(&g_cpus[target], thread);
+            scheduler_thread_mailbox_unlock(thread);
+            (void)x86_smp_request_reschedule(target);
+        } else {
+            if (target == cpu_id) {
+                (void)scheduler_complete_wake_local(cpu, thread, epoch, true);
+            }
+            thread->remote_wake_next = 0;
+            atomic_store_explicit(&thread->remote_wake_queued, false,
+                                  memory_order_relaxed);
+            /* 释放现有锁前先转移邮箱引用；此处无需再次获取锁，也无需销毁对象。 */
+            scheduler_command_release_enqueue_locked(cpu, thread);
+            scheduler_thread_mailbox_unlock(thread);
         }
-        atomic_store_explicit(&thread->remote_wake_queued, false,
-                              memory_order_relaxed);
-        /* 释放现有锁前先转移邮箱引用；此处无需再次获取锁，也无需销毁对象。 */
-        scheduler_command_release_enqueue_locked(cpu, thread);
-        scheduler_thread_mailbox_unlock(thread);
         thread = next;
     }
 }

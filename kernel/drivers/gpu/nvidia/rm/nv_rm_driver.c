@@ -14,12 +14,9 @@
 #define NULL ((void *)0)
 #endif
 
-/* The normal PE image deliberately uses the fallback boundary below; the
- * vendor bridge is linked separately by the ELF NVIDIA phase builds.  GCC's
- * weak-definition model is not usable as a fallback with MinGW PE objects:
- * its linker leaves references to those symbols unresolved.  Keep the weak
- * definitions for ELF so a strong vendor bridge can replace them, but emit
- * ordinary definitions for the self-contained MinGW image. */
+/* 普通 PE 映像特意使用下方的回退边界；NVIDIA 阶段构建会将厂商桥接层单独链接到 ELF 中。GCC 的
+ * MinGW PE 对象不能使用弱定义作为回退：其链接器会使这些符号的引用保持未解析状态。ELF 中
+ * 仍保留弱定义，以便由强定义的厂商桥接层替换；而自包含的 MinGW 映像使用普通定义。 */
 #if defined(__MINGW32__) || defined(__MINGW64__)
 #define NV_RM_WEAK
 #else
@@ -83,10 +80,8 @@ static void nv_rm_log_status(const char *prefix, kstatus_t status)
 }
 
 /*
- * The production System image does not link the vendor RM object.  Keep that
- * image honest and buildable: the unresolved vendor boundary is an explicit
- * failure, never a successful no-op.  The Phase 4 image supplies the strong
- * implementation from the immutable 595.84 object set.
+ * 正式版 System 映像不会链接厂商 RM 对象。应确保该映像如实且可构建：未解析的厂商边界必须明确
+ * 失败，绝不能伪装成空操作成功。第 4 阶段映像会从不可变的 595.84 对象集中提供强定义实现。
  */
 NV_RM_WEAK kstatus_t nv_rm_vendor_start(const pci_device_t *device,
                                                    void **context_out,
@@ -355,9 +350,8 @@ kstatus_t nv_rm_driver_probe(void)
         return status;
     }
 
-    /* Phase 4 stops at the vendor OBJGPU/NVOC/HAL discovery object.  The
-     * internal device handle is created by the later adapter/GSP path and is
-     * intentionally not required at this phase boundary. */
+    /* 第 4 阶段止于厂商 OBJGPU/NVOC/HAL 发现对象。内部设备句柄由后续适配器/GSP 路径创建，
+     * 此阶段边界特意不要求该句柄存在。 */
     if (g_nv_gpu.vendor_context == NULL || result.rm_gpu == NULL) {
         nv_rm_driver_unwind();
         nv_rm_driver_fail(NV_RM_FAILURE_RM, K_EIO);

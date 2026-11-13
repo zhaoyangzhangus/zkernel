@@ -17,8 +17,8 @@ static device_t *g_devices[DEVICE_REGISTRY_LIMIT];
 static driver_t *g_drivers[DRIVER_REGISTRY_LIMIT];
 
 static void device_lock(void) {
-    /* Registry operations nest state locks; keep their owner on this CPU.
-     * Driver callbacks and I/O waits remain outside this critical section. */
+    /* 注册表操作会嵌套获取状态锁，因此要让锁持有者留在当前 CPU 上。
+     * 驱动回调和 I/O 等待仍在此临界区之外执行。 */
     sched_preempt_disable();
     spinlock_lock(&g_device_lock);
 }
@@ -29,7 +29,7 @@ static void device_unlock(void) {
 }
 
 static void device_state_lock(device_t *dev) {
-    /* Also used alone after callbacks, not only under the registry lock. */
+    /* 回调执行后也会单独使用此操作，并非只在持有注册表锁时使用。 */
     sched_preempt_disable();
     spinlock_lock(&dev->state_lock);
 }
@@ -286,9 +286,8 @@ static void device_cancel_pending_io(device_t *dev) {
             device_unlock();
             return;
         }
-        /* Claim before unlocking: a transferred reference alone cannot stop
-         * a rival finalizer from freeing/reusing the request before dispatch.
-         * The winning claim keeps execution ownership until unlocked finish. */
+        /* 解锁前先认领：仅转移引用无法阻止其他终结者在分发前释放或复用请求。
+         * 成功认领的一方会一直持有执行权，直到在锁外完成处理。 */
         for (list_head_t *node = dev->io_requests.next;
              node != &dev->io_requests; node = node->next) {
             io_request_t *candidate = list_entry(node, io_request_t, device_node);
@@ -297,8 +296,8 @@ static void device_cancel_pending_io(device_t *dev) {
                 break;
             }
         }
-        /* A slow finalizer must not block cancellation of later requests.
-         * Wait only when every remaining node already has an owner. */
+        /* 速度较慢的终结者不能阻塞后续请求的取消操作。只有所有剩余节点都已有
+         * 所有者时才等待。 */
         if (request == 0) {
             device_unlock();
             __asm__ volatile ("pause");
@@ -307,8 +306,7 @@ static void device_cancel_pending_io(device_t *dev) {
         device_unlock();
         /*
          * 设备移除和用户 IO_CANCEL 可能同时观察到同一个请求。
-         * The CAS above selected the sole owner. Driver callbacks and device
-         * reference releases must stay outside the device-list lock.
+         * 上方的 CAS 已选出唯一所有者。驱动回调和设备引用释放必须在设备列表锁之外执行。
          */
         io_request_finish_device_cancel(request, K_EDEVREMOVED);
     }

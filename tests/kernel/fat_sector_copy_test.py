@@ -6,6 +6,7 @@ import resource
 
 root = Path(__file__).resolve().parents[2]
 source = (root / 'kernel/fs/nativefs/file_lifecycle.c').read_text()
+helper = source[source.index('static void fat32_extend_seek_hint('):source.index('static BOOLEAN locate_file_cluster(')]
 functions = source[source.index('static UINT64 fat32_contiguous_extent_bytes('):
                    source.index('static BOOLEAN fat32_write(')]
 assert functions.count('__builtin_memcpy(') == 2
@@ -29,6 +30,8 @@ typedef struct {
     UINT64 Size;
     UINT32 FirstCluster, CursorLogicalStart, CursorLength, CursorPhysicalStart;
     int Used, CursorValid;
+    UINT32 SeekCacheCount, SeekLogical[8], SeekPhysical[8], SeekLength[8];
+    UINT32 SeekIndexValid, SeekIndexLogical[32], SeekIndexPhysical[32], SeekIndexLength[32];
 } OS_FAT32_FILE;
 static unsigned char media[131072], expected[131072], output[131136], input[131136];
 static OS_FAT32 fs;
@@ -75,7 +78,7 @@ static BOOLEAN extend_file_to(OS_FAT32_FILE *f,UINT64 n,UINT64 zero_until) {
     if(n>f->Size)f->Size=n;
     return 1;
 }
-'''+functions.replace('__builtin_memcpy(', 'counted_copy(')+r'''
+'''+helper+functions.replace('__builtin_memcpy(', 'counted_copy(')+r'''
 int main(void) {
     unsigned cases=0;
     for(unsigned i=0;i<sizeof(input);++i)input[i]=(unsigned char)(i*29+7);
@@ -109,7 +112,7 @@ int main(void) {
         assert((unsigned)writes==sectors);
         assert((unsigned)reads==partial);++cases;
     }
-    /* Errors after a completed sector must preserve exact prior progress. */
+    /* 一个扇区完成后发生错误时，必须准确保留此前的进度。 */
     fs=(OS_FAT32){.BytesPerSector=512,.SectorsPerCluster=8,.Cache={1}};
     OS_FAT32_FILE file={.FileSystem=&fs,.Size=sizeof(media),.FirstCluster=1,.Used=1};
     for(unsigned fail=0;fail<3;++fail) {

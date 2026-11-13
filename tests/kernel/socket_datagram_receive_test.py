@@ -133,8 +133,8 @@ with tempfile.TemporaryDirectory(prefix='socket-datagram-') as directory:
     flags = ['cc','-std=c11','-O2','-g','-Wall','-Wextra','-Werror',
              '-I'+str(root/'include'),'-I'+str(root/'kernel/net'),
              '-fsanitize=address,undefined','-fno-pie']
-    # Keep the scheduler boundary out of the socket translation unit, as in
-    # the kernel; whole-fixture IPA otherwise folds this controlled wait stub.
+    # 像内核中一样，将调度器边界放在套接字翻译单元之外；否则整个测试夹具的 IPA 优化
+    # 会折叠这个受控的等待桩函数。
     wait_mock = r'''
 #include <assert.h>
 #include "socket_model.h"

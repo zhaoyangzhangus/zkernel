@@ -18,6 +18,7 @@ program = r'''
 #include <string.h>
 #include <stdio.h>
 #include <kernel/base.h>
+#include <kernel/pixel_blend.h>
 #include <uapi/window.h>
 #define VM_OBJECT_SHARED 1
 typedef struct {unsigned type;} vm_object_t;
@@ -57,7 +58,7 @@ int main(void){
   for(unsigned y=0;y<nh;++y)for(unsigned device=0;device<2;++device){
    for(unsigned i=0;i<66;++i)out[i]=0x00abcdef;
    uint64_t page=UINT64_MAX;uint8_t *base=0;
-   compositor_copy_surface_span(&w,&s,(uint64_t)y*s.row_bytes,0,nw,
+   compositor_copy_surface_span(&w,&s,y,0,nw,
     device?0:out+1,device?out+1:0,&page,&base);
    assert(out[0]==0x00abcdef&&out[nw+1]==0x00abcdef);
    for(unsigned x=0;x<nw;++x){
@@ -67,6 +68,22 @@ int main(void){
   }
   w.surface_lease=false;compositor_surface_source_prepare(&w,&s);assert(!s.readable);
   w.surface_lease=true;w.surface_width=0;compositor_surface_source_prepare(&w,&s);assert(!s.readable);
+ }
+ /* 行号越界和行跨度乘法溢出均不得解析任何后备页。 */
+ compositor_window_view_t edge={.width=8,.height=8,.surface_width=8,.surface_height=3,
+  .surface_lease=true,.buffer_size=8192,.background=0x112233};
+ compositor_surface_source_context_t es={.readable=true,.row_bytes=32};
+ const uint32_t edge_rows[]={3,UINT32_MAX,2};
+ for(unsigned n=0;n<3;++n) {
+  es.row_bytes=n==2?(UINT64_MAX/2+1):32;
+  for(unsigned dev=0;dev<2;++dev) {
+   for(unsigned k=0;k<66;++k)out[k]=0xabcdef;
+   uint64_t page=UINT64_MAX;uint8_t *base=0;
+   compositor_copy_surface_span(&edge,&es,edge_rows[n],0,8,
+    dev?0:out+1,dev?out+1:0,&page,&base);
+   assert(page==UINT64_MAX&&base==0&&out[0]==0xabcdef&&out[9]==0xabcdef);
+   for(unsigned k=1;k<=8;++k)assert(out[k]==edge.background);
+  }
  }
  printf("Surface resize retention: %lu oracle pixels, old committed stride, grow/shrink, both slots, WB/device, no cross-row/back-slot reads and legacy safety PASS\n",checks);
 }
@@ -80,6 +97,9 @@ with tempfile.TemporaryDirectory(prefix='surface-resize-retention-') as director
     subprocess.run([str(path/'test')],check=True)
     if args.negative_controls:
         variants = {
+            'unchecked-row-multiply': program.replace(
+                '__builtin_mul_overflow((uint64_t)source_row, surface->row_bytes,\n                               &source_row_offset)',
+                '(source_row_offset=(uint64_t)source_row*surface->row_bytes, false)'),
             'blank-on-resize': program.replace(
                 '(window->resize_pending && !window->surface_lease)', 'window->resize_pending'),
             'new-stride-for-old-frame': program.replace(

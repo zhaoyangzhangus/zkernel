@@ -49,8 +49,7 @@ with tempfile.TemporaryDirectory(prefix='system-menu-first-frame-') as directory
             assert (width, height) == (1920, 1080)
             assert image.readline().strip() == b'255'
             pixels = image.read()
-        # Outside the panel and its meaningful shadow, inside the native
-        # popup's bounds. The broken animation painted this whole strip blue.
+        # 位于面板和有效阴影之外、原生弹出窗口范围之内。错误的动画会将整个条带绘制成蓝色。
         margin = b''.join(pixels[(y * width + 535) * 3:(y * width + 540) * 3]
                           for y in range(200, 650, 5))
         return margin, namespace['menu_is_painted'](width, pixels)

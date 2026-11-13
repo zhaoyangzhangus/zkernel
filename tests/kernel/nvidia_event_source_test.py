@@ -28,16 +28,22 @@ typedef struct {unsigned notifications;} wait_queue_t;
 static void wait_queue_init(wait_queue_t *q){q->notifications=0;}
 typedef pthread_mutex_t nv_port_spinlock_t;
 static _Thread_local unsigned held;
+static void (*after_unlock)(void);
 static unsigned allocations,frees;
 static bool allocation_failure;
 static void nv_port_spin_init(nv_port_spinlock_t *q){assert(!pthread_mutex_init(q,NULL));}
 static uint64_t nv_port_spin_lock_irqsave(nv_port_spinlock_t *q){assert(!pthread_mutex_lock(q));assert(!held++);return 5070;}
-static void nv_port_spin_unlock_irqrestore(nv_port_spinlock_t *q,uint64_t f){assert(f==5070&&held--==1);assert(!pthread_mutex_unlock(q));}
+static void nv_port_spin_unlock_irqrestore(nv_port_spinlock_t *q,uint64_t f){assert(f==5070&&held--==1);assert(!pthread_mutex_unlock(q));if(after_unlock){void (*callback)(void)=after_unlock;after_unlock=NULL;callback();}}
 static void *kmalloc(size_t n,unsigned flags){assert(!held&&!flags);if(allocation_failure)return NULL;void *p=malloc(n);assert(p);++allocations;return p;}
 static void *kmalloc_try_cached(size_t n,unsigned flags){assert(held==1&&!flags);if(allocation_failure)return NULL;void *p=malloc(n);assert(p);++allocations;return p;}
 static void kfree(void *p){assert(p&&!held);++frees;free(p);}
 static int wake_all(wait_queue_t *q){assert(!held);++q->notifications;return 0;}
 ''' + object_header + '\n' + header + '\n' + object_source + '\n' + source + r'''
+static nv_port_event_source_t *race_source;
+static void consume_then_post(void){
+    assert(nv_port_event_source_poll(race_source,true)==NV_PORT_EVENT_READ);
+    assert(!nv_port_event_source_post_irq(race_source,NULL));
+}
 int main(void) {
     allocation_failure=true;
     assert(nv_port_event_source_create()==NULL);
@@ -50,6 +56,13 @@ int main(void) {
     assert(!object_is_signaled(a)&&!object_wait_value(a));
     assert(!nv_port_event_source_post(a,NULL));
     assert(a->header.signal_waiters.notifications==1&&!b->header.signal_waiters.notifications);
+    unsigned allocated_before=allocations;
+    for(unsigned i=0;i<100000;++i){
+        assert(!nv_port_event_source_post(a,NULL));
+        assert(!nv_port_event_source_post_irq(a,NULL));
+    }
+    assert(a->header.signal_waiters.notifications==1&&allocations==allocated_before);
+
     for(unsigned i=0;i<1000;++i) {
         assert(object_is_signaled(a)&&object_wait_value(a)==NV_PORT_EVENT_READ);
     }
@@ -82,6 +95,21 @@ int main(void) {
     object_put(wait_object);
     assert(frees==frees_before+2);
     assert(!b->header.signal_waiters.notifications&&!object_is_signaled(b));
+    // 首次发布解锁后、通知前被消费并再次发布，两次通知均不可丢失。
+    race_source=b;after_unlock=consume_then_post;
+    assert(!nv_port_event_source_post(b,NULL));
+    assert(b->header.signal_waiters.notifications==2);
+    assert(nv_port_event_source_poll(b,true)==NV_PORT_EVENT_READ);
+    // 消费后重新发布必须产生新通知；普通和 IRQ 路径交替验证。
+    for(unsigned i=0;i<1000;++i){
+        unsigned before=b->header.signal_waiters.notifications;
+        assert(!nv_port_event_source_post_irq(b,NULL));
+        assert(!nv_port_event_source_post(b,NULL));
+        assert(b->header.signal_waiters.notifications==before+1);
+        assert(nv_port_event_source_poll(b,true)==NV_PORT_EVENT_READ);
+        assert(!object_is_signaled(b));
+    }
+
     assert(!nv_port_event_source_post(b,&record));
     assert(!nv_port_event_source_post_irq(b,NULL));
     assert(!nv_port_event_source_post_irq(b,&record));

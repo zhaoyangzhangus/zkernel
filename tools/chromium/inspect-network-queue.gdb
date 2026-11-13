@@ -9,8 +9,8 @@ import tempfile
 sys.path.insert(0, 'tools/chromium')
 from guest_inspection import run
 
-# Compile the actual private layouts before stopping the guest. No duplicated
-# offsets, inferior calls, memory writes or persistent profiling selectors.
+# 在暂停客户机前编译实际的私有结构布局。不重复定义偏移，不调用被调试进程，不写入内存，
+# 也不设置持久化性能分析选择器。
 with tempfile.TemporaryDirectory(prefix='network-queue-types-') as directory:
     objects = []
     for name, source in (('net', 'kernel/drivers/net/core.c'),
@@ -25,7 +25,7 @@ with tempfile.TemporaryDirectory(prefix='network-queue-types-') as directory:
         import gdb
         names = ('g_e1000_poll_timing', 'g_deferred', 'g_deferred_slow_work',
                  'g_deferred_slow_work_untracked')
-        # Capture real addresses before adding unlinked, type-only objects.
+        # 在加入未链接的纯类型对象前，先捕获真实地址。
         addresses = {name: int(gdb.parse_and_eval('&' + name)) for name in names}
         cpus_address = int(gdb.parse_and_eval('&g_cpus'))
         for target in objects:

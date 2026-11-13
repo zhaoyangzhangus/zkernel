@@ -3,7 +3,7 @@
 #include <uapi/socket.h>
 #include "internal.h"
 
-/* REFACTOR_P8_NET_FIREWALL_OWNER: firewall rule state and packet policy. */
+/* REFACTOR_P8_NET_FIREWALL_OWNER：防火墙规则状态和数据包策略。 */
 
 #define NET_FIREWALL_PROTOCOL_UDP 17U
 

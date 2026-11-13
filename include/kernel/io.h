@@ -18,7 +18,7 @@ enum io_request_state {
     IOREQ_COMPLETING,
     IOREQ_COMPLETED,
     IOREQ_CANCELLED,
-    /* Exclusive, non-cancellable setup; retain existing state numbers. */
+    /* 独占且不可取消的初始化；保留现有状态编号。 */
     IOREQ_PREPARING,
 };
 
@@ -60,7 +60,7 @@ typedef struct io_request {
 
     void (*cancel)(struct io_request *);
     void (*complete)(struct io_request *);
-    /* Called after terminal state publication; must not access the request. */
+    /* 终止状态发布后调用；不得再访问请求。 */
     void (*notify)(void);
 
     void *completion_target;
@@ -112,7 +112,6 @@ void io_request_init(io_request_t *req, uint32_t opcode, struct device *device,
 /* 设备移除与用户取消共享同一 CAS 状态机，但保留各自的完成错误码。 */
 kstatus_t io_cancel_with_status(io_request_t *req, kstatus_t status);
 /* 将一个观察者引用交给完成者，在终态发布前释放。 */
-/* Claim while holding the device-list lock; finish only a successful claim,
- * outside the lock. The claim transfers the existing execution ownership. */
+/* 持有设备列表锁时认领；只在锁外完成成功认领的请求。认领操作会转移现有执行所有权。 */
 bool io_request_claim_device_cancel(io_request_t *req);
 void io_request_finish_device_cancel(io_request_t *req, kstatus_t status);

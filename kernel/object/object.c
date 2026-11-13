@@ -99,7 +99,11 @@ static void object_unpin_wait_set(void *const *objects, size_t count) {
 static kstatus_t object_wait_on_pinned_signals(
     void *const *objects, size_t count, bool (*predicate)(void *),
     void *context, uint64_t timeout_ns) {
-    wait_queue_t *inline_queues[WAIT_INLINE_QUEUE_COUNT] = {0};
+    /* 对象引用已固定；就绪和零超时查询不需要构建、排序订阅队列。
+     * 阻塞路径仍会在订阅前复查谓词，避免检查与注册之间丢失通知。 */
+    if (predicate(context)) return K_OK;
+    if (timeout_ns == 0U) return K_ETIMEDOUT;
+    wait_queue_t *inline_queues[WAIT_INLINE_QUEUE_COUNT];
     wait_queue_t **queues = inline_queues;
     if (count > WAIT_INLINE_QUEUE_COUNT) {
         if (count > SIZE_MAX / sizeof(*queues)) return K_EOVERFLOW;

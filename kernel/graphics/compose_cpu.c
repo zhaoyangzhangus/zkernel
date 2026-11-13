@@ -7,50 +7,16 @@
 
 /* CPU 端保留表面合成的底层实现。 */
 
-/*
- * 快速 WB -> WB 像素复制。
- *
- * 源数据来自通过物理直接映射访问的共享窗口后备页。目标为普通 RAM 中的合成帧缓冲区。
- *
- * REP MOVSQ 仅使用整数寄存器，适合复制连续扫描线跨度，且不会触及内核 SIMD/FPU 状态。
- */
-void compositor_copy_wb_pixels(
-    uint32_t *destination,
-    const uint32_t *source,
-    uint32_t pixels) {
-
-    uint64_t qwords;
-
-    if (destination == 0 ||
-        source == 0 ||
-        pixels == 0U) {
-        return;
-    }
-
-    qwords = pixels >> 1U;
-
-    if (qwords != 0U) {
-        void *out =
-            (void *)destination;
-
-        const void *in =
-            (const void *)source;
-
-        uint64_t count = qwords;
-
-        __asm__ volatile (
-            "rep movsq"
-            : "+D"(out),
-              "+S"(in),
-              "+c"(count)
-            :
-            : "memory");
-    }
-
-    if ((pixels & 1U) != 0U) {
-        destination[pixels - 1U] =
-            source[pixels - 1U];
-    }
+/* 普通 WB 内存之间按字节完整复制；不使用 SIMD，也不另设奇数像素尾部路径。 */
+void compositor_copy_wb_pixels(uint32_t *destination, const uint32_t *source,
+                               uint32_t pixels) {
+    if (destination == 0 || source == 0 || pixels == 0U) return;
+    /* 单像素直接存储，避免极窄损坏条带支付字符串指令的启动开销。 */
+    if (pixels == 1U) { *destination = *source; return; }
+    size_t bytes = (size_t)pixels * sizeof(uint32_t);
+    __asm__ volatile ("rep movsb"
+        : "+D"(destination), "+S"(source), "+c"(bytes)
+        : : "memory");
 }
 
 bool compositor_copy_self_test(void) {
@@ -108,7 +74,7 @@ bool compositor_copy_self_test(void) {
  * 填充私有保留场景。GOP 别名回退路径要求全局合成指针仍为 volatile；调用方仅在确认目标
  * 是普通可缓存 WB RAM 后才会进入此辅助函数。
  */
-void compositor_fill_wb_pixels(
+static void compositor_fill_wb_pixels(
     uint32_t *destination,
     uint32_t pixels,
     uint32_t color) {
@@ -150,7 +116,7 @@ void compositor_fill_wb_pixels(
  *
  * 主要用于实时调整大小或无法解析共享后备页时。将两个 XRGB 像素打包到一次 64 位存储中。
  */
-void compositor_fill_surface_pixels(
+static void compositor_fill_surface_pixels(
     volatile uint32_t *destination,
     uint32_t pixels,
     uint32_t color) {
@@ -201,16 +167,6 @@ void compositor_fill_surface_pixels(
 
 
 /*
- * 复制一段水平窗口表面跨度。
- *
- * 仅当跨度跨越 4K VM_OBJECT_SHARED 后备页时才会拆分。因此每约 1024 个 XRGB8888 像素
- * 查找一次页面，而非每个像素都查找。
- *
- * cached_page/cached_base 会跨扫描线保留，因此同一页面同时包含上一行尾部和下一行开头时，
- * 无需重复解析。
- */
-
-/*
  * 窗口表面的常驻直接映射页表。
  *
  * VM_OBJECT_SHARED 页面在所属对象存续期间不会移动。合成器快照会持有活动窗口的引用，
@@ -250,7 +206,8 @@ compositor_surface_cache_get(const compositor_window_view_t *view) {
     /* 同一稳定分区直接复用页表；窗口快照持有引用，页面不会迁移。 */
     if (cache != 0 && cache->section == view->section) return cache;
 
-    uint64_t bytes = reference->buffer_size;
+    /* 数组覆盖本帧固定分区的全部槽位，不从窗口注册表重新读取后备区大小。 */
+    uint64_t bytes = view->section->size;
     if (bytes == 0U) return 0;
     /* 减一后取整，避免向字节数加上页内偏移时溢出。 */
     uint64_t pages = ((bytes - 1U) >> PAGE_SHIFT) + 1U;
@@ -299,7 +256,7 @@ static inline void compositor_prefetch_surface_page(
     }
 
     next =
-        cache->pages[page_index + 1U];
+        __atomic_load_n(&cache->pages[page_index + 1U], __ATOMIC_ACQUIRE);
 
     if (next == 0) {
         return;
@@ -310,13 +267,6 @@ static inline void compositor_prefetch_surface_page(
         :
         : "r"(next));
 }
-
-
-/*
- * 每次窗口/损坏区域处理时，仅解析一次行间不变的表面状态。
- * 对较窄的保留内容拖动条带尤其重要：即使每行只复制一两个像素，相邻行也可能访问不同的
- * 4K 页面。
- */
 
 
 /*
@@ -338,7 +288,7 @@ uint8_t *compositor_surface_page_resolve(
     cache = context->cache;
 
     if (cache != 0 && page_index < cache->page_count) {
-        base = cache->pages[page_index];
+        base = __atomic_load_n(&cache->pages[page_index], __ATOMIC_ACQUIRE);
         if (base != 0) {
             compositor_prefetch_surface_page(cache, page_index);
             return base;
@@ -357,7 +307,7 @@ uint8_t *compositor_surface_page_resolve(
     }
 
     if (cache != 0 && page_index < cache->page_count) {
-        cache->pages[page_index] = base;
+        __atomic_store_n(&cache->pages[page_index], base, __ATOMIC_RELEASE);
         compositor_prefetch_surface_page(cache, page_index);
     }
 
@@ -392,10 +342,3 @@ void compositor_surface_copy_destination(
             device_destination, source, pixels);
     }
 }
-
-
-/*
- * source_row_offset 由调用方增量维护。常规热路径现在只需计算页索引并查询直接映射页数组。
- * 常规热路径现在只需计算页索引并查询直接映射页数组。
- */
-

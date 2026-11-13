@@ -8,7 +8,7 @@ typedef struct video_pacing {
 
 static inline void video_pacing_init(video_pacing_t *p, int numerator,
                                       int denominator) {
-    /* Bound malformed rates, preserving ordinary fractional frame rates. */
+    /* 限制异常帧率，同时保留常见的非整数帧率。 */
     if (numerator < 1 || denominator < 1 ||
         (int64_t)numerator < denominator ||
         (int64_t)numerator > (int64_t)denominator * 240) {
@@ -28,7 +28,7 @@ static inline uint64_t video_pacing_advance(video_pacing_t *p, uint64_t now) {
         p->carry -= p->divisor;
         ++step;
     }
-    /* Recover from a pause/stall without a burst of catch-up frames. */
+    /* 从暂停或卡顿中恢复时，不要突发补齐多帧。 */
     if (p->deadline == 0 ||
         (now > p->deadline && now - p->deadline > p->step * 4))
         p->deadline = now;

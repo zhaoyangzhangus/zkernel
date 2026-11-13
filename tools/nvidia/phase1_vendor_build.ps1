@@ -36,8 +36,7 @@ function Get-RelativeVendorPath([string]$FullPath) {
 }
 
 function Get-SymbolCategory([string]$SymbolName) {
-    # Deterministic name-based classification only. It describes the missing
-    # boundary by symbol spelling; it never supplies an implementation.
+    # 仅按名称进行确定性分类。它根据符号名称描述缺失的边界，绝不提供实现。
     if ($SymbolName -match '(?i)(dma|scatter|iommu|sg_)') { return 'DMA' }
     if ($SymbolName -match '(?i)(irq|intr|interrupt|isr|msi)') { return 'IRQ' }
     if ($SymbolName -match '(?i)(atomic|cmpxchg|compare_exchange|cas)') { return 'atomic' }
@@ -62,8 +61,8 @@ New-Item -ItemType Directory -Path $outputRoot -Force | Out-Null
 New-Item -ItemType Directory -Path $rmGeneratedRoot -Force | Out-Null
 New-Item -ItemType Directory -Path $modesetGeneratedRoot -Force | Out-Null
 
-# Verify the imported baseline before reading it for the build graph. This also
-# makes an accidental edit to the read-only vendor tree fail early.
+# 在读取导入的基线以构建依赖图之前先进行校验。
+# 这样也能尽早发现只读供应商代码树遭到意外修改。
 $versionPath = Join-Path $vendorRoot 'VENDOR_VERSION'
 $manifestPath = Join-Path $vendorRoot 'VENDOR_SHA256SUMS'
 if (-not (Test-Path -LiteralPath $versionPath -PathType Leaf)) { throw "missing VENDOR_VERSION" }
@@ -106,9 +105,9 @@ if ($mutableVendorFiles.Count -ne 0) {
     throw "vendor source is not immutable: $($mutableVendorFiles[0].FullName)"
 }
 
-# The upstream source lists are the authority for the OS-agnostic RM and
-# modeset portions. kernel-open/ is intentionally not selected here: it is the
-# Linux kbuild/ABI frontend reference, not a System implementation.
+# 上游源文件清单是跨操作系统 RM 和模式设置部分的权威依据。
+# 此处有意不选取 kernel-open/：它是 Linux kbuild/ABI 前端参考，
+# 并非 System 实现。
 $sourceLists = @(
     [PSCustomObject]@{ Component = 'rm'; ListPath = (Join-Path $vendorSourceRoot 'src\nvidia\srcs.mk') },
     [PSCustomObject]@{ Component = 'modeset'; ListPath = (Join-Path $vendorSourceRoot 'src\nvidia-modeset\srcs.mk') }
@@ -171,7 +170,7 @@ foreach ($record in $records) {
 Write-AsciiLines $sourceListReport $sourceReportLines
 $sourceListHash = (Get-FileHash -LiteralPath $sourceListReport -Algorithm SHA256).Hash.ToLowerInvariant()
 
-# Generated version headers are build outputs, not modifications to vendor.
+# 生成的版本头文件属于构建产物，不算对供应商代码的修改。
 Write-AsciiLines (Join-Path $rmGeneratedRoot 'version.h') @('#define NVIDIA_VERSION "595.84"')
 Write-AsciiLines (Join-Path $modesetGeneratedRoot 'version.h') @('#define NVIDIA_VERSION "595.84"')
 
@@ -386,7 +385,7 @@ foreach ($record in $compiledRecords) {
     }
 }
 
-# Rewrite the object report after nm so its per-object nm status is final.
+# 在运行 nm 后重写对象报告，以确保其中每个对象的 nm 状态都是最终结果。
 $objectReportLines = New-Object 'System.Collections.Generic.List[string]'
 $objectReportLines.Add('# System Phase 1 vendor object inventory')
 $objectReportLines.Add(('# source_list_sha256={0}' -f $sourceListHash))

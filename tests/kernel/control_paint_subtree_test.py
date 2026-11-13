@@ -10,7 +10,14 @@ end = source.index('typedef struct control_paint_query', start)
 paint = source[start:end]
 instrumented = paint.replace('for (uint32_t i = 0U; i < count; ++i) {',
                             'for (uint32_t i = 0U; i < count; ++i) { ++visits;')
+instrumented = instrumented.replace('control_intersection(', 'counted_intersection(')
 source = source[:start] + instrumented + source[end:]
+source = source.replace('uint32_t index = i - 1U;', 'uint32_t index = i - 1U; ++hit_visits;',1)
+helper = '''static Rect counted_intersection(Rect a, Rect b){
+ ++intersections;return control_intersection(a,b);
+}
+'''
+source = source.replace('void control_tree_paint(', helper+'void control_tree_paint(',1)
 program = r'''
 #include <assert.h>
 #include <stdio.h>
@@ -19,7 +26,7 @@ program = r'''
 _Static_assert(sizeof(control_tree_box_t)==sizeof(struct {
  Rect bounds,clip;bool visible,enabled;uint32_t depth;control_tree_style_t style;
 }), "layout cache footprint");
-static unsigned visits;
+static unsigned visits,intersections,hit_visits,hit_oracles;
 ''' + source + r'''
 static os_control_node_t nodes[4096];
 static control_tree_box_t boxes[4096];
@@ -41,8 +48,20 @@ static void compare(Rect damage){
   Rect clip=intersection(intersection(damage,boxes[i].clip),boxes[i].bounds);
   if(!rect_is_empty(clip))pixel(expected,nodes+i,boxes+i,clip);
  }
- visits=0;control_tree_paint(nodes,4096,boxes,damage,pixel,actual);
+ visits=intersections=0;control_tree_paint(nodes,4096,boxes,damage,pixel,actual);
  assert(!memcmp(expected,actual,sizeof(actual)));
+ /* 独立反向线性基准，覆盖被隐藏的父节点及其子树和越界控件。 */
+ for(int y=0;y<80;y+=13)for(int x=0;x<128;x+=17){
+  unsigned expected_hit=OS_CONTROL_NO_PARENT;
+  for(unsigned i=4096;i;--i){
+   unsigned j=i-1;
+   if(!boxes[j].visible||!boxes[j].enabled||
+      (nodes[j].flags&OS_CONTROL_POINTER_PASSTHROUGH))continue;
+   Rect r=intersection(boxes[j].bounds,boxes[j].clip);
+   if(x>=r.x0&&x<r.x1&&y>=r.y0&&y<r.y1){expected_hit=j;break;}
+  }
+  assert(control_tree_hit_test(nodes,4096,boxes,x,y)==expected_hit);++hit_oracles;
+ }
 }
 int main(void){
  nodes[0]=(os_control_node_t){.identifier=1,.parent=OS_CONTROL_NO_PARENT,.kind=OS_CONTROL_CONTAINER};
@@ -66,8 +85,13 @@ int main(void){
  }
  compare((Rect){4,4,6,6});assert(visits==128);
  unsigned pruned=visits;
- compare((Rect){200,200,201,201});assert(visits==1);
+ compare((Rect){200,200,201,201});assert(visits==1 && intersections==0);
  compare((Rect){0,0,0,0});assert(visits==0);
+ /* 空继承裁剪位于损坏范围内部时，也必须直接跳过整树。 */
+ Rect saved_clip=boxes[0].clip;boxes[0].clip=(Rect){0};
+ visits=intersections=0;
+ control_tree_paint(nodes,4096,boxes,(Rect){-1,-1,1,1},pixel,actual);
+ assert(visits==1&&!intersections);boxes[0].clip=saved_clip;
  /* 取消第二分支的父裁剪，让子节点越过父边界回到重绘区域，不能错误跳过。 */
  nodes[66].flags=0;nodes[67].y=-30;
  assert(control_tree_layout(nodes,4096,0,viewport,boxes));
@@ -97,7 +121,17 @@ int main(void){
  compare((Rect){0,0,16,16});
  nodes[1].flags|=OS_CONTROL_HIDDEN;
  assert(control_tree_layout(nodes,4096,0,viewport,boxes));
- compare((Rect){0,0,16,16});assert(visits==2);
+ compare((Rect){0,0,16,16});assert(visits==2 && intersections==2);
+ hit_visits=0;
+ assert(control_tree_hit_test(nodes,4096,boxes,0,0)==0);
+ assert(hit_visits==2);
+ /* 整棵树隐藏时只访问最后一个节点，沿父链直接跳过根。 */
+ nodes[0].flags|=OS_CONTROL_HIDDEN;
+ assert(control_tree_layout(nodes,4096,0,viewport,boxes));
+ hit_visits=0;
+ assert(control_tree_hit_test(nodes,4096,boxes,0,0)==OS_CONTROL_NO_PARENT);
+ assert(hit_visits==1);
+ printf("Hidden subtree hit test: %u linear oracle comparisons, 4096 nodes -> 2 visits, hidden root -> 1 visit PASS\n",hit_oracles);
  printf("Control paint subtree: 1000 4096-node pixel oracles, depth 64, overflow/hidden/clip/order; small damage visits 4096 -> %u PASS\n",pruned);
 }
 '''
@@ -119,3 +153,10 @@ with tempfile.TemporaryDirectory(prefix='control-paint-subtree-') as directory:
     subprocess.run(command, input=broken, text=True, check=True)
     assert subprocess.run([binary], stderr=subprocess.DEVNULL).returncode != 0
     print('负面对照通过：错误裁掉允许越界的子控件时，像素断言拒绝该实现')
+
+    guard = 'while (parent < index && !boxes[parent].visible)'
+    assert program.count(guard)==1
+    broken = program.replace(guard, 'while (false && parent < index && !boxes[parent].visible)')
+    subprocess.run(command, input=broken, text=True, check=True)
+    assert subprocess.run([binary], stderr=subprocess.DEVNULL).returncode != 0
+    print('负面对照通过：隐藏命中恢复逐节点扫描时访问次数断言失败')

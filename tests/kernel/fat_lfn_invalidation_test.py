@@ -130,8 +130,8 @@ int main(void) {
     assert(!strcmp(info.name,"F0000999.TXT")&&full_resets==0);
     assert(previous_enumerate(&fs,"/",999,&info)&&full_resets==1000);
     puts("1000 short entries: lookup/enumeration full 520-byte clears 1001/1000 -> 0");
-    /* Measure the exact VFS call pattern, not an assumed disk latency:
-     * each index restarts production enumeration at the first sector. */
+    /* 测量 VFS 的实际调用模式，而不是假设磁盘延迟：每个索引都会让生产枚举从首个
+     * 扇区重新开始。 */
     unsigned sizes[]={16,64,256};
     for(unsigned sample=0;sample<3;++sample){
         unsigned n=sizes[sample];memset(media,0,sizeof(media));
@@ -144,7 +144,7 @@ int main(void) {
             assert(!strcmp(info.name,expected_name));
             expected_reads+=i/16+1;
         }
-        /* VFS stops at its 256-entry bound without requesting index 256. */
+        /* VFS 到达 256 项上限后会停止，不会请求索引 256。 */
         if(n<256){assert(!fat32_enumerate_path(&fs,"/",n,&info));expected_reads+=n/16+1;}
         assert(sector_reads==expected_reads&&directory_resolutions==n+(n<256));
         printf("FAT enumeration baseline: %u entries -> %u sector-read calls, %u directory resolutions; sequential coverage is %u sectors (cache may hide device reads)\n",
@@ -165,7 +165,7 @@ int main(void) {
     for(unsigned length=1;length<=255;++length)for(unsigned mode=0;mode<7;++mode) {
         memset(media,0,sizeof(media));char name[256],second[32];
         memset(name,'a',length);name[length]=0;
-        /* Start across a sector boundary, with deletion/volume separators. */
+        /* 从跨扇区边界的位置开始，并包含删除项/卷标分隔符。 */
         for(unsigned i=0;i<15;++i) {short_entry(i,i);media[i*32]=0xe5;}
         unsigned count_lfn=(length+12)/13;
         unsigned end=long_entries(15,name,length,123);
@@ -194,8 +194,7 @@ int main(void) {
     for(unsigned sector=2;sector<=5;++sector){failed_lba=sector;compare_bulk(256,256);}
     failed_lba=UINT64_MAX;fs.FatType=16;
     printf("FAT batch: %u full-output/count/canary comparisons, LFN/deletions/volume labels/callback stop/limits/read failures/FAT16 root/FAT32 chain passed\n",bulk_cases);
-    /* Invalidation never reads or writes the character arena; a subsequent
-     * head completely initializes it before publishing valid state. */
+    /* 失效处理从不读写字符区；后续头部会在发布有效状态前将其完整初始化。 */
     UINT16 chars[260];memset(chars,0x75,sizeof(chars));BOOLEAN valid=1;
     UINT32 expected=7;UINT8 checksum=19;
     fat32_lfn_invalidate(&valid,&expected,&checksum);

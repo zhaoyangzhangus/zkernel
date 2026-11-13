@@ -25,7 +25,9 @@ typedef int kstatus_t;
 typedef uint64_t vaddr_t;
 typedef struct { uint64_t value; } paddr_t;
 typedef struct { paddr_t root_table; atomic_uint_fast64_t rss_pages; } vm_space_t;
-typedef struct { uint64_t start,end; } vm_area_t;
+typedef struct { unsigned type; } vm_object_t;
+#define VM_OBJECT_FILE 2U
+typedef struct { uint64_t start,end; vm_object_t *object,*private_object; } vm_area_t;
 #define PAGE_SIZE 4096ULL
 #define K_OK 0
 #define K_ENOENT -2
@@ -81,6 +83,13 @@ static int x86_protect_user_page_deferred(paddr_t root,uint64_t va,unsigned flag
     *changed=status==K_OK;
     return status;
 }
+/* 事务夹具模拟融合接口；真实页表的锁次数由融合遍历回归验证。 */
+static kstatus_t x86_protect_next_user_page_deferred(paddr_t root,vaddr_t start,
+    uint64_t end,uint32_t flags,int mode,vaddr_t *out,bool *changed) {
+    *changed=false;
+    kstatus_t status=x86_next_present_page(root,start,end,out);
+    return status==K_OK ? x86_protect_user_page_deferred(root,*out,flags,mode,changed) : status;
+}
 ''' + function('kernel/mm/tlb.c', 'rss_decrement(').replace(
     'if (count == 0U) return;', 'if (count == 0U) return;\n    ++accounting_calls;') + '\n' + \
     function('kernel/mm/tlb.c', 'vm_tlb_unmap_range(') + '\n' + \
@@ -88,7 +97,7 @@ static int x86_protect_user_page_deferred(paddr_t root,uint64_t va,unsigned flag
 static void reset(void) { calls=changes=flags_seen=dense_pages=batches=accounting_calls=0;fail_scan_at=fail_change_at=0;disappeared=0; }
 int main(void) {
     vm_space_t space = {.root_table={4096}};
-    vm_area_t area = {0,1ULL<<46};
+    vm_area_t area = {.start=0,.end=1ULL<<46};
     atomic_init(&space.rss_pages,3);
     reset(); assert(vm_tlb_unmap_range(&space,0,area.end)==K_OK);
     assert(calls==3 && changes==3 && atomic_load(&space.rss_pages)==0);
@@ -133,7 +142,7 @@ int main(void) {
                 if(scan_failure) fail_scan_at=(failure-1)*PAGE_SIZE+1;
                 else fail_change_at=(failure-1)*PAGE_SIZE;
             }
-            /* Zero denotes no injected failure in the MMU fixture. */
+            /* MMU 测试夹具中，零表示未注入故障。 */
             bool injected=failure && (scan_failure ? failure<count : failure>1);
             kstatus_t status=vm_tlb_unmap_range(&space,0,count*PAGE_SIZE);
             assert(status==(injected ? K_EIO : K_OK));

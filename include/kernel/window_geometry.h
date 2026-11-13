@@ -3,7 +3,7 @@
 #include <uapi/window.h>
 #include <stdbool.h>
 
-/* Shared window-frame geometry.  Ownership stays outside the compositor. */
+/* 共用的窗口框架几何信息。其所有权仍由合成器之外的模块管理。 */
 #define WINDOW_FRAME_BORDER              1U
 #define WINDOW_FRAME_EXTRA               (WINDOW_FRAME_BORDER * 2U)
 #define WINDOW_TITLEBAR_HEIGHT           30U

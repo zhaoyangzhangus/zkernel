@@ -18,7 +18,7 @@ try:
         esp = Path(directory)
         runtime = esp/'usr/apps/chrome/lib'
         runtime.mkdir(parents=True)
-        # Only fixture links are removed below; the canonical runtime is read-only.
+        # 下方只会移除测试夹具创建的链接；规范运行时目录为只读。
         for path in actual.iterdir():
             if path.is_file():
                 (runtime/path.name).symlink_to(path)

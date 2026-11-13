@@ -18,7 +18,7 @@ finish = re.sub(r'__asm__ volatile \(\s*"pushfq; popq %0"\s*'
                 r': "=r"\(flags\)\s*:\s*: "memory"\);',
                 'flags=irq ? 1ULL<<9 : 0;', source[finish_start:finish_end])
 assert '__asm__' not in finish
-# All consumers must have an interruptible retry, including BSP logical idle.
+# 所有消费者都必须支持可中断重试，包括 BSP 逻辑空闲路径。
 runtime = (root / 'kernel/init/runtime.c').read_text()
 idle_loop = runtime[runtime.index('    for (;;) {\n        net_manager_status_t net_status;'):]
 assert idle_loop.index('sched_finish_switch();') < idle_loop.index('"cli"')
@@ -116,8 +116,7 @@ int main(void) {
     tlb=false;current_cpu=1;scheduler_command_release_drain(0);
     assert(!releases && g_cpus[0].command_release_head==&a);
     current_cpu=0;migrate_on_put=true;scheduler_command_release_drain(0);
-    /* Detached counts stay owned by this continuation across migration;
-       another CPU must not pop the remaining source CPU FIFO. */
+    /* 迁移期间该续行仍持有已分离的计数；另一个 CPU 不能弹出源 CPU FIFO 中的剩余项。 */
     assert(a.puts==3 && !a.refs && b.puts==0 && current_cpu==1);
     assert(g_cpus[0].command_release_pending && g_cpus[0].command_release_head==&b);
     current_cpu=0;enqueue_on_put=true;scheduler_command_release_drain(0);
@@ -149,8 +148,8 @@ int main(void) {
     for(unsigned n=0;n<64;++n)
         assert(!batch[n].refs&&batch[n].puts==256&&!batch[n].command_release_count);
     fifo_base=0;
-    /* Once background cleanup is available, the last owned reference must
-     * leave the switching thread without running its destructor there. */
+    /* 后台清理可用后，最后一个所有者引用必须从正在切换的线程移走，不能在那里运行
+     * 析构函数。 */
     background_ready=true;
     thread_t background_case={.refs=1};queue(0,&background_case,1);
     unsigned before_deferred=deferred,before_reaped=reaped;
@@ -160,7 +159,7 @@ int main(void) {
     assert(background_argument==&background_case&&background_work);
     background_work(background_argument);background_work=0;
     assert(background_case.puts==1&&!background_case.refs);
-    // A saturated cleanup queue must retain the last reference for retry.
+    // 清理队列饱和时，必须保留最后一个引用以便重试。
     thread_t saturated={.refs=256};queue(0,&saturated,256);
     background_full=true;sched_finish_switch();
     assert(saturated.refs==1&&saturated.puts==255&&!background_work);
@@ -169,8 +168,8 @@ int main(void) {
     assert(saturated.refs==1&&!g_cpus[0].command_release_pending);
     background_work(background_argument);background_work=0;
     assert(!saturated.refs&&saturated.puts==256);
-    /* An interruptible release can migrate after a non-final put. Restore
-     * the retained reference on the new CPU, not the stale source FIFO. */
+    /* 非最终 put 后，可中断释放过程可能迁移到其他 CPU。应在新 CPU 上恢复保留引用，
+     * 不能放回过期的源 FIFO。 */
     thread_t migrated={.refs=3};queue(0,&migrated,3);
     background_full=true;migrate_on_put=true;
     scheduler_command_release_drain(0);

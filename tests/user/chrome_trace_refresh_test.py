@@ -21,7 +21,7 @@ for index, (name, pattern, _) in enumerate(ANCHORS):
     assert {int(x, 16) for x in re.findall(pattern, updated[name])} == {expected}
 for name in FILES:
     assert f"expected = '{identity}'" in updated[name]
-    # Non-address behavior, offsets, limits and kernel expressions are intact.
+    # 非地址行为、偏移量、限制和内核表达式均保持不变。
     normalize = lambda s: re.sub(r'0x[0-9a-fA-F]+|Build ID: [0-9a-f]+|ONLY Chrome build ID [0-9a-f]+', '_', s)
     assert normalize(scripts[name]) == normalize(updated[name]), name
 assert refreshed(updated, output, identity, 0x40000000) == updated

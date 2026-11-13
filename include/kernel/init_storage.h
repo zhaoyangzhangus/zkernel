@@ -9,6 +9,6 @@ typedef struct kernel_init_storage_hooks {
     void (*halt)(void);
 } kernel_init_storage_hooks_t;
 
-/* Validate the storage controller path and return the active controller. */
+/* 校验存储控制器路径，并返回活动控制器。 */
 BOOLEAN kernel_init_storage(const kernel_init_storage_hooks_t *hooks,
                             const nvme_controller_t **active_controller);

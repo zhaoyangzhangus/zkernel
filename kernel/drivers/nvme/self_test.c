@@ -3,7 +3,7 @@
 #include <kernel/telemetry.h>
 #include "internal.h"
 
-/* REFACTOR_P8_NVME_SELF_TEST_OWNER: NVMe data-path and reset validation. */
+/* REFACTOR_P8_NVME_SELF_TEST_OWNER：NVMe 数据路径和复位校验。 */
 
 bool nvme_driver_self_test(void) {
     if (nvme_driver_register() != K_OK) return false;

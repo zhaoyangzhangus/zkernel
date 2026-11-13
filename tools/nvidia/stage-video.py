@@ -22,8 +22,8 @@ command=['python3',str(root/'tools/nvidia/video-baseline-cc.py'),'-std=gnu11','-
          '-pthread','-o',str(out/'vulkan-video')]
 dev=root/'build/nvidia/host-deps/glibc/libc6-dev-extract/usr'
 runtime=root/'build/nvidia/host-deps/glibc/libc6-extract/lib/x86_64-linux-gnu'
-# Include header sets as well as their contents: adding/removing an included
-# header invalidates the receipt even when older timestamps are restored.
+# 除头文件内容外，也要纳入头文件集合：即使恢复了旧时间戳，
+# 新增或移除被包含的头文件也会使回执失效。
 headers=[*ff.rglob('*.h'),*(out/'sdk/include').rglob('*.h'),
          *(dev/'include').rglob('*.h'),*(root/'include/uapi').rglob('*.h')]
 inputs=[root/'tools/nvidia/video-baseline-cc.py',root/'tools/nvidia/stage-video.py',

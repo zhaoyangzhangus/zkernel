@@ -39,15 +39,14 @@ int main(void) {
    assert(litefs_mount(&fs,&storage,BLOCKS)==K_OK);
    assert(litefs_create_file(&fs,"bulk",0100666,&inode)==K_OK);
    memset(expected,0,sizeof(expected));memcpy(expected+offset,input,n);
-   /* LiteFS intentionally rejects sparse writes. Create the zero prefix
-    * through its normal API rather than assuming unsupported hole growth. */
+   /* LiteFS 有意拒绝稀疏写入。通过其常规 API 创建零填充前缀，不假定它支持扩展空洞。 */
    if(offset) {
     assert(litefs_write_file(&fs,inode,offset,input,n,&bytes)==K_EINVAL);
     assert(litefs_write_file(&fs,inode,0,expected,offset,&bytes)==K_OK && bytes==offset);
    }
    assert(litefs_write_file(&fs,inode,offset,input,n,&bytes)==K_OK && bytes==n);
    assert(litefs_fsync(&fs)==K_OK);
-   /* Lose volatile state and remount actual metadata/journal. */
+   /* 丢弃易失状态，并重新挂载实际元数据/日志。 */
    memcpy(disk,durable,sizeof(disk));
    assert(litefs_mount(&recovered,&storage,BLOCKS)==K_OK);
    memset(out,0x75,sizeof(out));
@@ -57,14 +56,14 @@ int main(void) {
    ++cases;
   }
  }
- /* Full extent replacement, including the final permitted byte. */
+ /* 覆盖整个范围，包括最后一个允许访问的字节。 */
  uint32_t inode=0;uint64_t bytes;
  assert(litefs_write_file(&recovered,inode,0,input,sizeof(input),&bytes)==K_OK && bytes==sizeof(input));
  assert(litefs_fsync(&recovered)==K_OK);memcpy(disk,durable,sizeof(disk));
  assert(litefs_mount(&fs,&storage,BLOCKS)==K_OK);
  assert(litefs_read_file(&fs,inode,0,out,sizeof(out),&bytes)==K_OK && bytes==sizeof(out));
  assert(!memcmp(out,input,sizeof(out)));
- /* Checksum protection remains active on the persistent superblock. */
+ /* 持久化超级块仍受校验和保护。 */
  disk[0][7]^=1;assert(litefs_mount(&recovered,&storage,BLOCKS)!=K_OK);
  printf("Production journal self-test and LiteFS: %u unaligned writes, zero prefixes/sparse rejection, fsync/remount, full extent and checksum corruption passed (%u reads, %u writes, %u flushes)\n",cases,reads,writes,flushes);
 }

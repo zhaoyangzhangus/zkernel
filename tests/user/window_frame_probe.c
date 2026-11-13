@@ -1,4 +1,4 @@
-/* Freestanding Linux-personality frame-switch runtime regression. */
+/* 独立运行的 Linux personality 边框切换运行时回归测试。 */
 #include <stdint.h>
 #include <uapi/linux_abi.h>
 #include <uapi/window.h>

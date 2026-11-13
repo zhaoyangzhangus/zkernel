@@ -1,7 +1,7 @@
 set pagination off
 target remote /tmp/system-prewarm.sock
-# nm current staged Chrome: MaybePrewarmForDefaultSearchEngine=0xa600190.
-# Revalidate after any Chrome rebuild; PIE bias is 0x40000000.
+# nm 当前暂存的 Chrome：MaybePrewarmForDefaultSearchEngine=0xa600190。
+# 每次重新构建 Chrome 后都要重新验证；PIE 偏移为 0x40000000。
 hbreak *0x4a600190
 commands
 silent

@@ -36,7 +36,12 @@ qemu_args=()
 ''' + storage + inputs + '\nprintf "%s\\0" "${qemu_args[@]}"\n'
     args = subprocess.check_output(['bash', '-c', script]).decode().rstrip('\0').split('\0')
     verify(args)
-    assert args.count('qemu-xhci,id=vm-xhci,msix=on') == 1
+    controllers = [value for kind, value in zip(args[::2], args[1::2])
+                   if kind == '-device' and value.split(',')[0] == 'qemu-xhci']
+    assert len(controllers) == 1
+    options = dict(pair.split('=', 1) for pair in controllers[0].split(',')[1:])
+    assert options['id'] == 'vm-xhci' and options['msix'] == 'on'
+    assert options['p2'] == '8' and options['p3'] == '8'
     if nested:
         assert 'usb-mouse,id=vm-nested-mouse,bus=vm-xhci.0,port=1.1.1' in args
     damaged = [value.replace('drive=vm-', 'drive=missing-') for value in args]

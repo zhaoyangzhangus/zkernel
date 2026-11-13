@@ -63,7 +63,7 @@ int main(void){
  while(atomic_load(&entered)<4)sched_yield();
  unsigned start=atomic_load(&pauses);
  while(atomic_load(&pauses)<start+10000)sched_yield();
- /* One failed compare per waiting CPU, not an exchange per pause. */
+ /* 每个等待 CPU 只进行一次比较失败，而不是每次暂停都交换。 */
  assert(atomic_load(&attempts)==6);
  map_unlock(&space);
  for(int i=0;i<4;i++)assert(!pthread_join(workers[i],0));

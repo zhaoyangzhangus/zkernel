@@ -11,7 +11,6 @@
 #include <kernel/string.h>
 #include <kernel/sched.h>
 #include <kernel/wait.h>
-#include <kernel/window_server.h>
 #include <uapi/process.h>
 #include <uapi/syscall.h>
 #include <uapi/wait.h>
@@ -956,9 +955,8 @@ kstatus_t process_fork(process_t *parent, process_t **out) {
     if (status != K_OK) return status;
 
     handle_table_t cloned = {0};
-    /* 窗口是绑定所有者的资源。fork 出来的命令不得继承 shell 的窗口句柄，否则退出时会关闭父进程窗口。 */
-    status = handle_table_clone_without_type(&parent->handles, &cloned,
-                                             KOBJECT_TYPE_WINDOW);
+    /* 对象自行声明继承策略，进程核心不依赖具体资源类型。 */
+    status = handle_table_clone(&parent->handles, &cloned);
     if (status != K_OK) {
         (void)process_abort(child);
         object_put(child);

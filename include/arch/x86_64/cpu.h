@@ -64,9 +64,8 @@ _Static_assert(__builtin_offsetof(x86_cpu_local_t, SyscallActive) ==
                "x86 CPU-local syscall ABI changed");
 
 /*
- * Fast local helpers are valid after x86 CPU-local setup.  They deliberately
- * do not perform Self/MAX_CPUS validation; allocator hot paths call them only
- * after arch_cpu_init() and mm_boot_init() boot ordering is complete.
+ * x86 CPU 本地设置完成后，快速本地辅助函数即可使用。它们特意不执行 Self/MAX_CPUS 校验；
+ * 分配器热路径只会在 arch_cpu_init() 和 mm_boot_init() 完成启动顺序后调用它们。
  */
 static inline uint32_t x86_current_cpu_index_fast(void) {
     uint32_t cpu;

@@ -165,16 +165,11 @@ static void exec_diag_prepare(kstatus_t status, uint32_t stage) {
 static kstatus_t exec_copy_user_path(const char __user *user_path,
                                      char output[EXEC_PATH_CAPACITY]) {
     if (user_path == 0 || output == 0) return K_EINVAL;
-    for (size_t index = 0U; index < EXEC_PATH_CAPACITY; ++index) {
-        kstatus_t status = copy_from_user(&output[index], user_path + index,
-                                          sizeof(output[index]));
-        if (status != K_OK) return status;
-        if (output[index] == '\0') {
-            return index == 0U ? K_ENOENT : K_OK;
-        }
-    }
-    output[EXEC_PATH_CAPACITY - 1U] = '\0';
-    return K_ENAMETOOLONG;
+    kstatus_t status = copy_string_from_user(output, user_path,
+                                              EXEC_PATH_CAPACITY);
+    if (status == K_ENAMETOOLONG) output[EXEC_PATH_CAPACITY - 1U] = '\0';
+    if (status != K_OK) return status;
+    return output[0] == '\0' ? K_ENOENT : K_OK;
 }
 
 static bool exec_path_is_self_exe(const char *path) {
@@ -292,8 +287,8 @@ static uint32_t fault_access(uint32_t protection) {
     return VM_PROT_EXEC;
 }
 
-static kstatus_t write_address_space(vm_space_t *space, uint64_t address,
-                                     const void *source, size_t size) {
+static kstatus_t write_address_space_access(vm_space_t *space, uint64_t address,
+                                     const void *source, size_t size, uint32_t access) {
     const uint8_t *input = (const uint8_t *)source;
     while (size != 0) {
         uint64_t page_address = address & ~(PAGE_SIZE - 1ULL);
@@ -305,7 +300,7 @@ static kstatus_t write_address_space(vm_space_t *space, uint64_t address,
                                               &physical, 0);
         if (status != K_OK) {
             status = vm_handle_fault(space, &(vm_fault_info_t){
-                (vaddr_t)page_address, VM_PROT_WRITE, 0});
+                (vaddr_t)page_address, access, 0});
             if (status == K_OK) {
                 status = x86_translate_page(space->root_table,
                                             (vaddr_t)page_address,
@@ -323,6 +318,12 @@ static kstatus_t write_address_space(vm_space_t *space, uint64_t address,
         size -= chunk;
     }
     return K_OK;
+}
+
+/* 栈和可写段使用写权限；加载器写入只读段时显式传递该段的缺页权限。 */
+static kstatus_t write_address_space(vm_space_t *space, uint64_t address,
+                                     const void *source, size_t size) {
+    return write_address_space_access(space, address, source, size, VM_PROT_WRITE);
 }
 
 static kstatus_t read_vfs_range(file_t *file, uint64_t offset,
@@ -669,7 +670,7 @@ static kstatus_t map_load_segment_from_vfs(
     }
     if (status != K_OK) return status;
 
-    if (data_end > file_mapping_end) {
+    if (program->file_size != 0U && data_end > file_mapping_end) {
         /* 最后一个不完整文件页使用匿名映射，以确保 p_filesz 之后的字节为零。它最多只有一页，
          * 因为完整页面均由文件后备。 */
         uint64_t copy_start = virtual_start > file_mapping_end ?
@@ -684,16 +685,8 @@ static kstatus_t map_load_segment_from_vfs(
             source_file, program->offset + (copy_start - virtual_start),
             tail, (size_t)copy_size);
         if (status != K_OK) return status;
-        paddr_t tail_physical;
-        uint64_t tail_page = copy_start & ~(PAGE_SIZE - 1ULL);
-        if (x86_translate_page(space->root_table, (vaddr_t)tail_page,
-                               &tail_physical, 0) != K_OK) {
-            status = vm_handle_fault(space, &(vm_fault_info_t){
-                (vaddr_t)tail_page, fault_access(protection), 0});
-            if (status != K_OK) return status;
-        }
-        status = write_address_space(space, copy_start, tail,
-                                     (size_t)copy_size);
+        status = write_address_space_access(space, copy_start, tail,
+                                            (size_t)copy_size, fault_access(protection));
         if (status != K_OK) return status;
     }
 
@@ -729,20 +722,11 @@ static kstatus_t map_load_segment(vm_space_t *space, const uint8_t *image,
         exec_debug_result(status);
         return status;
     }
-    uint32_t access = fault_access(protection);
-    for (uint64_t page = mapping_start; page < mapping_end; page += PAGE_SIZE) {
-        exec_debug_progress(0x122U |
-                            (uint32_t)((page - mapping_start) >> PAGE_SHIFT));
-        status = vm_handle_fault(space, &(vm_fault_info_t){(vaddr_t)page, access, 0});
-        if (status != K_OK) {
-            exec_debug_result(status);
-            return status;
-        }
-    }
+    /* 文件内容之外的匿名页保留按需分配，避免先遍历整个 BSS 再逐页复制。 */
     exec_debug_progress(0x123U);
     if (program->file_size == 0U) return K_OK;
-    return write_address_space(space, virtual_start, image + program->offset,
-                               (size_t)program->file_size);
+    return write_address_space_access(space, virtual_start, image + program->offset,
+                                      (size_t)program->file_size, fault_access(protection));
 }
 
 static kstatus_t map_elf_segments(vm_space_t *space, const uint8_t *image,
@@ -800,20 +784,9 @@ static kstatus_t copy_exec_vector(
             *count = index;
             return K_OK;
         }
-        bool terminated = false;
-        for (uint32_t character = 0U; character < ELF_EXEC_ARG_LENGTH; ++character) {
-            char value = 0;
-            status = copy_from_user(&value, value_pointer + character,
-                                    sizeof(value));
-            if (status != K_OK) return status;
-            values[index][character] = value;
-            if (value == '\0') {
-                terminated = true;
-                break;
-            }
-            if (character + 1U == ELF_EXEC_ARG_LENGTH) return K_EINVAL;
-        }
-        if (!terminated) return K_EINVAL;
+        status = copy_string_from_user(values[index], value_pointer,
+                                         ELF_EXEC_ARG_LENGTH);
+        if (status != K_OK) return status == K_ENAMETOOLONG ? K_EINVAL : status;
     }
     return K_EINVAL;
 }
@@ -836,6 +809,11 @@ static kstatus_t build_initial_stack(vm_space_t *space,
                                      const elf_exec_arguments_t *arguments,
                                      const os_exec_fd_map_t *descriptor_map,
                                      vaddr_t *stack_pointer) {
+    /* 直接加载的程序没有参数，不必为两个空向量分配整块参数存储。 */
+    uint32_t argument_count = arguments != 0 ? arguments->count : 0U;
+    uint32_t environment_count = arguments != 0 ? arguments->environment_count : 0U;
+    if (argument_count > ELF_EXEC_ARG_MAX ||
+        environment_count > ELF_EXEC_ENV_MAX) return K_EINVAL;
     vaddr_t guard_address = OS_LINUX_USER_STACK_BASE - PAGE_SIZE;
     vaddr_t stack_address = OS_LINUX_USER_STACK_BASE;
     kstatus_t status = vm_map_object(space, 0, &guard_address, 0, PAGE_SIZE, 0,
@@ -862,8 +840,6 @@ static kstatus_t build_initial_stack(vm_space_t *space,
         seed ^= seed << 17;
         random_bytes[i] = (uint8_t)seed;
     }
-    if (arguments == 0 || arguments->count > ELF_EXEC_ARG_MAX ||
-        arguments->environment_count > ELF_EXEC_ENV_MAX) return K_EINVAL;
     vaddr_t random_address = OS_LINUX_USER_STACK_TOP -
                              sizeof(random_bytes);
     status = write_address_space(space, random_address, random_bytes, sizeof(random_bytes));
@@ -878,7 +854,7 @@ static kstatus_t build_initial_stack(vm_space_t *space,
         environment_values[index] = 0U;
     }
     vaddr_t string_pointer = random_address;
-    for (uint32_t index = arguments->count; index != 0U; --index) {
+    for (uint32_t index = argument_count; index != 0U; --index) {
         const char *argument = arguments->values[index - 1U];
         size_t length = 0U;
         while (length < ELF_EXEC_ARG_LENGTH && argument[length] != '\0') ++length;
@@ -888,7 +864,7 @@ static kstatus_t build_initial_stack(vm_space_t *space,
         if (status != K_OK) return status;
         argv_values[index - 1U] = string_pointer;
     }
-    for (uint32_t index = arguments->environment_count; index != 0U; --index) {
+    for (uint32_t index = environment_count; index != 0U; --index) {
         const char *environment = arguments->environment[index - 1U];
         size_t length = 0U;
         while (length < ELF_EXEC_ARG_LENGTH && environment[length] != '\0') {
@@ -906,7 +882,7 @@ static kstatus_t build_initial_stack(vm_space_t *space,
     vaddr_t platform_address = 0U;
     if (info->linux_abi) {
         static const char platform[] = LINUX_ARCH_ELF_PLATFORM;
-        const char *execfn = arguments->count != 0U ? arguments->values[0] : "";
+        const char *execfn = argument_count != 0U ? arguments->values[0] : "";
         size_t platform_length = sizeof(platform);
         size_t execfn_length = 0U;
         while (execfn_length < ELF_EXEC_ARG_LENGTH &&
@@ -967,7 +943,7 @@ static kstatus_t build_initial_stack(vm_space_t *space,
     LINUX_AUX_PUSH(AUX_NULL, 0U);
 #undef LINUX_AUX_PUSH
     size_t vector_size = sizeof(uint64_t) *
-                         (arguments->environment_count + arguments->count + 3U);
+                         (environment_count + argument_count + 3U);
     size_t stack_data_size = auxiliary_count * sizeof(uint64_t) + vector_size;
     vaddr_t stack_top = string_pointer & ~15ULL;
     size_t padding = (size_t)((stack_top - stack_data_size) & 15ULL);
@@ -978,25 +954,25 @@ static kstatus_t build_initial_stack(vm_space_t *space,
     status = write_address_space(space, sp, auxiliary,
                                  auxiliary_count * sizeof(uint64_t));
     if (status != K_OK) return status;
-    sp -= sizeof(uint64_t) * (arguments->environment_count + 1U);
+    sp -= sizeof(uint64_t) * (environment_count + 1U);
     if (write_address_space(space, sp, environment_values,
                             sizeof(uint64_t) *
-                            (arguments->environment_count + 1U)) != K_OK) {
+                            (environment_count + 1U)) != K_OK) {
         return K_EIO;
     }
-    sp -= sizeof(uint64_t) * (arguments->count + 1U);
+    sp -= sizeof(uint64_t) * (argument_count + 1U);
 #if OS_DEBUG_SERIAL
     kernel_serial_printf_serial_only(
         "OS_EXEC_STACK argc=%u sp=%llx argv0=%llx argv1=%llx\r\n",
-        arguments->count, (unsigned long long)sp,
+        argument_count, (unsigned long long)sp,
         (unsigned long long)argv_values[0],
-        (unsigned long long)(arguments->count > 1U ? argv_values[1] : 0U));
+        (unsigned long long)(argument_count > 1U ? argv_values[1] : 0U));
 #endif
     if (write_address_space(space, sp, argv_values,
-                            sizeof(uint64_t) * (arguments->count + 1U)) != K_OK) {
+                            sizeof(uint64_t) * (argument_count + 1U)) != K_OK) {
         return K_EIO;
     }
-    uint64_t argc = arguments->count;
+    uint64_t argc = argument_count;
     sp -= sizeof(uint64_t); /* 参数个数 */
     if (write_address_space(space, sp, &argc, sizeof(argc)) != K_OK) return K_EIO;
     if ((sp & 15U) != 0) return K_EIO;
@@ -1248,18 +1224,15 @@ static kstatus_t prepare_elf_space(const void *raw_image, size_t image_size,
     return K_OK;
 }
 
-kstatus_t process_load_elf_image(process_t *process, const void *image, size_t image_size,
-                                 user_elf_image_info_t *info, vaddr_t *stack_pointer) {
+static kstatus_t process_load_elf_source(
+    process_t *process, const void *image, size_t image_size,
+    file_t *file, uint64_t file_size, user_elf_image_info_t *info,
+    vaddr_t *stack_pointer) {
     if (process == 0 || info == 0 || stack_pointer == 0) return K_EINVAL;
-    elf_exec_arguments_t *arguments =
-        (elf_exec_arguments_t *)kzalloc(sizeof(*arguments), 0);
-    if (arguments == 0) return K_ENOMEM;
-    (void)copy_exec_arguments(0, 0, arguments);
     vm_space_t *new_space = 0;
-    kstatus_t status = prepare_elf_space(image, image_size, 0, image_size,
-                                          &new_space, info, arguments, 0,
+    kstatus_t status = prepare_elf_space(image, image_size, file, file_size,
+                                          &new_space, info, 0, 0,
                                           stack_pointer, 0);
-    kfree(arguments);
     if (status != K_OK) return status;
     process_thread_lock(process);
     /* 准备阶段不持有所有者锁。此期间进程可能退出；一次性资源拆除开始后，绝不能重新安装 VM。 */
@@ -1286,6 +1259,46 @@ kstatus_t process_load_elf_image(process_t *process, const void *image, size_t i
     linux_fd_table_release_stdio(previous_stdio);
     vm_space_put(old_space);
     return K_OK;
+}
+
+kstatus_t process_load_elf_image(process_t *process, const void *image, size_t image_size,
+                                 user_elf_image_info_t *info, vaddr_t *stack_pointer) {
+    return process_load_elf_source(process, image, image_size, 0, image_size,
+                                    info, stack_pointer);
+}
+
+/* 文件句柄在元数据读取、段加载和地址空间安装期间保持有效，失败时也统一释放。
+ * 桌面启动不再读取调试信息等非加载段，也不再持有整个 ELF 的临时副本。 */
+kstatus_t process_load_elf_from_vfs(process_t *process, const char *path,
+    uint64_t maximum_size, user_elf_image_info_t *info, vaddr_t *stack_pointer) {
+    if (process == 0 || path == 0 || maximum_size == 0U ||
+        info == 0 || stack_pointer == 0) return K_EINVAL;
+    file_t *file = 0;
+    kstatus_t status = vfs_open_kernel(path, VFS_OPEN_READ, 0U, &file);
+    if (status != K_OK) return status;
+    uint8_t *image = 0;
+    size_t image_size = 0U;
+    if (file == 0 || file->vnode == 0) {
+        status = K_EINVAL;
+    } else {
+        os_file_info_t metadata;
+        status = vfs_file_stat(file, &metadata);
+        if (status == K_OK) {
+            uint64_t file_size = metadata.size;
+            if (file_size == 0U || file_size > maximum_size || file_size > SIZE_MAX) {
+                status = K_EINVAL;
+            } else {
+                status = read_vfs_metadata(file, &image, &image_size);
+                if (status == K_OK) {
+                    status = process_load_elf_source(process, image, image_size,
+                                                      file, file_size, info, stack_pointer);
+                }
+            }
+        }
+    }
+    kfree(image);
+    if (file != 0) vfs_close(file);
+    return status;
 }
 
 kstatus_t process_exec_from_vfs(

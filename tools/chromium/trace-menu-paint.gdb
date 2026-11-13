@@ -13,8 +13,8 @@ except RuntimeError as error:
 end
 target remote /tmp/system-keys.sock
 python
-# Four entry addresses only. Hardware stops perturb these wall-clock
-# timelines; they are not CPU timings, nor proof that a menu is visible.
+# 仅使用四个入口地址。硬件断点会影响这些墙钟时间线；
+# 它们不是 CPU 耗时，也不能证明菜单已经可见。
 started=None
 owner=None
 samples=0

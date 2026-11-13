@@ -62,7 +62,7 @@ for filename in ('trace-first-new-tab.gdb', 'trace-newtab-syscall-cost.gdb',
                  'trace-draw-paint-pair.gdb', 'trace-root-render-pass.gdb'):
     script = (root / 'tools/chromium' / filename).read_text()
     assert f'Build ID: {build_id}' in script, filename
-    # User text addresses live in the PIE range, unlike record sizes/constants.
+    # 用户文本地址位于 PIE 范围内，与记录大小/常量不同。
     literals = {int(x, 16) for x in re.findall(r'0x[0-9a-fA-F]+', script)
                 if 0x40000000 < int(x, 16) < 0x80000000}
     assert literals and literals <= valid, (filename, literals - valid)

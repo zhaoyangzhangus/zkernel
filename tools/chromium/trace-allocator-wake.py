@@ -32,9 +32,8 @@ try:
                     '-x', 'tools/chromium/trace-allocator-lock-wake.gdb'],
                    cwd=root, check=True, timeout=40)
 finally:
-    # Killing a timed-out debugger is not a remote detach. QEMU may retain
-    # its hardware breakpoint and immediately stop again after `cont`.
-    # Reconnect and detach explicitly before disabling the debug server.
+    # 终止超时的调试器不等于远程分离。QEMU 可能仍保留硬件断点，并在 `cont` 后立即再次暂停。
+    # 禁用调试服务器前，重新连接并显式执行分离。
     try:
         subprocess.run(['gdb', '-q', '-nx', '-batch',
                         '-ex', 'target remote /tmp/system-allocator.sock',

@@ -34,8 +34,8 @@ int main(void) {
             fair_insert(&queue,&nodes[i]);
         }
         bool shortcut=scheduler_fair_current_wins(&queue);
-        /* The original schedule path accounts first, enqueues current,
-         * picks the leftmost and then removes it. Use those actual helpers. */
+        /* 原始调度路径先记账、将当前线程入队、选择最左项，再将其移除。使用这些真实的
+         * 辅助函数。 */
         fair_insert(&queue,&current);
         assert(shortcut==(queue.fair_leftmost==&current));
         if(shortcut)++shortcuts;else ++full;

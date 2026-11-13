@@ -56,7 +56,7 @@ int main(void) {
     assert(syscall_complete_dispatch(&t,-110)==-110 && takes==2 && drains==1);
     pending=true;
     assert(syscall_complete_dispatch(&t,0)==0 && !pending && drains==2);
-    /* Local wake has no IPI pending bit: the old return helper lost it. */
+    /* 本地唤醒没有待处理的 IPI 位：旧的返回辅助函数会丢失该唤醒。 */
     local_request=true;
     assert(syscall_complete_dispatch(&t,-5)==-5 && drains==3 && !local_request);
     assert(syscall_complete_dispatch(&t,9)==9 && drains==3);

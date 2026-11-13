@@ -1,8 +1,6 @@
 /*
- * Use the immutable NVIDIA registry-key declarations themselves.  The
- * vendor header emits the full parameter table when
- * NV_DEFINE_REGISTRY_KEY_TABLE is selected; no System-specific duplicate of
- * that database is maintained here.
+ * 直接使用不可变的 NVIDIA 注册表键声明。选择 NV_DEFINE_REGISTRY_KEY_TABLE 后，
+ * 厂商头文件会生成完整的参数表；此处不维护 System 专用的数据库副本。
  */
 #include <stddef.h>
 

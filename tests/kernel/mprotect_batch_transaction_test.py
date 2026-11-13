@@ -25,7 +25,9 @@ program = r'''
 #define X86_PAGE_USER 2U
 #define X86_PAGE_GLOBAL 4U
 #define X86_CACHE_WB 0
-typedef struct { list_head_t ordered_node; uint64_t start,end; uint32_t prot; bool cow; } vm_area_t;
+typedef struct { unsigned type; } vm_object_t;
+#define VM_OBJECT_FILE 2U
+typedef struct { list_head_t ordered_node; uint64_t start,end; uint32_t prot; bool cow; vm_object_t *object,*private_object; } vm_area_t;
 typedef struct { list_head_t area_list; uint64_t root_table; } vm_space_t;
 static vm_area_t areas[2];
 static vm_space_t space;
@@ -59,7 +61,7 @@ static kstatus_t x86_protect_page(uint64_t root, vaddr_t va, uint32_t flags, uns
 }
 static bool x86_tlb_shootdown_root(uint64_t root) {
     (void)root; assert(locked);
-    /* No VMA publication may precede acknowledgement, even on rollback. */
+    /* 即使发生回滚，也不得在确认前发布 VMA。 */
     assert(areas[0].prot==3 && areas[1].prot==3);
     return ++flushes != fail_flush;
 }
@@ -77,6 +79,13 @@ static bool x86_page_range_has_present_pages(uint64_t root,vaddr_t start,uint64_
     (void)root;assert(locked);
     for(uint64_t va=start;va<end;va+=PAGE_SIZE)if(present[va/PAGE_SIZE])return true;
     return false;
+}
+/* 事务夹具模拟融合接口；真实页表的锁次数由融合遍历回归验证。 */
+static kstatus_t x86_protect_next_user_page_deferred(uint64_t root,vaddr_t start,
+    uint64_t end,uint32_t flags,unsigned mode,vaddr_t *out,bool *changed) {
+    *changed=false;
+    kstatus_t status=x86_next_present_page(root,start,end,out);
+    return status==K_OK ? x86_protect_user_page_deferred(root,*out,flags,mode,changed) : status;
 }
 ''' + helper + r'''
 static kstatus_t transaction(vm_space_t *space, vaddr_t address, uint64_t end, uint32_t prot) {

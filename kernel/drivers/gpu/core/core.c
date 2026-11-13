@@ -63,8 +63,8 @@ static void gpu_submission_unlink(gpu_pending_submission_t *submission) {
     submission->node.prev = &submission->node;
 }
 
-/* Inline the locking boundary so caller accesses see its acquire/release,
- * rather than relying on interprocedural mod/ref summaries of debug hooks. */
+/* 在此处内联加锁边界，让调用方访问直接体现 acquire/release 语义，
+ * 而不是依赖调试钩子的过程间读写摘要。 */
 static inline __attribute__((always_inline)) void gpu_context_lock(gpu_context_t *context) {
     gpu_context_debug_set(1U, context);
     sched_preempt_disable();

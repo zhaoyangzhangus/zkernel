@@ -102,7 +102,7 @@ int main(){
  assert(canvas.value==0x40007);
  assert(!stub.MakeContextCurrent(HasGLES2ReadOrWriteUsage(canvas)));
 #endif
- // A real GL request must still fail when GL is absent, not silently succeed.
+ // 缺少 GL 时，真实 GL 请求仍必须失败，不能静默返回成功。
  auto explicit_gl=blink::CanvasRasterSharedImageUsage(
   SHARED_IMAGE_USAGE_DISPLAY_READ|SHARED_IMAGE_USAGE_GLES2_WRITE,vk_only);
  assert(!stub.MakeContextCurrent(HasGLES2ReadOrWriteUsage(explicit_gl)));

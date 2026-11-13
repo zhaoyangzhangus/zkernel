@@ -37,7 +37,7 @@ program += 'emit(""); return 0; }\n'
 
 with tempfile.TemporaryDirectory(prefix='system-events-probe-') as directory:
     path = Path(directory)
-    # Code generation, not only syntax checking, catches dormant TU errors.
+    # 生成代码可以捕获未触发的翻译单元错误，而不仅仅是语法检查。
     subprocess.run(['cc', '-std=gnu11', '-Wall', '-Wextra', '-Werror', '-O2',
                     '-ffreestanding', '-I' + str(ROOT / 'user/libc/include'),
                     '-I' + str(ROOT / 'include'), '-c', str(SOURCE),

@@ -1,3 +1,3 @@
 #pragma once
-/* Source compatibility for the external browser toolchain. */
+/* 为外部浏览器工具链提供源码兼容性。 */
 #include <libc/libc.h>

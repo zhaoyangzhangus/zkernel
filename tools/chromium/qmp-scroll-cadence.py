@@ -85,7 +85,7 @@ with tempfile.TemporaryDirectory(prefix='system-scroll-cadence-') as directory:
                     {'type': 'btn', 'data': {'button': button, 'down': down}}]})
             changes, captures, gaps = [], [], []
             last_sample = started
-            # No held key or three-tick spacing in this measurement.
+            # 此项测量不保持按键，也不设置三个时钟节拍的间隔。
             while time.monotonic()-started < .7:
                 current, capture_ms = frame()
                 observed = time.monotonic()

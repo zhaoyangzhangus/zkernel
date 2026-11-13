@@ -57,11 +57,11 @@ int main(void) {
     enqueue_local_raw(&g_cpus[1],&thread);
     assert(thread.sched.vruntime==1004000);
     assert(!(thread.sched.flags&SCHED_ENTITY_VRUNTIME_RELATIVE));
-    /* Source clock must not impose an 89-second artificial debt on CPU1. */
+    /* 源 CPU 的时钟不能让 CPU1 背上 89 秒的人为债务。 */
     assert(thread.sched.vruntime<2000000);
     dequeue_local_raw(&g_cpus[1],&thread);
-    /* Exercise the real dequeue/transfer/rollback path with another running
-     * FAIR entity keeping the source clock at its independent baseline. */
+    /* 使用另一个运行中的 FAIR 实体保持源 CPU 时钟处于独立基线，测试真实的出队/转移/
+     * 回滚路径。 */
     thread_t runner={0};runner.sched_class=SCHED_CLASS_FAIR;
     atomic_init(&runner.state,THREAD_RUNNING);runner.sched.vruntime=9000;
     reset(9000,800000,&thread);g_cpus[0].queue.current=&runner;
@@ -89,7 +89,7 @@ int main(void) {
         seed=seed*UINT64_C(6364136223846793005)+1;
         thread.sched.vruntime=seed;
         uint64_t original=seed,debt=seed>source_floor?seed-source_floor:0;
-        /* Failed publication rolls back before the caller re-enqueues. */
+        /* 发布失败时应先回滚，再由调用方重新入队。 */
         accepted=false;
         assert(!scheduler_transfer_local(0,&g_cpus[0],&thread,1));
         assert(thread.owner_cpu==0&&thread.sched.vruntime==original);
@@ -100,7 +100,7 @@ int main(void) {
         enqueue_local_raw(&g_cpus[1],&thread);
         uint64_t expected=debt>UINT64_MAX-target_floor?UINT64_MAX:target_floor+debt;
         assert(thread.sched.vruntime==expected);
-        /* Duplicate enqueue must not apply the target clock twice. */
+        /* 重复入队不得重复应用目标时钟偏移。 */
         enqueue_local_raw(&g_cpus[1],&thread);
         assert(thread.sched.vruntime==expected&&g_cpus[1].queue.nr_running==1);
         dequeue_local_raw(&g_cpus[1],&thread);++cases;
@@ -116,7 +116,7 @@ int main(void) {
     enqueue_local_raw(&g_cpus[2],&thread);
     assert(thread.sched.vruntime==50100);
     dequeue_local_raw(&g_cpus[2],&thread);
-    /* A class change while blocked must consume the relative marker too. */
+    /* 阻塞期间改变调度类时，也必须消费相对偏移标记。 */
     reset(9000,800000,&thread);thread.sched.vruntime=9100;
     scheduler_prepare_fair_migration(&g_cpus[0].queue,&thread);
     thread.sched_class=SCHED_CLASS_RT;thread.rt_priority=3;
@@ -127,8 +127,8 @@ int main(void) {
     atomic_store(&thread.state,THREAD_RUNNING);g_cpus[0].queue.current=&thread;
     scheduler_migrate_local(0,&g_cpus[0],&thread,1);
     assert(thread.migration_pending&&thread.owner_cpu==0&&thread.sched.vruntime==9100&&!pushes);
-    /* Running migrations stage privately until the assembly switch finishes.
-     * Invalid early-test contexts must not strand an unpublishable thread. */
+    /* 运行中的迁移会私下暂存，直到汇编上下文切换完成。
+     * 早期测试上下文无效时，不得让线程停留在无法发布的状态。 */
     thread_t idle={0};g_cpus[0].queue.idle=&idle;
     assert(!scheduler_stage_handoff(&g_cpus[0],&thread));
     thread.arch.switch_ctx.rsp=1;

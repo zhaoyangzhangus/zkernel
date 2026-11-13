@@ -118,7 +118,7 @@ int main(void) {
             fail_read=0;
         }
     }
-    /* Maximum extent, high LBA and first-slot duplicate semantics. */
+    /* 最大范围、高 LBA 和首槽重复项语义。 */
     for(unsigned high=0;high<2;++high) {
         memset(&cache,0,sizeof(cache));assert(block_cache_init(&cache,&device));
         UINT64 base=high?UINT64_MAX-128U:64U;
@@ -150,7 +150,7 @@ int main(void) {
     assert(block_cache_read_range(&cache,64,1,single_output));
     assert(!range_checks&&lookup_calls==1&&!reads);
     for(unsigned i=0;i<512;++i)assert(single_output[i]==0xa5);
-    /* Write hit/eviction: failed dirty flush must preserve the old entry. */
+    /* 写入命中/淘汰：脏数据刷写失败时必须保留旧条目。 */
     for(unsigned failure=0;failure<2;++failure) {
         memset(&cache,0,sizeof(cache));assert(block_cache_init(&cache,&device));
         cache.Clock=100;

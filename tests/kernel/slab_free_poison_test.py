@@ -103,7 +103,7 @@ int main(void){
   kfree_internal(p);assert(errors==prior+1&&poisoned==bytes);
   ++cases;
  }
- /* Invalid input must not poison or publish any slot. */
+ /* 输入无效时不得写入毒值，也不得发布任何槽位。 */
  for(unsigned bad=0;bad<5;++bad){
   void *p=setup(0,1,0,0);allocation_header_t *h=payload_header(p);
   slab_page_t *s=(void*)h->owner;
@@ -112,15 +112,15 @@ int main(void){
   kfree_internal(p);assert(errors==1&&!poisoned&&!frees&&!locks);
  }
  kfree_internal(0);
- /* Large objects retain their full requested-byte poison and page release. */
+ /* 大对象仍会对全部请求字节写入毒值并释放页面。 */
  for(unsigned n=0;n<=4096;n+=128){
   void *p=setup(9,0,0,0);allocation_header_t *h=payload_header(p);
   h->class_index=KMEM_CLASS_LARGE;h->owner=(uintptr_t)&page;h->requested=n;
   h->cookie=allocation_cookie(h,p);write_trailer(p,n,h->cookie);
   kfree_internal(p);assert(!errors&&frees==1&&poisoned==n&&!locks);
  }
- /* The public wrapper pins small CPU-local frees, but must not extend an
-  * existing guard across large-object poison fills/page reclamation. */
+ /* 公共包装器会固定小型 CPU 本地释放操作，但不得让现有保护区延伸到大对象毒值填充/
+  * 页面回收过程。 */
  unsigned wrapper_cases=0;
  for(initial_pin=0;initial_pin<4;++initial_pin){
   for(unsigned n=2048;n<=32768;n*=2){

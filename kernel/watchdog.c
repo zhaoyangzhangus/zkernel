@@ -11,7 +11,7 @@ static struct {
 } g_watchdog;
 
 static void watchdog_lock(void) {
-    /* Keep the owner runnable on this CPU until protected state is released. */
+    /* 在受保护状态释放之前，确保所有者在此 CPU 上始终可运行。 */
     sched_preempt_disable();
     spinlock_lock(&g_watchdog.lock);
 }

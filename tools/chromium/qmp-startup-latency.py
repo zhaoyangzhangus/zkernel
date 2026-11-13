@@ -11,9 +11,8 @@ import argparse
 import subprocess
 
 def browser_extent(width, pixels):
-    # Sample multiple rows below toolbar glyphs. A focused address field
-    # draws a blue border across row 90; a single-row test would mistake a
-    # visible focused browser for an empty desktop after dock restoration.
+    # 对工具栏字形下方的多行进行采样。地址栏聚焦时会在第 90 行绘制蓝色边框；只采样一行
+    # 会把 Dock 恢复后仍显示但已聚焦的浏览器误判为空桌面。
     light = [x for x in range(width)
              if sum(min(pixels[(y*width+x)*3:(y*width+x)*3+3]) >= 200
                     for y in (84, 86, 88, 90, 92)) >= 3]
@@ -58,8 +57,8 @@ def command(name, arguments=None):
     return qmp.command(name, arguments)
 
 if args.reset_pointer:
-    # A fresh QEMU does not guarantee a (0,0) guest pointer. Relative motion
-    # alone can click beyond the dock and masquerade as a launch failure.
+    # 新启动的 QEMU 不保证客户机指针位于 (0,0)。只发送相对移动可能会让指针移出 Dock，
+    # 看起来像是启动失败。
     for _ in range(25):
         command('input-send-event', {'events':[
             {'type':'rel','data':{'axis':'x','value':-100}},
@@ -101,8 +100,7 @@ with tempfile.TemporaryDirectory(prefix='system-startup-') as directory:
             time.sleep(.1)
         command('screendump',{'filename':str(root/'build/chrome-root-closed.png'),
                              'format':'png'})
-        # Current calibrated pointer is the root X; the canonical dock icon
-        # is (1200,1020). The caller's relative startup defaults are ignored.
+        # 当前已校准指针位置是根 X；规范 Dock 图标位于 (1200,1020)。忽略调用方的相对启动默认值。
         args.move_x, args.move_y = 265, 990
     offset=(20*width+20)*3
     desktop=baseline[offset:offset+3]
@@ -134,9 +132,8 @@ with tempfile.TemporaryDirectory(prefix='system-startup-') as directory:
                 continue
             center = (extent[0]+extent[1])//2
             left, right = max(extent[0], center-275), min(extent[1], center+275)
-            # Include the online Google logo/Doodle, not only the mostly
-            # white search/footer area. A blank navigation still has no
-            # body pixels here; screenshots remain the authoritative gate.
+            # 同时包含在线 Google 标志/Doodle，而不只是大多为白色的搜索/页脚区域。
+            # 空白导航在这里仍没有正文像素；截图仍是权威门禁依据。
             if body_pixel_count(width, pixels, left, right)>1000:
                 result={'window_seconds':window_seconds,
                         'body_seconds':time.monotonic()-start,

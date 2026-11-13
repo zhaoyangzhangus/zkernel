@@ -102,8 +102,8 @@ int main(void) {
         }
     }
     baseline=depth=0; input_lock(); assert(!input_coalesce_motion(0)); input_unlock();
-    /* Exercise the real public pressure path, including merged motion at a
-     * full ring: it must not invoke eviction or change the count. */
+    /* 覆盖真实的公共压力处理路径，包括队列已满时合并运动事件：不得触发逐出，也不得
+     * 改变计数。 */
     input_core_init(); input_event_t in,out;
     for(unsigned i=0;i<INPUT_CORE_CAPACITY;++i) {
         in=event(i,1); in.device_id=i; assert(input_core_push(&in)==K_OK);

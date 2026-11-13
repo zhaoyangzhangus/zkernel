@@ -1,9 +1,9 @@
 set pagination off
 target remote /tmp/system-keys.sock
-# Current staged Chrome: Window::UpdateVisualState=0xd6dc9e0, PIE=0x40000000.
-# Disassembly's failure-only branch follows the check at byte 0x114. Break
-# there, not on every frame: normal rendering must incur no debugger stops.
-# Revalidate both the function and branch addresses after rebuilding Chrome.
+# 当前暂存的 Chrome：Window::UpdateVisualState=0xd6dc9e0，PIE=0x40000000。
+# 反汇编中的仅失败分支位于偏移 0x114 的检查之后。在该分支设置断点，而不是每帧都停下：
+# 正常渲染不能受到调试器暂停影响。
+# Chrome 重建后重新验证函数和分支地址。
 hbreak *0x4d6dc9f9
 commands
 silent

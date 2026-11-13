@@ -90,14 +90,14 @@ int main(void) {
         for (unsigned i = 0; i < 10000; ++i) {
             probes = 0; check(family, 2, 1, 4511); assert(probes == 1);
         }
-        /* Registry growth relocates storage, but hints retain only indices. */
+        /* 注册表扩展会搬移存储，但提示只保留索引。 */
         memcpy(tables4[1], tables4[0], sizeof(tables4[0]));
         memcpy(tables6[1], tables6[0], sizeof(tables6[0]));
         g_tcp_connections = tables4[1]; g_tcp6_connections = tables6[1];
         memset(tables4[0], 0xa5, sizeof(tables4[0]));
         memset(tables6[0], 0xa5, sizeof(tables6[0]));
         probes = 0; check(family, 2, 1, 4511); assert(probes == 1);
-        /* A newly registered earlier wildcard must supersede the hot entry. */
+        /* 新注册的靠前通配项必须优先于缓存的热项。 */
         assert(socket_unregister_tcp_locked(&sockets[0]) == 1);
         check(family, 2, 1, 4511);
         sockets[512].family = family == 4 ? OS_AF_INET4 : OS_AF_INET6;
@@ -119,7 +119,7 @@ int main(void) {
             seed = seed * 1664525U + 1013904223U;
             check(family, 2 + (i % 5 == 0), 1 + (i % 7 == 0), 4000 + (seed % 520));
         }
-        /* A stale, now out-of-range hint never accesses the retired slot. */
+        /* 过期且现已越界的提示绝不会访问已回收的槽位。 */
         check(family, 2, 1, 4511); g_registry_capacity = 64;
         check(family, 2, 1, 4511); check(family, 2, 1, 4001);
     }

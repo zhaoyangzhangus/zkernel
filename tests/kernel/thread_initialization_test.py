@@ -13,7 +13,7 @@ thread=(root/'kernel/process/thread.c').read_text()
 frame=thread[thread.index('    uintptr_t frame_address = '):
              thread.index('    process_thread_lock(process);',thread.index('    uintptr_t frame_address = '))]
 worker_sources=['kernel/irq/deferred.c','kernel/graphics/assets.c',
-                'kernel/graphics/present.c','kernel/graphics/launcher.c',
+                'kernel/graphics/launcher.c',
                 'kernel/graphics/server.c']
 worker_clears=[]
 for index,filename in enumerate(worker_sources):
@@ -44,9 +44,9 @@ int main(void) {
     _Static_assert(sizeof(arch_trap_frame_t)==22*sizeof(uint64_t),"Trap frame must have no uninitialized padding");
     _Alignas(thread_t) unsigned char storage[sizeof(thread_t)+128];
     void (*clear_workers[])(thread_t *)={clear_worker_0,clear_worker_1,
-                                        clear_worker_2,clear_worker_3,clear_worker_4};
+                                        clear_worker_2,clear_worker_3};
     unsigned worker_cases=0;
-    for(unsigned fn=0;fn<5;++fn)
+    for(unsigned fn=0;fn<sizeof(clear_workers)/sizeof(clear_workers[0]);++fn)
     for(unsigned offset=16;offset<=64;offset+=_Alignof(thread_t)) {
         memset(storage,0x75,sizeof(storage));thread_t *worker=(void *)(storage+offset);
         clear_workers[fn](worker);
@@ -80,6 +80,8 @@ int main(void) {
     for(unsigned cpu=0;cpu<MAX_CPUS+3;++cpu)for(unsigned pin=0;pin<2;++pin) {
         thread_t actual,expected;memset(&actual,0x75,sizeof(actual));expected=actual;
         atomic_init(&expected.state,THREAD_NEW);
+        atomic_init(&expected.priority_queued,false);expected.priority_next=0;
+        atomic_init(&expected.priority_request,0);atomic_init(&expected.exit_defer_count,0);
         atomic_init(&expected.remote_wake_queued,false);atomic_init(&expected.remote_wake_lock,0);
         atomic_init(&expected.block_epoch,0);atomic_init(&expected.start_pending,false);
         atomic_init(&expected.blocked_waiter,0);atomic_init(&expected.command_ack,0);

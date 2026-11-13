@@ -123,8 +123,8 @@ int64_t syscall_io_submit(uint64_t arguments_pointer, uint64_t unused1,
         goto cleanup;
     }
 
-    /* vector_count was capped above: one bounded allocation contains all
-     * three arrays, without reserving 64 entries for a small request. */
+    /* 上方已限制 vector_count：一次有界分配即可容纳全部三个数组，无需为小请求预留
+     * 64 个条目。 */
     size_t context_bytes = sizeof(*context) + (size_t)arguments.vector_count *
         (sizeof(os_io_vec_t) + sizeof(io_vec_t) + sizeof(void *));
     context = arguments.vector_count != 0U ?
@@ -140,9 +140,8 @@ int64_t syscall_io_submit(uint64_t arguments_pointer, uint64_t unused1,
         context->buffers = (void **)(context->kernel_vectors +
                                     arguments.vector_count);
     }
-    /* Only active slots are visible to submission and cleanup. Descriptors
-     * are fully overwritten by copy_from_user; no inactive slots are allocated.
-     * Initialize ownership before that copy can fail. */
+    /* 提交和清理流程只能看到活动槽位。描述符会由 copy_from_user 完整覆盖；不会为
+     * 非活动槽位分配内存。在复制可能失败之前先初始化所有权。 */
     for (uint32_t i = 0; i < arguments.vector_count; ++i) {
         context->kernel_vectors[i] = (io_vec_t){0};
         context->buffers[i] = 0;
@@ -154,9 +153,8 @@ int64_t syscall_io_submit(uint64_t arguments_pointer, uint64_t unused1,
         status = K_EACCES;
         goto cleanup;
     }
-    /* Validate the complete captured vector list before allocating payloads
-     * or reading user data. A bad late vector must not consume a large
-     * valid prefix's staging memory and copy work. */
+    /* 分配负载或读取用户数据之前，先验证已捕获的完整向量列表。较后位置的无效向量
+     * 不得消耗较大有效前缀所需的暂存内存和复制开销。 */
     for (uint32_t i = 0; i < arguments.vector_count; ++i) {
         const os_io_vec_t *user_vector = &context->user_vectors[i];
         if (user_vector->length > USER_IO_MAX_BYTES ||
@@ -174,8 +172,8 @@ int64_t syscall_io_submit(uint64_t arguments_pointer, uint64_t unused1,
         const os_io_vec_t *user_vector = &context->user_vectors[i];
         context->kernel_vectors[i].length = (size_t)user_vector->length;
         if (user_vector->length == 0U) continue;
-        /* Writes fill every staged byte before submission; reads and
-         * control requests retain blank buffers for short device output. */
+        /* 写入请求会在提交前填满所有暂存字节；读取和控制请求则保留空缓冲区，以接收
+         * 设备返回的短数据。 */
         context->buffers[i] = arguments.opcode == OS_IO_WRITE ?
             kmalloc((size_t)user_vector->length, 0) :
             kzalloc((size_t)user_vector->length, 0);
@@ -198,8 +196,8 @@ int64_t syscall_io_submit(uint64_t arguments_pointer, uint64_t unused1,
         goto cleanup;
     }
 
-    /* No request object exists on staging failure. The initializer clears
-     * it once and installs its first reference before cleanup can put it. */
+    /* 暂存失败时尚未创建请求对象。初始化函数会先清零对象并设置首个引用，之后清理
+     * 流程才能释放它。 */
     request = (io_request_t *)kmalloc(sizeof(*request), 0);
     if (request == 0) {
         status = K_ENOMEM;
@@ -220,7 +218,7 @@ int64_t syscall_io_submit(uint64_t arguments_pointer, uint64_t unused1,
     if (status != K_OK) goto cleanup;
     status = io_request_register_user(request);
     if (status != K_OK) goto cleanup;
-    /* Registration owns a separate reference; retain ours until submit returns. */
+    /* 注册流程拥有单独的引用；提交返回前保留当前引用。 */
     uint64_t request_id = request->request_id;
     status = io_submit(request);
     object_put(request);
@@ -235,7 +233,7 @@ cleanup:
     if (request != 0) {
         if ((request->internal_flags & IOREQ_INTERNAL_USER_REQUEST) != 0U &&
             !io_request_is_terminal(request)) {
-            /* Remove an unsubmitted request from the user registry. */
+            /* 从用户请求注册表中移除尚未提交的请求。 */
             (void)io_cancel(request);
         }
         object_put(request);
@@ -246,7 +244,7 @@ cleanup:
     return status;
 }
 
-/* IO_CANCEL(request_id): cancel only a request owned by the current process. */
+/* IO_CANCEL(request_id)：只取消当前进程拥有的请求。 */
 int64_t syscall_io_cancel(uint64_t request_id, uint64_t unused1,
                              uint64_t unused2, uint64_t unused3,
                              uint64_t unused4, uint64_t unused5) {

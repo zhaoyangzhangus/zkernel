@@ -1,9 +1,8 @@
 #pragma once
 #include <stdint.h>
 
-/* Opt-in surface exchange. The mapped allocation contains two equal,
- * page-aligned slots; applications only write the slot granted by BEGIN.
- * COMMIT publishes a complete frame, CANCEL keeps the previous frame. */
+/* 显式启用的表面交换接口。映射的分配区域包含两个大小相同、按页面对齐的槽位；应用只能写入 BEGIN
+ * 授予的槽位。COMMIT 发布完整帧，CANCEL 保留上一帧。 */
 enum os_surface_operation {
     OS_SURFACE_BEGIN = 1U,
     OS_SURFACE_COMMIT = 2U,

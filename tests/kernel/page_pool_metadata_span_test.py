@@ -8,7 +8,7 @@ source = (root / 'kernel/mm/phys/percpu_page.c').read_text()
 helpers = source[source.index('static void pool_install_base('):source.index('static void pool_partial_push(')]
 alloc = source[source.index('page_t *pool_alloc_small('):source.index('static PAGE_NOINLINE bool pool_free_slow(')]
 slot = source[source.index('static bool pool_page_in_local_group('):source.index('bool pool_free_small(')]
-# Independent physical-address path retained as the pre-cache oracle.
+# 保留独立的物理地址路径，作为缓存引入前的基准。
 previous = slot[:slot.index('    uintptr_t metadata_delta =')]
 previous += slot[slot.index('    uint64_t page_physical'):]
 previous = previous.replace('pool_page_in_local_group(', 'previous_slot(')
@@ -84,7 +84,7 @@ int main(void) {
                 else assert(actual==0xdeadbeef);
                 ++free_cases;
             }
-            /* One-past metadata and physical group must not become slot 64. */
+            /* 超出末尾的元数据和物理组都不能被当作槽位 64。 */
             unsigned outside=91;
             assert(!pool_page_in_local_group(second+total-split,pool,order,&outside));
             assert(outside==91);
@@ -101,8 +101,7 @@ int main(void) {
                 assert(actual==expected&&lookups==(offset<split?0U:1U));
                 assert(actual->u.compound.head==actual&&actual->u.compound.index==0);
                 if(offset>=split) {
-                    /* Integer-address control avoids forming an out-of-array
-                     * pointer: the old arithmetic points into the wrong array. */
+                    /* 整数地址检查避免构造数组外指针：旧的算术运算会指向错误的数组。 */
                     assert((uintptr_t)first+(size_t)offset*sizeof(*first)!=(uintptr_t)actual);
                     ++negative_cases;
                 }

@@ -11,8 +11,8 @@ from chromium_source import chromium_source
 root = Path(__file__).resolve().parents[2]
 source = chromium_source()
 sdk = source/'build/linux/debian_bullseye_amd64-sysroot'
-# A Windows checkout can preserve a symlink as an invalid reparse-tag string.
-# Catch the foundational runtime links before a large SDK rebuild/link step.
+# Windows 工作区可能会把符号链接保留为无效的重解析标记字符串。
+# 在大型 SDK 重建/链接之前，先检查基础运行时链接。
 for relative in ('lib64/ld-linux-x86-64.so.2',
                  'usr/lib/x86_64-linux-gnu/libutil.so',
                  'usr/lib/x86_64-linux-gnu/librt.so',
@@ -43,7 +43,7 @@ for name, command in (
 ):
     env = environment.copy()
     if name == 'generator':
-        # The unified launcher sanitizes these for standard Chromium tools.
+        # 统一启动器会为标准 Chromium 工具清理这些环境变量。
         for key in ('CPATH', 'C_INCLUDE_PATH', 'CPLUS_INCLUDE_PATH'):
             env.pop(key)
     result = subprocess.run([*command, '-M', '-x', 'c', '-'], input=probe,

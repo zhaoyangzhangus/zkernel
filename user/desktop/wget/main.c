@@ -1968,7 +1968,7 @@ static bool parse_cli(uint64_t argc, char **argv, const char **url,
         } else if ((value = long_option_value(argument, "--method")) != 0) {
             if (!copy_text_cap(options->method, sizeof(options->method), value)) return false;
         } else if (argument[0] == '-' && argument[1] != '\0') {
-            /* Accept common attached short forms: -Ofile, -Pdir, -t3, -Uagent. */
+            /* 接受常见的短选项连写形式：-Ofile、-Pdir、-t3、-Uagent。 */
             if (argument[1] == 'O' && argument[2] != '\0' && options->output == 0) {
                 options->output = argument + 2U;
             } else if (argument[1] == 'P' && argument[2] != '\0' &&
@@ -1976,10 +1976,10 @@ static bool parse_cli(uint64_t argc, char **argv, const char **url,
                 options->directory_prefix = argument + 2U;
             } else if (argument[1] == 't' && argument[2] != '\0' &&
                        parse_u32_text(argument + 2U, &options->tries) && options->tries != 0U) {
-                /* parsed */
+                /* 已解析。 */
             } else if (argument[1] == 'U' && argument[2] != '\0' &&
                        copy_text_cap(options->user_agent, sizeof(options->user_agent), argument + 2U)) {
-                /* parsed */
+                /* 已解析。 */
             } else {
                 return false;
             }

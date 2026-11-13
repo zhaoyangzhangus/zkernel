@@ -28,7 +28,7 @@ bool firmware_logical_name_valid(const char *logical_name) {
         }
     }
     if (length == 0U || length == FIRMWARE_NAME_CAP || component_length == 0U) return false;
-    /* Reject a parent component without a second pass over the path. */
+    /* 无需再次遍历路径即可拒绝上级目录分量。 */
     return component_length != 2U || !component_is_dots;
 }
 
@@ -85,8 +85,8 @@ kstatus_t firmware_request(firmware_manager_t *manager,
         return K_EINVAL;
     }
     *out = (firmware_blob_t){0};
-    /* The acquire-ready check above publishes the immutable provider fields.
-     * Providers may access files or wait for I/O; no registry lock is needed. */
+    /* 上方的 acquire-ready 检查会发布不可变的提供方字段。提供方可能访问文件或等待
+     * I/O，因此无需持有注册表锁。 */
     resolve = manager->resolve;
     release = manager->release;
     context = manager->context;

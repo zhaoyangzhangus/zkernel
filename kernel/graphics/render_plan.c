@@ -1,4 +1,5 @@
 #include "internal.h"
+#include <kernel/string.h>
 
 /* REFACTOR_P7H_RENDER_PLAN_OWNER：不可变空间计划编译。 */
 
@@ -6,6 +7,16 @@ compositor_render_span_t
     g_compositor_render_plan[WINDOW_RENDER_PLAN_MAX_SPANS];
 uint32_t g_compositor_render_plan_count;
 bool g_compositor_render_plan_valid;
+
+/* 只保留值类型键和数组长度，不持有窗口、Surface 或控件引用。
+ * 瓦片修订号统一反映几何、层级、透明标志、屏幕大小及动画失效。 */
+static struct {
+    uint64_t revision;
+    uint32_t damage_count, span_count;
+    bool valid;
+    Rect damage[WINDOW_DAMAGE_MAX_SNAPSHOT_RECTS];
+} g_compositor_plan_cache;
+
 
 void compositor_render_plan_reset(void) {
     g_compositor_render_plan_count = 0U;
@@ -48,8 +59,7 @@ bool compositor_view_fully_covers_snapshot_bounds(
     int64_t left, top, right, bottom;
     return bounds != 0 &&
         compositor_view_opaque_bounds(window, &left, &top, &right, &bottom) &&
-        (int64_t)bounds->x0 >= left && (int64_t)bounds->y0 >= top &&
-        (int64_t)bounds->x1 <= right && (int64_t)bounds->y1 <= bottom;
+        rect_inside_bounds(*bounds, left, top, right, bottom);
 }
 
 static uint32_t compositor_render_plan_exact_floor(
@@ -92,37 +102,10 @@ static bool compositor_view_intersects_render_rect(
     const compositor_window_view_t *window,
     const Rect *rect) {
 
-    int64_t left;
-    int64_t top;
-    int64_t right;
-    int64_t bottom;
-
-    if (window == 0 || rect == 0 ||
-        rect->x0 >= rect->x1 ||
-        rect->y0 >= rect->y1) {
-        return false;
-    }
-
-    left = window->x;
-    top = window->y;
-
-    right =
-        left +
-        (int64_t)window_outer_width(
-            window->width,
-            window->flags);
-
-    bottom =
-        top +
-        (int64_t)window_outer_height(
-            window->height,
-            window->flags);
-
-    return
-        right > (int64_t)rect->x0 &&
-        bottom > (int64_t)rect->y0 &&
-        left < (int64_t)rect->x1 &&
-        top < (int64_t)rect->y1;
+    if (window == 0 || rect == 0) return false;
+    return rect_intersects_bounds(*rect, window->x, window->y,
+        (int64_t)window->x + window_outer_width(window->width, window->flags),
+        (int64_t)window->y + window_outer_height(window->height, window->flags));
 }
 
 static uint64_t compositor_compile_render_span_mask(
@@ -197,9 +180,24 @@ bool compositor_build_render_plan(
 
     /* 瓦片数据不可用时由调用方执行精确回退绘制。 */
     if (snapshot == 0 || snapshot->damage_count == 0U ||
-        !compositor_tile_metadata_valid()) {
+        snapshot->damage_count > WINDOW_DAMAGE_MAX_SNAPSHOT_RECTS ||
+        snapshot->animations || !compositor_tile_metadata_valid()) {
+        g_compositor_plan_cache.valid = false;
         return false;
     }
+
+    uint64_t revision = compositor_tile_metadata_revision();
+    size_t damage_bytes = (size_t)snapshot->damage_count * sizeof(Rect);
+    if (g_compositor_plan_cache.valid &&
+        g_compositor_plan_cache.revision == revision &&
+        g_compositor_plan_cache.damage_count == snapshot->damage_count &&
+        memcmp(g_compositor_plan_cache.damage, snapshot->damage_rects, damage_bytes) == 0) {
+        g_compositor_render_plan_count = g_compositor_plan_cache.span_count;
+        g_compositor_render_plan_valid = true;
+        return true;
+    }
+    /* 开始覆盖原数组前先作废缓存；中途容量不足或构建失败不能复用半成品。 */
+    g_compositor_plan_cache.valid = false;
 
     columns = window_damage_tile_columns_locked();
     rows = window_damage_tile_rows_locked();
@@ -419,5 +417,10 @@ bool compositor_build_render_plan(
     g_compositor_render_plan_valid = true;
 
     compositor_compile_render_plan_commands(snapshot);
+    memcpy(g_compositor_plan_cache.damage, snapshot->damage_rects, damage_bytes);
+    g_compositor_plan_cache.revision = revision;
+    g_compositor_plan_cache.damage_count = snapshot->damage_count;
+    g_compositor_plan_cache.span_count = g_compositor_render_plan_count;
+    g_compositor_plan_cache.valid = true;
     return true;
 }

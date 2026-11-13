@@ -111,7 +111,7 @@ int main(void){
   }
   fail_alloc=false;kfree(p);assert(!live_pages && !live_bytes);
  }
- /* Every validation failure must leave all bytes/metadata unchanged. */
+ /* 任一验证失败都必须保持所有字节和元数据不变。 */
  void *p=kmalloc(4096,0);allocation_header_t *h=payload_header(p);
  page_t *page=(void*)h->owner;void *clean=malloc(page->bytes);assert(clean);
  memcpy(clean,page->memory,page->bytes);
@@ -133,8 +133,8 @@ int main(void){
  }
  memcpy(page->memory,clean,page->bytes);page->owner=PAGE_OWNER_SLAB;page->order=1;
  free(clean);kfree(p);assert(!kmalloc_try_grow(NULL,4096));
- /* Real shared-file growth succeeds without any page allocation, even
-  * when all subsequent allocations fail. Re-exposed bytes remain zero. */
+ /* 真实共享文件扩展无需分配页面即可成功，即使之后的所有分配都失败也一样。
+  * 重新暴露的字节仍必须为零。 */
  vfs_backend_node_t b={0};
  assert(vfs_memory_backend_truncate(&b,2097152)==K_OK);
  memset(b.data,0x57,(size_t)b.size);uint8_t *old=b.data;unsigned before=calls;
@@ -145,8 +145,8 @@ int main(void){
  for(size_t j=0;j<b.size;++j)assert(b.data[j]==(j<2097152?0x57:0));
  assert(vfs_memory_backend_truncate(&b,0)==K_OK && !live_pages);
  fail_alloc=false;
- /* Append's doubled target cannot fit; exact growth can. Consume an
-  * aliased source before clearing its adjacent hole, without retiring it. */
+ /* 追加操作的两倍目标容量无法放入，但精确扩展可以。清空相邻空洞前先读取别名源，
+  * 且不能回收该源。 */
  assert(vfs_memory_backend_truncate(&b,32768)==K_OK);
  for(size_t j=0;j<b.size;++j)b.data[j]=(uint8_t)(j*19+7);
  uint8_t expected[64];memcpy(expected,b.data+b.size-64,sizeof(expected));
@@ -156,14 +156,12 @@ int main(void){
  assert(b.data_capacity==32849 && !memcmp(b.data+32785,expected,64));
  for(unsigned j=0;j<32768;++j)assert(b.data[j]==(uint8_t)(j*19+7));
  for(unsigned j=32768;j<32785;++j)assert(!b.data[j]);
- /* Crossing the physical boundary still takes the original OOM path,
-  * preserving old data, EOF, guards and ownership. */
+ /* 越过物理边界时仍走原有 OOM 路径，并保留旧数据、EOF、保护信息和所有权。 */
  size_t capacity=65536-KMEM_PAYLOAD_OFFSET-KMEM_TRAILER_SIZE;
  assert(vfs_memory_backend_truncate(&b,capacity+1)==K_ENOMEM);
  assert(b.data==old && b.size==32849 && b.data_capacity==32849 && live_pages==1);
  assert(!memcmp(b.data+32785,expected,64));
- /* Outside the block, successful replacement still copies the old prefix,
-  * retires its old owner once and exposes only zero-filled new bytes. */
+ /* 超出块容量后，成功替换仍会复制旧前缀、仅回收一次旧所有者，并只暴露填零的新字节。 */
  fail_alloc=false;before=calls;
  assert(vfs_memory_backend_truncate(&b,65500)==K_OK);
  assert(calls==before+1 && b.data!=old && live_pages==1 && live_bytes==131072);
@@ -171,8 +169,8 @@ int main(void){
  for(unsigned j=0;j<32768;++j)assert(b.data[j]==(uint8_t)(j*19+7));
  assert(!memcmp(b.data+32785,expected,64));
  for(size_t j=32849;j<b.size;++j)assert(!b.data[j]);
- /* This request is just below the half-block boundary. Including kmalloc
-  * metadata pushed it up one order, so even doubled append capacity fits. */
+ /* 此请求略低于半块边界。计入 kmalloc 元数据后，它上升了一个阶，因此两倍追加容量
+  * 仍然放得下。 */
  old=b.data;before=calls;fail_alloc=true;memcpy(expected,b.data,64);
  assert(vfs_memory_backend_write(&b,b.size+17,b.data,64,&bytes)==K_OK);
  assert(bytes==64 && b.data==old && calls==before && b.data_capacity==131000);

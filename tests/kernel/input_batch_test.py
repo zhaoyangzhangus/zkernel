@@ -186,8 +186,8 @@ int main(void) {
         assert(actual_x==expected_x && actual_y==expected_y && !input_core_pending());
     }
     puts("Real input pump: 50 paired/separate-axis edge reversals preserve sequential clipped coordinates");
-    /* Compare the actual new pump with its old single-pop loop. Include every
-     * position of a drag-start barrier, wrapped rings and mixed motion types. */
+    /* 将实际的新事件泵与旧的单次弹出循环比较。覆盖拖动开始屏障的每个位置、已回绕
+     * 的环形队列以及混合运动类型。 */
     unsigned pumps=0;
     for(unsigned head=0;head<256;head+=17)for(unsigned barrier=0;barrier<256;++barrier) {
         input_event_t original[256],reference[512];

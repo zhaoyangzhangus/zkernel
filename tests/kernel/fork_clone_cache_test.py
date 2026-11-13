@@ -1,6 +1,8 @@
 """Actual fork cache: aligned-address collision oracle, RB bounds and lifetime."""
 from pathlib import Path
 import subprocess
+import resource
+import signal
 import tempfile
 
 root = Path(__file__).resolve().parents[2]
@@ -21,11 +23,11 @@ static vm_object_t copies[COUNT];
 static unsigned visits,attempts,allocations,frees,clones,gets,fail_entry,fail_clone;
 static bool locked;
 void *kmalloc(size_t size,uint32_t flags) {
- assert(locked && !flags);
+ assert(!locked && !flags);
  if(++attempts==fail_entry)return 0;
  void *p=malloc(size);assert(p);++allocations;return p;
 }
-void kfree(void *p) {assert(p);++frees;free(p);}
+void kfree(void *p) {assert(!locked && p);++frees;free(p);}
 void vm_object_get(vm_object_t *object) {
  assert(locked && atomic_load(&object->refs.value));++gets;
  atomic_fetch_add(&object->refs.value,1);
@@ -63,12 +65,13 @@ int main(void) {
  assert(sizeof(slot_t)==4096);
  uint64_t total_new=0,total_old=0;
  for(unsigned order=0;order<4;++order) {
-  reset();rb_root_t tree={0};int heads[64],next[COUNT];
+  reset();vm_clone_cache_t tree={0};int heads[64],next[COUNT];
   for(unsigned i=0;i<64;++i)heads[i]=-1;
   unsigned permutation[COUNT];for(unsigned i=0;i<COUNT;++i)permutation[i]=i;
   if(order==1)for(unsigned i=0;i<COUNT;++i)permutation[i]=COUNT-1-i;
   if(order==2)for(unsigned i=0;i<COUNT;++i)permutation[i]=(i*2053U)%COUNT;
   if(order==3)for(unsigned i=0;i<COUNT;++i)permutation[i]=(i%2)?COUNT-1-i/2:i/2;
+  assert(clone_cache_reserve(&tree,COUNT)==K_OK);
   locked=true;
   for(unsigned i=0;i<COUNT;++i) {
    unsigned id=permutation[i],before=visits;vm_object_t *out=(void*)1;
@@ -77,7 +80,7 @@ int main(void) {
    unsigned bucket=((uintptr_t)&sources[id].object>>4)%64;
    for(int item=heads[bucket];item!=-1;item=next[item])++total_old;
    next[id]=heads[bucket];heads[bucket]=(int)id;
-   if((i%64)==63)validate(&tree,i+1);
+   if((i%64)==63)validate(&tree.index,i+1);
   }
   fail_entry=attempts+1;fail_clone=clones+1;
   for(unsigned i=0;i<2*COUNT;++i) {
@@ -91,31 +94,43 @@ int main(void) {
    }
    assert(found);
   }
-  assert(clones==COUNT && allocations==COUNT && gets==2*COUNT && attempts==COUNT);
-  validate(&tree,COUNT);total_new+=visits;locked=false;
-  clone_cache_release(&tree);assert(!tree.root && frees==allocations);
-  /* Cache entries borrow references: releasing bookkeeping must not consume
-   * any of the three references owned by the synthetic child aliases. */
+  assert(clones==COUNT && allocations==1 && gets==2*COUNT && attempts==1);
+  validate(&tree.index,COUNT);total_new+=visits;locked=false;
+  clone_cache_release(&tree);assert(!tree.index.root && frees==allocations);
+  /* 缓存项借用引用：释放记账数据时不得消耗合成子进程别名持有的三个引用。 */
   for(unsigned i=0;i<COUNT;++i)assert(atomic_load(&copies[i].refs.value)==3);
  }
  assert(total_new*50<total_old);
+ reset();vm_clone_cache_t pool={0};
+ fail_entry=1;assert(clone_cache_reserve(&pool,4)==K_ENOMEM&&!pool.entries&&!pool.capacity);
+ fail_entry=0;assert(clone_cache_reserve(&pool,4)==K_OK);
+ vm_clone_entry_t *saved=pool.entries;size_t capacity=pool.capacity;
+ fail_entry=attempts+1;
+ assert(clone_cache_reserve(&pool,8)==K_ENOMEM&&pool.entries==saved&&pool.capacity==capacity);
+ assert(clone_cache_reserve(&pool,SIZE_MAX)==K_ENOMEM&&pool.entries==saved);
+ fail_entry=0;assert(clone_cache_reserve(&pool,8)==K_OK&&pool.capacity==8);
+ assert(clone_cache_reserve(&pool,3)==K_OK&&pool.capacity==8);
+ clone_cache_release(&pool);assert(!pool.entries&&!pool.used&&!pool.capacity&&!pool.index.root);
+
  for(unsigned kind=0;kind<2;++kind)for(unsigned boundary=0;boundary<64;++boundary) {
-  reset();rb_root_t tree={0};locked=true;
-  if(kind==0)fail_entry=boundary+1;else fail_clone=boundary+1;
+  reset();vm_clone_cache_t tree={0};
+  assert(clone_cache_reserve(&tree,kind==0?boundary:64)==K_OK);
+  locked=true;
+  if(kind==1)fail_clone=boundary+1;
   for(unsigned i=0;i<=boundary;++i) {
    vm_object_t *out=(void*)1;
    kstatus_t status=clone_anon_cached(&tree,&sources[i].object,&out);
    if(i==boundary)assert(status==K_ENOMEM && out==(void*)1);
    else assert(status==K_OK && out==&copies[i]);
   }
-  validate(&tree,boundary);
+  validate(&tree.index,boundary);
   for(unsigned i=0;i<boundary;++i) {
    vm_object_t *out=0;assert(clone_anon_cached(&tree,&sources[i].object,&out)==K_OK && out==&copies[i]);
   }
-  locked=false;clone_cache_release(&tree);assert(!tree.root && allocations==frees);
+  locked=false;clone_cache_release(&tree);assert(!tree.index.root && allocations==frees);
   for(unsigned i=0;i<boundary;++i)assert(atomic_load(&copies[i].refs.value)==2);
  }
- printf("Fork clone cache: 4096 aligned sources, four orders, 32768 aliases: %llu old-chain visits -> %llu RB visits; <=24 per request, RB invariants, 128 allocation/clone failure boundaries and borrowed lifetime passed\n",
+ printf("Fork clone cache: 4096 aligned sources, four orders, 32768 aliases: %llu old-chain visits -> %llu RB visits; <=24 per request, RB invariants, 128 capacity/clone failure boundaries; one unlocked cache allocation per fork and borrowed lifetime passed\n",
         (unsigned long long)total_old,(unsigned long long)total_new);
 }
 '''
@@ -127,3 +142,13 @@ with tempfile.TemporaryDirectory(prefix="system-clone-cache-") as directory:
         "-I"+str(root/"include"), "-x", "c", "-", "-o", binary,
     ], input=program, text=True, check=True)
     subprocess.run([binary], check=True, timeout=30)
+    allocation='vm_clone_entry_t *entries = kmalloc(target * sizeof(*entries), 0U);'
+    assert program.count(allocation)==1
+    negative=program.replace(allocation,'locked=true; '+allocation+' locked=false;')
+    subprocess.run(['cc','-std=c11','-O2','-Wall','-Wextra','-Werror',
+                    '-I'+str(root/'include'),'-x','c','-','-o',binary],
+                    input=negative,text=True,check=True)
+    result=subprocess.run([binary],capture_output=True,text=True,timeout=30,
+        preexec_fn=lambda:resource.setrlimit(resource.RLIMIT_CORE,(0,0)))
+    assert result.returncode==-signal.SIGABRT and '!locked' in result.stderr
+    print('负面对照通过：克隆缓存预留重新进入映射锁时触发断言')

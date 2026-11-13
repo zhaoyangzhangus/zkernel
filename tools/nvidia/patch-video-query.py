@@ -46,15 +46,15 @@ def apply(root):
                                           pool->nb_queries,
                                           pool->qd_size, e->query_data,
                                           pool->qd_size / pool->nb_queries, qf);
-    /* NOT_READY and errors must never expose stale results to callers. */
+    /* NOT_READY 和错误不得向调用方暴露过期结果。 */
     if (ret == VK_SUCCESS && data)
         *data = e->query_data;
     return ret;''')
     source = ffmpeg / 'libavcodec/vulkan_decode.c'
     stage(source, '    sd_buf = (FFVkBuffer *)vp->slices_buf->data;',
           '''    sd_buf = (FFVkBuffer *)vp->slices_buf->data;
-    /* The submitted range is aligned, and pooled storage retains old bytes.
-     * Keep that entire range deterministic without modifying slice payload. */
+    /* 提交范围已对齐，而池化存储会保留旧字节。
+     * 不修改切片负载的同时，确保整个范围的内容确定。 */
     if (!sd_buf->mapped_mem || vp->slices_size > data_size ||
         data_size > sd_buf->size)
         return AVERROR(EINVAL);
@@ -68,14 +68,14 @@ def apply(root):
     previous = original.replace('        av_log(avctx,',
                                 '        if (ret == VK_SUCCESS)\n            av_log(avctx,')
     stage(source, original, '''        /* Vulkan permits implementation-defined positive success statuses;
-         * status is signed: zero is unavailable, negative indicates failure. */
+         * status 为有符号数：零表示不可用，负数表示失败。 */
         if (ret == VK_SUCCESS)
             av_log(avctx,
                    result[0] <= 0 ? AV_LOG_ERROR : AV_LOG_DEBUG,
                    "Result of previous frame decoding: %d\\n", result[0]);''',
           previous=(previous,))
-    # Verify every source revision before modifying any file. A mismatch must
-    # not leave a partially patched build tree that a later retry could reuse.
+    # 修改任何文件前，先验证每个源文件版本。出现不匹配时不能留下部分修改的构建树，
+    # 以免后续重试误用它。
     for source, text in updates.items():
         source.write_text(text)
 

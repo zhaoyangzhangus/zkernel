@@ -5,7 +5,7 @@ set $network_state = &g_e1000
 set $work_state = &g_deferred
 set $poll_queued_address = &g_e1000_poll_queued
 set $lifecycle_address = &g_e1000_lifecycle_lock
-# Use only the matching running kernel's DWARF, not stale auxiliary objects.
+# 只使用正在运行的匹配内核的 DWARF，不使用过期的辅助对象。
 python
 import gdb
 net = gdb.Value(int(gdb.parse_and_eval('$network_state'))).cast(gdb.lookup_type('e1000_state_t').pointer()).dereference()

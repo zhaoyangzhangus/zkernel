@@ -32,12 +32,12 @@ int main(void) {
     fair_insert(&queue,&browser);
     assert(queue.fair_leftmost==&browser);
     fair_remove(&queue,&browser); fair_remove(&queue,&sleeper);
-    /* A thread already ahead keeps its charge; no repeated-yield boost. */
+    /* 已领先的线程保留其权重；反复让出 CPU 不会提高其权重。 */
     browser.sched.vruntime=400000000;
     fair_insert(&queue,&browser);
     assert(browser.sched.vruntime==400000000);
     fair_remove(&queue,&browser);
-    /* Current and queued entity both participate in the floor. */
+    /* 当前实体和排队实体都参与最低值计算。 */
     browser.sched.vruntime=500000000; queue.current=&browser;
     renderer.sched.vruntime=450000000;
     fair_insert(&queue,&renderer);

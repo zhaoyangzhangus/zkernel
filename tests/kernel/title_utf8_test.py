@@ -19,6 +19,7 @@ program = r'''
 #include FT_FREETYPE_H
 #include "ascii_font_internal.h"
 #include <uapi/utf8.h>
+#include <uapi/font.h>
 #include "user/runtime/caption.h"
 #include <kernel/caption_text.h>
 #define ASCII_FONT_SUPERSAMPLE 4U

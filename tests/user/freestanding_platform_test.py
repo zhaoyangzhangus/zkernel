@@ -28,15 +28,15 @@ for target, flag in cases:
         assert '-DBL_BUILD_NO_JIT' in args
         assert 'bl_runtime_detect_cpu_features' not in output
         assert 'BLRuntimeInitializer bl_runtime_auto_init' not in output
-        # The shipping recipe disables JIT. Audit its guarded future path too,
-        # without changing the production flags or launching another guest.
+        # 发布构建配方会禁用 JIT。也检查受保护的未来路径，
+        # 不修改生产标志，也不启动另一个客户机。
         jit_args = args + ['-UBL_BUILD_NO_JIT']
         output = subprocess.check_output(jit_args, cwd=ROOT, text=True)
         assert re.search(r'features\s*&=\s*~\(BL_RUNTIME_CPU_FEATURE_X86_AVX\s*\|\s*'
                          r'BL_RUNTIME_CPU_FEATURE_X86_AVX2\s*\|\s*'
                          r'BL_RUNTIME_CPU_FEATURE_X86_AVX512\)', output)
         assert 'BLRuntimeInitializer bl_runtime_auto_init' not in output
-        # Prove the mask/auto-init checks distinguish the wrong hosted branch.
+        # 验证掩码/自动初始化检查能够区分错误的宿主分支。
         hosted = subprocess.check_output([arg for arg in jit_args if arg != flag], cwd=ROOT, text=True)
         assert 'BLRuntimeInitializer bl_runtime_auto_init' in hosted
         assert not re.search(r'features\s*&=\s*~\(BL_RUNTIME_CPU_FEATURE_X86_AVX', hosted)

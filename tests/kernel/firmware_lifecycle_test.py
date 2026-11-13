@@ -119,7 +119,7 @@ int main(void) {
     assert(atomic_load(&observers_ready)==4 && atomic_load(&attempts)==8 && firmware_core_self_test());
     assert(firmware_manager_init(&manager,other_resolve,release_provider,&context)==K_EBUSY);
     assert(firmware_manager_init(&manager,resolve_provider,other_release,&context)==K_EBUSY);
-    /* Existing API ignores replacement context when callbacks match. */
+    /* 回调相同时，现有 API 会忽略替换后的上下文。 */
     assert(firmware_manager_init(&manager,resolve_provider,release_provider,&other_context)==K_OK);
     assert(manager.context==&context);
     for(unsigned mode=1;mode<=6;++mode) {

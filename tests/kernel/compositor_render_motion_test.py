@@ -6,10 +6,10 @@ import tempfile
 root = Path(__file__).resolve().parents[2]
 source = (root / 'kernel/graphics/compositor.c').read_text()
 begin = source.index('static void compositor_render_region_bounded(')
-body = source[begin:source.index('void compositor_render_snapshot(', begin)]
+body = source[begin:source.index('static void compositor_render_snapshot(', begin)]
 render = source[source.index('void compositor_render_snapshot('):]
-assert 'compositor_render_region_bounded(span, service_motion)' in render
-assert 'compositor_render_region_bounded(0, service_motion)' in render
+assert 'compositor_render_region_bounded(span->rect, span, service_motion)' in render
+assert 'compositor_render_region_bounded(*rect, 0, service_motion)' in render
 program = r'''
 #include <assert.h>
 #include <stdbool.h>
@@ -22,12 +22,17 @@ typedef struct {unsigned mask;} compositor_render_span_t;
 static struct {Rect damage_bounds;} g_compositor_snapshot;
 static uint32_t pixels[2100*300],visits[2100*300];
 static unsigned calls,pumps,finished;
+static bool bounded;
 static uint32_t last_bottom;
 static const compositor_render_span_t *expected;
 static Rect original;
-static void compositor_region_locked(const compositor_render_span_t *span) {
+static void compositor_region_locked(Rect clip,const compositor_render_span_t *span) {(void)clip;
     assert(span==expected);++calls;
-    Rect r=g_compositor_snapshot.damage_bounds;
+    Rect r=clip;
+    assert(!memcmp(&original,&g_compositor_snapshot.damage_bounds,sizeof(original)));
+    if(bounded&&(uint64_t)(original.x1-original.x0)*(original.y1-original.y0)>
+            WINDOW_COMPOSITOR_ATOMIC_PIXELS)
+        assert((uint64_t)(r.x1-r.x0)*(r.y1-r.y0)<=WINDOW_COMPOSITOR_ATOMIC_PIXELS);
     assert(r.x0==original.x0&&r.x1==original.x1);
     assert(r.y0==(int)last_bottom&&r.y1<=original.y1);
     for(unsigned layer=0;layer<3;++layer)
@@ -40,8 +45,8 @@ static void compositor_region_locked(const compositor_render_span_t *span) {
 }
 static void window_server_pump_publication_motion(void) {
     assert(finished);finished=0;++pumps;
-    /* A moving cursor may restore any pixel: touched pixels must be fully
-     * layered, all others must still be the previous clean retained scene. */
+    /* 移动光标可能恢复任意像素：被触及的像素必须完成全部图层合成，其他像素则必须
+     * 仍保持上一帧的干净保留场景。 */
     for(unsigned i=0;i<2100*300;++i)assert(pixels[i]==(visits[i]?3:17));
 }
 ''' + body + r'''
@@ -49,14 +54,18 @@ static void run(unsigned width,unsigned height,bool service,bool planned) {
     compositor_render_span_t span={7};expected=planned?&span:0;
     original=(Rect){3,5,3+(int)width,5+(int)height};
     g_compositor_snapshot.damage_bounds=original;
+    bounded=service;
     memset(visits,0,sizeof(visits));
     for(unsigned i=0;i<2100*300;++i)pixels[i]=17;
     calls=pumps=finished=0;last_bottom=original.y0;
-    compositor_render_region_bounded(expected,service);
+    compositor_render_region_bounded(original,expected,service);
     assert(!memcmp(&original,&g_compositor_snapshot.damage_bounds,sizeof(original)));
     bool split=service&&(uint64_t)width*height>WINDOW_COMPOSITOR_ATOMIC_PIXELS;
     assert(calls>=1&&pumps==(service&&width&&height?calls:0));
     if(!split)assert(calls==1);
+    /* 只按像素预算分片；固定 32 行会增加不必要的完整图层遍历。 */
+    if(split)assert(calls==(height+(WINDOW_COMPOSITOR_ATOMIC_PIXELS/width)-1)/
+                          (WINDOW_COMPOSITOR_ATOMIC_PIXELS/width));
     for(unsigned y=0;y<300;++y)for(unsigned x=0;x<2100;++x) {
         bool inside=x>=3&&x<3+width&&y>=5&&y<5+height;
         assert(visits[y*2100+x]==inside);
@@ -65,6 +74,7 @@ static void run(unsigned width,unsigned height,bool service,bool planned) {
 }
 /* 一个快照包含许多小矩形时，每个完整区域之后都必须推进输入消费。 */
 static void fragmented(void) {
+    bounded=true;
     compositor_render_span_t span={7};
     memset(visits,0,sizeof(visits));
     for(unsigned i=0;i<2100*300;++i)pixels[i]=17;
@@ -73,7 +83,7 @@ static void fragmented(void) {
         original=(Rect){3,5+(int)i*4,67,7+(int)i*4};
         g_compositor_snapshot.damage_bounds=original;
         last_bottom=original.y0;expected=i%2?&span:0;
-        compositor_render_region_bounded(expected,true);
+        compositor_render_region_bounded(original,expected,true);
         assert(calls==i+1&&pumps==i+1&&!finished);
         assert(!memcmp(&original,&g_compositor_snapshot.damage_bounds,sizeof(original)));
     }
@@ -103,3 +113,11 @@ with tempfile.TemporaryDirectory(prefix='compositor-render-motion-') as director
                    input=broken, text=True, check=True)
     assert subprocess.run([binary], stderr=subprocess.DEVNULL).returncode != 0
     print('负面对照通过：小区域不服务输入时，碎片化重绘断言拒绝该实现')
+    # 恢复固定行数上限，应被相同像素预算下的条带数量检查拒绝。
+    broken = program.replace('if (rows == 0U) rows = 1U;',
+        'if (rows == 0U) rows = 1U; if (rows > 32U) rows = 32U;')
+    subprocess.run(['cc', '-std=gnu11', '-O2', '-Wall', '-Wextra', '-Werror',
+                    '-I' + str(root / 'include'), '-x', 'c', '-', '-o', binary],
+                   input=broken, text=True, check=True)
+    assert subprocess.run([binary], stderr=subprocess.DEVNULL).returncode != 0
+    print('负面对照通过：恢复固定 32 行分片时，冗余条带检查拒绝该实现')

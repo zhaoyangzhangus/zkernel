@@ -54,9 +54,8 @@ int main(void){
  puts("Shared spinlock: 80000 protected/publication updates, try-lock, 20000+ held-lock reads with four failed acquire attempts passed");
 }
 '''
-# Namespace/backend templates below also seed unrelated wrapper fixtures.
-# The actual VFS protocol is executed by vfs_vnode_preempt_test, not these
-# raw-spinlock traffic templates.
+# 下方的命名空间/后端模板也会初始化无关的包装器测试夹具。
+# 真实 VFS 协议由 vfs_vnode_preempt_test 执行，而不是由这些原始自旋锁流量模板执行。
 source = (root/'kernel/fs/vfs/core.c').read_text()
 wrappers = source[source.index('static void vfs_lock('):source.index('size_t vfs_string_length(')]
 vfs_program = program.replace('spinlock_lock(&lock);', 'vfs_lock();').replace(
@@ -66,7 +65,7 @@ vfs_program = vfs_program.replace('static uint64_t protected_value,checksum;',
 vfs_program = vfs_program.replace('Shared spinlock:', 'Production VFS lock:')
 port_source = (root/'kernel/ipc/port.c').read_text()
 port_wrappers = port_source[port_source.index('static void message_port_lock('):
-                            port_source.index('static bool message_port_ready(')]
+                            port_source.index('typedef struct message_port_receive_context')]
 port_program = program.replace('static spinlock_t lock;',
     'typedef struct { spinlock_t lock; } message_port_t;\n'
     'static message_port_t test_port;\n' + port_wrappers)
@@ -76,7 +75,7 @@ port_program = port_program.replace('&lock', '&test_port.lock')
 port_program = port_program.replace('Shared spinlock:', 'Production message-port lock:')
 completion_source = (root/'kernel/ipc/completion.c').read_text()
 completion_wrappers = completion_source[completion_source.index('static void completion_port_lock('):
-                                        completion_source.index('static bool completion_port_ready(')]
+                                        completion_source.index('typedef struct completion_port_wait_context')]
 completion_program = program.replace('static spinlock_t lock;',
     'typedef struct { spinlock_t lock; } completion_port_t;\n'
     'static completion_port_t test_port;\n' + completion_wrappers)
@@ -99,8 +98,7 @@ backend_program = backend_program.replace('spinlock_lock(&lock);',
 backend_program = backend_program.replace('spinlock_unlock(&lock);',
     'vfs_backend_unlock(&test_backend); assert(!preempt_depth);')
 backend_program = backend_program.replace('&lock', '&test_backend.io_lock')
-# The shared try-lock checks deliberately use the raw lock, so their releases
-# must also bypass the backend wrapper's matching preemption guard.
+# 共享 try-lock 检查有意直接使用原始锁，因此释放操作也必须绕过后端包装器对应的抢占保护。
 begin = backend_program.index('int main(void){')
 end = backend_program.index(' atomic_store(&attempts,0);', begin)
 raw_begin = program.index('int main(void){')
@@ -151,8 +149,13 @@ handle_program = handle_program.replace('vfs_backend_lock(&test_backend)',
 handle_program = handle_program.replace('vfs_backend_unlock(&test_backend)',
                                         'handle_unlock(&test_backend.io_lock)')
 handle_program = handle_program.replace('Production VFS backend lock', 'Production handle table lock')
-# Both wrapper entry points share the same guard and diagnostic publication.
-# Exercise the otherwise unused chunk wrappers in the table fixture as well.
+# 句柄锁先尝试快速获取，失败后再进入自旋获取；每个等待者有两次失败尝试。
+handle_program = handle_program.replace('atomic_load(&attempts)<5', 'atomic_load(&attempts)<9')
+handle_program = handle_program.replace('atomic_load(&attempts)==5', 'atomic_load(&attempts)==9')
+handle_program = handle_program.replace('four failed acquire attempts',
+                                      'four waiters and eight failed try/lock attempts')
+# 两个包装器入口共用同一保护和诊断发布逻辑。
+# 同时覆盖表测试夹具中其他情况下未使用的块包装器。
 handle_program = handle_program.replace('puts("Production handle table lock',
     'handle_chunk_t chunk; spinlock_init(&chunk.lock);\n'
     'chunk_lock(&chunk); assert(preempt_depth==1 && !atomic_load(&g_handle_waiting_lock));\n'
@@ -191,10 +194,12 @@ wait_program = wait_program.replace('Production VFS backend lock', 'Production w
 mutex_source = (root/'kernel/sync/mutex.c').read_text()
 mutex_wrappers = mutex_source[mutex_source.index('static void pi_lock('):
                               mutex_source.index('static kmutex_t *mutex_from_owner_node(')]
-mutex_program = vfs_program.replace(wrappers, '#define g_pi_lock lock\n' + mutex_wrappers)
-mutex_program = mutex_program.replace('vfs_lock()', 'pi_lock()')
-mutex_program = mutex_program.replace('vfs_unlock()', 'pi_unlock()')
-mutex_program = mutex_program.replace('Production VFS lock:', 'Production mutex PI lock:')
+# PI 锁已经采用抢占保护，复用带嵌套深度断言的模板。
+mutex_program = backend_program.replace(backend_wrappers,
+    '#define g_pi_lock test_backend.io_lock\n' + mutex_wrappers)
+mutex_program = mutex_program.replace('vfs_backend_lock(&test_backend)', 'pi_lock()')
+mutex_program = mutex_program.replace('vfs_backend_unlock(&test_backend)', 'pi_unlock()')
+mutex_program = mutex_program.replace('Production VFS backend lock', 'Production mutex PI lock')
 service_source = (root/'kernel/service.c').read_text()
 service_wrappers = service_source[service_source.index('static void service_lock('):
                                   service_source.index('bool service_manager_init(')]
@@ -216,10 +221,13 @@ resource_program = resource_program.replace('Production VFS lock:', 'Production 
 net_source = (root/'kernel/net/core/core.c').read_text()
 net_wrappers = net_source[net_source.index('static void net_cache_lock('):
                           net_source.index('void net_arp_cache_init(')]
-net_program = vfs_program.replace(wrappers, net_wrappers)
-net_program = net_program.replace('vfs_lock()', 'net_cache_lock(&lock)')
-net_program = net_program.replace('vfs_unlock()', 'net_cache_unlock(&lock)')
-net_program = net_program.replace('Production VFS lock:', 'Production ARP/NDP cache lock:')
+# 网络缓存锁也需要验证抢占保护和嵌套深度。
+net_program = backend_program.replace(backend_wrappers, net_wrappers)
+net_program = net_program.replace('vfs_backend_lock(&test_backend)',
+                                  'net_cache_lock(&test_backend.io_lock)')
+net_program = net_program.replace('vfs_backend_unlock(&test_backend)',
+                                  'net_cache_unlock(&test_backend.io_lock)')
+net_program = net_program.replace('Production VFS backend lock', 'Production ARP/NDP cache lock')
 socket_source = (root/'kernel/net/socket.c').read_text()
 socket_wrappers = socket_source[socket_source.index('void socket_lock('):
                                 socket_source.index('void socket_initialize_globals(')]
@@ -273,8 +281,8 @@ power_program = power_program.replace(' atomic_fetch_add(&attempts,1);',
     ' assert(preempt_depth); atomic_fetch_add(&attempts,1);')
 power_program = power_program.replace(' atomic_fetch_add(&polls,1);',
     ' assert(preempt_depth); atomic_fetch_add(&polls,1);')
-# This manager has no public try-lock wrapper. Keep the shared-header raw
-# try-lock checks separate from the guarded production acquire path.
+# 此管理器没有公开的 try-lock 包装器。将共享头文件中的原始 try-lock 检查与生产环境
+# 的受保护获取路径分开。
 power_program = power_program.replace(' spinlock_init(&test_power.lock);',
     ' spinlock_init(&test_power.lock);sched_preempt_disable();')
 power_program = power_program.replace(' atomic_store(&attempts,0);',
@@ -470,8 +478,8 @@ static void gpu_context_debug_set(unsigned value,gpu_context_t *context) {
     fixture = fixture.replace('device_unlock()', f'{owner}_unlock(&test_queue)')
     fixture = fixture.replace('Production device registry lock', f'Production {owner} lock')
     gpu_programs.append(fixture)
-# VFS now uses its shared guarded state protocol rather than spinlock_lock.
-# Keep its actual namespace/backend/vnode and preemptible-wait gates together.
+# VFS 现在使用共享的受保护状态协议，而不是 spinlock_lock。
+# 将真实的命名空间/后端/vnode 和可抢占等待门禁放在一起。
 subprocess.run(['python3', str(root/'tests/kernel/vfs_vnode_preempt_test.py')], check=True)
 for fixture in (program, port_program, completion_program,
                 *nativefs_programs, handle_program, timer_program, io_program, wait_program,

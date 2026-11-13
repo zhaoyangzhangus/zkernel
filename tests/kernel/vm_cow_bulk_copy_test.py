@@ -95,8 +95,8 @@ int main(void) {
  fail_node=true;assert(private_file_shadow_page(&area,17,source_address,&out)==K_ENOMEM);fail_node=false;
  fail_direct=true;assert(private_file_shadow_page(&area,17,source_address,&out)==K_EIO);fail_direct=false;
  assert(!store.pages && !depth);
- /* A failed candidate must still discover a concurrent successful publisher,
-  * without allocating a node after page OOM or overwriting winner data. */
+ /* 候选分配失败时仍必须发现并发成功的发布者；页面 OOM 后不能再分配节点，也不能覆盖
+  * 成功者的数据。 */
  for(unsigned failure=0;failure<3;++failure) {
   attempts=atomic_load(&node_attempts);
   fail_page=failure==0;fail_node=failure==1;fail_direct=failure==2;
@@ -126,8 +126,8 @@ int main(void) {
  ((unsigned char*)phys_to_direct(page_to_phys(out)))[123]^=1;
  assert(!memcmp(phys_to_direct(page_to_phys(original)),expected,PAGE_SIZE));
  assert(!memcmp(phys_to_direct(source_address),expected,PAGE_SIZE));
- /* The second lookup must tolerate both a vanished node and a now-exclusive
-  * page; even a failed allocation is unnecessary in the exclusive case. */
+ /* 第二次查找必须容忍节点已消失或页面现已独占的情况；页面独占时即使分配失败也无妨，
+  * 因为根本不需要分配。 */
  hook_page=out;atomic_store(&hook_page->refs,2);
  allocation_hook=become_exclusive;fail_page=true;
  assert(anon_page_cow(&object,17,&out)==K_OK && out==hook_page);
@@ -141,7 +141,7 @@ int main(void) {
  assert(vm_object_populated_pages(&object)==1);
  assert(anon_page_cow(0,17,&out)==K_EINVAL);
  assert(anon_page_cow(&object,17,0)==K_EINVAL);
- /* Preserve the zero-filled file tail without clearing the candidate first. */
+ /* 保留文件尾部的零填充区域，不必先清除候选页面。 */
  shadow_phase=true;
  memset(expected+PAGE_SIZE-37,0,37);
  memcpy(phys_to_direct(source_address),expected,PAGE_SIZE);

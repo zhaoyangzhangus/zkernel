@@ -131,12 +131,11 @@ static BOOLEAN lapic_send_ipi(UINT32 apic_id, UINT32 command) {
     /*
     * ICR_HIGH 与 ICR_LOW 构成一个逻辑事务。特别是，当此 CPU 正在执行 TLB shootdown 时，
     * 定时器中断可能排入延迟工作，并由其发送重新调度 IPI。不得让本地中断在两次 MMIO
-    * 写入之间覆盖目标地址。可能耗时的投递等待应放在关闭中断的临界区之外；获取该区后
-    * 还需重新检查，以防等待期间中断发送了另一条 IPI。
+    * 写入之间覆盖目标地址。先在短临界区检查空闲状态；仅忙时恢复原中断状态并等待，
+    * 重试时再次检查，避免常见空闲路径重复读取设备寄存器。
      */
     UINT64 interrupt_flags;
     for (;;) {
-        if (!lapic_wait_icr_idle()) return 0;
         __asm__ volatile ("pushfq; popq %0; cli"
                           : "=r"(interrupt_flags) : : "memory");
         if ((lapic_read(LAPIC_ICR_LOW_REGISTER) &
@@ -146,6 +145,7 @@ static BOOLEAN lapic_send_ipi(UINT32 apic_id, UINT32 command) {
         if ((interrupt_flags & (1ULL << 9)) != 0U) {
             __asm__ volatile ("sti" : : : "memory");
         }
+        if (!lapic_wait_icr_idle()) return 0;
     }
     lapic_write(LAPIC_ICR_HIGH_REGISTER, apic_id << 24);
     lapic_write(LAPIC_ICR_LOW_REGISTER, command);

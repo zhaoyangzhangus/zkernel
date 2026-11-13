@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Ninja can mistake a zero-byte archive left by an interrupted/OOM-killed
-# action for a completed target because its timestamp is still up to date.
-# Only touch the generated output tree explicitly selected by the caller.
+# Ninja 可能会把被中断或因 OOM 终止的操作留下的零字节归档误认为已完成目标，因为其时间戳
+# 仍然是最新的。
+# 只操作调用方明确选择的生成输出目录。
 out_root="${CHROMIUM_OUT:-}"
 dry_run=0
 

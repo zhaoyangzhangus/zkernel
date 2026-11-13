@@ -7,7 +7,7 @@ import tempfile
 root = Path(__file__).resolve().parents[2]
 io = (root / 'kernel/fs/vfs/file_io.c').read_text()
 pages = (root / 'kernel/fs/vfs/page_cache.c').read_text()
-helpers = io[io.index('static kstatus_t vfs_write_transaction_begin('):
+helpers = io[io.index('static kstatus_t vfs_file_write_begin('):
              io.index('/* 直接 I/O 写入会更新页缓存视图')]
 write = io[io.index('static kstatus_t vfs_write_chunk('):
            io.index('kstatus_t vfs_write(file_t')]

@@ -13,14 +13,16 @@ void window_buffer_set_target_locked(volatile uint32_t *target) {
 void window_buffer_prepare(void) {
     if (g_window_server.composite_framebuffer != 0) return;
 
-    uint64_t bytes =
+    uint64_t pixels =
         (uint64_t)g_window_server.display_stride *
-        g_window_server.display_height * sizeof(uint32_t);
+        g_window_server.display_height;
 
-    window_buffer_set_target_locked(
-        (volatile uint32_t *)kzalloc((size_t)bytes, 0));
+    /* 场景不需要连续物理页；页面对齐的零填充映射避免堆头偏移，并减少大块分配的碎片要求。 */
+    if (pixels != 0U && pixels <= SIZE_MAX / sizeof(uint32_t) &&
+        g_window_server.display_stride >= g_window_server.display_width)
+        window_buffer_set_target_locked(vmalloc((size_t)pixels * sizeof(uint32_t)));
     if (g_window_server.composite_framebuffer == 0) {
-        /* Preserve the existing low-memory direct-framebuffer fallback. */
+        /* 内存不足或几何无效时，使用直接帧缓冲后备路径。 */
         window_buffer_set_target_locked(g_window_server.framebuffer);
     }
 }

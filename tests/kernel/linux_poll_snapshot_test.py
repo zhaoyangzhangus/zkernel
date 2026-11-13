@@ -208,7 +208,7 @@ int main(void) {
     assert(waits==3 && allocation_calls==3 && !allocations_live);
     assert(allocation_sizes[2]==9U*3U*(sizeof(void *)+sizeof(uint8_t)));
     balanced();
-    /* All legal blocking set sizes use exact capacity and release storage. */
+    /* 所有合法的阻塞集合大小都使用精确容量，并释放存储。 */
     for (unsigned count=9;count<=256;++count) {
         linux_pollfd_t fds[256];
         for (unsigned i=0;i<count;++i) fds[i]=(linux_pollfd_t){1,1,0};

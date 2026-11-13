@@ -34,7 +34,7 @@ static bool scheduler_remote_command_try_push_once(uint32_t from,uint32_t to,
     ++pushes;
     if(accepted&&consume) {
         atomic_store(&t->state,THREAD_RUNNING);atomic_store(&t->start_pending,false);
-        /* Destination owns every scheduler flag after publication. */
+        /* 发布后，所有调度器标志都归目标端所有。 */
         t->sched.flags|=SCHED_ENTITY_INITIAL_PLACEMENT|SCHED_ENTITY_ENQUEUED;
     }
     return accepted;

@@ -1,6 +1,6 @@
 #pragma once
 
-/* Keep the fixed-width types independent of the host C library. */
+/* 固定宽度类型不依赖宿主 C 库。 */
 typedef __INT8_TYPE__ int8_t;
 typedef __INT16_TYPE__ int16_t;
 typedef __INT32_TYPE__ int32_t;
@@ -14,7 +14,7 @@ typedef __UINTPTR_TYPE__ uintptr_t;
 typedef __INTMAX_TYPE__ intmax_t;
 typedef __UINTMAX_TYPE__ uintmax_t;
 
-/* The least-width family follows the compiler's ABI types. */
+/* 最小宽度整数类型沿用编译器 ABI 类型。 */
 typedef int8_t int_least8_t;
 typedef int16_t int_least16_t;
 typedef int32_t int_least32_t;
@@ -24,7 +24,7 @@ typedef uint16_t uint_least16_t;
 typedef uint32_t uint_least32_t;
 typedef uint64_t uint_least64_t;
 
-/* A 64-bit integer is the naturally fast integer type for this target. */
+/* 对此目标而言，64 位整数是自然且快速的整数类型。 */
 typedef int64_t int_fast8_t;
 typedef int64_t int_fast16_t;
 typedef int64_t int_fast32_t;

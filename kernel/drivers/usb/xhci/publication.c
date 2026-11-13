@@ -3,8 +3,8 @@
 #include <kernel/console.h>
 #include <usb/storage.h>
 
-/* REFACTOR_P8_XHCI_PUBLICATION_OWNER: working-context DMA ownership transfer
- * and canonical Slot.context publication share one state boundary. */
+/* REFACTOR_P8_XHCI_PUBLICATION_OWNER：工作上下文中的 DMA 所有权转移与规范
+ * Slot.context 发布共用同一个状态边界。 */
 
 static bool xhci_move_device_context(xhci_device_context_t *destination,
                                      xhci_device_context_t *source) {

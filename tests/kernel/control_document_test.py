@@ -167,14 +167,43 @@ int main(void){
  os_window_control_tree_t request={.identifier=7,.count=2,.nodes=(uintptr_t)nodes,
   .text=(uintptr_t)text,.text_size=2};
  assert(window_server_control_tree(&other,&request)==K_EPERM&&!live&&!allocations);
- assert(window_server_control_tree(&owner,&request)==K_OK&&live==4&&window.controls);
+ /* 合并后的存储必须覆盖奇数节点、最大容量、空文本和索引开关，并保持类型对齐。 */
+ const unsigned storage_counts[]={1,3,OS_CONTROL_TREE_MAX_NODES};
+ const unsigned storage_texts[]={0,1,OS_CONTROL_TREE_MAX_TEXT};
+ for(unsigned indexed=0;indexed<2;++indexed)
+ for(unsigned c=0;c<3;++c)for(unsigned t=0;t<3;++t){
+  unsigned count=storage_counts[c],size=storage_texts[t],before=allocations;
+  size_t cleared=zeroed_bytes;
+  window_control_document_t *storage=control_document_allocate(count,size,indexed);
+  assert(storage&&(unsigned)allocations==before+1&&!storage->boxes&&!storage->runs);
+  assert(zeroed_bytes-cleared==sizeof(*storage));
+  assert((uintptr_t)storage->nodes%_Alignof(os_control_node_t)==0);
+  assert(storage->count==count&&storage->text_size==size);
+  char *end=(char *)(storage->nodes+count);
+  if(indexed){
+   assert((char *)storage->targets==end&&(uintptr_t)storage->targets%_Alignof(uint16_t)==0);
+   end+=(size_t)count*sizeof(uint16_t);
+  }else assert(!storage->targets);
+  assert(storage->text==end);
+  if(!size)assert(!storage->text[0]);
+  memset(storage->nodes,0,(size_t)count*sizeof(*storage->nodes));
+  memset(storage->text,0x5a,size?size:1U);
+  window_control_document_get(storage);window_control_document_put(storage);
+  assert(live==1);window_control_document_put(storage);assert(!live);
+ }
+ unsigned rejected_allocations=allocations;
+ assert(!control_document_allocate(0,0,true));
+ assert(!control_document_allocate(OS_CONTROL_TREE_MAX_NODES+1U,0,true));
+ assert(!control_document_allocate(1,OS_CONTROL_TREE_MAX_TEXT+1U,true));
+ assert((unsigned)allocations==rejected_allocations);
+ assert(window_server_control_tree(&owner,&request)==K_OK&&live==2&&window.controls);
  /* 同文档刷新必须保留已排队事件、鼠标捕获和按键配对，且不制造新损坏。 */
  window_control_document_t *identical=window.controls;uint64_t same_revision=request.revision;
  window.dirty=false;window.control_hover=window.control_pressed=window.control_focus=2;
  window.control_key_target=2;window.control_key_code=0x2c;window.control_shift=1;
  window.client_button_capture=true;
  for(unsigned i=0;i<32;++i){
-  assert(window_server_control_tree(&owner,&request)==K_OK&&window.controls==identical&&live==4);
+  assert(window_server_control_tree(&owner,&request)==K_OK&&window.controls==identical&&live==2);
   assert(request.revision==same_revision&&!window.dirty&&marked==1&&notifies==1);
   assert(window.control_hover==2&&window.control_pressed==2&&window.control_focus==2);
   assert(window.control_key_target==2&&window.control_key_code==0x2c&&window.control_shift==1);
@@ -230,33 +259,33 @@ int main(void){
  assert(!window.control_hover&&events[event_count-1].action==OS_CONTROL_LEAVE);
  window_unlock();marked=notifies=1;
  window_control_document_get(old);
- /* 新文档的四处基础分配均须覆盖，不能被幂等快速路径绕过。 */
+ /* 新文档的两处基础分配均须覆盖，不能被幂等快速路径绕过。 */
  ++nodes[1].foreground;
- for(int i=1;i<=4;++i){
+ for(int i=1;i<=2;++i){
   fail_alloc=allocations+i;
-  assert(window_server_control_tree(&owner,&request)==K_ENOMEM&&live==4&&window.controls==old);
+  assert(window_server_control_tree(&owner,&request)==K_ENOMEM&&live==2&&window.controls==old);
   fail_alloc=0;
  }
  for(int i=1;i<=2;++i){
   fail_copy=copies+i;
-  assert(window_server_control_tree(&owner,&request)==K_EFAULT&&live==4&&window.controls==old);
+  assert(window_server_control_tree(&owner,&request)==K_EFAULT&&live==2&&window.controls==old);
   fail_copy=0;
  }
  nodes[1].surface=2;nodes[1].kind=OS_CONTROL_SURFACE;
- assert(window_server_control_tree(&owner,&request)==K_EINVAL&&window.controls==old&&live==4);
+ assert(window_server_control_tree(&owner,&request)==K_EINVAL&&window.controls==old&&live==2);
  nodes[1].kind=OS_CONTROL_BUTTON;nodes[1].font_size=97;
- assert(window_server_control_tree(&owner,&request)==K_EINVAL&&window.controls==old&&live==4);
+ assert(window_server_control_tree(&owner,&request)==K_EINVAL&&window.controls==old&&live==2);
  nodes[1].font_size=0;nodes[1].x=INT32_MAX;
- assert(window_server_control_tree(&owner,&request)==K_EINVAL&&window.controls==old&&live==4);
+ assert(window_server_control_tree(&owner,&request)==K_EINVAL&&window.controls==old&&live==2);
  nodes[1].x=0;
  close_at=lookups+2;
- assert(window_server_control_tree(&owner,&request)==K_EPERM&&window.controls==old&&live==4);
+ assert(window_server_control_tree(&owner,&request)==K_EPERM&&window.controls==old&&live==2);
  close_at=0;
- assert(window_server_control_tree(&owner,&request)==K_OK&&live==8&&window.controls!=old);
+ assert(window_server_control_tree(&owner,&request)==K_OK&&live==4&&window.controls!=old);
  assert(window.control_focus==2&&!window.control_pressed);
  text[0]='N';nodes[1].width=12;
  assert(old->text[0]=='O'&&old->nodes[1].width==100);
- window_control_document_put(old);assert(live==4);
+ window_control_document_put(old);assert(live==2);
  request.count=request.text_size=0;
  assert(window_server_control_tree(&owner,&request)==K_OK&&!window.controls&&!live);
  assert(notifies==3&&marked==3&&!locked);
@@ -439,22 +468,22 @@ int main(void){
  nodes[2]=(os_control_node_t){.identifier=3,.parent=0,.kind=OS_CONTROL_TEXT,.width=100,.height=40,
   .flags=OS_CONTROL_INHERIT_FONT,.text_offset=1,.text_length=1};
  unsigned before_fonts=font_builds;
- assert(window_server_control_tree(&owner,&request)==K_OK&&live==5&&font_builds==before_fonts+1);
+ assert(window_server_control_tree(&owner,&request)==K_OK&&live==3&&font_builds==before_fonts+1);
  old=window.controls;window_control_document_get(old);
  for(unsigned i=0;i<100;++i){
   nodes[2].foreground=i+1U;
-  assert(window_server_control_tree(&owner,&request)==K_OK&&live==9);
+  assert(window_server_control_tree(&owner,&request)==K_OK&&live==5);
   assert(font_builds==before_fonts+1&&window.controls->fonts[24]==old->fonts[24]);
  }
  window_control_document_put(old);old=window.controls;window_control_document_get(old);
- assert(live==5);
+ assert(live==3);
  nodes[0].font_size=28;
- fail_alloc=allocations+5;
- assert(window_server_control_tree(&owner,&request)==K_ENOMEM&&live==5&&window.controls==old);fail_alloc=0;
- fail_font=true;assert(window_server_control_tree(&owner,&request)==K_EIO&&live==5&&window.controls==old);fail_font=false;
+ fail_alloc=allocations+3;
+ assert(window_server_control_tree(&owner,&request)==K_ENOMEM&&live==3&&window.controls==old);fail_alloc=0;
+ fail_font=true;assert(window_server_control_tree(&owner,&request)==K_EIO&&live==3&&window.controls==old);fail_font=false;
  nodes[0].font_size=96;
- assert(window_server_control_tree(&owner,&request)==K_OK&&live==10&&window.controls->fonts[96]);
- window_control_document_put(old);assert(live==5);
+ assert(window_server_control_tree(&owner,&request)==K_OK&&live==6&&window.controls->fonts[96]);
+ window_control_document_put(old);assert(live==3);
  request.count=request.text_size=0;assert(window_server_control_tree(&owner,&request)==K_OK&&!live);
  /* 混合 UTF-8 文字：重复字形只存一份，纯 ASCII 保持原快速路径。 */
  {
@@ -471,7 +500,7 @@ int main(void){
  unsigned builds=allocations;
  for(unsigned i=0;i<20;++i){
   assert(window_server_control_tree(&owner,&request)==K_OK&&window.controls->runs[1]==run);
-  assert((unsigned)allocations==builds+(i+1)*3);
+  assert((unsigned)allocations==builds+(i+1));
  }
  /* 文字控件前插入无关节点，再恢复原顺序；保留旧快照检查字形缓存生命周期。 */
  old=window.controls;window_control_document_get(old);unsigned before_glyphs=glyph_builds;
@@ -507,7 +536,7 @@ int main(void){
   assert(frame[0]==0x12345678&&frame[1+40*28]==0x12345678);
  }
  old=window.controls;int retained_live=live;nodes[0].font_size=28;
- for(unsigned i=1;i<=7;++i){
+ for(unsigned i=1;i<=5;++i){
   fail_alloc=allocations+i;
   assert(window_server_control_tree(&owner,&request)==K_ENOMEM&&window.controls==old&&live==retained_live);
   fail_alloc=0;
@@ -999,23 +1028,23 @@ int main(void){
  assert(window_server_control_tree(&owner,&request)==K_OK&&locked_node_reads<128&&!locate_walks);
  uint32_t cost_target=cost_nodes[OS_CONTROL_TREE_MAX_NODES-1].identifier;
  size_t duplicate_bytes=allocated_bytes;unsigned duplicate_calls=allocations;
- /* 不需要的第三次分配即使会失败，也不能妨碍相同文档刷新。 */
- fail_alloc=allocations+3;
+ /* 不需要的第二次分配即使会失败，也不能妨碍相同文档刷新。 */
+ fail_alloc=allocations+2;
  assert(window_server_control_tree(&owner,&request)==K_OK);fail_alloc=0;
  printf("DUPLICATE_OPTIMIZED calls=%u bytes=%zu layout_bytes=%zu\n",(unsigned)allocations-duplicate_calls,
   allocated_bytes-duplicate_bytes,(size_t)request.count*sizeof(control_tree_box_t));
- assert((unsigned)allocations==duplicate_calls+2U);
+ assert((unsigned)allocations==duplicate_calls+1U);
  assert(allocated_bytes-duplicate_bytes==sizeof(window_control_document_t)+
-  (size_t)request.count*(sizeof(os_control_node_t)+sizeof(uint16_t)));
+  (size_t)request.count*(sizeof(os_control_node_t)+sizeof(uint16_t))+1U);
  /* 非法节点也在几何分配之前被拒绝，并完整保留当前快照。 */
  uint32_t final_identifier=cost_nodes[request.count-1].identifier;
  cost_nodes[request.count-1].identifier=cost_nodes[0].identifier;
  duplicate_calls=allocations;duplicate_bytes=allocated_bytes;
  window_control_document_t *before_invalid=window.controls;uint64_t before_revision=request.revision;
  assert(window_server_control_tree(&owner,&request)==K_EINVAL&&window.controls==before_invalid);
- assert(request.revision==before_revision&&(unsigned)allocations==duplicate_calls+2U);
+ assert(request.revision==before_revision&&(unsigned)allocations==duplicate_calls+1U);
  assert(allocated_bytes-duplicate_bytes==sizeof(window_control_document_t)+
-  (size_t)request.count*(sizeof(os_control_node_t)+sizeof(uint16_t)));
+  (size_t)request.count*(sizeof(os_control_node_t)+sizeof(uint16_t))+1U);
  cost_nodes[request.count-1].identifier=final_identifier;
 
 
@@ -1424,8 +1453,18 @@ int main(void){
   {.identifier=1,.parent=OS_CONTROL_NO_PARENT,.kind=OS_CONTROL_CONTAINER},
   {.identifier=2,.parent=0,.kind=OS_CONTROL_TEXT,.text_length=6}};
  control_tree_box_t overlay_boxes[2]={0};overlay_boxes[1].style.font_size=16;
+ unsigned overlay_start=allocations;
  window_control_document_t *overlay_doc=window_control_prepare_overlay(0,overlay_nodes,2,"打开",6,overlay_boxes);
  assert(overlay_doc && overlay_doc->runs && overlay_doc->runs[1]);
+ unsigned overlay_allocations=allocations-overlay_start;
+ assert(overlay_allocations==5);
+ int overlay_live=live;
+ for(unsigned stage=1;stage<=overlay_allocations;++stage){
+  fail_alloc=allocations+stage;
+  assert(!window_control_prepare_overlay(0,overlay_nodes,2,"打开",6,overlay_boxes));
+  fail_alloc=0;
+  assert(live==overlay_live);
+ }
  assert(overlay_doc->runs[1]->count==2 && overlay_doc->runs[1]->width==32);
  assert(overlay_doc->runs[1]->glyphs[overlay_doc->runs[1]->cells[0].glyph].code==0x6253U);
  unsigned before_overlay=glyph_builds;

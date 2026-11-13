@@ -40,7 +40,7 @@ static void window_server_notify_worker(void){assert(!locked);++notifies;}
 int main(void){
  process_t owner={1},other={2};
  window_server_window_t popup={.owner=&owner,.flags=OS_WINDOW_RESIZABLE|OS_WINDOW_CLIENT_DECORATIONS,.width=448,.height=100,.x=10,.y=10};
- // Actual failing Chrome request captured in the canonical guest: 448x50.
+ // 在规范客户机中捕获到的 Chrome 实际失败请求：448x50。
  assert(window_server_resize(&owner,&popup,448,50)==K_OK);
  assert(popup.width==448&&popup.height==50&&popup.dirty&&popup.resize_pending);
  popup.fullscreen=true;

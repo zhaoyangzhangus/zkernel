@@ -16,8 +16,7 @@ typedef void (*e1000_recovery_write_t)(const void *owner,
                                        uint32_t offset,
                                        uint32_t value);
 
-/* The recovery unit owns interrupt registration and device interrupt state.
- * The controller keeps its hardware representation private through callbacks. */
+/* 恢复单元拥有中断注册和设备中断状态。控制器通过回调隐藏其硬件表示形式。 */
 typedef struct e1000_recovery_context {
     void *owner;
     e1000_recovery_read_t read;
@@ -55,7 +54,7 @@ typedef struct e1000_rx_packet {
     bool peer_window_scale_present;
     uint8_t source_address6[16];
     uint8_t destination_address6[16];
-    /* Bytes beyond payload_length are unspecified and must not be read. */
+    /* payload_length 之后的字节未定义，禁止读取。 */
     uint8_t payload[SOCKET_MAX_PAYLOAD];
 } e1000_rx_packet_t;
 

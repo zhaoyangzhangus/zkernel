@@ -6,6 +6,7 @@
 
 static spinlock_t g_timeout_lock;
 static list_head_t g_timeout_waiters;
+static atomic_uint_fast64_t g_timeout_next_deadline;
 static atomic_uint g_wait_init_state;
 enum { WAIT_WAKE_BATCH_COUNT = 16U };
 
@@ -122,6 +123,7 @@ static void wait_global_init(void) {
                                                  memory_order_acquire)) {
         spinlock_init(&g_timeout_lock);
         list_init(&g_timeout_waiters);
+        atomic_init(&g_timeout_next_deadline, UINT64_MAX);
         atomic_store_explicit(&g_wait_init_state, 2U, memory_order_release);
         return;
     }
@@ -132,6 +134,19 @@ static void wait_global_init(void) {
 
 static bool deadline_reached(uint64_t now, uint64_t deadline) {
     return deadline != UINT64_MAX && (int64_t)(now - deadline) >= 0;
+}
+
+/* 调用方持有超时锁；缓存允许提前失效，但绝不能晚于新注册的期限。 */
+static void wait_timeout_link_locked(waiter_t *waiter) {
+    wait_insert_tail(&g_timeout_waiters, &waiter->timeout_node);
+    uint64_t earliest = atomic_load_explicit(&g_timeout_next_deadline,
+                                              memory_order_relaxed);
+    if (waiter->deadline_tsc != UINT64_MAX &&
+        (earliest == UINT64_MAX ||
+         (int64_t)(waiter->deadline_tsc - earliest) < 0)) {
+        atomic_store_explicit(&g_timeout_next_deadline, waiter->deadline_tsc,
+                              memory_order_release);
+    }
 }
 
 static uint64_t make_deadline(uint64_t timeout_ns) {
@@ -336,7 +351,7 @@ static kstatus_t wait_on_sorted_queues(wait_queue_t *const *queues,
                              &subscriptions[index].queue_node);
         }
         if (deadline != UINT64_MAX) {
-            wait_insert_tail(&g_timeout_waiters, &waiter.timeout_node);
+            wait_timeout_link_locked(&waiter);
         }
 
         /* 已在每个队列锁下验证采样到的序列。解锁谓词检查后到达的通知会强制重试；
@@ -495,17 +510,21 @@ uint32_t wake_one(wait_queue_t *queue) {
     return 0U;
 }
 
-uint32_t wake_all(wait_queue_t *queue) {
-    if (queue == 0) return 0U;
+uint32_t wake_n(wait_queue_t *queue, uint32_t maximum) {
+    if (queue == 0 || maximum == 0U) return 0U;
+    if (maximum == 1U) return wake_one(queue);
     wait_global_init();
     uint32_t count = 0U;
     for (;;) {
         thread_t *threads[WAIT_WAKE_BATCH_COUNT];
         size_t collected = 0U;
+        uint32_t remaining = maximum - count;
+        size_t batch_limit = remaining < WAIT_WAKE_BATCH_COUNT ?
+                             remaining : WAIT_WAKE_BATCH_COUNT;
         uint64_t timeout_flags = wait_lock(&g_timeout_lock);
         uint64_t queue_flags = wait_lock(&queue->lock);
         for (list_head_t *node = queue->waiters.next;
-             node != &queue->waiters && collected < WAIT_WAKE_BATCH_COUNT;) {
+             node != &queue->waiters && collected < batch_limit;) {
             wait_subscription_t *subscription = subscription_from_node(node);
             node = node->next;
             thread_t *thread = waiter_claim_pinned_locked(subscription->waiter, WAITER_WOKEN);
@@ -514,9 +533,10 @@ uint32_t wake_all(wait_queue_t *queue) {
                 threads[collected++] = thread;
             }
         }
-        /* 保留 wake_one 的序列记账，包括最后一次未成功探测，同时避免为每个线程获取锁。 */
+        /* 按实际唤醒数记账；队列不足时保留一次未成功探测的序列变化。
+         * 达到调用方上限后不再探测，避免额外唤醒或改变剩余订阅。 */
         atomic_fetch_add_explicit(&queue->sequence,
-                                  collected + (collected < WAIT_WAKE_BATCH_COUNT ? 1U : 0U),
+                                  collected + (collected < batch_limit ? 1U : 0U),
                                   memory_order_release);
         wait_unlock(&queue->lock, queue_flags);
         wait_unlock(&g_timeout_lock, timeout_flags);
@@ -524,9 +544,13 @@ uint32_t wake_all(wait_queue_t *queue) {
             wait_wake_pinned(threads[index]);
         }
         count += (uint32_t)collected;
-        if (collected < WAIT_WAKE_BATCH_COUNT) break;
+        if (collected < batch_limit || count == maximum) break;
     }
     return count;
+}
+
+uint32_t wake_all(wait_queue_t *queue) {
+    return wake_n(queue, UINT32_MAX);
 }
 
 bool wait_cancel_thread(thread_t *target) {
@@ -559,10 +583,21 @@ bool wait_cancel_thread(thread_t *target) {
 
 void wait_poll_timeouts(uint64_t now_tsc) {
     if (atomic_load_explicit(&g_wait_init_state, memory_order_acquire) != 2U) return;
+    uint64_t earliest = atomic_load_explicit(&g_timeout_next_deadline,
+                                              memory_order_acquire);
+    if (!deadline_reached(now_tsc, earliest)) return;
     for (;;) {
         thread_t *threads[WAIT_WAKE_BATCH_COUNT];
         size_t collected = 0U;
+        uint64_t next_deadline = UINT64_MAX;
         uint64_t timeout_flags = wait_lock(&g_timeout_lock);
+        /* 等锁期间其他 CPU 可能已处理到期项；复查缓存，避免重复遍历未来等待者。 */
+        earliest = atomic_load_explicit(&g_timeout_next_deadline,
+                                         memory_order_relaxed);
+        if (!deadline_reached(now_tsc, earliest)) {
+            wait_unlock(&g_timeout_lock, timeout_flags);
+            return;
+        }
         for (list_head_t *node = g_timeout_waiters.next;
              node != &g_timeout_waiters && collected < WAIT_WAKE_BATCH_COUNT;) {
             waiter_t *waiter = waiter_from_timeout_node(node);
@@ -572,13 +607,23 @@ void wait_poll_timeouts(uint64_t now_tsc) {
                 wait_remove(&waiter->timeout_node);
                 continue;
             }
-            if (!deadline_reached(now_tsc, waiter->deadline_tsc)) continue;
+            if (!deadline_reached(now_tsc, waiter->deadline_tsc)) {
+                if (next_deadline == UINT64_MAX ||
+                    (int64_t)(waiter->deadline_tsc - next_deadline) < 0)
+                    next_deadline = waiter->deadline_tsc;
+                continue;
+            }
             thread_t *thread = waiter_claim_pinned_locked(waiter, WAITER_TIMED_OUT);
             /* 超时链表仅由 g_timeout_lock 管理。保留队列订阅供所有者清理，
              * 但线程等待调度期间不要重复扫描已过期条目。 */
             wait_remove(&waiter->timeout_node);
             if (thread != 0) threads[collected++] = thread;
         }
+        /* 只有完整扫描后才能发布最早期限。满批次仍可能留下已过期项，保留旧缓存。
+         * 终态清理不必维护精确最小值，陈旧的较早值至多导致一次额外扫描。 */
+        if (collected < WAIT_WAKE_BATCH_COUNT)
+            atomic_store_explicit(&g_timeout_next_deadline, next_deadline,
+                                  memory_order_release);
         wait_unlock(&g_timeout_lock, timeout_flags);
         for (size_t index = 0U; index < collected; ++index) {
             wait_wake_pinned(threads[index]);

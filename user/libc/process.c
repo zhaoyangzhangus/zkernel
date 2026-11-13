@@ -113,7 +113,7 @@ int waitid(idtype_t idtype, id_t id, siginfo_t *infop, int options) {
         errno = EINVAL;
         return -1;
     }
-    /* System currently publishes only terminal child states. */
+    /* System 当前只发布子进程的终止状态。 */
     if ((options & (WSTOPPED | WCONTINUED)) != 0 &&
         (options & WEXITED) == 0) {
         errno = ENOTSUP;

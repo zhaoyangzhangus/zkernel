@@ -1,4 +1,4 @@
-/* Phase 3 fail-closed OS ABI boundary. Exact declarations are checked in nvabi_contracts.c. */
+/* 第 3 阶段的 OS ABI 安全失败边界。具体声明由 nvabi_contracts.c 检查。 */
 
     .section .text.nvabi_os_unsupported,"ax",@progbits
     .extern nvabi_log_unsupported
@@ -12,7 +12,7 @@ os_add_record_for_crashLog:
     leaq .Lnvabi_msg_os_add_record_for_crashLog(%rip), %rdi
     leaq .Lnvabi_stage_os(%rip), %rsi
     call nvabi_log_unsupported
-    # void return
+    # void 返回
     popq %rbp
     ret
     .size os_add_record_for_crashLog, .-os_add_record_for_crashLog
@@ -51,7 +51,7 @@ os_close_file:
     leaq .Lnvabi_msg_os_close_file(%rip), %rdi
     leaq .Lnvabi_stage_os(%rip), %rsi
     call nvabi_log_unsupported
-    # void return
+    # void 返回
     popq %rbp
     ret
     .size os_close_file, .-os_close_file
@@ -77,7 +77,7 @@ os_delete_record_for_crashLog:
     leaq .Lnvabi_msg_os_delete_record_for_crashLog(%rip), %rdi
     leaq .Lnvabi_stage_os(%rip), %rsi
     call nvabi_log_unsupported
-    # void return
+    # void 返回
     popq %rbp
     ret
     .size os_delete_record_for_crashLog, .-os_delete_record_for_crashLog
@@ -233,7 +233,7 @@ os_iommu_sva_unbind:
     leaq .Lnvabi_msg_os_iommu_sva_unbind(%rip), %rdi
     leaq .Lnvabi_stage_os(%rip), %rsi
     call nvabi_log_unsupported
-    # void return
+    # void 返回
     popq %rbp
     ret
     .size os_iommu_sva_unbind, .-os_iommu_sva_unbind
@@ -324,7 +324,7 @@ os_nv_cap_close_fd:
     leaq .Lnvabi_msg_os_nv_cap_close_fd(%rip), %rdi
     leaq .Lnvabi_stage_os(%rip), %rsi
     call nvabi_log_unsupported
-    # void return
+    # void 返回
     popq %rbp
     ret
     .size os_nv_cap_close_fd, .-os_nv_cap_close_fd
@@ -363,7 +363,7 @@ os_nv_cap_destroy_entry:
     leaq .Lnvabi_msg_os_nv_cap_destroy_entry(%rip), %rdi
     leaq .Lnvabi_stage_os(%rip), %rsi
     call nvabi_log_unsupported
-    # void return
+    # void 返回
     popq %rbp
     ret
     .size os_nv_cap_destroy_entry, .-os_nv_cap_destroy_entry

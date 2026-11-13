@@ -123,7 +123,7 @@ static void audio_copy_bytes(void *destination, const void *source, size_t size)
         memcpy(destination, source, size);
         return;
     }
-    /* Preserve the original forward-copy behavior for overlapping ranges. */
+    /* 重叠范围仍保持原有的正向复制行为。 */
     uint8_t *out = (uint8_t *)destination;
     const uint8_t *in = (const uint8_t *)source;
     while (size-- != 0U) *out++ = *in++;

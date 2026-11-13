@@ -499,7 +499,7 @@ static bool net_tcp_parse_options(const uint8_t *tcp, uint32_t header_length,
         } else if (kind == 3U) {
             if (length != 3U) return false;
             if ((tcp[13] & NET_TCP_FLAG_SYN) != 0U && !*window_scale_present) {
-                /* RFC 7323 requires clamping a received shift above 14. */
+                /* RFC 7323 要求将收到的大于 14 的移位值限制为 14。 */
                 *window_scale = tcp[offset] > 14U ? 14U : tcp[offset];
                 *window_scale_present = true;
             }
@@ -745,8 +745,7 @@ kstatus_t net_tcp_parse_ipv6(const uint8_t *frame, size_t frame_length,
 }
 
 static void net_cache_lock(spinlock_t *lock) {
-    /* RX and socket output share these short cache guards. Never let a
-     * competing local thread displace the owner while it holds the lock. */
+    /* 接收路径和套接字输出共用这些短时缓存保护区。持锁期间不能让竞争线程抢占所有者。 */
     sched_preempt_disable();
     spinlock_lock(lock);
 }

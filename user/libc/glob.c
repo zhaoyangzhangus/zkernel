@@ -123,8 +123,7 @@ static int glob_expand(glob_context_t *context, const char *prefix,
 
     while (*pattern == '/') ++pattern;
     if (*pattern == '\0') {
-        /* An empty pattern is not the current directory.  Keep the
-         * no-match path available for GLOB_NOCHECK/GLOB_NOMAGIC below. */
+        /* 空模式不等同于当前目录。保留无匹配项路径，供下方的 GLOB_NOCHECK/GLOB_NOMAGIC 使用。 */
         if (prefix[0] == '\0') return 0;
         const char *path = prefix[0] == '\0' ? "." : prefix;
         if (stat(path, &status) < 0) return 0;

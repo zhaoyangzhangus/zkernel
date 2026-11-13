@@ -68,8 +68,8 @@ struct VideoFrame {
  int stride(int plane) const {return strides[plane];}
  void set_color_space(int n) {color=n;}
 };
-// Each receive overwrites exactly the same borrowed allocation, including
-// AGAIN/EOF/error calls. Consumers must already own previous frame pixels.
+// 每次接收都会覆盖同一块借用的内存，包括 AGAIN/EOF/错误返回。消费者必须自行持有
+// 前一帧的像素数据。
 struct os_video_decoder {
  unsigned serial=0,count=0;int mode=0;gfx::Size size{1,1};
  std::vector<uint8_t> bytes;
@@ -125,7 +125,7 @@ int main() {
    auto status=adapter.Drain(&frames);
    assert(status.value==(mode==2?DecoderStatus::Codes::kPlatformDecodeFailure:DecoderStatus::Codes::kOk));
    assert(frames.size()==decoder.count);verify(frames);
-   // Reset/destroy may overwrite and release the borrowed storage too.
+   // Reset/destroy 也可能覆盖并释放借用的存储。
    std::fill(decoder.bytes.begin(),decoder.bytes.end(),0x19);
    decoder.bytes.clear();decoder.bytes.shrink_to_fit();verify(frames);
    ++scenarios;

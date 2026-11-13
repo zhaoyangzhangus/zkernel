@@ -1,8 +1,7 @@
 #pragma once
 
-/* System has a single built-in C/POSIX locale and no message catalogs.  Keep
- * the POSIX surface available so libc++'s messages facet can compile; the
- * runtime returns the caller's default message. */
+/* System 只有一个内置 C/POSIX 区域设置，也没有消息目录。保留 POSIX 接口供 libc++ 的 messages
+ * facet 编译；运行时会返回调用方提供的默认消息。 */
 typedef int nl_catd;
 
 #define NL_CAT_LOCALE 1

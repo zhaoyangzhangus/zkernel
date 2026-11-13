@@ -218,6 +218,7 @@ static uint64_t window_server_worker_wait_ns(void) {
 /* 空闲时无限期休眠；仅活动动画和原生提交退避使用限时唤醒。 */
 static void __attribute__((noreturn)) window_server_worker_main(void *argument) {
     (void)argument;
+    compositor_parallel_start();
     if (!atomic_exchange_explicit(&g_window_worker_running_reported, true,
                                   memory_order_acq_rel)) {
         kernel_serial_printf_serial_only(

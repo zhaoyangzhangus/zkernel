@@ -35,9 +35,8 @@ void *NV_API_CALL os_pci_init_handle(NvU32 domain, NvU8 bus, NvU8 slot,
                                      NvU8 function, NvU16 *vendor,
                                      NvU16 *device_id) {
     const pci_device_t *device = nvabi_find_bdf(domain, bus, slot, function);
-    /* RM probes arbitrary BDFs while enumerating the PCI fabric.  A missing
-     * device is the normal negative result of this lookup, not an unsupported
-     * System operation; keep the probe silent and let vendor code continue. */
+    /* RM 枚举 PCI 总线时会探测任意 BDF。设备不存在是此查找的正常否定结果，不代表
+     * System 不支持该操作；保持探测静默，让厂商代码继续运行。 */
     if (device == NULL) return NULL;
     nvabi_pci_handle_t *handle = (nvabi_pci_handle_t *)kzalloc(
         sizeof(*handle), 0U);

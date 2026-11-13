@@ -63,8 +63,8 @@ int main(void){
  assert(pool.partial_head==2 && groups[2].partial_next==0 && groups[0].partial_next==UINT32_MAX);
  assert(groups[0].flags && groups[2].flags);
  pool_drain_one(0,0,1);assert(freed==1);
- /* Full groups with a pinned tail cannot be returned to Buddy. Pins in an
-    occupied slot cannot change the unrelated partial group's free mask. */
+ /* 尾部页面仍被固定的完整组不能归还给 Buddy。在非末尾槽位固定页面时，也不能改变
+  * 无关部分组的空闲掩码。 */
  pool.partial_head=0;
  for(unsigned i=0;i<3;++i){groups[i].flags=1;groups[i].free_mask=i==1?UINT64_MAX:3;
  groups[i].owner_cpu=0;groups[i].pool_order=1;

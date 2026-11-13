@@ -29,7 +29,7 @@ int main(void) {
     thread.sched.exec_start_ns=100;
     for (unsigned i=1;i<=1000;++i) {
         assert(scheduler_account_current(&queue,100+i*100000)==100000);
-        /* Context-switch anchors: a burst shorter than the timer period. */
+        /* 上下文切换锚点：一组操作的持续时间短于计时器周期。 */
         thread.sched.exec_start_ns=0;
         thread.sched.exec_start_ns=queue.clock_ns;
     }

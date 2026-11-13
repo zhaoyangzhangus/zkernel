@@ -42,8 +42,7 @@ int main(void) {
  wait_queue_t *bad[]={0};
  assert(wait_on_queues(bad,1,ready,&value,0)==K_EINVAL && checks==before);
  assert(wait_on_queues(one,SIZE_MAX,ready,&value,0)==K_EOVERFLOW);
- // Singleton readiness has no allocation failure mode. The pending failure
- // must remain available for the next actual multi-queue allocation.
+ // 单队列就绪状态没有分配失败的可能。待处理的失败状态必须留给下一次真实的多队列分配。
  host_fail_next_allocation();
  assert(wait_on_queue(&a,ready,&value,0)==K_OK);
  assert(wait_on_queues(one,1,ready,&value,0)==K_OK);

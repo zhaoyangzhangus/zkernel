@@ -77,8 +77,8 @@ int main(void) {
         bool overflowed=false;loads=0;
         assert(!scheduler_command_channel_try_push(&channel,&thread,1U,999,&overflowed));
         assert(overflowed&&loads==2&&channel.overflow_active);
-        /* Free primary while overflow is still nonempty: keep ordering by
-         * staying in overflow, even though primary now has room. */
+        /* 溢出队列仍非空时释放主队列槽位：即使主队列已有空位，也要继续留在溢出队列中
+         * 以保持顺序。 */
         atomic_store(&channel.primary.head,atomic_load(&channel.primary.tail));loads=0;
         assert(!scheduler_command_channel_try_push(&channel,&thread,1U,999,0));
         assert(loads==2&&channel.overflow_active);

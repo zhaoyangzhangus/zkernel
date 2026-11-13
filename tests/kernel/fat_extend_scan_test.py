@@ -67,7 +67,7 @@ static void reset(OS_FAT32_FILE *file,BOOLEAN existing) {
 }
 int main(void) {
     OS_FAT32 fs={512,1,8192};OS_FAT32_FILE file={.FileSystem=&fs};
-    /* Keep the legacy helper exercised even after production adopts 'from'. */
+    /* 即使生产代码已采用 'from' 参数，也继续覆盖旧辅助函数。 */
     reset(&file,0);UINT32 first;assert(fat32_find_free_cluster(&fs,&first) && first==2002);
     for(unsigned existing=0;existing<=1;++existing) {
         reset(&file,existing);
@@ -78,7 +78,7 @@ int main(void) {
         printf("1024-cluster extension: scanned %u entries\n",visits);
         assert(visits==3024);
         for(unsigned c=4;c<2002;++c) assert(table[c]==baseline[c]);
-        /* New allocation, new-chain link, old-tail attach and directory failures. */
+        /* 覆盖新分配、新链链接、旧尾部接入和目录操作失败。 */
         unsigned failures[]={1,2,3,2047,2048};
         for(unsigned i=0;i<sizeof(failures)/sizeof(*failures);++i) {
             if(!existing && failures[i]==2048) continue;
@@ -99,7 +99,7 @@ int main(void) {
         fail_directory=0;visits=0;
         assert(extend_file_to(&file,file.Size+1024*512ULL,file.Size+1024*512ULL) && visits==3024);
         visits=0;assert(extend_file_to(&file,file.Size,file.Size) && !visits);
-        /* Exhaustion after a partial chain must roll back and retry from 2. */
+        /* 部分链后发生空间耗尽时必须回滚，并从 2 重新尝试。 */
         reset(&file,existing);
         for(unsigned c=2002;c<8194;++c) table[c]=FAT32_EOC_MIN;
         table[8190]=table[8192]=0;memcpy(baseline,table,sizeof(table));

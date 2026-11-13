@@ -63,7 +63,7 @@ int main(void) {
   assert(atomic_load(&claims)==before && atomic_load(&handles)==1);
   pthread_barrier_destroy(&barrier);pthread_mutex_destroy(&process.lock);
  }
- // A claim is not a promise that callbacks have finished: keep existing semantics.
+ // claim 并不保证回调已经完成：保留现有语义。
  process_t process={0};pthread_mutex_init(&process.lock,NULL);
  claims=handles=fds=vm_puts=0;pause_release=true;entered=allow=false;
  pthread_t job;assert(!pthread_create(&job,NULL,release_job,&process));

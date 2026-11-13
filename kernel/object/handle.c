@@ -4,7 +4,6 @@
 
 #define HANDLE_INITIAL_CHUNKS 4U
 #define HANDLE_MAX_CHUNKS     65536U
-#define HANDLE_INVALID_INDEX  UINT32_MAX
 
 static atomic_uintptr_t g_handle_waiting_lock;
 
@@ -69,7 +68,6 @@ static handle_chunk_t *chunk_allocate(void) {
     spinlock_init(&chunk->lock);
     for (uint32_t i = 0; i < HANDLE_CHUNK_ENTRIES; ++i) {
         chunk->entries[i].generation = 1U;
-        chunk->entries[i].next_free = HANDLE_INVALID_INDEX;
     }
     return chunk;
 }
@@ -101,7 +99,6 @@ kstatus_t handle_table_init(handle_table_t *table) {
     table->chunk_count = 0;
     table->chunk_capacity = 0;
     table->free_hint = 0;
-    table->reserved = 0;
     spinlock_init(&table->grow_lock);
     handle_lock(&table->grow_lock);
     kstatus_t status = grow_table_locked(table);
@@ -109,51 +106,84 @@ kstatus_t handle_table_init(handle_table_t *table) {
     return status;
 }
 
-static kstatus_t handle_table_clone_internal(handle_table_t *source,
-                                             handle_table_t *destination,
-                                             bool exclude_type,
-                                             object_type_id_t excluded_type) {
+/* 预留块尚未承载句柄引用，借用首槽串联；发布前会完整覆盖所有条目。 */
+static void clone_spares_free(handle_chunk_t *spares) {
+    while (spares != 0) {
+        handle_chunk_t *next = (handle_chunk_t *)spares->entries[0].object;
+        kfree(spares);
+        spares = next;
+    }
+}
+
+static uint32_t clone_chunk_count_locked(const handle_table_t *source) {
+    uint32_t count = 0U;
+    for (uint32_t index = 0U; index < source->chunk_count; ++index) {
+        if (source->chunks[index] != 0) ++count;
+    }
+    return count;
+}
+
+kstatus_t handle_table_clone(handle_table_t *source,
+                              handle_table_t *destination) {
     if (source == 0 || destination == 0 || source == destination) return K_EINVAL;
 
     destination->chunks = 0;
     destination->chunk_count = 0;
     destination->chunk_capacity = 0;
     destination->free_hint = 0;
-    destination->reserved = 0;
     spinlock_init(&destination->grow_lock);
 
-    /* 保持索引和代数一致：COW fork 后，用户态描述符表仍包含原有内核句柄值。 */
+    /* 所有后备存储都在锁外预留；只有快照验证和条目复制持有源表锁。 */
+    uint32_t capacity, chunk_count;
+    handle_chunk_t *spares = 0;
     handle_lock(&source->grow_lock);
-    uint32_t capacity = source->chunk_capacity;
-    uint32_t chunk_count = source->chunk_count;
-    if (capacity == 0U || capacity > HANDLE_MAX_CHUNKS ||
-        chunk_count > capacity) {
+    for (;;) {
+        capacity = source->chunk_capacity;
+        chunk_count = source->chunk_count;
+        if (source->chunks == 0 || capacity == 0U ||
+            capacity > HANDLE_MAX_CHUNKS || chunk_count > capacity) {
+            handle_unlock(&source->grow_lock);
+            return K_EINVAL;
+        }
+        uint32_t reserved = clone_chunk_count_locked(source);
         handle_unlock(&source->grow_lock);
-        return K_EINVAL;
-    }
-
-    destination->chunks = (handle_chunk_t **)kzalloc(
-        (size_t)capacity * sizeof(handle_chunk_t *), 0);
-    if (destination->chunks == 0) {
+        handle_chunk_t **chunks = (handle_chunk_t **)kzalloc(
+            (size_t)capacity * sizeof(handle_chunk_t *), 0);
+        if (chunks == 0) return K_ENOMEM;
+        for (uint32_t index = 0U; index < reserved; ++index) {
+            handle_chunk_t *destination_chunk = (handle_chunk_t *)kmalloc(sizeof(*destination_chunk), 0);
+            if (destination_chunk == 0) {
+                clone_spares_free(spares);
+                kfree(chunks);
+                return K_ENOMEM;
+            }
+            destination_chunk->entries[0].object = spares;
+            spares = destination_chunk;
+        }
+        handle_lock(&source->grow_lock);
+        if (source->chunk_capacity == capacity && source->chunks != 0 &&
+            source->chunk_count <= capacity &&
+            clone_chunk_count_locked(source) <= reserved) {
+            destination->chunks = chunks;
+            chunk_count = source->chunk_count;
+            break;
+        }
         handle_unlock(&source->grow_lock);
-        return K_ENOMEM;
+        clone_spares_free(spares);
+        spares = 0;
+        kfree(chunks);
+        handle_lock(&source->grow_lock);
     }
     destination->chunk_capacity = capacity;
     destination->chunk_count = chunk_count;
     destination->free_hint = source->free_hint;
-    destination->reserved = source->reserved;
 
-    kstatus_t status = K_OK;
     for (uint32_t chunk_index = 0U; chunk_index < chunk_count; ++chunk_index) {
         handle_chunk_t *source_chunk = source->chunks[chunk_index];
         if (source_chunk == 0) continue;
-        /* 下方会复制每个条目，包括空闲槽位的代数。只需初始化锁；若先清零条目，就会在持有源表锁时将
-         * 整个内存块写两遍。 */
-        handle_chunk_t *destination_chunk = (handle_chunk_t *)kmalloc(sizeof(*destination_chunk), 0);
-        if (destination_chunk == 0) {
-            status = K_ENOMEM;
-            break;
-        }
+        handle_chunk_t *destination_chunk = spares;
+        spares = (handle_chunk_t *)spares->entries[0].object;
+        /* 完整复制所有槽位，既保留空闲槽的代数，也覆盖预留链指针。 */
         destination->chunks[chunk_index] = destination_chunk;
         spinlock_init(&destination_chunk->lock);
         chunk_lock(source_chunk);
@@ -164,8 +194,8 @@ static kstatus_t handle_table_clone_internal(handle_table_t *source,
                 &destination_chunk->entries[entry_index];
             *destination_entry = *source_entry;
             if (source_entry->object == 0) continue;
-            if (exclude_type &&
-                ((object_header_t *)source_entry->object)->type == excluded_type) {
+            if ((((object_header_t *)source_entry->object)->flags &
+                 OBJECT_FLAG_NO_FORK) != 0U) {
                 destination_entry->object = 0;
                 destination_entry->rights = 0;
                 destination_entry->flags = 0;
@@ -181,22 +211,9 @@ static kstatus_t handle_table_clone_internal(handle_table_t *source,
     }
     handle_unlock(&source->grow_lock);
 
-    if (status != K_OK) {
-        /* 尚未发布的克隆条目持有引用，而非逻辑句柄。 */
-        handle_table_release(destination, false);
-        return status;
-    }
+    /* 源表在预留期间可能减少分块；剩余预留块不含对象引用，在锁外回收。 */
+    clone_spares_free(spares);
     return K_OK;
-}
-
-kstatus_t handle_table_clone(handle_table_t *source, handle_table_t *destination) {
-    return handle_table_clone_internal(source, destination, false, 0U);
-}
-
-kstatus_t handle_table_clone_without_type(handle_table_t *source,
-                                          handle_table_t *destination,
-                                          object_type_id_t excluded_type) {
-    return handle_table_clone_internal(source, destination, true, excluded_type);
 }
 
 /* 仅在条目发布后才消费转移来的引用。失败时引用仍归调用方所有，并由调用方在解锁后释放。 */
@@ -237,7 +254,6 @@ static kstatus_t handle_create_internal(handle_table_t *table, void *object,
                 entry->object = object;
                 entry->rights = rights;
                 entry->flags = flags;
-                entry->next_free = HANDLE_INVALID_INDEX;
                 table->free_hint = index + 1U;
                 *out = make_handle(index, entry->generation);
                 chunk_unlock(chunk);

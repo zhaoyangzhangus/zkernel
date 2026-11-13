@@ -18,13 +18,30 @@ struct pipe_state {
     bool released;
     pipe_endpoint_t *read_endpoint;
     pipe_endpoint_t *write_endpoint;
-    /* Both endpoints live until the shared state's last destructor exits. */
+    /* 共享状态的最后一个析构函数执行完毕前，两端点都会保持有效。 */
     pipe_endpoint_t endpoints[2];
 };
+
+typedef struct pipe_read_context {
+    pipe_state_t *state;
+    void *buffer;
+    size_t length;
+    uint64_t *bytes;
+    pipe_read_limit_fn limit;
+    void *limit_context;
+    pipe_endpoint_t *peer;
+    kstatus_t status;
+} pipe_read_context_t;
 
 typedef struct pipe_write_context {
     pipe_state_t *state;
     size_t minimum_free;
+    const void *buffer;
+    size_t length;
+    uint64_t *bytes;
+    pipe_endpoint_t *peer;
+    bool wake_readers;
+    kstatus_t status;
 } pipe_write_context_t;
 
 static void pipe_lock(pipe_state_t *state) {
@@ -35,28 +52,8 @@ static void pipe_unlock(pipe_state_t *state) {
     spinlock_unlock(&state->lock);
 }
 
-static bool pipe_read_ready(void *context) {
-    pipe_state_t *state = (pipe_state_t *)context;
-    bool ready;
-    pipe_lock(state);
-    ready = state->readers == 0U || state->count != 0U || state->writers == 0U;
-    pipe_unlock(state);
-    return ready;
-}
-
-static bool pipe_write_ready(void *context) {
-    pipe_write_context_t *write = (pipe_write_context_t *)context;
-    pipe_state_t *state = write->state;
-    bool ready;
-    pipe_lock(state);
-    ready = state->writers == 0U || state->readers == 0U ||
-            state->capacity - state->count >= write->minimum_free;
-    pipe_unlock(state);
-    return ready;
-}
-
-/* Pin the peer while the transfer already holds the ring lock. The reference
- * survives a concurrent last handle close during the unlocked wake/notify. */
+/* 传输过程已持有环形缓冲区锁时，为对端增加引用。该引用可在解锁后执行唤醒/通知期间，
+ * 避免并发关闭最后一个句柄导致对象被释放。 */
 static pipe_endpoint_t *pipe_get_peer_locked(pipe_state_t *state, bool read_end) {
     pipe_endpoint_t *endpoint = read_end ? state->read_endpoint : state->write_endpoint;
     if (endpoint != 0 && !object_try_get(endpoint)) endpoint = 0;
@@ -126,9 +123,8 @@ static void pipe_endpoint_destroy(void *object) {
         if (state->endpoint_refs != 0U) --state->endpoint_refs;
         pipe_unlock(state);
 
-        /* Only the peer's predicate changed: reader loss breaks writes,
-         * writer loss produces EOF for reads. An in-flight I/O owns its
-         * endpoint reference, so the closing end cannot have live I/O. */
+        /* 只有对端的谓词发生变化：读端消失会使写入失败，写端消失会使读取返回 EOF。
+         * 正在进行的 I/O 持有自己的端点引用，因此关闭中的端点不会仍有活动 I/O。 */
         (void)wake_all(endpoint->read_end ? &state->write_waitq :
                                           &state->read_waitq);
         if (peer != 0) {
@@ -163,8 +159,8 @@ static void pipe_copy_in(pipe_state_t *state, const uint8_t *source,
                          size_t length) {
     size_t first = state->capacity - state->tail;
     if (first > length) first = length;
-    /* The endpoint holds the ring lock here. Keep copying bounded to its
-     * two contiguous spans and use the non-SIMD kernel bulk primitive. */
+    /* 此处端点持有环形缓冲区锁。复制范围限制在两个连续片段内，并使用内核的
+     * 非 SIMD 批量操作原语。 */
     __builtin_memcpy(state->buffer + state->tail, source, first);
     if (length != first)
         __builtin_memcpy(state->buffer, source + first, length - first);
@@ -185,6 +181,61 @@ static void pipe_copy_out(pipe_state_t *state, uint8_t *destination,
     state->count -= length;
 }
 
+/* 在谓词内完成传输，避免就绪检查后被竞争线程抢走数据并重置等待超时。
+ * 对端引用随传输一起固定，唤醒和对象通知仍由调用者在锁外完成。 */
+static bool pipe_try_read(void *context) {
+    pipe_read_context_t *read = context;
+    pipe_state_t *state = read->state;
+    bool finished = true;
+    pipe_lock(state);
+    if (state->readers == 0U) {
+        read->status = K_OK;
+    } else if (state->count != 0U) {
+        size_t amount = state->count < read->length ? state->count : read->length;
+        if (read->limit != 0) {
+            size_t bounded = read->limit(read->limit_context, amount);
+            if (bounded == 0U || bounded > amount) {
+                read->status = K_EINVAL;
+                pipe_unlock(state);
+                return true;
+            }
+            amount = bounded;
+        }
+        pipe_copy_out(state, read->buffer, amount);
+        read->peer = pipe_get_peer_locked(state, false);
+        *read->bytes = amount;
+        read->status = K_OK;
+    } else if (state->writers == 0U) {
+        read->status = K_OK;
+    } else {
+        finished = false;
+    }
+    pipe_unlock(state);
+    return finished;
+}
+
+static bool pipe_try_write(void *context) {
+    pipe_write_context_t *write = context;
+    pipe_state_t *state = write->state;
+    bool finished = true;
+    pipe_lock(state);
+    if (state->writers == 0U || state->readers == 0U) {
+        write->status = K_EPIPE;
+    } else if (state->capacity - state->count >= write->minimum_free) {
+        size_t amount = state->capacity - state->count;
+        if (amount > write->length) amount = write->length;
+        write->wake_readers = state->count == 0U;
+        pipe_copy_in(state, write->buffer, amount);
+        write->peer = pipe_get_peer_locked(state, true);
+        *write->bytes = amount;
+        write->status = K_OK;
+    } else {
+        finished = false;
+    }
+    pipe_unlock(state);
+    return finished;
+}
+
 kstatus_t pipe_create(uint32_t flags, pipe_endpoint_t **read_end,
                       pipe_endpoint_t **write_end) {
     pipe_state_t *state;
@@ -195,8 +246,8 @@ kstatus_t pipe_create(uint32_t flags, pipe_endpoint_t **read_end,
     }
     state = (pipe_state_t *)kmalloc(sizeof(*state), 0);
     if (state == 0) return K_ENOMEM;
-    /* Endpoint headers are initialized by their object constructor below.
-     * Keep the 64 KiB ring separate to avoid doubling its page allocation. */
+    /* 端点头部由下方的对象构造函数初始化。将 64 KiB 环形缓冲区单独分配，避免
+     * 页面分配量翻倍。 */
     memset(state, 0, __builtin_offsetof(pipe_state_t, endpoints));
     state->buffer = (uint8_t *)kmalloc(OS_PIPE_DEFAULT_SIZE, 0);
     if (state->buffer == 0) {
@@ -237,8 +288,8 @@ kstatus_t pipe_shutdown(pipe_endpoint_t *endpoint) {
     *open = 0U;
     pipe_endpoint_t *peer = pipe_get_peer_locked(state, !endpoint->read_end);
     pipe_unlock(state);
-    /* Logical shutdown must wake both the local in-flight operation and
-     * its peer. Reference pins protect memory, not the open direction. */
+    /* 逻辑关闭必须同时唤醒本端正在进行的操作和对端。引用只保护内存，不代表
+     * 通信方向仍处于打开状态。 */
     (void)wake_all(&state->read_waitq);
     (void)wake_all(&state->write_waitq);
     object_notify_signaled(endpoint);
@@ -254,91 +305,52 @@ kstatus_t pipe_read(pipe_endpoint_t *endpoint, void *buffer, size_t length,
 kstatus_t pipe_read_limited(pipe_endpoint_t *endpoint, void *buffer, size_t length,
                             uint64_t timeout_ns, uint64_t *bytes,
                             pipe_read_limit_fn limit, void *context) {
-    pipe_state_t *state;
-    size_t amount;
     if (!pipe_is_endpoint(endpoint) || !endpoint->read_end || bytes == 0 ||
         (buffer == 0 && length != 0U)) return K_EINVAL;
     *bytes = 0U;
     if (length == 0U) return K_OK;
-    state = endpoint->state;
-    for (;;) {
-        /* The wait path rechecks readiness before subscribing. Try the
-         * protected data/EOF state first, without its extra predicate lock. */
-        pipe_lock(state);
-        if (state->readers == 0U) {
-            pipe_unlock(state);
-            return K_OK;
-        }
-        if (state->count != 0U) {
-            amount = state->count < length ? state->count : length;
-            if (limit != 0) {
-                size_t bounded = limit(context, amount);
-                if (bounded == 0U || bounded > amount) {
-                    pipe_unlock(state);
-                    return K_EINVAL;
-                }
-                amount = bounded;
-            }
-            pipe_copy_out(state, (uint8_t *)buffer, amount);
-            pipe_endpoint_t *peer = pipe_get_peer_locked(state, false);
-            pipe_unlock(state);
-            *bytes = amount;
-            (void)wake_all(&state->write_waitq);
-            pipe_notify_endpoint(peer);
-            return K_OK;
-        }
-        if (state->writers == 0U) {
-            pipe_unlock(state);
-            return K_OK;
-        }
-        pipe_unlock(state);
+    pipe_read_context_t read = {
+        .state = endpoint->state, .buffer = buffer, .length = length,
+        .bytes = bytes, .limit = limit, .limit_context = context,
+        .status = K_ETIMEDOUT,
+    };
+    if (!pipe_try_read(&read)) {
         if (timeout_ns == 0U) return K_ETIMEDOUT;
-        kstatus_t status = wait_on_queue(&state->read_waitq, pipe_read_ready,
-                                         state, timeout_ns);
+        kstatus_t status = wait_on_queue(&read.state->read_waitq,
+                                         pipe_try_read, &read, timeout_ns);
         if (status != K_OK) return status;
     }
+    if (*bytes != 0U) {
+        (void)wake_all(&read.state->write_waitq);
+        pipe_notify_endpoint(read.peer);
+    }
+    return read.status;
 }
 
 kstatus_t pipe_write(pipe_endpoint_t *endpoint, const void *buffer,
                      size_t length, uint64_t timeout_ns, uint64_t *bytes) {
-    pipe_state_t *state;
-    pipe_write_context_t write;
-    size_t amount;
     if (!pipe_is_endpoint(endpoint) || endpoint->read_end || bytes == 0 ||
         (buffer == 0 && length != 0U)) return K_EINVAL;
     *bytes = 0U;
     if (length == 0U) return K_OK;
-    state = endpoint->state;
-    write.state = state;
-    write.minimum_free = length <= OS_PIPE_BUF ? length : 1U;
-    for (;;) {
-        /* Keep the atomic-write threshold under the same lock as copying. */
-        pipe_lock(state);
-        if (state->writers == 0U || state->readers == 0U) {
-            pipe_unlock(state);
-            return K_EPIPE;
-        }
-        if (state->capacity - state->count >= write.minimum_free) {
-            amount = state->capacity - state->count;
-            if (amount > length) amount = length;
-            bool wake_readers = state->count == 0U;
-            pipe_copy_in(state, (const uint8_t *)buffer, amount);
-            pipe_endpoint_t *peer = pipe_get_peer_locked(state, true);
-            pipe_unlock(state);
-            *bytes = amount;
-            /* Direct readers only block on an empty ring. Their predicate
-             * and subscription are serialized by the wait queue lock.
-             * Keep object notifications on every write for poll consumers. */
-            if (wake_readers) (void)wake_all(&state->read_waitq);
-            pipe_notify_endpoint(peer);
-            return K_OK;
-        }
-        pipe_unlock(state);
+    pipe_write_context_t write = {
+        .state = endpoint->state,
+        .minimum_free = length <= OS_PIPE_BUF ? length : 1U,
+        .buffer = buffer, .length = length, .bytes = bytes,
+        .status = K_ETIMEDOUT,
+    };
+    if (!pipe_try_write(&write)) {
         if (timeout_ns == 0U) return K_ETIMEDOUT;
-        kstatus_t status = wait_on_queue(&state->write_waitq, pipe_write_ready,
-                                         &write, timeout_ns);
+        kstatus_t status = wait_on_queue(&write.state->write_waitq,
+                                         pipe_try_write, &write, timeout_ns);
         if (status != K_OK) return status;
     }
+    if (*bytes != 0U) {
+        /* 直接读者只等空缓冲区；poll 消费者仍需每次写入的对象通知。 */
+        if (write.wake_readers) (void)wake_all(&write.state->read_waitq);
+        pipe_notify_endpoint(write.peer);
+    }
+    return write.status;
 }
 
 kstatus_t pipe_pending_bytes(const pipe_endpoint_t *endpoint, uint64_t *bytes) {

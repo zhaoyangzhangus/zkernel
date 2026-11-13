@@ -54,8 +54,7 @@ def command(name, arguments=None):
             return command_once(name, arguments)
         except RuntimeError as error:
             reply = error.args[0] if error.args else {}
-            # A breakpoint can briefly stop the guest between two members
-            # of an input chord. Rejected events have not been delivered.
+            # 断点可能会在组合键的两个成员之间短暂暂停客户机。被拒绝的事件尚未送达。
             if (name != 'input-send-event' or not isinstance(reply, dict) or
                     reply.get('error', {}).get('desc') != 'VM not running' or
                     time.monotonic() >= deadline):
@@ -73,8 +72,8 @@ process = None
 def stop_debugger():
     if process is None or process.poll() is not None:
         return
-    # Interrupt `continue` before exiting, allowing GDB to remove remote
-    # breakpoints. SIGTERM while running cannot reliably detach the target.
+    # 退出前先中断 `continue`，让 GDB 可以移除远程断点。运行中发送 SIGTERM 无法保证
+    # 与目标正确分离。
     process.send_signal(signal.SIGINT)
     try:
         process.wait(timeout=3)
@@ -85,10 +84,9 @@ def stop_debugger():
 def recover_failed_debugger():
     if process is None or process.poll() is None:
         return
-    # Batch GDB can exit zero after an interrupted `continue` while leaving
-    # hardware breakpoints installed. Exit status alone cannot prove detach.
-    # Always reset our remote-debug session and detach a fresh connection
-    # before resuming, including apparently successful timeout exits.
+    # 批处理 GDB 在 `continue` 被中断后仍可能以零状态退出，同时保留硬件断点。仅凭退出码
+    # 无法证明已分离。
+    # 恢复运行前始终重置远程调试会话，并断开新建连接，包括看似成功的超时退出。
     command('human-monitor-command', {'command-line': 'gdbserver none'})
     command('human-monitor-command', {'command-line':
         'gdbserver unix:/tmp/system-keys.sock,server=on,wait=off'})
@@ -142,7 +140,7 @@ finally:
     finally:
         command('human-monitor-command', {'command-line': 'gdbserver none'})
         command('cont')
-        # Partial chord/click delivery must not leave a guest button held.
+        # 组合键/点击只送达一部分时，不能让客户机中的按键保持按下。
         command('input-send-event', {'events': [
             {'type':'btn','data':{'button':'left','down':False}},
             *[{'type':'key','data':{'down':False,

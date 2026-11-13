@@ -57,7 +57,7 @@ int main(void){
  for(unsigned n=0;n<=5;++n){
   char *edge=area+unit-n-1;memcpy(edge,"/tmp/",n);edge[n]=0;check(edge);
  }
- /* The prefix alone is sufficient; no sixth byte may be read. */
+ /* 仅凭前缀即可完成判断；不得读取第六个字节。 */
  memcpy(area+unit-5,"/tmp/",5);reads=0;
  assert(vfs_volatile_path(area+unit-5)&&reads<=10);
  assert(munmap(area,2*(size_t)unit)==0);

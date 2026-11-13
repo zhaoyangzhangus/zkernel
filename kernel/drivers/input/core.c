@@ -18,9 +18,8 @@ static struct {
 } g_input;
 
 static void input_lock(void) {
-    /* input_core_push runs from device deferred work while input_core_read
-     * runs in the user syscall path.  Never let the owner be preempted on a
-     * one-vCPU guest while the other path spins on this lock. */
+    /* input_core_push 在设备延迟任务中运行，而 input_core_read 在用户系统调用路径中运行。
+     * 单 vCPU 来宾中，绝不能在另一条路径持锁自旋时抢占锁的所有者。 */
     sched_preempt_disable();
     spinlock_lock(&g_input.lock);
 }
@@ -38,8 +37,8 @@ static uint64_t input_timestamp(void) {
 }
 
 static void input_publish_pending(void) {
-    /* The ring lock serializes writers; publish its authoritative count
-     * without another locked read-modify-write on the mirror cache line. */
+    /* 环形缓冲区锁负责串行化写入者；发布其权威计数时，不要再对镜像缓存行执行一次
+     * 加锁读改写。 */
     atomic_store_explicit(&g_input.pending, g_input.count, memory_order_release);
 }
 
@@ -68,10 +67,9 @@ static bool input_coalesce_motion(const input_event_t *incoming) {
     bool relative = incoming->type == INPUT_EVENT_RELATIVE;
     if (!relative && (incoming->type != INPUT_EVENT_POINTER ||
                       incoming->code != 0U)) return false;
-    /* X and Y are emitted as separate events by boot-mouse HID.  Under queue
-     * pressure, coalesce within the trailing motion run so a busy pointer
-     * cannot fill the ring merely because the axes alternate.  Never cross a
-     * key/button event. */
+    /* boot-mouse HID 会将 X 和 Y 分开发送为两个事件。队列压力较大时，在末尾连续的
+     * 移动事件中合并更新，避免指针繁忙时仅因坐标轴交替就填满事件环。绝不跨越按键或
+     * 鼠标按钮事件进行合并。 */
     for (uint32_t offset = 0U; offset < g_input.count; ++offset) {
         uint32_t index = (g_input.write + INPUT_CORE_CAPACITY - 1U - offset) %
                          INPUT_CORE_CAPACITY;
@@ -98,7 +96,7 @@ static bool input_coalesce_motion(const input_event_t *incoming) {
     return false;
 }
 
-/* Remove one queued pointer-motion event without disturbing key/button order. */
+/* 移除一个已排队的指针移动事件，同时保持按键/鼠标按钮顺序不变。 */
 static bool input_drop_oldest_motion(void) {
     uint32_t offset;
     uint32_t target = 0U;
@@ -113,8 +111,8 @@ static bool input_drop_oldest_motion(void) {
         }
     }
     if (!found) return false;
-    /* A full ring has read==write; use the event count, not that sentinel.
-     * Shift the shorter side so deleting the oldest motion needs no copy. */
+    /* 环形缓冲区已满时 read==write；应检查事件计数，而不是依赖该标志值。
+     * 移动较短的一侧，使删除最早的移动事件无需复制数据。 */
     uint32_t suffix = g_input.count - offset - 1U;
     if (offset < suffix) {
         while (offset-- != 0U) {

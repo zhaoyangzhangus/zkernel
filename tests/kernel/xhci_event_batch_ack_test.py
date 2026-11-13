@@ -64,7 +64,7 @@ int main(void) {
     assert(advances==1024 && unlocks==4 && !scheduled);
     controller.deferred_event_count=1;locked=true;ehb=true;
     xhci_usb_bulk_session_end(1);assert(scheduled==1 && clears==5);
-    /* Empty/error batch still acknowledges and releases exactly once. */
+    /* 空批次/错误批次仍会确认并且只释放一次。 */
     controller.deferred_event_count=0;locked=true;ehb=true;
     xhci_usb_bulk_session_end(1);assert(clears==6 && unlocks==6);
 }

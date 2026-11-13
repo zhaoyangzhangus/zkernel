@@ -57,7 +57,7 @@ int main(void) {
         assert(input_core_read(&out,1)==K_ETIMEDOUT && depth==baseline);
     }
     baseline=depth=0; atomic_store(&publications,0);
-    /* Exercise pressure merge and rejected motion without count publication. */
+    /* 测试压力合并和拒绝运动事件时不发布计数。 */
     for(unsigned i=0;i<INPUT_CORE_CAPACITY;++i) { input_event_t event=make_event(i); assert(input_core_push(&event)==K_OK); }
     unsigned before=atomic_load(&publications); input_event_t motion=make_event(99); motion.type=INPUT_EVENT_RELATIVE;
     assert(input_core_push(&motion)==K_EAGAIN && input_core_pending()==INPUT_CORE_CAPACITY);

@@ -13,8 +13,8 @@ except RuntimeError as error:
 end
 target remote /tmp/system-keys.sock
 python
-# Four hardware addresses; no breakpoint deletion in stop(). This locates
-# callers, not latency: hardware stops perturb execution. Never read strings.
+# 使用四个硬件地址；不在 stop() 中删除断点。本脚本用于定位调用者，
+# 不能测量延迟：硬件断点会干扰执行。绝不读取字符串。
 owner = None
 samples = 0
 wait_return_pc = None

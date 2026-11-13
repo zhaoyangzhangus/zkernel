@@ -8,5 +8,5 @@ typedef struct kernel_init_network_hooks {
     void (*halt)(void);
 } kernel_init_network_hooks_t;
 
-/* Validate the network stack and publish the live network boundary. */
+/* 校验网络协议栈，并发布网络运行边界。 */
 BOOLEAN kernel_init_network(const kernel_init_network_hooks_t *hooks);

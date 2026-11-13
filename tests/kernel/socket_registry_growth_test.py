@@ -120,7 +120,7 @@ static void scenario(unsigned family){
  }
  socket_unlock(&g_binding_lock);
  assert(!socket_binding_at(g_registry_capacity));
- // Release holes before high slots; growth must preserve all live entries.
+ // 在高位槽之前释放空槽；扩展时必须保留所有有效项。
  for(unsigned parity=0;parity<2;++parity)for(unsigned i=parity;i<count;i+=2){
   socket_lock(&g_binding_lock);
   socket_unbind_locked(&sockets[i]);

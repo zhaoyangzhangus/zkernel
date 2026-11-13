@@ -3,13 +3,15 @@
 #include <arch/x86_64/smp.h>
 #include <kernel/console.h>
 #include <kernel/elf_loader.h>
-#include <kernel/kmem.h>
 #include <kernel/sched.h>
 #include <kernel/string.h>
-#include <kernel/vfs.h>
 #include "internal.h"
 
 #ifdef OS_KERNEL_BUILD
+
+static kstatus_t
+desktop_launch_program(uint32_t app);
+
 
 /* REFACTOR_P7A_SHELL_LAUNCHER_OWNER：桌面应用启动和标题策略。 */
 
@@ -140,7 +142,7 @@ const char *window_shell_app_title(uint32_t app) {
         g_desktop_programs[app].title[0] ? g_desktop_programs[app].title : 0;
 }
 
-bool window_shell_title_matches(const char *title, const char *expected) {
+static bool desktop_process_name_matches(const char *title, const char *expected) {
     uint32_t index = 0U;
     if (title == 0 || expected == 0) return false;
     while (index < 32U) {
@@ -321,31 +323,26 @@ uint32_t desktop_window_app_locked(const window_server_window_t *window) {
     if (!window || !window->owner || !desktop_shell_assets_available()) return DESKTOP_APP_NONE;
     process_t *owner = window->owner;
     uint32_t result = DESKTOP_APP_NONE;
+    char name[sizeof(owner->name)];
+    /* 进程信息锁只保护名称快照，路径扫描和匹配不占用该锁。 */
     spinlock_lock(&owner->info_lock);
+    memcpy(name, owner->name, sizeof(name));
+    spinlock_unlock(&owner->info_lock);
     for (uint32_t app=1; app<DESKTOP_APP_SLOTS; ++app) {
         const char *path = g_desktop_programs[app].path, *base = path;
         for (const char *p=path; *p; ++p) if (*p == '/') base = p+1;
-        if (window_shell_title_matches(owner->name, app == DESKTOP_APP_CHROME ? "chrome" : base)) {
+        if (desktop_process_name_matches(name, app == DESKTOP_APP_CHROME ? "chrome" : base)) {
             result = app;
             break;
         }
     }
-    if (window_shell_title_matches(owner->name,"wallpaper")) result=DESKTOP_APP_WALLPAPER;
-    spinlock_unlock(&owner->info_lock);
+    if (desktop_process_name_matches(name,"wallpaper")) result=DESKTOP_APP_WALLPAPER;
     return result;
 }
 
-static bool desktop_window_matches_app_locked(
-    const window_server_window_t *window, uint32_t app,
-    const char *expected_title) {
-    (void)expected_title;
-    return window->desktop_app == app;
-}
-
 bool desktop_restore_minimized_app(uint32_t app) {
-    const char *expected = window_shell_app_title(app);
     window_server_window_t *window = 0;
-    if (expected == 0) return false;
+    if (window_shell_app_title(app) == 0) return false;
 
     window_lock();
     for (uint32_t index = g_window_server.scene.count; index != 0U; --index) {
@@ -353,7 +350,7 @@ bool desktop_restore_minimized_app(uint32_t app) {
             g_window_server.scene.children[index - 1U];
         if (candidate == 0 ||
             (candidate->flags & OS_WINDOW_VISIBLE) == 0U ||
-            !desktop_window_matches_app_locked(candidate, app, expected)) {
+            candidate->client_show_inactive || candidate->desktop_app != app) {
             continue;
         }
         window = candidate;
@@ -362,6 +359,14 @@ bool desktop_restore_minimized_app(uint32_t app) {
     if (window == 0) {
         window_unlock();
         return false;
+    }
+
+    /* 重复点击已聚焦的最前窗口无需恢复、重绘、重新命中或唤醒等待者。 */
+    if (!window->minimized &&
+        g_window_server.scene.children[g_window_server.scene.count - 1U] == window &&
+        g_window_server.focused_identifier == window->identifier) {
+        window_unlock();
+        return true;
     }
 
     bool was_minimized = window->minimized;
@@ -377,7 +382,7 @@ bool desktop_restore_minimized_app(uint32_t app) {
     return true;
 }
 
-kstatus_t desktop_launch_program(uint32_t app) {
+static kstatus_t desktop_launch_program(uint32_t app) {
     const char *path = window_shell_program_path(app);
     bool chrome_launch_claimed = app == DESKTOP_APP_CHROME;
     uint64_t chrome_launch_token = 0U;
@@ -385,8 +390,6 @@ kstatus_t desktop_launch_program(uint32_t app) {
     thread_t *thread = 0;
     user_elf_image_info_t info;
     vaddr_t stack_pointer = 0U;
-    void *image = 0;
-    size_t image_size = 0U;
     kstatus_t status;
 
     if (path == 0) return K_EINVAL;
@@ -396,10 +399,6 @@ kstatus_t desktop_launch_program(uint32_t app) {
         }
         chrome_launch_token = DESKTOP_CHROME_LAUNCH_STARTING;
     }
-    status = vfs_load_file_kernel(path, 1U, DESKTOP_PROGRAM_MAX_BYTES,
-                                  &image, &image_size);
-    if (status != K_OK) goto done;
-
     status = process_create(0, &process);
     if (status == K_OK) {
         if (chrome_launch_claimed) {
@@ -412,11 +411,9 @@ kstatus_t desktop_launch_program(uint32_t app) {
             chrome_launch_token = process->pid;
         }
         process_set_name(process, path);
-        status = process_load_elf_image(process, image, image_size,
-                                        &info, &stack_pointer);
+        status = process_load_elf_from_vfs(process, path, DESKTOP_PROGRAM_MAX_BYTES,
+                                           &info, &stack_pointer);
     }
-    kfree(image);
-    image = 0;
     if (status == K_OK) {
         status = thread_create_user_suspended(process, info.entry,
                                               stack_pointer, 0U, 0U,
@@ -428,7 +425,6 @@ kstatus_t desktop_launch_program(uint32_t app) {
 done:
     /* 每个指针都持有一个引用，直到上方或此处释放。包括 Chrome 启动声明丢失在内的失败情况，
      * 都走相同处理路径。 */
-    if (image != 0) kfree(image);
     if (thread != 0) {
         if (status != K_OK) (void)thread_terminate(thread, status);
         object_put(thread);

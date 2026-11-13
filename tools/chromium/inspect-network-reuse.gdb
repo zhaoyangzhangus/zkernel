@@ -6,7 +6,7 @@ set $work_address = &g_deferred
 set $connections_address = &g_tcp_connections
 set $queued_address = &g_e1000_poll_queued
 set $lifecycle_address = &g_e1000_lifecycle_lock
-# Use only the matching running kernel's DWARF, not stale auxiliary objects.
+# 只使用正在运行的匹配内核的 DWARF，不使用过期的辅助对象。
 python
 import gdb
 def cast(address, name):
@@ -21,11 +21,11 @@ print('NETWORK queued=%d lifecycle=%d rx_clean=%d' % (
     int(net['rx_clean'])))
 if int(net['rx_ring']):
     print('RX descriptor_status=%#x' % int(net['rx_ring'][int(net['rx_clean'])]['status']))
-    # E1000_RING_COUNT is 16 in core_internal.h, not the software queue depth.
+    # core_internal.h 中的 E1000_RING_COUNT 为 16，不是软件队列深度。
     print('RX ready_slots=%s' % [i for i in range(16)
         if int(net['rx_ring'][i]['status']) & 1])
 if int(net['mmio']) and not int(net['io_mode']):
-    # Deliberately exclude ICR, whose read would clear pending interrupts.
+    # 有意排除 ICR，因为读取它会清除待处理中断。
     for name,offset in [('IMS',0xd0),('RDH',0x2810),('RDT',0x2818),
                         ('TDH',0x3810),('TDT',0x3818)]:
         address=int(net['mmio'])+offset

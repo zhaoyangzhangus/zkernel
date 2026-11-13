@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# One Chromium output directory and one bounded builder; never stage a live VM.
+# 只使用一个 Chromium 输出目录和一个有界构建器；绝不暂存正在运行的虚拟机。
 set -euo pipefail
 
 project_root="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -66,7 +66,7 @@ mkdir -p "$project_root/build"
 touch -- "$build_log"
 exec 9>"$project_root/build/.chromium-build.lock"
 flock -n 9 || { echo "已有统一构建入口运行；不会启动第二个构建" >&2; exit 1; }
-# Also protect a legacy/manual builder which does not hold our lock.
+# 同时保护不持有本锁的旧版/手动构建器。
 if pgrep -u "$(id -u)" -x ninja >/dev/null; then
     echo "已有 Ninja 构建运行；保留它，不启动第二个构建" >&2; exit 1
 fi
@@ -76,18 +76,18 @@ for unit in system-chromium-build.scope system-chromium-build.service \
         echo "资源单元仍运行：$unit；拒绝重叠构建或绕过资源上限" >&2; exit 1
     fi
 done
-# A cache daemon started elsewhere would run its compiler children outside
-# this service's budget. Do not stop another job's daemon automatically.
+# 在其他位置启动的缓存守护进程会使其编译器子进程不受本服务的资源预算约束。
+# 不要自动停止其他作业的守护进程。
 if pgrep -u "$(id -u)" -x sccache >/dev/null; then
     echo "已有 sccache 进程；待其所属任务结束后再运行此入口" >&2; exit 1
 fi
 
 cd "$chromium_src"
-# Unlike a transient scope, this service removes its idle cache daemon after
-# the main builder exits, so a later invocation can reuse the same unit name.
-# Compilation and generated files remain incremental in out/liteos-debian.
-# Ninja tracks GN inputs itself. Bootstrap missing/unsafe graphs only; running
-# GN unconditionally defeats its up-to-date check and wastes startup memory.
+# 与临时作用域不同，本服务会在主构建器退出后移除空闲缓存守护进程，因此后续调用可以
+# 重用相同的 unit 名称。
+# 编译结果和生成文件会在 out/liteos-debian 中增量更新。
+# Ninja 会自行追踪 GN 输入。只在构建图缺失或不安全时初始化；无条件运行 GN 会破坏其
+# 最新状态检查并浪费启动内存。
 systemd-run --user --wait --pipe --collect --unit=system-chromium-build \
     --working-directory="$chromium_src" \
     -p Nice=10 -p MemoryHigh=22G -p MemoryMax=24G -p MemorySwapMax=24G -p CPUQuota=1200% \

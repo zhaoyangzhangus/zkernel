@@ -12,8 +12,8 @@
 #define FONT_RUNTIME_CACHE_BYTES \
     (OS_FONT_GLYPH_COUNT * OS_FONT_MAX_WIDTH * OS_FONT_MAX_HEIGHT)
 
-/* Zero-initialized storage only; glyph pixels arrive from the kernel at run
- * time through OS_SYS_FONT_CACHE.  No font data is compiled into the image. */
+/* 这里只保留清零初始化的存储；字形像素在运行时通过 OS_SYS_FONT_CACHE 从内核获取。
+ * 映像中不包含任何字体数据。 */
 static uint8_t g_font_runtime_cache[FONT_RUNTIME_CACHE_BYTES];
 static uint32_t g_font_runtime_width;
 static uint32_t g_font_runtime_height;

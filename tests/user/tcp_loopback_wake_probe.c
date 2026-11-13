@@ -1,4 +1,4 @@
-/* Linux-ABI integration probe: only opens private loopback TCP connections. */
+/* Linux ABI 集成探测：只建立私有的回环 TCP 连接。 */
 #define _POSIX_C_SOURCE 200809L
 #include <arpa/inet.h>
 #include <errno.h>
@@ -12,8 +12,8 @@
 #include <unistd.h>
 
 static int pause_ms(long milliseconds) {
-    /* glibc's nanosleep wrapper uses clock_nanosleep, which this guest does
-     * not implement yet. Use the same supported poll timeout as the test. */
+    /* glibc 的 nanosleep 包装器会使用此客户机尚未实现的 clock_nanosleep。
+     * 使用与测试相同、当前受支持的 poll 超时。 */
     while (poll(NULL, 0, (int)milliseconds) < 0)
         if (errno != EINTR) return -1;
     return 0;
@@ -77,8 +77,8 @@ static int test_family(int family) {
     child = fork();
     if (child < 0) goto done;
     if (!child) {
-        /* Allow the parent to subscribe before freeing any send credit.
-         * Neither process closes its sockets until the readiness check. */
+        /* 在释放任何发送额度前，先允许父进程订阅。
+         * 就绪状态检查完成前，两个进程都不关闭套接字。 */
         if (pause_ms(200) < 0) _exit(2);
         size_t drained = 0;
         while (drained < filled) {
@@ -123,7 +123,7 @@ done:
 }
 
 int main(int argc, char **argv) {
-    /* Native launchers need not import their output handles as Linux fds. */
+    /* 原生启动器不必将输出句柄导入为 Linux 文件描述符。 */
     if (argc == 2) {
         int output = open(argv[1], O_WRONLY | O_CREAT | O_TRUNC, 0600);
         if (output < 0) return 2;

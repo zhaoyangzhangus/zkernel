@@ -81,8 +81,7 @@ int main(void){
   assert((family?socket_bind6_locked(&sockets[0],&states[0],a,4999):
                  socket_bind_locked(&sockets[0],&states[0],2,4999))==K_OK);
   check(family,2,4999,OS_SOCK_DGRAM,false);
-  /* Synthetic duplicate/wildcard tables exercise precedence even when the
-   * normal bind policy prevents duplicate live endpoints. */
+  /* 即使正常绑定策略会阻止活动端点重复，也要使用合成的重复/通配表测试优先级。 */
   g_bindings[0].port=g_bindings[511].port;
   for(unsigned mode=0;mode<3;++mode){
    g_udp_lookup_hint=g_udp6_lookup_hint=UINT32_MAX;

@@ -1,4 +1,4 @@
-/* Phase 7 real Linux/glibc x86-64 acceptance runner. */
+/* 第 7 阶段 Linux/glibc x86-64 验收运行程序。 */
 #include <arch/x86_64/cpu.h>
 #include <kernel/elf_loader.h>
 #include <kernel/kmem.h>

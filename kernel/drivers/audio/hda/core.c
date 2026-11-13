@@ -1096,8 +1096,7 @@ bool hda_pcm_self_test(void) {
         g_hda_error = HDA_ERROR_PCM_BDL_BASE;
         goto cleanup;
     }
-    /* Stream tags are one-based.  A zero tag is unused on physical HDA
-     * controllers even though some emulators tolerate it. */
+    /* 流标签从 1 开始。物理 HDA 控制器不会使用 0 标签，尽管部分模拟器可以容忍它。 */
     if (!hda_write32(&g_hda, stream + HDA_SD_CTL,
                      HDA_SD_CTL_RUN | HDA_SD_CTL_IOCE |
                      (1U << HDA_SD_CTL_STREAM_TAG_SHIFT))) {

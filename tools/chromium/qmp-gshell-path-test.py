@@ -23,7 +23,7 @@ with tempfile.TemporaryDirectory(prefix='shell-path-qa-') as directory, QMPClien
         q.key('ret')
         time.sleep(.3)
 
-    # Fresh guest-only directory, never overwrite a user's document or binary.
+    # 新建仅供客户机使用的目录，绝不覆盖用户文档或二进制文件。
     path = '/tmp/' + 'a' * 180 + str(time.monotonic_ns())
     assert len(path) < 240
     enter('mkdir ' + path)
@@ -43,17 +43,17 @@ with tempfile.TemporaryDirectory(prefix='shell-path-qa-') as directory, QMPClien
     time.sleep(.3)
     actual = frame()
     q.command('screendump', {'filename': str(ROOT / 'build/shell-long-path.png'), 'format': 'png'})
-    # Same expected output at the same row under a short path is a pixel oracle.
+    # 短路径下同一行的预期输出可作为像素基准。
     enter('cd /')
     enter('clear')
     enter('echo ' + text + 'b')
     expected = frame()
     def output_row(pixels, start=195):
-        # Exclude the pointer at the right edge and the following prompt row.
+        # 排除右边缘的指针以及其后的命令提示符行。
         return b''.join(pixels[(y * 1920 + 250) * 3:(y * 1920 + 1500) * 3]
                         for y in range(start, start + 17))
     assert output_row(expected) != bytes((255,)) * (1250 * 17 * 3), 'Expected echo output is blank'
-    # Full command echoes wrap, so the result can appear below additional rows.
+    # 完整命令回显可能换行，因此结果可能出现在更多行之后。
     assert any(output_row(actual, y) == output_row(expected) for y in range(195, 400)), \
         'Long-path click inserted at a truncated offset'
     print('QEMU Shell long path: scrolled input, end-click insertion and exact output pixels PASS')

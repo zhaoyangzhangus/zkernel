@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run System with the Linux QEMU/OVMF stack.
+# 使用 Linux QEMU/OVMF 组件运行 System。
 set -euo pipefail
 
 script_dir="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -27,9 +27,9 @@ vfio_devices=()
 usb_audio_devices=()
 [[ -z "${QEMU_USB_AUDIO:-}" ]] || usb_audio_devices+=("$QEMU_USB_AUDIO")
 vfio_primary=""
-# Boot from the removable FAT volume by default.  The USB-root kernel path
-# already validates /EFI/OS/init and /EFI/OS/init-runtime before selecting it as /.  Keep an
-# explicit NVMe switch for diagnostics and for comparing the old path.
+# 默认从可移动 FAT 卷启动。USB 根目录内核路径会先验证 /EFI/OS/init 和
+# /EFI/OS/init-runtime，再将其选作根目录 /。保留显式 NVMe 开关，用于诊断和
+# 对比旧路径。
 usb_storage=1
 chrome_fast=0
 monitor_socket=""
@@ -48,10 +48,9 @@ debug_level=2
 serial_trace=0
 qemu_trace="${QEMU_TRACE:-}"
 stream_log_dir="${QEMU_STREAM_LOG_DIR:-}"
-# QEMU's GTK Wayland client can keep a stale black surface even when the
-# guest scanout (and HMP screendump) is correct.  Prefer the XWayland path
-# when an X display is available; QEMU_GDK_BACKEND can explicitly select
-# wayland, x11, or another GTK backend for hosts that need a different path.
+# 即使来宾扫描输出（以及 HMP screendump）正常，QEMU 的 GTK Wayland 客户端也
+# 可能仍显示过期的黑色画面。若有 X 显示器，优先使用 XWayland；需要其他路径的
+# 主机可通过 QEMU_GDK_BACKEND 显式选择 wayland、x11 或其他 GTK 后端。
 qemu_gdk_backend="${QEMU_GDK_BACKEND:-${GDK_BACKEND:-}}"
 
 usage() {
@@ -104,9 +103,8 @@ while (($# > 0)); do
             (($# >= 2)) || { echo "--gdb-port 需要参数" >&2; exit 2; }
             gdb_port="$2"; shift 2 ;;
         --headless) headless=1; shift ;;
-        # The nested-device test needs the xHCI topology without a storage
-        # device occupying the direct root port, so retain its NVMe-root test
-        # semantics even though normal boots default to USB.
+        # 嵌套设备测试需要 xHCI 拓扑，且直连根端口不能被存储设备占用；因此即使
+        # 普通启动默认使用 USB，此测试仍沿用以 NVMe 为根设备的测试语义。
         --usb-nested) usb_nested=1; usb_storage=0; shift ;;
         --usb-storage) usb_storage=1; shift ;;
         --chrome-fast) chrome_fast=1; shift ;;
@@ -231,8 +229,8 @@ if ((reuse_image && !no_build)); then
     exit 2
 fi
 
-# Canonical physical network selection. Never detach a host driver here:
-# the existing VFIO preflight must fail closed if the NIC is not ready.
+# 选择规范的物理网络设备。此处绝不解绑宿主驱动：如果 NIC 尚未就绪，现有的
+# VFIO 启动前检查必须直接失败。
 if ((emulated_net == 0)); then
     if [[ ! "$physical_nic" =~ ^([0-9a-fA-F]{4}:)?[0-9a-fA-F]{2}:[0-9a-fA-F]{2}\.[0-7]$ ]]; then
         echo "无效的 QEMU_PHYSICAL_NIC：$physical_nic" >&2
@@ -249,9 +247,8 @@ if ((emulated_net == 0)); then
     if ((physical_nic_present == 0)); then vfio_devices+=("$physical_nic"); fi
 fi
 
-# Chrome maps large read-only assets and performs many small profile I/O
-# operations during startup. Keep USB as the explicit default for storage
-# validation, but let the runtime-oriented launch select the fast NVMe path.
+# Chrome 启动时会映射大型只读资源，并对配置文件执行大量小块 I/O。存储验证仍
+# 显式默认使用 USB，但面向运行时的启动方式可选择速度更快的 NVMe 路径。
 if ((chrome_fast)); then
     usb_storage=0
 fi
@@ -260,7 +257,7 @@ if ((emulated_net == 0)) && [[ -n "$net_dump" ]]; then
     exit 2
 fi
 
-# B10B-3 HMP HOTPLUG MONITOR
+# B10B-3 HMP 热插拔监视器
 if [[ -n "$monitor_socket" &&
       "$monitor_socket" != /* ]]; then
     monitor_socket="$script_dir/$monitor_socket"
@@ -301,10 +298,9 @@ mkdir -p "$build_dir"
 build_dir="$(cd -- "$build_dir" && pwd -P)"
 qemu_fat_image="$build_dir/qemu-fat.img"
 
-# Keep one QEMU launcher per BUILD alive at a time.  The lock is held by this
-# shell for the full QEMU lifetime, including timeout/debug wrappers, so a
-# second invocation cannot rebuild the shared disk or silently start a second
-# VM against a different inode.
+# 每个 BUILD 同一时间只允许一个 QEMU 启动器运行。此 shell 会在 QEMU 整个运行
+# 期间持有锁，包括超时和调试包装脚本的运行时间，避免第二次调用重新构建共享
+# 磁盘，或意外使用不同 inode 启动第二台虚拟机。
 command -v flock >/dev/null 2>&1 || {
     echo "缺少 flock（util-linux），无法保证同一 BUILD 只运行一台 QEMU" >&2
     exit 1
@@ -315,8 +311,8 @@ if ! flock -n "$qemu_lock_fd"; then
     exit 1
 fi
 
-# Validate an explicitly requested evidence destination before compiling or
-# replacing the disk. Never silently create a missing removable mount path.
+# 在编译或替换磁盘前，验证显式指定的证据保存位置。若可移动挂载路径不存在，
+# 绝不静默创建该路径。
 stream_log_run=""
 if [[ -n "$stream_log_dir" ]]; then
     [[ -d "$stream_log_dir" ]] || {
@@ -326,8 +322,8 @@ if [[ -n "$stream_log_dir" ]]; then
     echo "QEMU 完整输出镜像：$stream_log_run"
 fi
 
-# Fail before builds or disk replacement when this process cannot open/map
-# the requested devices. Image-only preparation needs neither VFIO nor mlock.
+# 如果当前进程无法打开或映射所请求的设备，应在构建或替换磁盘前失败。仅准备
+# 镜像时既不需要 VFIO，也不需要 mlock。
 if ((prepare_only == 0 && ${#vfio_devices[@]} > 0)); then
     python3 "$script_dir/tools/qemu-vfio-preflight.py" \
         --memory "$qemu_memory" "${vfio_devices[@]}"
@@ -350,9 +346,9 @@ mirror_build_stderr() {
 }
 
 if ((no_build == 0)); then
-    # COM1 is byte-serial at 115200 baud and every diagnostic character stalls
-    # the guest while it waits for the UART.  Keep normal runtime boots fast;
-    # opt into the diagnostic path only when --serial-trace is requested.
+    # COM1 以 115200 波特率逐字节串行传输；每个诊断字符都会让来宾等待 UART，
+    # 从而暂停运行。保持普通运行时启动速度；只有指定 --serial-trace 时才启用
+    # 诊断路径。
     build_status=0
     nvidia_make_args=()
     if ((${#vfio_devices[@]} > 0)); then
@@ -378,12 +374,10 @@ python3 "$script_dir/tools/finalize-app-layout.py" "$build_dir/esp" --strict
 }
 python3 "$script_dir/tools/clean-runtime-aliases.py" "$build_dir/esp"
 
-# The kernel VFS self-tests create temporary entries at the ESP root.  QEMU
-# 10's vvfat backend can leave those entries visible on the host after the
-# guest removes them; on the next boot they make the mkdir/create checks fail
-# (or trigger a vvfat assertion).  Quarantine every known self-test artifact
-# before constructing the synthetic FAT image.  Moving keeps the evidence
-# recoverable while making the boot directory deterministic.
+# 内核 VFS 自检会在 ESP 根目录创建临时条目。来宾删除这些条目后，QEMU 10 的
+# vvfat 后端仍可能让它们留在宿主机上；下次启动时，这些条目会导致 mkdir/create
+# 检查失败（或触发 vvfat 断言）。构建合成 FAT 镜像前，先隔离所有已知的自检
+# 产物。移动文件既能保留证据以便恢复，也能确保启动目录内容稳定。
 stale_dir="$build_dir/qemu-stale"
 mkdir -p "$stale_dir"
 for stale_entry in \
@@ -398,17 +392,15 @@ for stale_entry in \
 done
 fi
 
-# Do not boot directly from QEMU's `fat:rw:<directory>` backend.  Its vvfat
-# implementation can abort the whole emulator when a guest truncates or
-# fsyncs a file (for example Ctrl+S in notepad).  Materialize a normal FAT
-# disk image from a read-only directory view, then let the guest write that
-# raw image.  The generated image is disposable and never mutates build/esp.
+# 不要直接从 QEMU 的 `fat:rw:<directory>` 后端启动。来宾截断文件或执行 fsync
+# （例如在记事本中按 Ctrl+S）时，其 vvfat 实现可能导致整个模拟器中止。先从
+# 只读目录视图生成普通 FAT 磁盘镜像，再让来宾写入该原始镜像。生成的镜像可
+# 随时丢弃，且不会修改 build/esp。
 qemu_secondary_image="$build_dir/qemu-nvme-data.img"
 
-# qemu-img's legacy `fat:ro:` source defaults to FAT16 and refuses a Chrome
-# payload larger than roughly 512 MiB.  Keep the small-image path fast, but
-# materialize large images as FAT32 with a little writable headroom for
-# /tmp/chrome-data and the guest's runtime files.
+# qemu-img 的旧版 `fat:ro:` 源默认使用 FAT16，超过约 512 MiB 的 Chrome 负载会
+# 被拒绝。保持小镜像路径的处理速度；大型镜像则生成 FAT32，并为 /tmp/chrome-data
+# 和来宾运行时文件预留少量可写空间。
 fat_mkfs=""
 for candidate in "${MKFS_FAT:-}" /sbin/mkfs.fat /usr/sbin/mkfs.fat; do
     if [[ -n "$candidate" && -x "$candidate" ]]; then
@@ -529,8 +521,8 @@ if ((prepare_only)); then
     exit 0
 fi
 
-# Split OVMF images need their matching writable variable flash. Keep it
-# alongside the canonical disk, and never replace firmware settings on restart.
+# 拆分的 OVMF 镜像需要与之匹配的可写变量闪存。将其与规范磁盘放在一起，并且
+# 重启时绝不替换固件设置。
 firmware_vars_template="${OVMF_VARS_TEMPLATE:-}"
 if [[ -z "$firmware_vars_template" ]]; then
     case "${firmware##*/}" in
@@ -554,11 +546,10 @@ if [[ -n "$firmware_vars_template" ]]; then
     firmware_vars_args=( -drive "if=pflash,format=raw,file=$firmware_vars" )
 fi
 
-# A non-interactive headless launch must not make QEMU's serial backend depend
-# on the stdout process-substitution pipe.  That pipe changes TCG timing under
-# Popen/VS Code task runners and can hide a guest wakeup race.  Keep the live
-# terminal path unchanged, while giving headless automation a direct serial
-# file that is still mirrored to qemu-serial.log below.
+# 非交互式无头启动不能让 QEMU 串口后端依赖 stdout 的进程替换管道。该管道会在
+# Popen/VS Code 任务运行器下改变 TCG 时序，并可能掩盖来宾唤醒竞争。保持实时
+# 终端路径不变，同时为无头自动化提供直接写入的串口文件；下方还会将其同步到
+# qemu-serial.log。
 serial_device="file:/dev/stdout"
 serial_to_file=0
 if ((headless)) && [[ ! -t 1 ]]; then
@@ -575,8 +566,8 @@ qemu_cpu_model="$(qemu_select_cpu_model /proc/cpuinfo "$qemu_use_kvm" "$chrome_f
 
 qemu_machine=q35
 if ((${#vfio_devices[@]} > 0)); then
-    # Keep guest RAM below the platform's IVMD reserved ranges around 2 GiB.
-    # The rest of RAM is placed above 4 GiB; DMA isolation remains enabled.
+    # 将来宾 RAM 保持在平台约 2 GiB 处的 IVMD 保留范围以下。其余 RAM 放在
+    # 4 GiB 以上；DMA 隔离仍保持启用。
     qemu_machine+=",max-ram-below-4g=${QEMU_MAX_RAM_BELOW_4G:-1G}"
 fi
 
@@ -584,18 +575,16 @@ qemu_args=(
     -machine "$qemu_machine"
     -vga none
     -m "$qemu_memory"
-    # The freestanding crypto tests require a strong seed.  QEMU's qemu64
-    # model hides RDRAND by default, so expose the virtual instruction without
-    # enabling AVX/XSAVE, which the kernel does not yet preserve. Chrome/KVM
-    # may use host-supported SSSE3/SSE4/POPCNT with the existing FXSAVE64 state.
+    # 独立运行的加密测试需要足够强的随机种子。QEMU 的 qemu64 模型默认隐藏
+    # RDRAND，因此需要公开虚拟指令，但不能启用内核尚未保存状态的 AVX/XSAVE。
+    # Chrome/KVM 可以使用主机支持的 SSSE3/SSE4/POPCNT，以及现有的 FXSAVE64 状态。
     -cpu "$qemu_cpu_model"
     -smp "$cpu_count"
     -drive "if=pflash,format=raw,readonly=on,file=$firmware"
     "${firmware_vars_args[@]}"
     -boot order=c
-    # Interactive launches use QEMU stdout as the live COM1 stream; headless
-    # non-PTY launches use the direct serial file selected above so polling
-    # tools do not depend on a process-substitution pipe.
+    # 交互式启动将 QEMU stdout 用作实时 COM1 数据流；无头且非 PTY 的启动使用
+    # 上方选定的直接串口文件，避免轮询工具依赖进程替换管道。
     -serial "$serial_device"
     -d guest_errors
     -D "$build_dir/qemu.log"
@@ -607,23 +596,22 @@ if ((!keep_open)); then
 fi
 
 if ((stdvga)); then
-    # P14: deterministic QEMU Standard VGA.  A configured mode lets OVMF
-    # expose a real 1920x1080 GOP instead of merely scaling an 800x600 RAMFB.
+    # P14：使用固定配置的 QEMU Standard VGA。设置显示模式后，OVMF 可公开真正的
+    # 1920x1080 GOP，而不只是缩放 800x600 RAMFB。
     vga_spec="VGA,vgamem_mb=${vga_memory_mb}"
     if ((vga_width > 0 && vga_height > 0)); then
         vga_spec+=",xres=${vga_width},yres=${vga_height}"
     fi
     qemu_args+=( -device "$vga_spec" )
 elif ((ramfb)); then
-    # RAMFB is a system device rather than a PCI VGA device.  It gives the
-    # GTK backend a visible EFI framebuffer without consuming MMIO space or
-    # changing the BAR placement of a VFIO GPU.
+    # RAMFB 是系统设备，不是 PCI VGA 设备。它可让 GTK 后端显示 EFI 帧缓冲区，
+    # 无需占用 MMIO 空间，也不会改变 VFIO GPU 的 BAR 布局。
     qemu_args+=( -device ramfb )
 fi
 
 if ((usb_storage)); then
-    # The generated image is deliberately the only boot disk in USB mode, so
-    # both OVMF and System exercise the same U盘 filesystem and write path.
+    # USB 模式下，特意只使用生成的镜像作为启动磁盘，让 OVMF 和 System 都通过
+    # 同一个 U 盘文件系统和写入路径运行。
     qemu_args+=(
         -drive "if=none,id=vm-usb-stick,format=raw,file=$qemu_fat_image"
         -device "qemu-xhci,id=vm-xhci,msix=on,p2=8,p3=8"
@@ -675,10 +663,9 @@ fi
 if ((headless)); then
     qemu_args+=( -display none )
 else
-    # Capture keyboard input while the pointer is over the QEMU window.  GTK
-    # does not provide the macOS-only `full-grab` option; `grab-on-hover` is
-    # the supported Linux mechanism and avoids sending guest keys to the
-    # launcher terminal when the VM window is active.
+    # 指针位于 QEMU 窗口上方时捕获键盘输入。GTK 不提供仅 macOS 支持的
+    # `full-grab` 选项；Linux 支持的 `grab-on-hover` 机制可避免虚拟机窗口处于
+    # 活动状态时，将来宾按键发送到启动器终端。
     if ((fullscreen)); then
         qemu_args+=( -display gtk,zoom-to-fit=on,full-screen=on,grab-on-hover=on,show-cursor=off )
     else
@@ -696,26 +683,26 @@ fi
 
 if ((usb_nested)); then
     #
-    # B10B-2 NESTED USB HUB TOPOLOGY
+    # B10B-2 嵌套 USB 集线器拓扑
     #
-    # Physical topology:
+    # 实际连接拓扑：
     #
-    #   xHCI root port 1
+    #   xHCI 根端口 1
     #        |
-    #        +-- Hub #1
+    #        +-- 集线器 #1
     #              |
-    #              +-- port 1: Hub #2
+    #              +-- 端口 1：集线器 #2
     #                          |
-    #                          +-- port 1: Mouse
+    #                          +-- 端口 1：鼠标
     #
-    # xHCI route strings expected by System:
+    # System 预期的 xHCI 路由字符串：
     #
-    #   Hub #1 : 0x00000
-    #   Hub #2 : 0x00001
-    #   Mouse  : 0x00011
+    #   集线器 #1：0x00000
+    #   集线器 #2：0x00001
+    #   鼠标     ：0x00011
     #
-    # Keep the topology independent of the display backend so automated HMP
-    # tests can inject input in headless QEMU as well as in the GTK window.
+    # 让拓扑不依赖显示后端，使自动化 HMP 测试既能在无头 QEMU 中注入输入，也
+    # 能在 GTK 窗口中进行。
     qemu_args+=(
         -device "qemu-xhci,id=vm-xhci,msix=on,p2=8,p3=8"
         -device "usb-hub,id=vm-hub1,bus=vm-xhci.0,port=1"
@@ -729,8 +716,8 @@ elif ((usb_storage == 0)); then
         -device "usb-mouse,bus=vm-xhci.0"
     )
 else
-    # USB boot already created the xHCI controller for the storage device;
-    # add the input devices to that same controller in every display mode.
+    # USB 启动已为存储设备创建 xHCI 控制器；所有显示模式下都将输入设备添加到
+    # 同一个控制器。
     qemu_args+=(
         -device "usb-kbd,bus=vm-xhci.0"
         -device "usb-mouse,bus=vm-xhci.0"
@@ -744,8 +731,7 @@ for vfio_device in "${vfio_devices[@]}"; do
     vfio_device_short="${vfio_device#0000:}"
     vfio_primary_short="${vfio_primary#0000:}"
     vfio_device_options="vfio-pci,host=$vfio_device"
-    # Network boot is not used: leave the physical NIC to the guest driver,
-    # without exposing an optional vendor PXE/UEFI expansion ROM.
+    # 不使用网络启动：将物理 NIC 留给来宾驱动，不公开可选的厂商 PXE/UEFI 扩展 ROM。
     vfio_nic_short="${physical_nic#0000:}"
     if [[ "${vfio_device_short,,}" == "${vfio_nic_short,,}" ]]; then
         vfio_device_options+=",rombar=0"
@@ -772,19 +758,18 @@ if [[ -n "$qemu_trace" ]]; then
     done
     qemu_args+=( -trace "file=$build_dir/qemu-trace.log" )
 fi
-# The physical NIC is canonical; emulation is an explicit diagnostic mode.
-# `-net dump` was removed from newer QEMU builds, so the optional diagnostic
-# path adds a filter to this explicitly named user-mode NIC.
+# 物理 NIC 是规范设备；模拟网卡仅用于显式开启的诊断模式。新版 QEMU 移除了
+# `-net dump`，因此可选诊断路径会为这个显式命名的用户模式 NIC 添加过滤器。
 if ((emulated_net)); then
 qemu_args+=(
-    # Chrome reaches 127.0.0.1:7890 through SLIRP's host alias. Normal NAT
-    # sockets are independent per connection, without a guestfwd subprocess
-    # or a persistent TCP chardev that could mix concurrent TLS streams.
+    # Chrome 通过 SLIRP 的主机别名访问 127.0.0.1:7890。普通 NAT 套接字彼此独立，
+    # 每个连接各自使用一个套接字，不需要 guestfwd 子进程或可能混合并发 TLS 数据流
+    # 的持久 TCP chardev。
     -netdev "user,id=vm-net,host=10.0.2.2"
     -device "e1000e,netdev=vm-net,mac=52:54:00:12:34:56"
 )
 else
-    # Suppress QEMU's implicit default NIC too. VFIO NICs remain unaffected.
+    # 同时禁用 QEMU 隐式创建的默认 NIC。VFIO NIC 不受影响。
     qemu_args+=( -nic none )
 fi
 if [[ -n "$net_dump" ]]; then
@@ -803,8 +788,8 @@ if [[ -n "$stream_log_run" ]]; then
     stderr_targets+=("$stream_log_run/stderr.log")
 fi
 
-# Keep the complete stream in the two log files, but keep the interactive
-# terminal quiet unless a line describes a failure or an abnormal stop.
+# 完整数据流仍写入两个日志文件；只有出现故障或异常停止信息时，才在交互式
+# 终端中显示。
 mirror_qemu_stdout() {
     if ((serial_to_file)); then
         tee "${stdout_targets[@]}"
@@ -819,9 +804,8 @@ mirror_qemu_stdout() {
 }
 
 mirror_qemu_stderr() {
-    # QEMU normally reports the deliberate timeout termination on stderr.  It
-    # remains in qemu-stderr.log, but only diagnostic-looking lines reach the
-    # interactive terminal.
+    # QEMU 通常会在 stderr 中报告有意触发的超时终止。该信息仍保留在
+    # qemu-stderr.log 中，但只有看起来像诊断信息的行会显示在交互式终端上。
     tee "${stderr_targets[@]}" |
         awk '!/terminating on signal 15 from pid/ &&
              tolower($0) ~ /error|fail|fatal|panic|abort|invalid|cannot|could not|unsupported|assert|segmentation|fault/ {
@@ -830,12 +814,10 @@ mirror_qemu_stderr() {
         }' >&2
 }
 
-# Ctrl+S is VSTOP (XOFF) in a host terminal.  If the QEMU GTK window has not
-# taken focus yet, the terminal consumes that byte instead of the emulated
-# USB keyboard.  Disable software flow control for this launcher and restore
-# the exact terminal mode on every exit path.  This only applies to an
-# interactive graphical launch; headless/debug invocations have no terminal
-# keyboard to capture.
+# 在宿主终端中，Ctrl+S 对应 VSTOP（XOFF）。如果 QEMU GTK 窗口尚未获得焦点，
+# 该字符会被终端接收，而不会发给模拟的 USB 键盘。对此启动器禁用软件流控，并在
+# 所有退出路径上恢复原有终端模式。此设置仅适用于交互式图形启动；无头或调试
+# 调用没有需要捕获的终端键盘输入。
 tty_state=""
 restore_tty() {
     if [[ -n "$tty_state" ]]; then

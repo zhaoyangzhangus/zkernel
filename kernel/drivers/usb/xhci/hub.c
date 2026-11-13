@@ -268,10 +268,9 @@ bool xhci_hub_set_port_feature_device(
 
 
 /*
- * Compatibility wrapper.
+ * 兼容性包装函数。
  *
- * Existing Hub paths intentionally keep their old state->device
- * working-context behavior in V3.10.1C.
+ * 现有 Hub 路径在 V3.10.1C 中特意保留旧的 state->device 工作上下文行为。
  */
 
 
@@ -279,15 +278,13 @@ bool xhci_hub_set_port_feature_device(
 
 
 /*
- * V3.10.6B10B3 HUB PORT CHANGE ACK
+ * V3.10.6B10B3 Hub 端口变化确认
  *
- * USB Hub interrupt-IN reports that one or more wPortChange bits are
- * pending.  GET_STATUS does not acknowledge those bits: each asserted
- * change bit must be cleared with the matching C_PORT_* feature.
+ * USB Hub interrupt-IN 会报告一个或多个 wPortChange 位处于待处理状态。GET_STATUS
+ * 不会确认这些位：每个置位的变化标志都必须通过对应的 C_PORT_* 功能清除。
  *
- * Keeping stale change bits asserted makes a Hub interrupt endpoint
- * complete repeatedly and, on QEMU, can make the pre-detach wakeup race
- * ahead of the actual CONNECTION status transition.
+ * 若过期的变化标志一直处于置位状态，Hub 中断端点就会反复完成；在 QEMU 上，
+ * 分离前的唤醒竞争还可能先于实际 CONNECTION 状态转换发生。
  */
 bool xhci_hub_clear_port_feature_device(
     xhci_state_t *state,

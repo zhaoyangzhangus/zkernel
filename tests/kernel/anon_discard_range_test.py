@@ -14,7 +14,7 @@ index = source[source.index('static anon_page_node_t *anon_page_index_find('):
                source.index('kstatus_t anon_page_get(')]
 discard = source[source.index('kstatus_t anon_page_retire_range('):
                  source.index('/* 将文件页复制', source.index('kstatus_t anon_page_discard_range('))]
-# Count real traversal steps, including the old full ownership-list scan.
+# 统计实际遍历步数，包括旧版完整扫描所有权列表的操作。
 discard = discard.replace('while (*link != 0) {', 'while (*link != 0) { ++visits;')
 discard = discard.replace('while (tree_node != 0) {', 'while (tree_node != 0) { ++visits;')
 discard = discard.replace('while (last != 0 && last->right != 0) last = last->right;',
@@ -101,7 +101,7 @@ int main(void) {
     assert(visits<40 && released==2 && !subtractions);
     assert(anon_page_discard_range(&object,0,0)==K_OK && !held);
     assert(anon_page_discard_range(&object,5,4)==K_EINVAL && !held);
-    /* Remove an actual ownership-list head, then reinsert the same index. */
+    /* 移除实际的所有权列表头节点，再重新插入相同索引。 */
     uint64_t head=store.pages->index;
     assert(anon_page_discard_range(&object,head,head+1)==K_OK);
     assert(validate(&object)==N-3);
@@ -109,11 +109,11 @@ int main(void) {
     replacement->index=head; replacement->page=&pages[head/2]; ++replacement->page->refs;
     assert(anon_page_index_insert(&store,replacement)==replacement); ++object.populated_pages;
     assert(validate(&object)==N-2);
-    /* Shared backing has the same ownership semantics; empty sparse tails. */
+    /* 共享后备存储具有相同的所有权语义；稀疏尾部为空。 */
     object.type=VM_OBJECT_SHARED; object.u.shared.shared_root=&store;
     visits=0; assert(anon_page_discard_range(&object,30000,40000)==K_OK);
     assert(visits<40 && validate(&object)==N-2);
-    /* Repeated mixed erases/reinsertion exercise rotations and backlinks. */
+    /* 反复混合删除和重新插入，以覆盖旋转和反向链接。 */
     for (unsigned round=0;round<100;++round) {
         uint64_t first=(round*7919U)%N;
         unsigned before=validate(&object);
@@ -133,8 +133,7 @@ int main(void) {
     assert(!store.pages && !store.page_index.root && !object.populated_pages);
     for (unsigned i=0;i<N;++i) assert(pages[i].refs==1);
     assert(!held);free(pages);
-    /* Simulate another fault repopulating the same index immediately after
-     * unlock and before detached pages are released. New ownership survives. */
+    /* 模拟在解锁后、释放分离页面前，另一次缺页处理立即重新填充相同索引。新的所有权应继续有效。 */
     anon_page_node_t *old=calloc(1,sizeof(*old));assert(old);
     old->index=7;old->page=&old_page;old_page.refs=2;
     assert(anon_page_index_insert(&store,old)==old);++object.populated_pages;
@@ -145,8 +144,7 @@ int main(void) {
     assert(validate(&object)==1 && anon_page_index_find(&store,7)->page==&new_page);
     assert(anon_page_discard_range(&object,7,8)==K_OK);
     assert(new_page.refs==1 && validate(&object)==0);
-    /* The exclusive upper endpoint must not turn a partial request into a
-     * whole-store retirement, even at the largest representable index. */
+    /* 即使索引达到可表示的最大值，排他上界也不能将部分请求变成整个存储区回收。 */
     page_t boundary_pages[2]={{.refs=2},{.refs=2}};
     for(unsigned i=0;i<2;++i) {
         anon_page_node_t *node=calloc(1,sizeof(*node));assert(node);
@@ -158,12 +156,11 @@ int main(void) {
     assert(anon_page_discard_range(&object,0,UINT64_MAX)==K_OK);
     assert(erasures==1 && validate(&object)==1 && store.pages->index==UINT64_MAX);
     assert(boundary_pages[0].refs==1 && boundary_pages[1].refs==2);
-    /* Fixture teardown of the index that has no representable exclusive end. */
+    /* 清理没有可表示排他终点的索引测试夹具。 */
     anon_page_node_t *boundary=store.pages;
     store.pages=0;store.page_index.root=0;object.populated_pages=0;
     page_reference_put(boundary->page);kfree(boundary);
-    /* Multiple detached ranges remain alive without their old store. The
-     * later physical release must not touch a newly populated same index. */
+    /* 多个分离范围在旧存储区销毁后仍保持有效。之后释放物理页面时，不得影响已重新填充的相同索引。 */
     page_t deferred_pages[8];
     for(unsigned i=0;i<8;++i) {
         deferred_pages[i].refs=2;
@@ -191,8 +188,7 @@ int main(void) {
     assert(anon_page_discard_range(&object,3,4)==K_OK && fresh.refs==1);
 }
 '''
-# Old production nodes have no backlink yet; the operation-count assertion
-# still makes the pre-fix implementation fail for the actual regression.
+# 旧版生产节点尚无反向链接；操作次数断言仍可针对实际回归问题让修复前的实现失败。
 program = program.replace('LINK_ASSERT', 'assert(node->list_link==link);' if 'list_link' in types else '')
 with tempfile.TemporaryDirectory(prefix='liteos-anon-discard-') as directory:
     path=Path(directory); (path/'test.c').write_text(program)

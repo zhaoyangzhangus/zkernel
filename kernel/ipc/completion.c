@@ -9,14 +9,30 @@ static void completion_port_unlock(completion_port_t *port) {
     spinlock_unlock(&port->lock);
 }
 
-static bool completion_port_ready(void *context) {
-    completion_port_t *port = (completion_port_t *)context;
-    bool ready;
+typedef struct completion_port_wait_context {
+    completion_port_t *port;
+    os_completion_entry_t *entry;
+    kstatus_t status;
+} completion_port_wait_context_t;
+
+/* 谓词直接认领条目；所有重试共用等待层的一次截止时间。 */
+static bool completion_port_try_receive(void *context) {
+    completion_port_wait_context_t *receive = context;
+    completion_port_t *port = receive->port;
+    bool finished = true;
     completion_port_lock(port);
-    ready = port->count != 0U ||
-            atomic_load_explicit(&port->closed, memory_order_acquire);
+    if (port->count != 0U) {
+        *receive->entry = port->entries[port->head];
+        if (++port->head == port->capacity) port->head = 0U;
+        --port->count;
+        receive->status = K_OK;
+    } else if (atomic_load_explicit(&port->closed, memory_order_acquire)) {
+        receive->status = K_ECANCELED;
+    } else {
+        finished = false;
+    }
     completion_port_unlock(port);
-    return ready;
+    return finished;
 }
 
 static bool completion_port_is_signaled(const void *object) {
@@ -66,8 +82,8 @@ kstatus_t completion_port_create(uint32_t capacity, completion_port_t **out) {
     if (capacity == 0U) capacity = COMPLETION_PORT_DEFAULT_CAPACITY;
     if (capacity > COMPLETION_PORT_MAX_CAPACITY) return K_EINVAL;
 
-    /* Capacity is bounded above before sizing. Every readable slot is fully
-     * written by post before count publishes it under the port lock. */
+    /* 计算大小前已限制容量上限。每个可读槽位都会先由 post 完整写入，再由端口锁
+     * 保护并发布计数。 */
     completion_port_t *port = (completion_port_t *)kmalloc(
         sizeof(*port) + (size_t)capacity * sizeof(port->entries[0]), 0);
     if (port == 0) return K_ENOMEM;
@@ -108,33 +124,22 @@ kstatus_t completion_port_post(completion_port_t *port,
 kstatus_t completion_port_wait(completion_port_t *port, uint64_t timeout_ns,
                                os_completion_entry_t *entry) {
     if (port == 0 || entry == 0) return K_EINVAL;
-    for (;;) {
-        /* Ready entries do not need a wait subscription/predicate lock.
-         * The wait path rechecks readiness before it can sleep. */
-        completion_port_lock(port);
-        if (port->count != 0U) {
-            *entry = port->entries[port->head];
-            if (++port->head == port->capacity) port->head = 0U;
-            --port->count;
-            completion_port_unlock(port);
-            return K_OK;
-        }
-        bool closed = atomic_load_explicit(&port->closed, memory_order_acquire);
-        completion_port_unlock(port);
-        if (closed) return K_ECANCELED;
-        if (timeout_ns == 0U) return K_ETIMEDOUT;
-        kstatus_t status = wait_on_queue(&port->waitq, completion_port_ready,
-                                         port, timeout_ns);
-        if (status != K_OK) return status;
-    }
+    completion_port_wait_context_t receive = {
+        .port = port, .entry = entry, .status = K_ETIMEDOUT,
+    };
+    if (completion_port_try_receive(&receive)) return receive.status;
+    if (timeout_ns == 0U) return K_ETIMEDOUT;
+    kstatus_t status = wait_on_queue(&port->waitq,
+        completion_port_try_receive, &receive, timeout_ns);
+    return status == K_OK ? receive.status : status;
 }
 
 kstatus_t completion_port_close(completion_port_t *port) {
     if (port == 0) return K_EINVAL;
     bool was_closed = atomic_exchange_explicit(&port->closed, true,
                                                memory_order_acq_rel);
-    /* Closed readiness is permanent. A later waiter rechecks the predicate
-     * while subscribing; repeated closes need not rescan either wait queue. */
+    /* 关闭状态会一直保持。后续等待者会在订阅时重新检查谓词；重复关闭时无需重新
+     * 扫描任一等待队列。 */
     if (!was_closed) {
         (void)wake_all(&port->waitq);
         object_notify_signaled(port);

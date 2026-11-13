@@ -36,7 +36,7 @@ void object_get(void *p) { object_header_t *h=p; assert(atomic_fetch_add(&h->ref
 bool object_try_get(void *p) { if(reject_reference)return false; object_get(p); return true; }
 void object_put(void *p) { object_header_t *h=p; assert(atomic_fetch_sub(&h->refs.value,1)>1); }
 kstatus_t iommu_detach_device(device_t *d) {
-    /* Another registrar may own the global lock on a different CPU. */
+    /* 另一个 CPU 上的其他注册线程可能持有全局锁。 */
     assert(d && atomic_load(&d->state)==DEVICE_REMOVED && !preempt_depth);
     atomic_fetch_add(&detached,1); return K_OK;
 }

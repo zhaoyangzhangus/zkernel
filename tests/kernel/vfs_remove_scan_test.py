@@ -48,8 +48,7 @@ static void vfs_lock(void){assert(!depth);++depth;++locks;}
 static void vfs_unlock(void){assert(depth==1);--depth;}
 static void object_get(vnode_t *v){assert(depth&&v->refs);++v->refs;++gets;}
 static void object_put(vnode_t *v){assert(!depth&&v->refs);--v->refs;++drops;}
-/* All requests in this fixture select the in-memory backend. FAT removal is
- * independently exercised by the existing FAT identity/deletion regressions. */
+/* 此测试夹具中的所有请求都使用内存后端。FAT 删除由现有 FAT 身份/删除回归测试单独覆盖。 */
 static vfs_fat32_mount_t *vfs_fat32_mount_for_path(const char *p,char *r){(void)p;(void)r;return 0;}
 static bool fat32_stat_path(void *f,const char *p,os_file_info_t *o){(void)f;(void)p;(void)o;assert(0);return false;}
 static vnode_t *vfs_find_fat_node_locked(const char *p){(void)p;assert(0);return 0;}
@@ -115,12 +114,12 @@ int main(void){
  for(unsigned slot=0;slot<16;++slot){
   reset();strcpy(b[slot].path,"/target");compare(b[slot].path);
  }
- /* A successful exact remove must not touch the matched name's tail. */
+ /* 精确删除成功后不得触碰匹配名称的尾部。 */
  reset();strcpy(b[0].path,"/target");__asan_poison_memory_region(b[0].path+8,248);
  request="/target";depth=drops=scans=0;
  assert(vfs_remove_kernel(request)==K_OK&&!depth&&drops==1&&!scans&&!g_vfs_nodes[0]);
  __asan_unpoison_memory_region(b[0].path+8,248);
- /* A slash alone proves a descendant: even its first leaf byte is unused. */
+ /* 仅凭斜线即可确定这是后代路径：连叶名称的首字节都不会使用。 */
  reset();strcpy(b[0].path,"/target");b[0].directory=true;strcpy(b[1].path,"/target/deep/file");
  __asan_poison_memory_region(b[1].path+8,248);depth=drops=scans=0;
  assert(vfs_remove_kernel(request)==K_ENOTEMPTY&&!depth&&!drops&&!scans&&g_vfs_nodes[0]==&v[0]);
@@ -128,7 +127,7 @@ int main(void){
  if(!pid){assert(freopen("/dev/null","w",stderr));previous_remove(request);_exit(0);}
  int status;assert(waitpid(pid,&status,0)==pid&&WIFEXITED(status)&&WEXITSTATUS(status)==1);
  __asan_unpoison_memory_region(b[1].path+8,248);
- /* The type test and removal share the namespace lock. */
+ /* 类型检查和删除操作共用命名空间锁。 */
  drops=depth=0;
  reset();strcpy(b[0].path,"/target");b[0].directory=true;
  assert(vfs_remove_typed_kernel("/target",0)==K_EISDIR && !drops && !depth && g_vfs_nodes[0]);

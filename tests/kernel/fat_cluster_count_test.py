@@ -41,7 +41,8 @@ static void store(const OS_FAT32 *fs,UINT32 cluster,UINT32 value) {
     for(unsigned i=0;i<width;++i)media[(size_t)cluster*width+i]=(UINT8)(value>>(8*i));
 }
 '''
-for signature in ('BOOLEAN fat32_cluster_valid(', 'BOOLEAN fat32_read_fat_entry(',
+for signature in ('BOOLEAN fat32_cluster_valid(', 'static BOOLEAN fat32_fat_entry_location(',
+                  'BOOLEAN fat32_read_fat_entry(',
                   'BOOLEAN fat32_read_next_cluster(', 'UINT32 fat32_extent_length('):
     program += function(table, signature)
 program += count + reference + r'''

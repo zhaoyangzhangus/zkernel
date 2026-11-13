@@ -56,10 +56,11 @@ uint32_t wake_all(wait_queue_t *q) {
  wake_check(q);++all_wakes;atomic_fetch_add(&q->sequence,1);return 1;
 }
 kstatus_t wait_on_queue(wait_queue_t *q,bool (*ready)(void*),void *ctx,uint64_t timeout) {
- (void)q;assert(timeout==123 || timeout==0);++wait_calls;
- if(before_wait) { void (*hook)(void*)=before_wait;before_wait=0;hook(ctx); }
+ void *port=(void*)((uint8_t*)q - offsetof(completion_port_t,waitq));
+ assert(timeout==123 || timeout==0);++wait_calls;
+ if(before_wait) { void (*hook)(void*)=before_wait;before_wait=0;hook(port); }
  bool value=ready(ctx);
- if(value && after_ready) { void (*hook)(void*)=after_ready;after_ready=0;hook(ctx); }
+ if(value && after_ready) { void (*hook)(void*)=after_ready;after_ready=0;hook(port); }
  return value?K_OK:K_ETIMEDOUT;
 }
 ''' + source.replace('    *out = port;', '    check_storage(port);\n    *out = port;') + r'''
@@ -83,9 +84,9 @@ static void post_between_check_and_wait(void *p) {
  os_completion_entry_t e=entry_for(42);assert(completion_port_post(p,&e)==K_OK);
 }
 static void close_between_check_and_wait(void *p) { assert(completion_port_close(p)==K_OK); }
-static void consume_before_receiver_lock(void *p) {
- os_completion_entry_t e;
- assert(completion_port_wait(p,0,&e)==K_OK);check_entry(e,42);
+static void compete_after_claim(void *p) {
+ os_completion_entry_t e=entry_for(99);
+ assert(completion_port_wait(p,0,&e)==K_ETIMEDOUT);check_entry(e,99);
 }
 static void *close_many(void *p) {
  for(unsigned i=0;i<10000;++i)assert(completion_port_close(p)==K_OK);
@@ -104,7 +105,7 @@ int main(void) {
   assert(completion_port_create(cap,&p)==K_OK);
   unsigned sent=0,received=0,rng=cap;
   os_completion_entry_t out;
-  /* Fill/drain cycles cross each ring boundary from each starting position. */
+  /* 从每个起始位置执行填充/排空循环，并跨越环形缓冲区的边界。 */
   for(unsigned cycle=0;cycle<cap+2;++cycle) {
    unsigned wakes=one_wakes,notify=notifications;
    for(unsigned i=0;i<cap;++i) {
@@ -124,7 +125,7 @@ int main(void) {
    e=entry_for(sent++);assert(completion_port_post(p,&e)==K_OK);
    assert(completion_port_wait(p,0,&out)==K_OK);check_entry(out,received++);
   }
-  /* Reference FIFO indices are unbounded; mix partial drains and fills. */
+  /* 参考 FIFO 的索引不设上限；交错执行部分排空和填充。 */
   for(unsigned step=0;step<8192;++step) {
    rng=rng*1664525U+1013904223U;
    if(rng&0x80000000U) {
@@ -159,15 +160,15 @@ int main(void) {
  before_wait=post_between_check_and_wait;
  assert(completion_port_wait(p,123,&out)==K_OK);check_entry(out,42);
  assert(wait_calls==waits+1);
- before_wait=post_between_check_and_wait;after_ready=consume_before_receiver_lock;
+ before_wait=post_between_check_and_wait;after_ready=compete_after_claim;
  out=entry_for(99);
- assert(completion_port_wait(p,123,&out)==K_ETIMEDOUT);check_entry(out,99);
- assert(wait_calls==waits+3 && !p->count);
+ assert(completion_port_wait(p,123,&out)==K_OK);check_entry(out,42);
+ assert(wait_calls==waits+2 && !p->count);
  before_wait=close_between_check_and_wait;
  assert(completion_port_wait(p,123,&out)==K_ECANCELED);
- assert(wait_calls==waits+4 && !before_wait && !after_ready && !atomic_load(&p->lock.state));
+ assert(wait_calls==waits+3 && !before_wait && !after_ready && !atomic_load(&p->lock.state));
  object_put(p);
- /* Concurrent closes share one publication; destruction is also redundant. */
+ /* 并发 close 共享同一次发布；重复销毁操作也必须安全。 */
  assert(completion_port_create(1,&p)==K_OK);
  unsigned notify=notifications,wakes=all_wakes;
  pthread_t workers[8];

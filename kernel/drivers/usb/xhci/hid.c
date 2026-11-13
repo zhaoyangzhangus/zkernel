@@ -5,7 +5,7 @@
 #define USB_HID_PROTOCOL_KEYBOARD 0x01U
 #define USB_HID_PROTOCOL_MOUSE 0x02U
 
-/* REFACTOR_P8_XHCI_HID_OWNER: report decoding and input publication. */
+/* REFACTOR_P8_XHCI_HID_OWNER：报告解码和输入发布。 */
 static atomic_bool g_xhci_input_seen;
 static atomic_bool g_xhci_mouse_input_seen;
 static atomic_bool g_xhci_keyboard_input_seen;
@@ -33,8 +33,8 @@ static bool xhci_hid_previous_contains(const xhci_hid_report_context_t *device,
 }
 
 static uint32_t xhci_hid_input_device_id(const xhci_hid_report_context_t *context) {
-    /* A slot remains unique until Disable Slot, which also bounds the
-     * lifetime of events generated from its DMA report buffer. */
+    /* Slot 在 Disable Slot 执行前始终唯一；该操作也限定了由其 DMA 报告缓冲区生成的
+     * 事件的生命周期。 */
     return context == 0 ? 0x5848U : 0x58480000U | context->device_slot;
 }
 
@@ -119,9 +119,8 @@ static void xhci_hid_consume_keyboard_report(xhci_hid_report_context_t *state,
             xhci_hid_emit_key(state, current, INPUT_VALUE_PRESS);
         }
     }
-    /* All membership checks must use the same previous report. Updating a
-     * slot while examining the next one can synthesize presses when held
-     * keys are merely reordered or compacted by the keyboard. */
+    /* 所有成员检查都必须使用同一份上一轮报告。检查下一按键时更新槽位，可能会在键盘
+     * 仅对按住的按键重新排序或压紧排列时，错误地产生按下事件。 */
     for (uint32_t i = 2U; i < 8U; ++i) {
         uint8_t current = report[i];
         state->previous_keys[i - 2U] = current;
@@ -141,15 +140,12 @@ static void xhci_hid_consume_mouse_report(xhci_hid_report_context_t *state,
     }
     current_buttons = report[0] & 0x07U;
     changed_buttons = (uint16_t)(current_buttons ^ state->previous_buttons);
-    /* Boot mouse reports use signed 8-bit relative coordinates.  The input
-     * ABI deliberately uses screen coordinates (positive X right, positive Y
-     * down).  QEMU's USB boot-mouse backend, like conventional desktop HID
-     * stacks, reports a physical downward movement as a positive Y delta, so
-     * forward the value unchanged rather than applying a second inversion. */
+    /* Boot mouse 报告使用有符号 8 位相对坐标。输入 ABI 特意采用屏幕坐标（X 正向向右，
+     * Y 正向向下）。与常见桌面 HID 栈相同，QEMU 的 USB boot mouse 后端会将物理向下
+     * 移动报告为正 Y 增量，因此直接传递该值，不再进行第二次反转。 */
     int32_t delta_x = (int32_t)(int8_t)report[1];
     int32_t hid_delta_y = (int32_t)(int8_t)report[2];
-    /* The optional fourth byte is the Boot mouse wheel.  Preserve its HID
-     * signed direction; consumers can apply their own scroll convention. */
+    /* 可选的第 4 个字节表示 Boot mouse 滚轮。保留 HID 有符号方向；由使用方决定滚动方向。 */
     int32_t wheel = report_length >= 4U ? (int32_t)(int8_t)report[3] : 0;
     if (changed_buttons != 0U || delta_x != 0 || hid_delta_y != 0 ||
         wheel != 0) {

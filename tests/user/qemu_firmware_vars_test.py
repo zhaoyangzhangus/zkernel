@@ -45,7 +45,7 @@ with tempfile.TemporaryDirectory(prefix='qemu-vars-test-') as directory:
     template.unlink()
     assert run().returncode != 0
     assert not store.exists()
-    # Custom combined images retain their existing code-only behavior.
+    # 自定义组合镜像仍保留现有的纯代码行为。
     result = run(fixture / 'combined.fd')
     assert result.returncode == 0 and '-drive' not in result.stdout
     template.write_bytes(b'custom-vars')

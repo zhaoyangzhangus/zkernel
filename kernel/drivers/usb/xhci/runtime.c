@@ -151,9 +151,8 @@ void xhci_deferred_work(void *argument) {
     } while (consumed && pass < 8U);
     xhci_report_hid_completion_milestones();
 
-    /* Release queue ownership before the final IRQ handshake.  An MSI-X can
-     * arrive while this worker is draining the ring; the worker inherits that
-     * coalesced IRQ before deciding whether to schedule another bounded pass. */
+    /* 最后一次 IRQ 握手前先释放队列所有权。此工作线程排空事件环期间可能收到 MSI-X；
+     * 在决定是否再安排一轮有界处理前，工作线程会接手合并后的 IRQ。 */
     atomic_store_explicit(&g_xhci_work_queued, false,
                           memory_order_release);
 

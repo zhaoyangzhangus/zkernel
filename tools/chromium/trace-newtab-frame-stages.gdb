@@ -13,8 +13,8 @@ except RuntimeError as error:
 end
 target remote /tmp/system-keys.sock
 python
-# Four hardware addresses. Stage localization, not a native latency benchmark:
-# hardware stops perturb time and the first frame can contain prior damage.
+# 使用四个硬件地址。此脚本用于定位阶段，不是原生延迟基准：
+# 硬件断点会影响计时，而且首帧可能包含此前的损伤区域。
 started = None
 browser_pid = None
 all_processes = os.environ.get('OS_FRAME_SCOPE') == 'all'
@@ -67,9 +67,9 @@ elif frame_stage == 'pipeline':
     Stage('*0x4ecf4de0','DRAW_AND_SWAP')
     Stage('*0x4edaf0c0','BEGIN_PAINT')
 else:
-    # LiteOS deliberately disables its external platform ACK-loop adapter in
-    # DesktopWindowTreeHostPlatform. Trace the actual Viz scheduler, not the
-    # registered-but-unused NativeGuestBeginFrameSource::MaybeIssueFrame method.
+    # LiteOS 有意在 DesktopWindowTreeHostPlatform 中禁用外部平台 ACK 循环适配器。
+    # 跟踪实际的 Viz 调度器，而非已注册但未使用的
+    # NativeGuestBeginFrameSource::MaybeIssueFrame 方法。
     Stage('*0x4ecd4510','DISPLAY_BEGIN_FRAME')
     Stage('*0x4ecf4de0','DRAW_AND_SWAP')
 Stage('window_server_present','PRESENT')

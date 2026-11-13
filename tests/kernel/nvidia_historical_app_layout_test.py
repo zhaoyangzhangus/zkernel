@@ -95,7 +95,7 @@ class PrivateBundleValidation(unittest.TestCase):
     def test_remapped_hashes_aliases_manifests_and_negative_controls(self):
         with tempfile.TemporaryDirectory() as directory:
             work = Path(directory)
-            # Independent stand-ins; never inspect build/nvidia or the real cache.
+            # 使用独立的替代文件；绝不检查 build/nvidia 或真实缓存。
             fixture = work / 'fixture.c'
             fixture.write_text('int fixture(void) { return 42; }\n')
             elf = work / 'fixture.so'
@@ -124,7 +124,7 @@ class PrivateBundleValidation(unittest.TestCase):
                     (root / 'lib' / alias).write_bytes((root / 'lib' / target).read_bytes())
                     entries.append(dict(alias='lib/x86_64-linux-gnu/' + alias,
                                         target='lib/x86_64-linux-gnu/' + target))
-                # Host-only entries are intentionally absent from the guest bundle.
+                # 仅供宿主使用的条目有意不放入客户机文件包。
                 files.append(dict(target='lib64/ld-linux-x86-64.so.2', size=9, sha256='host-only'))
                 files.append(dict(target='usr/share/glvnd/egl_vendor.d/10_nvidia.json', size=0, sha256='host-only'))
                 manifest = work / 'userspace-595.84.json'

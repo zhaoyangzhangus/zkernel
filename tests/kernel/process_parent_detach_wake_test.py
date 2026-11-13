@@ -69,7 +69,7 @@ static kstatus_t wait_on_queue(wait_queue_t *q,bool (*pred)(void *),void *arg,ui
  pthread_mutex_lock(&q->gate);
  if(pred(arg)){pthread_mutex_unlock(&q->gate);return K_OK;}
  if(timeout==0){pthread_mutex_unlock(&q->gate);return K_ETIMEDOUT;}
- // A bounded watchdog makes the old missed wake fail instead of hanging QA.
+ // 有界看门狗会让旧的漏唤醒问题直接失败，而不是让 QA 挂起。
  struct timespec until;clock_gettime(CLOCK_REALTIME,&until);until.tv_sec+=2;
  ++q->waiting;
  while(!pred(arg)) {
@@ -99,7 +99,7 @@ static void *waiter(void *arg) {
 static void *detacher(void *arg) {process_detach_from_parent(arg);return NULL;}
 int main(void) {
  process_detach_from_parent(NULL);
- // Failed construction may install only the relation, before list insertion.
+ // 构造失败时，可能只安装了父子关系，还未插入链表。
  process_t *unlisted_parent=create(10),*unlisted_child=create(11);
  unlisted_child->parent=unlisted_parent;object_get(unlisted_parent);
  process_detach_from_parent(unlisted_child);
@@ -121,8 +121,7 @@ int main(void) {
   object_put(c);object_put(p);
  }
  assert(destroyed==200);
- // Retain the lookup owner while wake_all accesses its queue, even if the
- // relation was its last persistent reference.
+ // 即使该关系是最后一个持久引用，在 wake_all 访问队列期间也要保留查找得到的所有者。
  process_t *p=create(3),*c=create(4);attach(p,c);object_put(p);
  process_detach_from_parent(c);assert(destroyed==201 && c->refs==1 && !c->parent);object_put(c);
  assert(destroyed==202);return 0;

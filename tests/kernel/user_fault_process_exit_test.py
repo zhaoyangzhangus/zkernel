@@ -68,7 +68,7 @@ static void process_exit_diag(process_t *p,thread_t *t,int64_t status,uint32_t s
 static void process_terminate_siblings(process_t *p,thread_t *exclude,int64_t status){
  assert(p==&process && p->state==1 && exclude==running && p->status==status);
  ++cascades;
- /* Model the existing cancellation boundary, not the scheduler's internals. */
+ /* 模拟现有的取消边界，不模拟调度器内部实现。 */
  p->live_siblings=0;++p->close_notifications;
 }
 static __noreturn void thread_exit(int64_t status){
@@ -87,7 +87,7 @@ static void fault_on_worker(unsigned worker,unsigned vector,unsigned expected){
  assert(process.state==1 && process.signal==expected && process.status==-(int64_t)expected);
  assert(!process.live_siblings && process.close_notifications==1);
  assert(cascades==1 && diagnostics==1 && thread_exits==1);
- /* A second fault cannot overwrite status or repeat sibling termination. */
+ /* 第二次故障不能覆盖状态，也不能重复终止同级线程。 */
  running=&workers[(worker+1)%4];
  interrupts_enabled=false;
  if(!setjmp(escaped))exception_exit_user_process(vector);
@@ -110,8 +110,8 @@ int main(void){
   fault_on_worker(worker,17,OS_SIGBUS);
   fault_on_worker(worker,19,OS_SIGFPE);
  }
- /* Already-exiting user siblings must accept IPIs before thread cleanup;
-  * returning kernel and live-user paths must leave the gate state alone. */
+ /* 正在退出的用户同级线程必须在线程清理前接受 IPI；返回内核和仍活动的用户路径都
+  * 必须保持门禁状态不变。 */
  process=(process_t){.state=PROCESS_EXITING,.status=-11,.exit_code=-11};
  running=&workers[0];thread_exits=0;interrupts_enabled=false;
  exception_stop_exiting_user(false,&process);

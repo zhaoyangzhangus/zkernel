@@ -35,7 +35,7 @@ static page_t *page_for_address(uint64_t physical) {
 static page_t *page_span_for_pfn(pfn_t pfn,uint64_t *span) {
     if(pfn>=256||!present[pfn])return 0;
     uint64_t n=1;
-    /* Force metadata-span boundaries while preserving the actual marker. */
+    /* 在保留实际标记的同时，强制覆盖元数据跨度边界。 */
     while(n<*span&&pfn+n<256&&present[pfn+n]&&(pfn+n)%17)n++;
     *span=n;return &pages[pfn];
 }
@@ -111,7 +111,7 @@ int main(void) {
     lookups=0;free_block_locked(head,0);assert(lookups==9);
     reset(0);head=previous_take(0,0);lookups=0;
     previous_free(head,0);assert(lookups==18);
-    /* Invalid metadata pointers/orders must leave all lists and pages intact. */
+    /* 元数据指针或顺序无效时，所有链表和页面都必须保持不变。 */
     memcpy(saved_pages,pages,sizeof(pages));memcpy(saved_lists,g_free_lists,sizeof(g_free_lists));
     free_block_locked(0,0);free_block_locked(pages,BUDDY_MAX_ORDER+1);
     insert_known_block(0,0);insert_known_block(pages,BUDDY_MAX_ORDER+1);

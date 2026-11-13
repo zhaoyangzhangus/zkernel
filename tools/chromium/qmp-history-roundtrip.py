@@ -85,7 +85,7 @@ with tempfile.TemporaryDirectory(prefix='system-history-') as directory:
             capture('failure')
             raise RuntimeError('Forward bootstrap did not produce a distinct page body')
         time.sleep(.02)
-    # Bootstrap reference must stop changing; first paint may be incomplete.
+    # 初始页面基准必须先稳定；首次绘制可能尚未完成。
     previous = frame()
     stable_since = time.monotonic()
     while True:

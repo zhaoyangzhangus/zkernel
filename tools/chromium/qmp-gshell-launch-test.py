@@ -35,8 +35,7 @@ def enter(text):
     time.sleep(.5)
 
 def launch_and_verify(number, success, background):
-    # An identical status from the previous launch is not evidence of progress.
-    # Require an intervening, visibly different output before accepting it again.
+    # 与上次启动相同的状态不能证明有进展。再次接受它之前，必须先出现不同且可见的输出。
     assert lines()[-2] == success, f'Launch {number}: initial status missing'
     enter(f'echo LAUNCH PROBE {number}')
     assert lines()[-2] != success, f'Launch {number}: probe did not change the output'
@@ -65,8 +64,8 @@ with tempfile.TemporaryDirectory(prefix='system-shell-launch-') as directory:
         return bands
     click(815, 1020)
     time.sleep(.8)
-    # Render a known success label with the same guest font, no OCR or host
-    # image libraries. Subsequent real child exits must match this exact text.
+    # 使用相同的客户机字体绘制已知成功标签，不使用 OCR 或宿主图像库。
+    # 后续真实子进程的退出结果必须与此文本完全一致。
     label = 'PROGRAM STARTED IN BACKGROUND' if args.background else 'PROGRAM EXIT STATUS 0'
     enter('echo ' + label)
     success = lines()[-2]
@@ -75,8 +74,7 @@ with tempfile.TemporaryDirectory(prefix='system-shell-launch-') as directory:
         launch_and_verify(number + 1, success, args.background)
         print(f'{"Background" if args.background else "Foreground"} launch {number + 1}/{args.count}: {label}', flush=True)
     if args.background:
-        # Creation alone is insufficient: verify that all requested children
-        # actually exec'd NASM with the snapshotted argument vector.
+        # 仅创建进程还不够：验证所有请求的子进程确实使用快照参数向量 exec 了 NASM。
         serial_after = (root / 'build/qemu-serial.log').read_text(errors='replace').count('NASM version')
         assert serial_after - serial_before >= args.count, 'Background child exec/output missing'
     mode = 'background' if args.background else 'launch'

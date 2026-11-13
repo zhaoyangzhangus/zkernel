@@ -22,7 +22,7 @@ code = r'''
 #include <unistd.h>
 #define VFS_PATH_LIMIT 256U
 #define OS_FILE_TYPE_DIRECTORY 2
-/* Put the path last so the fixture can guard the byte immediately after it. */
+/* 将路径放在末尾，以便测试夹具保护路径后的紧邻字节。 */
 typedef struct {bool directory;char path[256];} vfs_backend_node_t;
 typedef struct {void *fs_private;} vnode_t;
 typedef struct {unsigned type;} os_file_info_t;
@@ -81,7 +81,7 @@ int main(void){
   }
  }
  mounted=false;g_vfs_node_capacity=4;
- /* A supplied parent-prefix length need not be the whole request length. */
+ /* 给定的父路径前缀长度不必等于整个请求长度。 */
  g_vfs_node_capacity=1;
  for(unsigned n=0;n<=256;++n){
   memset(request,'x',256);memset(b[0].path,'x',256);
@@ -110,7 +110,7 @@ int main(void){
  assert(!vfs_directory_exists_locked("/disk/parent/file",17));
  assert(!vfs_parent_directory_exists_locked("/disk/missing/file",18));
  path_sensitive=false;
- /* Path ends at the protected page: [256] must never be read. */
+ /* 路径在保护页处结束：绝不能读取索引 [256]。 */
  long page=sysconf(_SC_PAGESIZE);assert(page>=(long)sizeof(b[0]));
  char *arena=mmap(0,(size_t)page*2,PROT_READ|PROT_WRITE,
                   MAP_PRIVATE|MAP_ANONYMOUS,-1,0);assert(arena!=MAP_FAILED);

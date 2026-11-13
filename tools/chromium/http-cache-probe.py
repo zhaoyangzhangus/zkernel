@@ -40,10 +40,9 @@ for index in range(capacity):
                         tables[name]=db.execute('SELECT COUNT(*) FROM '+quoted).fetchone()[0]
                     record['sqlite_rows']=tables
                     record['sqlite_quick_check']=[row[0] for row in db.execute('PRAGMA quick_check')]
-                    # Chromium CalculateCheckSum appends the low 32 hash bits
-                    # in network byte order. Inspect snapshots, never alter or
-                    # "repair" guest cache bytes. An in-flight transaction can
-                    # make the raw database snapshot temporarily inconsistent.
+                    # Chromium CalculateCheckSum 会按网络字节序追加哈希值的低 32 位。
+                    # 只检查快照，绝不修改或“修复”客户机缓存字节。正在进行的事务可能会
+                    # 暂时导致原始数据库快照不一致。
                     columns={row[1] for row in db.execute('PRAGMA table_info(resources)')}
                     if {'res_id','head','check_sum','cache_key_hash'} <= columns:
                         def checksum(data,key_hash):

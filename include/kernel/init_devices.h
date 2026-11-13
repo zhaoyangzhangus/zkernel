@@ -8,6 +8,6 @@ typedef struct kernel_init_devices_hooks {
     void (*halt)(void);
 } kernel_init_devices_hooks_t;
 
-/* Discover platform devices and complete the deterministic device self-tests. */
+/* 发现平台设备，并完成确定性的设备自检。 */
 BOOLEAN kernel_init_devices(OS_BOOT_INFO *info,
                             const kernel_init_devices_hooks_t *hooks);

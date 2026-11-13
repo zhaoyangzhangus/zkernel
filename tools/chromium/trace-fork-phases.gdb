@@ -1,7 +1,7 @@
 set pagination off
 target remote /tmp/system-keys.sock
-# Current kernel: immediately after x86_tsc_to_ns(finished - started).
-# Saved timestamps were all taken before this sole breakpoint.
+# 当前内核：位于 x86_tsc_to_ns(finished - started) 之后。
+# 所有时间戳都在这唯一的断点触发前保存。
 hbreak *0xffffffff80019db3
 commands
 silent

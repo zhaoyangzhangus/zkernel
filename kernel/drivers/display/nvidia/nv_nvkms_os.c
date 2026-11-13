@@ -1,10 +1,9 @@
 /*
- * System OS interface for the official NVIDIA 595.84 NVKMS core.
+ * 官方 NVIDIA 595.84 NVKMS 核心的 System OS 接口。
  *
- * This file is the port boundary.  It owns System allocation, synchronization,
- * time, worker, and KAPI-open mechanics; it does not implement RM operations,
- * video-memory allocation, GPU virtual address management, GMMU programming,
- * or GSP RPC.  Those remain in the immutable 595.84 RM/NVKMS object set.
+ * 此文件是移植边界。它负责 System 的内存分配、同步、时间、工作线程和 KAPI 打开机制；
+ * 不实现 RM 操作、显存分配、GPU 虚拟地址管理、GMMU 编程或 GSP RPC。这些功能仍由不可变的
+ * 595.84 RM/NVKMS 对象集负责。
  */
 
 #include <nvidia-modeset-os-interface.h>
@@ -38,10 +37,8 @@
 extern NvS32 os_vsnprintf(char *destination, NvU32 capacity,
                           const char *format, va_list arguments);
 
-/* The kernel image exports the byte-copy primitives, but it deliberately
- * does not provide a hosted libc string ABI.  Keep these small helpers local
- * to the NVKMS boundary instead of adding a global symbol just for the vendor
- * port. */
+/* 内核映像导出了字节复制原语，但特意没有提供宿主环境的 libc 字符串 ABI。将这些小型
+ * 辅助函数保留在 NVKMS 边界内，不要只为厂商移植层新增全局符号。 */
 static size_t nvkms_local_strlen(const char *s)
 {
     const char *p = s;
@@ -139,10 +136,9 @@ typedef struct nvkms_bootstrap_context {
 } nvkms_bootstrap_context_t;
 
 /*
- * nvKmsModuleLoad() and the initial KAPI modeset use sleeping mutexes.  The
- * runtime entry is still executing on the BSP's logical-idle bootstrap
- * continuation, so run the complete operation on the existing real Ring0
- * thread primitive instead of weakening the mutex contract.
+ * nvKmsModuleLoad() 和初始 KAPI 模式设置会使用可休眠互斥锁。运行时入口仍在 BSP 的逻辑
+ * 空闲引导续执行路径上，因此应使用现有的真实 Ring0 线程原语执行完整操作，而不是放宽
+ * 互斥锁约定。
  */
 static void nvkms_bootstrap_worker(void *argument)
 {
@@ -187,18 +183,16 @@ static void nvkms_bootstrap_poll(void)
     (void)x86_smp_take_reschedule_request();
     if (sched_runnable_count() != 0U)
         (void)sched_try_run_ready();
-    /* Serial-only markers are captured by the real-test buffer.  Flush from
-     * the bootstrap continuation so a vendor worker that blocks or spins
-     * still leaves the last completed boundary on the FAT log. */
+    /* 仅串口标记会被真实硬件测试缓冲区捕获。在引导续执行路径中刷新日志，即使厂商工作线程
+     * 阻塞或自旋，FAT 日志中也会留下最后一个已完成的边界。 */
     if (realtest_enabled())
         (void)realtest_flush();
 }
 
 static bool nvkms_lock(uint64_t timeout_ns)
 {
-    /* A real-hardware probe must not leave the host waiting forever if the
-     * vendor core owns its serialization mutex while a bootstrap operation
-     * is stuck.  Production/non-realtest behavior remains unchanged. */
+    /* 如果引导操作卡住且厂商核心持有串行化互斥锁，真实硬件探测不能让宿主机无限等待。
+     * 生产环境和非真实硬件测试的行为保持不变。 */
 #if OS_REALTEST
     if (timeout_ns == UINT64_MAX)
         timeout_ns = 5000000000ULL;
@@ -214,14 +208,13 @@ static void nvkms_unlock(void)
 }
 
 /*
- * The official Linux port has two distinct locks here:
- *   - nvkms_pm_lock protects clients from suspend/resume;
- *   - nvkms_lock serializes entry into the NVKMS core.
+ * 官方 Linux 移植层在此处使用两把不同的锁：
+ *   - nvkms_pm_lock 用于在挂起/恢复期间保护客户端；
+ *   - nvkms_lock 用于串行化进入 NVKMS 核心的操作。
  *
- * KAPI's try_pmlock helper must only try the former.  Treating the core
- * mutex as the PM lock rejects a valid modeset whenever another NVKMS
- * operation owns the core mutex, which is exactly what the real hardware
- * trace exposed.
+ * KAPI 的 try_pmlock 辅助函数只能尝试获取前一把锁。若将核心互斥锁当作电源管理锁，
+ * 只要另一项 NVKMS 操作持有核心互斥锁，就会拒绝有效的模式设置；真实硬件跟踪正好暴露了
+ * 这个问题。
  */
 static bool nvkms_pm_read_lock(void)
 {
@@ -364,8 +357,7 @@ void nvkms_yield(void)
 
 void nvkms_dump_stack(void)
 {
-    /* System has no Linux-compatible stack decoder; retain a serial-only
-     * diagnostic marker instead of claiming that a stack was dumped. */
+    /* System 没有兼容 Linux 的栈解码器；保留仅供串口读取的诊断标记，不要声称已转储栈信息。 */
     kernel_serial_write_serial_only("OS_NVKMS_STACK_DUMP_UNAVAILABLE\r\n");
 }
 
@@ -482,8 +474,7 @@ static void nvkms_timer_reap_thread(void *argument)
 
             timer_thread = timer->thread;
             if (timer_thread != NULL) {
-                /* This is a private reaper thread, so waiting here cannot
-                 * stall the shared compositor/deferred worker. */
+                /* 这是专用的回收线程，因此在此等待不会阻塞共享的合成器/延迟工作线程。 */
                 status = nv_port_thread_join(timer_thread, UINT64_MAX);
                 if (status != K_OK) {
                     nvkms_timer_reap_push(timer);
@@ -571,7 +562,7 @@ static void nvkms_timer_thread(void *argument)
             nvkms_unlock();
         }
     } else if (timer->is_ref_ptr) {
-        /* A canceled ref timer still owns the extra ref. */
+        /* 已取消的引用定时器仍持有额外引用。 */
         if (nvkms_lock(UINT64_MAX)) {
             (void)nvkms_dec_ref((struct nvkms_ref_ptr *)timer->data_ptr);
             nvkms_unlock();
@@ -686,10 +677,9 @@ void nvkms_free_timer(nvkms_timer_handle_t *handle)
     if (thread == NULL)
         return;
     (void)nv_port_thread_stop(thread);
-    /* The official implementation is non-blocking here.  In particular,
-     * proc() may call nvkms_free_timer() on its own handle while the global
-     * NVKMS lock is held.  Let the timer thread enqueue the reaper after it
-     * has returned from proc() and the wrapper has published finished. */
+    /* 官方实现要求此处不得阻塞。尤其是 proc() 可能在持有全局 NVKMS 锁时，对自己的句柄调用
+     * nvkms_free_timer()。应让定时器线程在 proc() 返回且包装函数发布完成状态后，再将回收任务
+     * 加入队列。 */
     if (atomic_load_explicit(&thread->finished, memory_order_acquire))
         nvkms_queue_timer_reap(timer);
 }
@@ -810,9 +800,8 @@ void nvkms_close_from_kapi(struct nvkms_per_open *popen)
         return;
     atomic_store_explicit(&popen->closed, true, memory_order_release);
     if (!nvkms_pm_read_lock() || !nvkms_lock(UINT64_MAX)) {
-        /* Do not free a live vendor per-open object while nvKmsClose() could
-         * still be pending.  The global lock is initialized before KAPI is
-         * exposed, so this is a fail-closed diagnostic path. */
+        /* nvKmsClose() 仍可能处于等待状态时，不要释放仍在使用的厂商逐打开对象。全局锁在公开
+         * KAPI 前已完成初始化，因此此路径会安全失败并记录诊断信息。 */
         kernel_serial_write_serial_only("OS_NVKMS_CLOSE_LOCK_FAIL\r\n");
         if (g_nvkms_pm_lock_initialized)
             nvkms_pm_read_unlock();

@@ -113,7 +113,7 @@ int main(void){
  for(unsigned i=0;i<4;++i)assert(!pthread_join(producers[i],NULL));
  drain();
  assert(executed==40000);for(unsigned i=0;i<40000;++i)assert(seen[i]==1);
- // A blocked cleanup cannot retain the queue lock or consume device work.
+ // 被阻塞的清理操作不能一直持有队列锁，也不能占用设备工作项。
  assert(deferred_background_schedule(slow,0));pthread_t cleanup;
  assert(!pthread_create(&cleanup,NULL,one_cleanup,NULL));
  while(!atomic_load(&slow_entered))sched_yield();
@@ -123,8 +123,7 @@ int main(void){
  background_item_t item;assert(background_take(&item)&&item.function==marker);
  item.function(item.argument);assert(markers==1);
  assert(!background_take(&item));assert(background_prepare_sleep()&&blocked==31);
- // No host worker is running now. Reconstruct deterministic boot layouts;
- // idle CPUs and offline holes must not force an invalid affinity target.
+ // 当前没有宿主工作线程运行。重建确定性的引导布局；空闲 CPU 和离线空位不能导致亲和性目标无效。
  unsigned layouts=0;
  for(discovered=1;discovered<=4;++discovered)
  for(online=1;online<(1ULL<<discovered);++online)

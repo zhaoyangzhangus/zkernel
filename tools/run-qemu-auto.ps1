@@ -40,9 +40,9 @@ function Get-WslDistro {
 
     $preferred = @($env:OS_WSL_DISTRO, 'Debian', 'Ubuntu')
     try {
-        # wsl.exe can exist as the Windows optional-feature stub even when WSL
-        # is not installed.  In that case `wsl -l -q` writes an error and
-        # PowerShell turns it into a NativeCommandError under Stop mode.
+        # 即使未安装 WSL，Windows 可选功能占位程序也可能提供 wsl.exe。
+        # 在这种情况下，`wsl -l -q` 会输出错误；Stop 模式下 PowerShell 会将其转换为
+        # NativeCommandError。
         $rawAvailable = @(& $wsl.Source -l -q 2>$null)
     }
     catch {

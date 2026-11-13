@@ -1,6 +1,7 @@
 """Production premultiplied spans and all opaque-coverage decisions."""
 from pathlib import Path
 import subprocess
+import resource
 import tempfile
 
 root = Path(__file__).resolve().parents[2]
@@ -17,6 +18,7 @@ program = r'''
 #include <kernel/base.h>
 #include <uapi/window.h>
 #include <assert.h>
+#include <kernel/pixel_blend.h>
 #include <stdio.h>
 #include <string.h>
 #define WINDOW_CORNER_RADIUS 8U
@@ -26,19 +28,21 @@ program = r'''
 #define WINDOW_DAMAGE_MAX_TILES_Y 8U
 #define WINDOW_SERVER_MAX_WINDOWS 64U
 typedef struct { uint64_t touch_mask, opaque_mask; } compositor_tile_meta_t;
-typedef struct { uint32_t x0,y0,x1,y1; } Rect;
+#include <kernel/rect.h>
 typedef struct { int32_t x,y; uint32_t width,height,flags,background,surface_width,surface_height; uint64_t buffer_size,surface_offset; bool maximized,surface_lease; } compositor_window_view_t;
 typedef struct { bool readable; uint64_t row_bytes; } compositor_surface_source_context_t;
 typedef struct { unsigned window_count,damage_count; compositor_window_view_t windows[2]; Rect damage_rects[16]; } compositor_snapshot_t;
 static uint32_t page_data[3072], output[3072];
 static int missing=-1;
-static unsigned copied;
+static unsigned copied, resolve_calls[3];
+static unsigned page_order[3]={0,1,2};
 static bool window_client_decorations(uint32_t f) { return (f&OS_WINDOW_CLIENT_DECORATIONS)!=0; }
 static bool window_standard_caption(uint32_t f) { return (f&(OS_WINDOW_CLIENT_DECORATIONS|OS_WINDOW_STANDARD_CAPTION_CONTROLS))==(OS_WINDOW_CLIENT_DECORATIONS|OS_WINDOW_STANDARD_CAPTION_CONTROLS); }
 static unsigned window_outer_width(unsigned w,unsigned f) { (void)f; return w; }
 static unsigned window_outer_height(unsigned h,unsigned f) { (void)f; return h; }
 static uint8_t *compositor_surface_page_resolve(const compositor_surface_source_context_t *s,uint64_t index) {
-    (void)s; assert(index<3); return (int)index==missing ? 0 : (uint8_t*)&page_data[index*1024];
+    (void)s; assert(index<3); ++resolve_calls[index];
+    return (int)index==missing ? 0 : (uint8_t*)&page_data[page_order[index]*1024];
 }
 static void compositor_surface_copy_destination(uint32_t *wb,volatile uint32_t *dev,const uint32_t *src,uint32_t n) {
     ++copied; for(unsigned i=0;i<n;++i) { if(wb)wb[i]=src[i]; else dev[i]=src[i]; }
@@ -71,8 +75,29 @@ int main(void) {
         w.buffer_size=sizeof(page_data);
     }
     assert(!copied);
-    // Actual Chrome-like opaque interior takes the bulk path, preserving
-    // translucent/transparent boundary pixels and both destination types.
+    /* 连续页只调用一次复制；倒序页、缺失页不能跨边界合并，每页也只解析一次。 */
+    uint32_t saved_flags=w.flags;
+    w.flags=0;w.background=0x334455;
+    for(unsigned dev=0;dev<2;++dev)for(unsigned layout=0;layout<3;++layout) {
+        for(unsigned i=0;i<3072;++i)page_data[i]=i*2654435761U;
+        for(unsigned p=0;p<3;++p)page_order[p]=layout==1?2-p:p;
+        missing=layout==2?1:-1;
+        memset(resolve_calls,0,sizeof(resolve_calls));
+        unsigned before=copied;
+        run_span(&w,dev,0,3072);
+        assert(copied-before==(layout==0?1U:layout==1?3U:2U));
+        for(unsigned p=0;p<3;++p) {
+            assert(resolve_calls[p]==1);
+            for(unsigned x=0;x<1024;++x)
+                assert(output[p*1024+x]==((int)p==missing?w.background:
+                    page_data[page_order[p]*1024+x]));
+        }
+    }
+    for(unsigned p=0;p<3;++p)page_order[p]=p;
+    missing=-1;w.flags=saved_flags;w.background=0;
+
+    // 类似 Chrome 的不透明内部区域走批量路径，同时保留半透明/透明边界像素，
+    // 并覆盖两种目标类型。
     for(unsigned device=0;device<2;++device) {
         for(unsigned i=0;i<256;++i){page_data[i]=0xff123456;output[i]=0x006080a0;}
         page_data[0]=0x80402010;page_data[255]=0;
@@ -86,10 +111,9 @@ int main(void) {
     run_span(&w,false,0,5);assert(!memcmp(output,page_data+1024,20));
     w.surface_offset=UINT64_MAX;
     run_span(&w,false,1,5);for(unsigned i=0;i<4;++i)assert(output[i]==w.background);
-    // Moving clock strokes: repaint over the retained previous frame, not
-    // a freshly cleared destination. Old white pixels must become black.
-    // Alternate real page offsets and test both WB and device destinations,
-    // including the premultiplied path used by Chrome.
+    // 移动的时钟笔画：在保留的上一帧上重绘，而不是绘制到刚清空的目标缓冲区。
+    // 旧的白色像素必须变为黑色。交替使用真实页偏移，并测试 WB 和设备内存目标，
+    // 包括 Chrome 使用的预乘路径。
     for(unsigned alpha=0;alpha<2;++alpha)for(unsigned device=0;device<2;++device){
         w.flags=OS_WINDOW_VISIBLE|OS_WINDOW_CLIENT_DECORATIONS|
             (alpha?OS_WINDOW_PREMULTIPLIED_ALPHA:0);
@@ -134,3 +158,15 @@ with tempfile.TemporaryDirectory(prefix='liteos-alpha-') as directory:
                     '-fsanitize=address,undefined','-fno-pie','-no-pie',
                     '-I'+str(root/'include'),str(path/'test.c'),'-o',str(path/'test')],check=True)
     subprocess.run([str(path/'test')],check=True)
+
+    negative=program.replace('next == 0 || (uintptr_t)next != next_address', 'next == 0')
+    assert negative != program
+    (path/'test.c').write_text(negative)
+    subprocess.run(['cc','-std=gnu11','-Wall','-Wextra','-Werror','-Wno-unused-function',
+                    '-fsanitize=address,undefined','-fno-pie','-no-pie',
+                    '-I'+str(root/'include'),str(path/'test.c'),'-o',str(path/'test')],check=True)
+    def no_core():
+        resource.setrlimit(resource.RLIMIT_CORE,(0,0))
+    result=subprocess.run([str(path/'test')],capture_output=True,text=True,preexec_fn=no_core)
+    assert result.returncode != 0 and ('Assertion' in result.stderr or 'AddressSanitizer' in result.stderr)
+print('连续页合并：连续/倒序/缺失页均逐像素匹配，每页仅解析一次；错误跨物理边界合并的负面对照被拒绝')

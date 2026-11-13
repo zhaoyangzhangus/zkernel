@@ -34,7 +34,7 @@ with QMPClient() as qmp, tempfile.TemporaryDirectory(prefix='editor-message-qa-'
         qmp.key('ret')
         time.sleep(.8)
     def focused_button(pixels):
-        # No font-height assumptions: find the actual accent button raster.
+        # 不假定字体高度：查找实际的强调按钮光栅图形。
         runs = []
         accent = bytes.fromhex('1a73e8')
         for y in range(350, 800):

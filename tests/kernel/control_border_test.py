@@ -24,8 +24,8 @@ static unsigned pixels[40*32+2];
 static unsigned calls,max_height;
 static bool count_only;
 static struct {Rect damage_bounds;} g_compositor_snapshot;
-static void control_fill(int64_t x,int64_t y,unsigned w,unsigned h,unsigned r,unsigned color){
- assert(!r&&h&&w);++calls;if(h>max_height)max_height=h;
+static void control_fill(Rect clip,int64_t x,int64_t y,unsigned w,unsigned h,unsigned r,unsigned color){
+ (void)clip;assert(!r&&h&&w);++calls;if(h>max_height)max_height=h;
  if(count_only)return;
  assert(x>=0&&y>=0&&x+w<=40&&y+h<=32);
  for(unsigned row=0;row<h;++row)for(unsigned i=0;i<w;++i){
@@ -51,7 +51,7 @@ int main(void){
   if(n==4998)x=INT32_MIN-10LL;if(n==4999)x=INT32_MAX+10LL;
   unsigned w=n%37,h=n%31,b=n%13,r=n%23;
   g_compositor_snapshot.damage_bounds=(Rect){2,3,38,29};
-  control_border(x,y,w,h,r,b,1);
+  control_border(g_compositor_snapshot.damage_bounds,x,y,w,h,r,b,1);
   if(b>w/2)b=w/2;if(b>h/2)b=h/2;
   if(r>w/2)r=w/2;if(r>h/2)r=h/2;
   for(int py=0;py<32;++py)for(int px=0;px<40;++px){
@@ -68,10 +68,10 @@ int main(void){
  printf("Control borders: %u oracle pixels, four corners, widths, tiny sizes, clipping, extreme origins and no duplicate writes PASS\n",cases);
  count_only=true;calls=max_height=0;
  g_compositor_snapshot.damage_bounds=(Rect){0,0,3840,2160};
- control_border(0,0,3840,2160,8,1,1);
+ control_border(g_compositor_snapshot.damage_bounds,0,0,3840,2160,8,1,1);
  assert(calls==32&&max_height==2144);
  unsigned rounded=calls;calls=max_height=0;
- control_border(0,0,3840,2160,0,1,1);
+ control_border(g_compositor_snapshot.damage_bounds,0,0,3840,2160,0,1,1);
  assert(calls==4&&max_height==2158);
  printf("Border work: 4K rounded border %u submissions, rectangular border %u; straight edges use bulk rectangles PASS\n",rounded,calls);
 }

@@ -2,7 +2,7 @@
 #include <kernel/perf.h>
 #include <kernel/telemetry.h>
 
-/* REFACTOR_P7F_TILE_METADATA_OWNER: per-frame tile masks and self-test. */
+/* REFACTOR_P7F_TILE_METADATA_OWNER：逐帧瓦片掩码和自检。 */
 
 _Static_assert(WINDOW_SERVER_MAX_WINDOWS <= 64U,
                "tile metadata masks require <= 64 windows");
@@ -13,6 +13,7 @@ compositor_tile_meta_t g_compositor_tile_meta[WINDOW_DAMAGE_TILE_COUNT]
 static uint32_t g_compositor_tile_columns;
 static uint32_t g_compositor_tile_rows;
 static bool g_compositor_tile_meta_valid;
+static uint64_t g_compositor_tile_revision;
 
 static uint32_t tile_count_for_extent(uint32_t extent, uint32_t limit) {
     uint32_t count =
@@ -146,8 +147,36 @@ bool compositor_tile_metadata_build(
     const compositor_snapshot_t *snapshot) {
     uint32_t columns = 0U;
     uint32_t rows = 0U;
+    /* 只缓存瓦片计算依赖的值，不保留窗口或快照引用；数组顺序就是掩码位序。
+     * 像素提交与损坏区域变化不影响几何遮挡，无需每帧清零并重写整屏表。 */
+    typedef struct tile_geometry {
+        int32_t x, y;
+        uint32_t width, height, flags;
+        bool maximized;
+    } tile_geometry_t;
+    static tile_geometry_t geometry[WINDOW_SERVER_MAX_WINDOWS];
+    static uint32_t saved_count, saved_width, saved_height;
+
+    if (g_compositor_tile_meta_valid && snapshot != 0 && !snapshot->animations &&
+        snapshot->window_count == saved_count &&
+        g_window_server.display_width == saved_width &&
+        g_window_server.display_height == saved_height) {
+        bool unchanged = true;
+        for (uint32_t i = 0U; i < saved_count; ++i) {
+            const compositor_window_view_t *view = &snapshot->windows[i];
+            const tile_geometry_t *saved = &geometry[i];
+            if (view->x != saved->x || view->y != saved->y ||
+                view->width != saved->width || view->height != saved->height ||
+                view->flags != saved->flags || view->maximized != saved->maximized) {
+                unchanged = false;
+                break;
+            }
+        }
+        if (unchanged) return true;
+    }
 
     g_compositor_tile_meta_valid = false;
+    ++g_compositor_tile_revision;
 
     /* 动画帧使用动态裁剪和平移，不消费静态瓦片遮挡数据。
      * 先作废旧结果再跳过构建，结束动画后的普通帧必须重新计算。 */
@@ -169,10 +198,25 @@ bool compositor_tile_metadata_build(
         return false;
     }
 
+    for (uint32_t i = 0U; i < snapshot->window_count; ++i) {
+        const compositor_window_view_t *view = &snapshot->windows[i];
+        geometry[i] = (tile_geometry_t){
+            .x = view->x, .y = view->y, .width = view->width,
+            .height = view->height, .flags = view->flags,
+            .maximized = view->maximized,
+        };
+    }
+    saved_count = snapshot->window_count;
+    saved_width = g_window_server.display_width;
+    saved_height = g_window_server.display_height;
     g_compositor_tile_columns = columns;
     g_compositor_tile_rows = rows;
     g_compositor_tile_meta_valid = true;
     return true;
+}
+
+uint64_t compositor_tile_metadata_revision(void) {
+    return g_compositor_tile_revision;
 }
 
 bool compositor_tile_metadata_valid(void) {
@@ -222,8 +266,8 @@ bool compositor_tile_self_test(void) {
         return false;
     }
 
-    /* A restored surface touches the corner tile but does not fully occlude
-     * it. The same maximized window is square and genuinely covers the tile. */
+    /* 恢复后的表面会触及角落瓦片，但不会完全遮挡它。同一窗口最大化后则会变成方形，
+     * 真正覆盖该瓦片。 */
     snapshot.windows[0].maximized = true;
     if (!tile_metadata_build_into(&snapshot, 64U, 64U, metadata, &columns, &rows) ||
         metadata[0].opaque_mask != 0x1U) return false;
@@ -314,13 +358,13 @@ uint32_t compositor_tile_occlusion_floor(uint32_t tile_x, uint32_t tile_y,
     return floor < window_count ? floor : UINT32_MAX;
 }
 
-uint32_t compositor_occlusion_floor_for_damage(void) {
+uint32_t compositor_occlusion_floor_for_damage(Rect clip) {
     Rect bounds;
     if (!compositor_tile_metadata_valid() ||
-        !rect_clip_to_extent(g_compositor_snapshot.damage_bounds.x0,
-            g_compositor_snapshot.damage_bounds.y0,
-            g_compositor_snapshot.damage_bounds.x1,
-            g_compositor_snapshot.damage_bounds.y1,
+        !rect_clip_to_extent(clip.x0,
+            clip.y0,
+            clip.x1,
+            clip.y1,
             g_window_server.display_width, g_window_server.display_height, &bounds))
         return UINT32_MAX;
 

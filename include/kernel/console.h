@@ -12,8 +12,7 @@ void kernel_serial_write_u32(uint32_t value);
 void kernel_serial_write_u32_serial_only(uint32_t value);
 void kernel_serial_enable_concurrency(void);
 
-/* Internal serial transaction primitives.  They let location-aware stage
- * records share the COM1 lock with printf without drawing into the GOP. */
+/* 内部串口事务原语。带位置信息的阶段记录可与 printf 共用 COM1 锁，而无需绘制到 GOP。 */
 typedef struct kernel_serial_guard {
     uint64_t flags;
     uint8_t owned;
@@ -27,9 +26,8 @@ void kernel_serial_write_record_guarded(const char *text);
 void kernel_serial_write_serial_only(const char *text);
 int kernel_serial_printf_serial_only(const char *format, ...);
 
-/* The kernel terminal is a 12x24 fixed-cell A8 console.  printk formats one
- * complete record before it reaches the character/color buffers; the backend
- * then renders the dirty rows to GOP in one transaction. */
+/* 内核终端是 12x24 固定单元格的 A8 控制台。printk 会先格式化完整记录，再写入字符/颜色缓冲区；
+ * 后端随后会在一个事务中将脏行渲染到 GOP。 */
 int printk(const char *format, ...);
 int printf(const char *format, ...);
 void kernel_console_refresh(void);

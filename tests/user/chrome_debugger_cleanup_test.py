@@ -33,8 +33,7 @@ assert 'recover_failed_debugger()' in ast.unparse(recovery_try.body[0])
 cleanup = ast.unparse(ast.Module(body=recovery_try.finalbody, type_ignores=[]))
 assert 'gdbserver none' in cleanup and "command('cont')" in cleanup
 assert "'down': False" in cleanup and "'button': 'left'" in cleanup
-# Execute the real input retry policy: only rejected events may be retried,
-# successful delivery happens once, and unrelated errors stay errors.
+# 执行真实输入重试策略：只有被拒绝的事件可以重试；成功投递只发生一次，其他错误仍按错误处理。
 retry = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name=='command')
 clock=[0.0]
 attempts=[]
@@ -62,8 +61,7 @@ else:raise AssertionError('retry must be bounded')
 assert 3<=clock[0]<3.1
 print('Debugger cleanup: zero/nonzero exits reset stale traps, live debugger preserved, input retry bounded, buttons released and resume passed')
 
-# Click timing is independent of key timing: a 100ms diagnostic hold would
-# otherwise obscure the release-triggered address selection being measured.
+# 点击时序与按键时序相互独立：100ms 的诊断按压时间会干扰正在测量的按键释放触发地址选择操作。
 click = next(n for n in ast.walk(outer) if isinstance(n,ast.If)
              and ast.unparse(n.test)=='args.click')
 buttons = next(n for n in click.body if isinstance(n,ast.For)

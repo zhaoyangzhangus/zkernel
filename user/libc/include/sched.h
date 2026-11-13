@@ -3,7 +3,7 @@
 #include <stddef.h>
 #include <sys/types.h>
 
-/* Linux clone flags used by Chromium's POSIX sandbox and process helpers. */
+/* Chromium POSIX 沙箱和进程辅助函数使用的 Linux clone 标志。 */
 #ifndef CLONE_VM
 #define CLONE_VM             0x00000100UL
 #define CLONE_FS             0x00000200UL
@@ -31,7 +31,7 @@
 #define CLONE_IO             0x80000000UL
 #endif
 
-/* Linux-compatible fixed-size CPU sets used by Chromium's thread helpers. */
+/* Chromium 线程辅助函数使用的 Linux 兼容固定大小 CPU 集合。 */
 #ifndef CPU_SETSIZE
 #define CPU_SETSIZE 1024
 #endif
@@ -40,7 +40,7 @@ typedef struct {
     unsigned long bits[CPU_SETSIZE / (8U * sizeof(unsigned long))];
 } cpu_set_t;
 
-/* Linux scheduling constants and parameter layout used by POSIX clients. */
+/* POSIX 客户端使用的 Linux 调度常量和参数布局。 */
 #ifndef SCHED_OTHER
 #define SCHED_OTHER 0
 #define SCHED_FIFO 1

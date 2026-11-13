@@ -89,7 +89,7 @@ int main(void) {
  check(&node,65536ULL*PAGE_SIZE,37,false,0);
  check(&node,37,0,false,0);
  free(cache.expanded_buckets);
- /* Sparse/wide growth retains a single list walk, not millions of probes. */
+ /* 稀疏/大范围扩展仍只遍历一次链表，而不是探测数百万次。 */
  cache=(vfs_page_cache_t){0};
  for(unsigned i=0;i<8;++i) {
   entries[i]=(vfs_cached_page_t){.index=i,.page=data[i]};

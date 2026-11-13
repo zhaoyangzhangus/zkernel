@@ -93,8 +93,8 @@ static void *worker(void *opaque) {
         } else successes += e1000_poll();
         assert(!depth);
     }
-    /* try-lock makes no fairness promise; ensure every worker exercises the
-     * protected backend even if all its initial bounded attempts lost. */
+    /* try-lock 不保证公平性；即使工作线程最初所有有界尝试都失败，也要确保每个线程
+     * 最终都能测试受保护的后端。 */
     while(!successes) {
         sched_yield();
         if(tx) successes += e1000_send_frame(&frame,1)==K_OK;

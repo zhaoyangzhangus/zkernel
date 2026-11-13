@@ -6,8 +6,8 @@
 #include "internal.h"
 #include "png_internal.h"
 
-/* PNG decoding is shared by the cold desktop-asset worker and bounded user
- * image requests; both paths use the same 16 MiB output limit. */
+/* PNG 解码供低频桌面资源工作线程和有界用户图像请求共用；两条路径使用相同的
+ * 16 MiB 输出上限。 */
 #define PNG_MAX_OUTPUT_BYTES     (16ULL * 1024ULL * 1024ULL)
 #define PNG_HUFFMAN_MAX_NODES    640U
 #define PNG_MAX_CODE_LENGTH      15U
@@ -342,7 +342,7 @@ static bool png_inflate_zlib(const uint8_t *encoded, size_t encoded_size,
         return false;
     }
     reader.data = encoded;
-    /* Keep the Adler-32 bytes addressable for the final checksum check. */
+    /* 保留 Adler-32 字节的可寻址性，以便最后进行校验和检查。 */
     reader.size = encoded_size;
     reader.bit_position = 16U;
 

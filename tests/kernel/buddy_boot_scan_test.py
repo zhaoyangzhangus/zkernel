@@ -23,8 +23,8 @@ static page_section_t g_sections[8];static unsigned g_section_count;
 typedef struct {uint64_t pfn;unsigned order;} block_t;
 static block_t blocks[262144],expected[262144];
 static unsigned used,expected_used,checks,old_checks;
-/* Real insert_block changes compound metadata but preserves PAGE_FREE;
- * the builder observes only that bit. Record its exact calls here. */
+/* 真实的 insert_block 会修改复合页面元数据，但会保留 PAGE_FREE；构建器只检查该位。
+ * 在此记录 insert_block 的实际调用。 */
 static void insert_block(uint64_t physical,unsigned order) {
  assert(!(physical&4095) && used<262144);
  blocks[used++]=(block_t){physical>>PAGE_SHIFT,order};
@@ -69,13 +69,13 @@ int main(void) {
  g_section_count=1;section(0,262144,262144);check();
  assert(used==1 && blocks[0].order==18 && checks==262143 && old_checks==524286);
  printf("262144 free pages: candidate checks %u -> %u; per-page section lookups removed\n",old_checks,checks);
- /* Reserved pages at growth boundaries must prevent over-large blocks. */
+ /* 增长边界上的保留页面必须阻止生成过大的内存块。 */
  for(unsigned i=0;i<=18;++i) {
   unsigned at=(1U<<i)-1;g_sections[0].pages[at].flags=0;check();
   g_sections[0].pages[at].flags=PAGE_FREE;
  }
  release();
- /* Exhaust all small flag layouts, including unaligned section starts. */
+ /* 遍历所有小型标志布局，包括未对齐的区段起始位置。 */
  for(unsigned base=0;base<16;++base)for(unsigned mask=0;mask<256;++mask) {
   section(0,base,8);
   for(unsigned i=0;i<8;++i)g_sections[0].pages[i].flags=(mask>>i)&1;

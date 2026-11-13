@@ -1,8 +1,7 @@
 #pragma once
 #include "nv_port.h"
 
-/* OS-owned notification state. Vendor payload translation stays above this
- * boundary. Callers retain the queue owner throughout every operation. */
+/* 由 OS 拥有的通知状态。厂商负载转换逻辑保留在此边界之上。调用方在整个操作期间持有队列所有者。 */
 typedef struct nv_port_event_record {
     uint32_t parent, object, index, info32;
     uint16_t info16;
@@ -19,8 +18,7 @@ typedef struct nv_port_event_queue {
 void nv_port_event_queue_init(nv_port_event_queue_t *queue);
 kstatus_t nv_port_event_post(nv_port_event_queue_t *queue,
                              const nv_port_event_record_t *record);
-/* IRQ route uses only existing slab capacity and may fail on contention.
- * Dataless posts still require no allocation. The owner remains pinned. */
+/* IRQ 路径只使用现有 slab 容量，竞争时可能失败。无数据发布仍不需要分配内存。队列所有者保持固定。 */
 kstatus_t nv_port_event_post_irq(nv_port_event_queue_t *queue,
                                  const nv_port_event_record_t *record);
 kstatus_t nv_port_event_take(nv_port_event_queue_t *queue,
@@ -28,9 +26,8 @@ kstatus_t nv_port_event_take(nv_port_event_queue_t *queue,
 uint32_t nv_port_event_poll(nv_port_event_queue_t *queue, bool consume_dataless);
 bool nv_port_event_queue_close(nv_port_event_queue_t *queue);
 
-/* Refcounted, independently pinnable wait source for poll/epoll. The creator
- * owns one object reference. Close logical state before dropping that reference;
- * waiters may retain the closed source until they have unsubscribed. */
+/* 为 poll/epoll 提供带引用计数、可单独固定的等待源。创建者拥有一个对象引用。释放此引用前先关闭
+ * 逻辑状态；等待者可以继续持有已关闭的源，直到取消订阅。 */
 typedef struct nv_port_event_source nv_port_event_source_t;
 nv_port_event_source_t *nv_port_event_source_create(void);
 void *nv_port_event_source_wait_object(nv_port_event_source_t *source);

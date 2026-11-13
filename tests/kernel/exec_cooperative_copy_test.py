@@ -6,7 +6,7 @@ import tempfile
 root=Path(__file__).resolve().parents[2]
 source=(root/'kernel/process/exec.c').read_text()
 begin=source.index('static kstatus_t write_address_space')
-end=source.index('\n}',source.index('static kstatus_t write_address_space',begin))+2
+end=source.index('static kstatus_t read_vfs_range(',begin)
 program=r'''
 #include <kernel/process.h>
 #include <kernel/vm.h>
@@ -19,6 +19,7 @@ program=r'''
 static thread_t current;
 static bool preempt, shootdown, pending, tick;
 static unsigned yields, fault_calls;
+static unsigned expected_access=VM_PROT_WRITE;
 static unsigned char *destination;
 static bool resident[70];
 static int fail_page=-1;
@@ -39,7 +40,7 @@ kstatus_t x86_translate_page(paddr_t root,vaddr_t address,paddr_t *out,uint64_t 
     *out=paddr_make((uintptr_t)destination+page*PAGE_SIZE);return K_OK;
 }
 kstatus_t vm_handle_fault(vm_space_t *space,const vm_fault_info_t *fault) {
-    (void)space;++fault_calls;
+    (void)space;++fault_calls;assert(fault->access==expected_access);
     unsigned page=(fault->address-0x400000)/PAGE_SIZE;
     if ((int)page==fail_page) return K_EIO;
     resident[page]=true;return K_OK;
@@ -66,6 +67,17 @@ int main(void) {
     assert(!memcmp(destination+3,input,10*PAGE_SIZE-3));
     assert(destination[10*PAGE_SIZE]==0);
     assert(write_address_space(&space,0x400003,0,0)==K_OK && !yields);
+    // 只读和可执行段按各自权限建立页面，只触碰文件内容所在的页。
+    fail_page=-1;
+    const unsigned accesses[]={VM_PROT_READ,VM_PROT_WRITE,VM_PROT_EXEC};
+    for(unsigned i=0;i<3;++i) {
+        expected_access=accesses[i];fault_calls=0;
+        memset(resident,0,sizeof(resident));memset(destination,0,70*PAGE_SIZE);
+        assert(write_address_space_access(&space,0x400003,input,size,expected_access)==K_OK);
+        assert(!memcmp(destination+3,input,size) && fault_calls==66 && !yields);
+        for(unsigned p=66;p<70;++p)assert(!resident[p]);
+        assert(destination[size+3]==0);
+    }
     free(input);free(destination);
 }
 '''
@@ -82,4 +94,4 @@ with tempfile.TemporaryDirectory(prefix='liteos-exec-copy-') as directory:
                     '-I'+str(root/'include'),str(path/'test.c'),str(path/'string.o'),
                     '-o',str(path/'test')],check=True)
     subprocess.run([str(path/'test')],check=True)
-print('ELF copy: exact bytes, faults, failure and no uncommitted-image scheduling passed')
+print('ELF copy: exact bytes, RX/RW/X fault access, untouched BSS pages, failure and no uncommitted-image scheduling passed')

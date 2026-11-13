@@ -26,11 +26,10 @@ with tempfile.TemporaryDirectory(prefix='runtime-namespace-') as directory:
                 assert len(code) > 1000, name
                 symbols = subprocess.check_output(['nm', '--defined-only', str(obj)], text=True)
                 relocations = subprocess.check_output(['objdump', '-r', str(obj)], text=True)
-                # These payloads are copied directly into a user ELF image.
+                # 这些负载会直接复制到用户 ELF 映像中。
                 assert not re.search(r'^RELOCATION RECORDS FOR', relocations, re.M), name
-                # nm sorts the original names using the process locale. A
-                # prefix rename can change that order without changing any
-                # symbol address; compare canonical rows, preserving duplicates.
+                # nm 会依据进程区域设置对原始名称排序。添加前缀可能改变排序，但不会更改
+                # 符号地址；比较规范化后的行，同时保留重复项。
                 normalized = '\n'.join(sorted(
                     symbols.replace(previous, current).splitlines()))
                 outputs.append((code, normalized))

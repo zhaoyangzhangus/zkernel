@@ -53,7 +53,7 @@ int main(void) {
  for(unsigned i=0;i<g_section_count;++i)
   g_sections[i]=(page_section_t){.base_pfn=256+i*8ULL,.present_pages=4,.pages=metadata+i*4};
  check_section_pfn_order();assert(g_sections_pfn_ordered);
- // Direct expected answers avoid an O(n squared) oracle on this large map.
+ // 直接给出预期结果，避免在大型映射上执行 O(n²) 基准计算。
  for(unsigned i=0;i<g_section_count;++i)for(unsigned j=0;j<8;++j) {
   visits=0;assert(page_for_pfn(256+i*8ULL+j)==(j<4?&metadata[i*4+j]:0));assert(visits<=17);
  }
@@ -84,7 +84,7 @@ int main(void) {
    for(unsigned i=0;i<g_section_count;++i)check(g_sections[i].base_pfn);
   }
  }
- // Preserve first-match answers for overlaps, equal bases and empty spans.
+ // 对重叠范围、相同基址和空跨度，仍采用首次匹配结果。
  g_section_count=3;
  g_sections[0]=(page_section_t){.base_pfn=100,.present_pages=10,.pages=metadata};
  g_sections[1]=(page_section_t){.base_pfn=105,.present_pages=12,.pages=metadata+16};

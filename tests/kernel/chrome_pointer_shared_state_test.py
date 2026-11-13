@@ -80,20 +80,20 @@ int main(){
   return w.CreateEvent({nativeguest::kButton,code,value},{3,4});
  };
  auto move=[&](NativeGuestWindow& w){return w.CreateEvent({nativeguest::kRelative,0,0},{5,6});};
- // The opening press hits the browser, but the menu receives its release.
+ // 打开菜单的按下事件命中浏览器，但释放事件由菜单接收。
  assert(button(browser,nativeguest::kButtonLeft,nativeguest::kPress)->flags==1);
  assert(manager.mouse_button_flags()==1);
  assert(button(popup,nativeguest::kButtonLeft,nativeguest::kRelease)->flags==1);
  assert(manager.mouse_button_flags()==0);
  assert(move(browser)->flags==0);
  assert(manager.cursor.x==15 && manager.cursor.y==16);
- // Reversed queue order, and idempotent conversion during capture rerouting.
+ // 反转队列顺序，并验证捕获重路由时的转换操作具有幂等性。
  button(popup,nativeguest::kButtonLeft,nativeguest::kPress);
  button(browser,nativeguest::kButtonLeft,nativeguest::kPress);
  assert(manager.mouse_button_flags()==1);
  button(browser,nativeguest::kButtonLeft,nativeguest::kRelease);
  assert(move(popup)->flags==0);
- // Preserve another physically held button across window changes.
+ // 切换窗口时保留另一枚仍被物理按住的按键状态。
  button(browser,nativeguest::kButtonLeft,nativeguest::kPress);
  button(popup,nativeguest::kButtonRight,nativeguest::kPress);
  assert(button(popup,nativeguest::kButtonLeft,nativeguest::kRelease)->flags==5);
@@ -101,7 +101,7 @@ int main(){
  assert(move(other)->flags==0);
  button(browser,nativeguest::kButtonRight,nativeguest::kRelease);
  assert(move(popup)->flags==0);
- // Destroying a menu cannot strand a private copy of the physical state.
+ // 销毁菜单后，不能遗留一份独立的物理状态副本。
  {
   auto transient=std::make_unique<NativeGuestWindow>(NativeGuestWindow{&manager,{20,20}});
   button(browser,nativeguest::kButtonLeft,nativeguest::kPress);

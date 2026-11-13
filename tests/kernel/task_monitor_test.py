@@ -6,8 +6,7 @@ import resource
 
 root = Path(__file__).resolve().parents[2]
 source = (root/'kernel/process/process.c').read_text()
-# Linux TID translation has separate fixtures and depends on the full process
-# registry. Extract only the actual monitor/termination implementation here.
+# Linux TID 转换有独立测试夹具，并依赖完整进程注册表。此处只抽取真实的监视/终止实现。
 functions = (source[source.index('static bool process_monitor_protected('):
                     source.index('uint64_t linux_thread_visible_tid(')] +
              source[source.index('kstatus_t process_task_query('):
@@ -70,7 +69,7 @@ static kstatus_t thread_terminate(thread_t *t,int64_t status){
   size_t i=(size_t)(t-many);assert(i<64 && !seen[i]);seen[i]=true;
   for(unsigned j=shrink_snapshot?31:0;j<64;++j)assert(many[j].signal_pending&256);
   ++terminated;
-  /* Concurrent detach must not invalidate any held snapshot reference. */
+  /* 并发分离操作不得使任何已持有的快照引用失效。 */
   process.threads.next=&process.threads;process.thread_count=0;
   if(allocation_fail){process.threads.next=&many[i+1<64?i+1:i].process_node;
    if(i==63)process.threads.next=&process.threads;}
@@ -94,15 +93,14 @@ int main(void){
  started_cpus=0;
  assert(process_task_query(10,0,&info)==0 && info.cpu_count==1);
  started_cpus=4;
- /* A single-thread query must not walk unrelated successors after its match. */
+ /* 单线程查询匹配后，不得继续遍历无关的后续项。 */
  a.process_node.next=0;
  assert(process_task_query(10,12,&info)==0 && info.runtime_ns==100);
  a.process_node.next=&b.process_node;
  assert(process_task_query(10,11,&info)==0 && info.runtime_ns==20 && info.state==OS_THREAD_BLOCKED);
  assert(process_task_query(10,99,&info)==K_ENOENT && !refs && !held);
  assert(process_task_query(99,0,&info)==K_ENOENT && !refs);
- /* Independent saturating total and exact individual identities, including
-  * empty lists and a retired total that already reached the ceiling. */
+ /* 独立的饱和总数和精确的单项身份，包括空列表以及已达到上限后又回收的总数。 */
  const uint64_t retired[]={0,40,UINT64_MAX-1,UINT64_MAX};
  for(unsigned count=0;count<=64;++count)for(unsigned r=0;r<4;++r)
  for(unsigned mode=0;mode<3;++mode){
@@ -170,8 +168,8 @@ int main(void){
  }
  exit_race=true;atomic_store(&process.state,OS_PROCESS_RUNNING);terminated=0;allocations=0;
  assert(process_terminate_pid(&caller,10,123)==0 && !terminated && !allocations && !refs);
- /* Normal exit must preserve the caller's status and never signal or
-  * terminate the current thread. Dead siblings are not referenced either. */
+ /* 正常退出必须保留调用方状态，且绝不向当前线程发送信号或终止它。已退出的同级线程
+  * 也不应被获取引用。 */
  large_case=false;exit_race=false;sibling_case=true;expected_status=42;
  atomic_store(&process.state,OS_PROCESS_EXITING);process.thread_count=2;
  process.threads.next=&a.process_node;a.process_node.next=&b.process_node;
@@ -182,7 +180,7 @@ int main(void){
  atomic_store(&b.state,OS_THREAD_DEAD);terminated=0;b.signal_pending=0;
  process_terminate_siblings(&process,&a,42);
  assert(!terminated && !b.signal_pending && refs==1);
- /* Also exercise current/dead exclusions in the allocation-free fallback. */
+ /* 同时测试无分配回退路径对当前线程/已退出线程的排除逻辑。 */
  process_terminate_threads_fallback(&process,&a,42);
  assert(!terminated && refs==1);
  object_put(&process);

@@ -37,12 +37,14 @@ static thread_t current;
 static bool has_current;
 static unsigned preempt,depth,calls,yields;
 static uint64_t mock_flags,completed;
-static unsigned stop_at,mode;
+static unsigned stop_at,mode,resched_mode;
 static file_t *active_file;
 static unsigned char *base;
 static thread_t *sched_current_thread(void){return has_current?&current:NULL;}
 static bool sched_preempt_disabled(void){return preempt!=0;}
+static bool sched_tick_should_preempt(void){return resched_mode==1 || (resched_mode==2 && calls>=2);}
 static void schedule(void){
+ assert(sched_tick_should_preempt());
  assert(!depth && !preempt && has_current && current.sched_class!=SCHED_CLASS_IDLE);
  assert(mock_flags & (1ULL<<9));
  assert(active_file->position==13U+completed); /* Commit precedes the switch. */
@@ -69,8 +71,7 @@ static kstatus_t vfs_read_backend_chunk(vnode_t *vnode,vfs_backend_node_t *backe
 ''' + helper + read + r'''
 int main(void){
  const size_t batch=1024U*1024U;
- /* The backend never dereferences the destination. Keep pointer arithmetic
-  * inside one real object while avoiding stack allocation of several MiB. */
+ /* 后端不会解引用目标地址。将指针运算限制在真实对象内，同时避免在栈上分配数 MiB 空间。 */
  static unsigned char output[3U*1024U*1024U+29U];
  base=output;
  vfs_backend_node_t backend={UINT64_MAX,1};vnode_t vnode={&backend};
@@ -79,7 +80,8 @@ int main(void){
  const size_t sizes[]={0,1,batch-1,batch,batch+1,2*batch,3*batch+29};
  for(unsigned state=0;state<4;++state)for(unsigned nesting=0;nesting<3;++nesting)
  for(unsigned irq=0;irq<2;++irq)for(unsigned n=0;n<7;++n)
- for(unsigned stop=0;stop<4;++stop)for(unsigned outcome=0;outcome<4;++outcome){
+ for(unsigned stop=0;stop<4;++stop)for(unsigned outcome=0;outcome<4;++outcome)
+ for(resched_mode=0;resched_mode<3;++resched_mode){
   has_current=state!=0;current.sched_class=state?state-1:0;
   preempt=nesting;mock_flags=0x46U | (irq?(1ULL<<9):0);
   calls=yields=depth=0;completed=0;file.position=13;
@@ -94,7 +96,8 @@ int main(void){
    if(call==stop && outcome==2)break;
    if(call==stop && outcome==3){expected+=chunk/2;break;}
    expected+=chunk;
-   if(expected<sizes[n] && eligible)++expected_yields;
+   if(expected<sizes[n] && eligible &&
+      (resched_mode==1 || (resched_mode==2 && expected_calls>=2)))++expected_yields;
   }
   uint64_t bytes=UINT64_MAX;
   int status=vfs_read_kernel(&file,output,sizes[n],&bytes);
@@ -103,7 +106,7 @@ int main(void){
   assert(!depth && preempt==nesting && mock_flags==(0x46U | (irq?(1ULL<<9):0)));
   ++cases;
  }
- printf("Kernel read batch yield: %u boot/idle/RT/FAIR, IRQ/nesting, final/short/failed batch and committed-offset cases passed\n",cases);
+ printf("Kernel read batch yield: %u boot/idle/RT/FAIR, IRQ/nesting, absent/pending/late requests, final/short/failed batch and committed-offset cases passed\n",cases);
 }
 '''
 with tempfile.TemporaryDirectory(prefix='vfs-read-yield-') as directory:
@@ -127,8 +130,12 @@ with tempfile.TemporaryDirectory(prefix='vfs-read-yield-') as directory:
                                    'if (total > len) vfs_read_kernel_yield();'),
         'outer-preemption-lost': ('if (sched_preempt_disabled()) return;',
                                  'if (false && sched_preempt_disabled()) return;'),
-        'irq-disabled-switch': ('if ((flags & (1ULL << 9)) != 0U) schedule();',
-                               'if (flags != UINT64_MAX) schedule();'),
+        'irq-disabled-switch': ('if ((flags & (1ULL << 9)) != 0U && sched_tick_should_preempt()) schedule();',
+                               'if (flags != UINT64_MAX && sched_tick_should_preempt()) schedule();'),
+        'unsolicited-switch': ('&& sched_tick_should_preempt()) schedule();',
+                               ') schedule();'),
+        'missing-late-request': ('sched_tick_should_preempt()) schedule();',
+                                 'false) schedule();'),
         'idle-continuation-switch': ('current == 0 || current->sched_class == SCHED_CLASS_IDLE',
                                     'current == 0'),
     }

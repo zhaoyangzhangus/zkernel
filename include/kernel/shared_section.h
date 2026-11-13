@@ -14,3 +14,4 @@ typedef struct shared_section {
 } shared_section_t;
 
 kstatus_t shared_section_create(uint64_t size, shared_section_t **out);
+kstatus_t shared_section_create_populated(uint64_t size, shared_section_t **out);

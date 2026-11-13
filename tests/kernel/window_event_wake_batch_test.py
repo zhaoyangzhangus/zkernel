@@ -87,42 +87,42 @@ int main(void){
  assert(atomic_load(&normal.refs)==2 && g_window_server.event_ready_count==1);
  unsigned accesses_before=ready_accesses;
  assert(window_flush_event_wakes());check(&normal,1);assert(!window_flush_event_wakes());
- // One ready-array write while locked, one publication read after unlock.
- // A second unconditional membership-clearing pass would add two accesses.
+ // 持锁时写入就绪数组一次，解锁后读取发布状态一次。
+ // 再无条件清除一次成员关系会额外增加两次访问。
  assert(ready_accesses-accesses_before==2);
- // Overflow overlaps the detached ready set: each window must wake exactly once.
+ // 溢出集合与已分离的就绪集合有重叠：每个窗口必须恰好唤醒一次。
  window_server_window_t all[65];
  reset();for(unsigned i=0;i<65;++i)init(&all[i]);
  for(unsigned i=0;i<64;++i){g_window_server.scene.children[i]=&all[i];schedule(&all[i]);}
  g_window_server.scene.count=64;schedule(&all[64]);assert(g_window_server.event_ready_overflow);
  assert(window_flush_event_wakes());for(unsigned i=0;i<64;++i)check(&all[i],1);
  check(&all[64],0); // Not registered, so the fallback must not touch it.
- // Removed ready windows retain their references; all live overflow windows are notified.
+ // 已移除的就绪窗口仍保留其引用；所有活动溢出窗口都会收到通知。
  reset();window_server_window_t removed[64],active[64];
  for(unsigned i=0;i<64;++i){init(&removed[i]);init(&active[i]);schedule(&removed[i]);g_window_server.scene.children[i]=&active[i];}
  g_window_server.scene.count=64;
  for(unsigned i=0;i<64;++i)schedule(&active[i]);
  assert(window_flush_event_wakes());
  for(unsigned i=0;i<64;++i){check(&removed[i],1);check(&active[i],1);}
- // Empty registry entries and empty queues don't create overflow references.
+ // 空注册表项和空队列不会创建溢出引用。
  reset();for(unsigned i=0;i<64;++i)schedule(&removed[i]);
  active[0].event_count=0;g_window_server.scene.count=2;g_window_server.scene.children[0]=NULL;g_window_server.scene.children[1]=&active[0];
  schedule(&active[0]);assert(window_flush_event_wakes());check(&active[0],1);
- // Publication occurs outside the lock, after membership is cleared.
+ // 清除成员关系后，在锁外发布。
  reset();init(&normal);schedule(&normal);requeue=&normal;
  assert(window_flush_event_wakes());
  assert(g_window_server.event_ready_count==1 && normal.event_wake_pending && atomic_load(&normal.refs)==2);
  assert(window_flush_event_wakes());check(&normal,2);
- // Teardown before flushing also leaves the queued reference alive.
+ // 刷新之前执行拆除操作时，排队中的引用仍保持有效。
  reset();init(&normal);schedule(&normal);
  assert(atomic_fetch_sub(&normal.refs,1)==2);
  assert(window_flush_event_wakes());
  assert(!atomic_load(&normal.refs) && atomic_load(&normal.wakes)==1 && atomic_load(&normal.notifications)==1);
- // Concurrent teardown during wake leaves the batch reference valid for object notification.
+ // 唤醒期间并发拆除时，批次引用仍有效，可用于对象通知。
  reset();init(&normal);g_window_server.scene.children[0]=&normal;g_window_server.scene.count=1;
  schedule(&normal);close_during_wake=&normal;assert(window_flush_event_wakes());
  assert(!atomic_load(&normal.refs) && atomic_load(&normal.notifications)==1);
- // Real producer/consumer interleavings exercise pending-bit and reference ownership.
+ // 使用真实的生产者/消费者交错场景测试待处理位和引用所有权。
  reset();for(unsigned i=0;i<64;++i){init(&concurrent[i]);g_window_server.scene.children[i]=&concurrent[i];}
  g_window_server.scene.count=64;atomic_init(&producer_done,false);
  pthread_t thread;assert(!pthread_create(&thread,NULL,producer,NULL));

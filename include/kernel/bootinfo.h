@@ -27,7 +27,7 @@ enum {
     OS_PIXEL_BLT_ONLY = 3,
 };
 
-/* This structure is a loader/kernel ABI. Keep field order and widths stable. */
+/* 此结构属于加载器/内核 ABI。保持字段顺序和宽度稳定。 */
 typedef struct os_boot_info {
     UINT64 Magic;
     UINT32 Version;

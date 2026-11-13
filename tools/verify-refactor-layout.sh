@@ -598,8 +598,10 @@ require_text kernel/process/exit.c 'bool process_publish_thread_exit'
 forbidden_text 'thread->exit_code' kernel/sched/core.c
 forbidden_text 'sched_dead_prepare_fn|sched_publish_dead\([^)]*,' \
     include/kernel/sched.h kernel/sched kernel/process
-forbidden_text 'THREAD_FLAG_INITIAL_PLACEMENT|THREAD_FLAG_EXECUTION_REAP_QUEUED|global_node' \
+# 线程不再参与全局链表，进程注册表仍需要自己的 global_node。
+forbidden_text 'THREAD_FLAG_INITIAL_PLACEMENT|THREAD_FLAG_EXECUTION_REAP_QUEUED' \
     include/kernel/sched.h include/kernel/process.h kernel/sched kernel/process
+forbidden_text 'global_node' include/kernel/sched.h kernel/sched
 require_text include/kernel/sched.h 'void sched_initialize_new_thread'
 require_text kernel/sched/runqueue.c 'void sched_initialize_new_thread'
 require_text kernel/sched/runqueue.c 'void sched_initialize_test_thread'
@@ -610,7 +612,7 @@ forbidden_text 'thread->[[:space:]]*(state|sched_class|rt_priority|base_sched_cl
 # 合成器实现仍是热循环的单一所有者。
 require_file include/kernel/rect.h
 require_text include/kernel/rect.h 'typedef struct Rect'
-forbidden_text 'window_damage_rect_t|WindowRect|RegionRect|(^|[.>-])(left|top|right|bottom)\b' \
+forbidden_text 'window_damage_rect_t|WindowRect|RegionRect|(^|[.]|->)(left|top|right|bottom)\b' \
     include/kernel/rect.h kernel/graphics compat/graphics/window_server.c
 for path in \
     kernel/graphics/window_geometry.c \
@@ -627,7 +629,6 @@ for path in \
     kernel/graphics/input_drag.c \
     kernel/graphics/input_events.c \
     kernel/graphics/input_pump.c \
-    kernel/graphics/present.c \
     kernel/graphics/present_cursor.c \
     kernel/graphics/damage.c \
     kernel/graphics/compose_cpu.c \
@@ -743,7 +744,7 @@ require_text kernel/graphics/input.c 'window_input_resize_edges_locked'
 require_text kernel/graphics/input_router.c 'void window_clear_title_capture_locked'
 require_text kernel/graphics/input_router.c 'bool window_title_capture_moved_locked'
 require_text kernel/graphics/input_router.c 'uint32_t window_title_button_at_locked'
-require_text kernel/graphics/input_router.c 'static bool window_minimize_locked'
+require_text kernel/graphics/input_router.c 'bool window_minimize_locked'
 require_text kernel/graphics/input_router.c 'bool window_toggle_maximize_locked'
 require_text kernel/graphics/input_router.c 'void route_input_locked'
 require_text kernel/graphics/input_drag.c 'REFACTOR_P7A_INPUT_DRAG_OWNER'
@@ -828,6 +829,8 @@ done
 require_text kernel/graphics/input_router.c \
     'void window_input_reset_desktop_state_locked'
 require_text kernel/graphics/input_router.c \
+    'bool window_input_request_desktop_launch_locked'
+require_text kernel/graphics/input_router.c \
     'uint32_t window_input_take_desktop_launch_locked'
 require_text kernel/graphics/input_router.c \
     'bool window_input_take_focus_cycle_request_locked'
@@ -856,22 +859,26 @@ done
 require_text kernel/graphics/launcher.c 'REFACTOR_P7A_SHELL_LAUNCHER_OWNER'
 require_text kernel/graphics/launcher.c 'kstatus_t desktop_launch_program'
 require_text kernel/graphics/present_cursor.c 'REFACTOR_P7J_PRESENT_CURSOR_OWNER'
-require_text kernel/graphics/present_cursor.c 'window_present_cursor_overlay'
+forbidden_text 'window_present_cursor_overlay' kernel/graphics/present_cursor.c kernel/graphics/internal.h
 require_text kernel/graphics/present_cursor.c 'window_present_self_test'
 require_text kernel/graphics/present_cursor.c 'compositor_present_cursor_direct'
 require_text kernel/graphics/present_cursor.c \
     'void window_present_cursor_reset_locked'
+require_text kernel/graphics/present_cursor.c \
+    'void window_present_cursor_record'
 for path in kernel/graphics/*.c; do
     case "$path" in
         kernel/graphics/present_cursor.c) ;;
         *)
             forbidden_text \
-                'g_window_server\.presented_pointer_(x|y|valid)[[:space:]]*=[[:space:]]*($|[^=])' \
+                'g_window_server\.(presented_pointer_(x|y|valid)|presented_cursor_shape)[[:space:]]*=[[:space:]]*($|[^=])' \
                 "$path"
             ;;
     esac
 done
-require_text kernel/graphics/present.c 'void compositor_copy_wc_scanline'
+require_text kernel/drivers/display/core.c 'void display_core_publish_xrgb8888_span'
+require_text kernel/graphics/publication_policy.c 'display_core_publish_xrgb8888_span('
+forbidden_text 'compositor_copy_wc_scanline' kernel/graphics
 require_text kernel/graphics/damage.c 'window_mark_rect_locked'
 require_text kernel/graphics/damage.c 'void window_damage_reset_locked'
 require_text kernel/graphics/damage.c \
@@ -927,7 +934,25 @@ require_text kernel/graphics/cursor_occlusion.c 'void compositor_cursor_locked'
 require_text kernel/graphics/cursor_occlusion.c 'uint32_t compositor_topmost_damage_cover'
 require_text kernel/graphics/cursor_occlusion.c 'bool compositor_damage_inside_surface_interior'
 require_text kernel/graphics/cursor_occlusion.c 'bool compositor_window_intersects_damage_locked'
-require_text kernel/graphics/cursor_occlusion.c 'bool compositor_snapshot_overwrites_presented_cursor'
+forbidden_text 'compositor_snapshot_overwrites_presented_cursor' kernel/graphics/cursor_occlusion.c kernel/graphics/internal.h
+# 图形私有步骤：定义留在所属实现文件，不能重新扩大公共内部接口。
+for entry in \
+    'compositor.c:compositor_commit_snapshot compositor_region_locked compositor_render_snapshot compositor_snapshot_begin_locked compositor_snapshot_finish compositor_snapshot_plan' \
+    'render.c:compositor_surface_locked compositor_surface_source_prepare compositor_copy_surface_span' \
+    'compose_cpu.c:compositor_fill_wb_pixels compositor_fill_surface_pixels' \
+    'launcher.c:desktop_launch_program' \
+    'present_cursor.c:window_present_cursor_into_buffer'; do
+    path="kernel/graphics/${entry%%:*}"
+    for name in ${entry#*:}; do
+        case "$name" in
+            compositor_snapshot_begin_locked|window_present_cursor_into_buffer) type=bool ;;
+            desktop_launch_program) type=kstatus_t ;;
+            *) type=void ;;
+        esac
+        require_text "$path" "static $type $name("
+        forbidden_text "$name[[:space:]]*[(]" kernel/graphics/internal.h
+    done
+done
 require_text kernel/graphics/raster.c 'REFACTOR_P7E_RASTER_OWNER'
 require_text kernel/graphics/raster.c 'void compositor_fill_span_wb'
 require_text kernel/graphics/raster.c 'void compositor_fill_locked'
@@ -1022,8 +1047,8 @@ forbidden_text '^[[:space:]]*(static inline )?void compositor_copy_wb_pixels|^[[
 forbidden_text '^[[:space:]]*void compositor_present_init|^[[:space:]]*bool compositor_present_start_copy_workers|^[[:space:]]*void compositor_copy_wc_scanline|^[[:space:]]*bool compositor_copy_rect_parallel_buffers|g_compositor_copy_|window_server_start_copy_workers|WINDOW_COMPOSITOR_COPY_' \
     compat/graphics/window_server.c
 
-# Network socket protocol tests are kept out of the runtime Owner.  The
-# private hook contract is explicit and does not add a production dispatch.
+# 网络套接字协议测试不纳入运行时 Owner。私有钩子契约是明确的，
+# 且不会增加生产环境中的分发逻辑。
 require_file kernel/net/socket_internal.h
 require_text kernel/net/socket_internal.h 'REFACTOR_P8_SOCKET_INTERNAL'
 require_file kernel/net/socket_model.h
@@ -1071,8 +1096,8 @@ forbidden_text '^[[:space:]]*(static[[:space:]]+)?bool[[:space:]]+socket_self_te
 forbidden_text 'socket_test_tcp_output|socket_test_tcp6_output|SOCKET_LONG_TEST_' \
     kernel/net/socket.c
 
-# Network core policy has a single firewall Owner.  The core runtime keeps
-# routing/cache orchestration and may only call the public firewall contract.
+# 网络核心策略由单一防火墙 Owner 负责。核心运行时保留路由和缓存编排，
+# 且只能调用公开的防火墙契约。
 require_file kernel/net/core/internal.h
 require_text kernel/net/core/internal.h 'REFACTOR_P8_NET_INTERNAL'
 require_file kernel/net/core/firewall.c
@@ -1089,7 +1114,7 @@ forbidden_text '^[[:space:]]*bool net_firewall_self_test\(' kernel/net/core/core
 forbidden_text '^[[:space:]]*bool net_(core|arp|ipv6|ndp|tcp)_self_test\(' \
     kernel/net/core/core.c
 
-# Phase 8: driver primitives must be represented by their dedicated units.
+# 阶段 8：驱动基础组件必须由各自专用的单元表示。
 for path in \
     kernel/drivers/usb/xhci/ring.c \
     kernel/drivers/usb/xhci/core.c \
@@ -1640,8 +1665,8 @@ forbidden_text '^[[:space:]]*static (bool|void) xhci_(prepare_connected_port|att
 forbidden_text '^[[:space:]]*bool xhci_hardware_self_test[[:space:]]*\(' \
     kernel/drivers/usb/xhci/core.c
 
-# No pre-migration os source tree may remain after all kernel, header, user,
-# test, and tool sources are rooted at the repository level.
+# 当所有内核、头文件、用户态、测试和工具源码都迁至仓库根目录后，
+# 不得残留迁移前的 os 源码树。
 for path in os; do
     if [[ -d "$path" ]] && find "$path" -type f -print -quit | grep -q .; then
         printf 'refactor layout: old source tree still contains files: %s\n' \

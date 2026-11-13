@@ -169,8 +169,8 @@ class QMPTests(unittest.TestCase):
                 'filename': str(ROOT / 'build/test.png'), 'format': 'png'})])
 
     def test_motion_pacing_with_bounded_coalescing_hid_reader(self):
-        # Conservative signed-byte reader: movements queued before a sample
-        # coalesce and clamp. A host enqueue ACK is not that sample.
+        # 保守地按有符号字节读取：采样前排队的移动事件会合并并限幅。
+        # 宿主入队 ACK 不代表已经完成该采样。
         for start in [(0, 0), (1919, 1079), (960, 540)]:
             for target in [(0, 0), (815, 1020), (935, 30), (1666, 155)]:
                 position = list(start)

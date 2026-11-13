@@ -48,7 +48,7 @@ int main(void) {
     assert(query(&a, 3, 0, INT64_MAX, LINUX_F_WRLCK).type == LINUX_F_UNLCK);
     file_lock_release_owner(2);
     assert(pins == 0);
-    /* Exhaustion is a real error and preserves every existing interval. */
+    /* 资源耗尽属于真实错误，并且必须保留所有已有区间。 */
     for (int i = 0; i < 512; ++i)
         assert(set(&a, 1, 2*i, 2*i, LINUX_F_WRLCK) == K_OK);
     assert(pins == 512);

@@ -73,8 +73,8 @@ with tempfile.TemporaryDirectory(prefix='chrome-glibc-toolchain-') as directory:
     subprocess.run([sys.executable, str(root/'tools/nvidia/vulkan_runtime_abi.py'),
                     '--runtime-dir', str(root/'build/esp/usr/apps/chrome/lib'),
                     str(binary)], check=True, timeout=30)
-    # Run with the guest loader explicitly, not the host interpreter. This
-    # validates ABI/TLS/dlopen on the build host, NOT native-kernel execution.
+    # 显式使用来宾加载器运行，而不是宿主解释器。此操作在构建主机上验证 ABI/TLS/dlopen，
+    # 并不验证原生内核执行。
     subprocess.run([str(runtime/'ld-linux-x86-64.so.2'), '--library-path',
                     str(runtime), str(binary)], env=environment, check=True, timeout=15)
     probe_log = base/'guest-probe.log'

@@ -153,8 +153,8 @@ int main(void){
   width=7+random_value()%24;height=16+random_value()%48;
   caption=0;status=0;
   g_target_width=20+width*(1+random_value()%100);
-  // Compare unchanged layouts with at least one complete document row.
-  // Zero-row layouts intentionally differ and are checked separately below.
+  // 对比未变化的布局时，至少包含一整行文档内容。
+  // 零行布局有意不同，在下方单独检查。
   g_target_height=caption+status+(1+random_value()%25)*height+random_value()%height;
   g_text_length=random_value()%8192;
   for(size_t i=0;i<g_text_length;++i){

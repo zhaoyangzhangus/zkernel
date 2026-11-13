@@ -1,4 +1,4 @@
-# Read-only return probes for the exact kernel implementing scheduler queries.
+# 针对实现调度器查询的确切内核设置只读返回探测点。
 set pagination off
 set confirm off
 python

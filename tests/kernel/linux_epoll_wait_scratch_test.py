@@ -65,7 +65,7 @@ static uint64_t x86_tsc_to_ns(uint64_t n) { return n; }
 static void *kmalloc(size_t n, unsigned flags) {
     assert(!ep.lock && !flags); ++allocations; last_bytes=n;
     if (fail_at==allocations) return NULL;
-    /* Production may allocate replacement before releasing the old block. */
+    /* 生产代码可能先分配替换块，再释放旧块。 */
     return malloc(n);
 }
 static void kfree(void *p) { assert(p && !ep.lock); ++frees; free(p); }
@@ -86,7 +86,7 @@ static int linux_epoll_capture_wait_set(linux_epoll_object_t *e, void **out,
     if (grow_on_capture) { ep.watch_limit=grow_on_capture; grow_on_capture=0; }
     if (capture_error) return capture_error;
     size_t needed=ep.watch_limit*3U+1U;
-    /* Model capture's documented partial-pin unwind on overflow. */
+    /* 模拟捕获数据溢出时，按文档要求撤销部分固定操作。 */
     if (cap<needed) { assert(*count==0); return K_ENOSPC; }
     *count=needed; pins=needed-1; *seq=1; out[0]=e; return 0;
 }
@@ -178,8 +178,8 @@ int main(void) {
 }
 '''
 resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
-# Also exercise real capture/unwind rather than relying on the loop mock's
-# contract: a watch can grow to three sources after the size hint was read.
+# 同时测试真实捕获和撤销路径，不依赖循环模拟的约定：读取大小提示后，watch 可能增加
+# 到三个来源。
 capture_start = source.index('static bool linux_epoll_watch_has_wait_source(')
 capture_end = source.index('static bool linux_epoll_wait_ready(', capture_start)
 capture = source[capture_start:capture_end]

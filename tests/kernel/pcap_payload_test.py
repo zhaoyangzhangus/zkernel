@@ -53,8 +53,8 @@ assert track(waiting, False, b'', 0, 103, 0, 16) == []
 assert track(waiting, False, b'data', 0, 103, 0x18, 17) == [2]
 print('ACK timing: retransmissions, partial ACK, wrap and piggyback ACK passed')
 
-# A duplicate arriving *after* its ACK must not start a new latency sample.
-# Otherwise the next ordinary ACK can be misreported as a long guest stall.
+# ACK 之后到达的重复数据包不得开启新的延迟采样。
+# 否则下一个普通 ACK 可能被误报为客户机长时间停顿。
 waiting = {}
 state.clear()
 track(waiting, True, b'abc', 100, 0, 0x18, 1)
@@ -64,9 +64,9 @@ assert track(waiting, False, b'', 0, 103, 0x10, 60) == []
 assert not waiting
 print('Post-ACK duplicates do not create false long-stall samples')
 
-# Drive the real CLI against a persistent connection, then reuse its port.
-# A recent-window report must include traffic on a connection opened earlier,
-# without inheriting that connection's old latency samples or FIN/RST state.
+# 针对持久连接运行真实 CLI，然后重用其端口。
+# 最近时间窗报告必须包括较早建立的连接上的流量，但不能继承该连接旧的延迟样本或
+# FIN/RST 状态。
 records = []
 def record(stamp, incoming, data=b'', seq=0, ack=0, flags=0x10):
     frame = packet(data, src=7890 if incoming else 50000,

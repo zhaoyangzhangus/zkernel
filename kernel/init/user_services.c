@@ -3,11 +3,9 @@
 #include <arch/x86_64/paging.h>
 #include <kernel/device.h>
 #include <kernel/elf_loader.h>
-#include <kernel/kmem.h>
 #include <kernel/debug_stage.h>
 #include <kernel/process.h>
 #include <kernel/sched.h>
-#include <kernel/vfs.h>
 #include <uapi/device.h>
 #include <uapi/audio.h>
 #include <uapi/process.h>
@@ -51,19 +49,12 @@ static bool init_register_device(void) {
 static kstatus_t init_load_path(const char *path, process_t *process,
                                 user_elf_image_info_t *info,
                                 vaddr_t *stack_pointer) {
-    void *image = 0;
-    size_t image_size = 0U;
-    /* 文件打开、边界检查、读取与回滚由 VFS 统一处理；此处只记录整体读取阶段。 */
+    /* 服务和桌面共用分块 ELF 加载器；阶段标记覆盖完整准备过程。 */
     kernel_debug_stage(OS_DEBUG_PHASE_USER, OS_DEBUG_STEP_LOAD, 0x1AU);
-    kstatus_t status = vfs_load_file_kernel(path, 1U, INIT_IMAGE_SIZE,
-                                            &image, &image_size);
+    kstatus_t status = process_load_elf_from_vfs(process, path, INIT_IMAGE_SIZE,
+                                                 info, stack_pointer);
     kernel_debug_stage(OS_DEBUG_PHASE_USER, OS_DEBUG_STEP_LOAD, 0x1DU);
-    if (status == K_OK) {
-        status = process_load_elf_image(process, image, image_size,
-                                        info, stack_pointer);
-        if (status == K_OK) process_set_name(process, path);
-    }
-    kfree(image);
+    if (status == K_OK) process_set_name(process, path);
     return status;
 }
 

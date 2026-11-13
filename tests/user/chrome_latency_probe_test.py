@@ -82,7 +82,7 @@ for filename in ('qmp-scroll-cadence.py', 'qmp-history-roundtrip.py', 'qmp-tab-c
     page = bytearray([255]*10000)
     other = page.copy()
     other[:800] = bytes(800)
-    # Large white backgrounds invalidated the old 15% bootstrap gate.
+    # 大面积白色背景会使旧的 15% 引导检查失效。
     assert .03 < difference(page, other) < .15
     assert difference(page, page) == 0
     slightly_changed = page.copy()

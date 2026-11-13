@@ -7,7 +7,7 @@
 static spinlock_t g_timer_lock;
 static atomic_uint g_timer_init_state;
 static timer_object_t *g_timers[TIMER_OBJECT_LIMIT];
-/* Exclusive upper occupied slot, protected/published with g_timer_lock. */
+/* 已占用槽位的排他上界，由 g_timer_lock 保护并发布。 */
 static uint32_t g_timer_scan_limit;
 #define TIMER_SLOT_WORDS ((TIMER_OBJECT_LIMIT + 63U) / 64U)
 static uint64_t g_timer_occupied[TIMER_SLOT_WORDS]; /* protected by g_timer_lock */
@@ -29,10 +29,9 @@ static uint32_t timer_registered_limit_locked(void) {
 
 static void timer_global_lock(void) {
     /*
-     * timer_poll() runs as deferred kernel work and may hold this lock while
-     * notifying waiters.  Keep its owner on the CPU until the table walk and
-     * wakeups are published; otherwise a timer/object cleanup on that same
-     * CPU can preempt it and spin forever on this global lock.
+     * timer_poll() 作为延迟内核任务运行，通知等待者时可能持有此锁。表遍历和唤醒
+     * 发布完成前，应让锁的持有者继续运行在当前 CPU 上；否则同一 CPU 上的定时器或
+     * 对象清理可能抢占它，并因等待这把全局锁而永久自旋。
      */
     sched_preempt_disable();
     spinlock_lock(&g_timer_lock);
@@ -83,8 +82,7 @@ static void timer_destroy(void *object) {
         g_timers[slot] = 0;
         bitmap_clear_bit(g_timer_occupied, slot);
     } else {
-        /* Recover stale/unregistered slot metadata without leaving a
-         * dangling registry pointer when the object is freed below. */
+        /* 恢复过期或未注册的槽位元数据，避免下方释放对象后留下悬空的注册表指针。 */
         for (uint32_t i = 0; i < g_timer_scan_limit; ++i) {
             if (g_timers[i] == timer) {
                 g_timers[i] = 0;
@@ -148,8 +146,8 @@ kstatus_t timer_create(uint64_t delay_ns, uint64_t period_ns,
 
 kstatus_t timer_cancel(timer_object_t *timer) {
     if (timer == 0 || timer->object.type != KOBJECT_TYPE_TIMER) return K_EINVAL;
-    /* Cancellation is persistent readiness. Publish/notify only on the
-     * transition: repeated callers and final destruction need no new wake. */
+    /* 取消状态是持续就绪状态。仅在状态转换时发布/通知；重复调用以及最终销毁
+     * 无需再次唤醒等待者。 */
     if (!atomic_exchange_explicit(&timer->canceled, true, memory_order_acq_rel))
         object_notify_signaled(timer);
     return K_OK;
@@ -158,8 +156,8 @@ kstatus_t timer_cancel(timer_object_t *timer) {
 void timer_poll(uint64_t now_tsc) {
     timer_global_initialize();
     timer_global_lock();
-    /* Registration and retirement hold this same lock. Walk occupied bits
-     * in slot order, preserving notification order without reading holes. */
+    /* 注册和回收操作都持有同一把锁。按槽位顺序遍历已占用位，以保持通知顺序，
+     * 同时跳过空槽。 */
     uint32_t words = (g_timer_scan_limit + 63U) / 64U;
     for (uint32_t word = 0; word < words; ++word) {
         uint64_t occupied = g_timer_occupied[word];
@@ -170,16 +168,15 @@ void timer_poll(uint64_t now_tsc) {
             if (timer == 0 || atomic_load_explicit(&timer->canceled, memory_order_acquire)) {
                 continue;
             }
-            /* fired is persistent readiness, not a consumable token. All pollers
-             * serialize on the global lock, and only polling publishes fired;
-             * completed one-shot timers need no further locks/notifications. */
+            /* fired 表示持续就绪状态，不是可消费的令牌。所有轮询者都通过全局锁串行化，
+             * 且只有轮询会发布 fired；已完成的一次性定时器无需再加锁或通知。 */
             if (timer->period_tsc == 0U &&
                 atomic_load_explicit(&timer->fired, memory_order_acquire)) continue;
-            /* Creation and deadline updates also serialize on the global lock.
-             * Future deadlines need no per-object lock on every timer tick. */
+            /* 创建和截止时间更新也通过全局锁串行化。每次定时器节拍无需为未来的
+             * 截止时间获取对象锁。 */
             if (!timer_deadline_reached(now_tsc, timer->deadline_tsc)) continue;
-            /* The global lock protects lifetime and deadline updates. fired and
-             * canceled remain atomic for waiters/cancelers outside this lock. */
+            /* 全局锁保护对象生命周期和截止时间更新。对于在锁外运行的等待者和取消者，
+             * fired 与 canceled 仍使用原子操作。 */
             atomic_store_explicit(&timer->fired, true, memory_order_release);
             if (timer->period_tsc != 0) {
                 uint64_t next = timer->deadline_tsc + timer->period_tsc;

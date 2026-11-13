@@ -8,8 +8,8 @@ with open('build/qemu-running-kernel.elf','rb') as source:
 end
 target remote /tmp/system-keys.sock
 python
-# One large Chrome PRESENT snapshot, four entry addresses. Diagnostic host
-# intervals include hardware-stop overhead; no callbacks delete live traps.
+# 捕获一个大型 Chrome PRESENT 快照，使用四个入口地址。宿主诊断区间包含硬件暂停开销；
+# 回调不会删除仍有效的断点。
 started=None
 worker=None
 def current():
@@ -19,8 +19,7 @@ def current():
     return gdb.parse_and_eval('g_cpus[%d].queue.current'%cpu)
 class Stage(gdb.Breakpoint):
     def __init__(self,name,label):
-        # A source-level function breakpoint can resolve inline instances
-        # and consume multiple hardware slots; use its single entry address.
+        # 源码级函数断点可能解析到内联实例并占用多个硬件槽；应使用单一入口地址。
         address=int(gdb.parse_and_eval('&'+name))
         super().__init__('*%#x'%address,gdb.BP_HARDWARE_BREAKPOINT,internal=True)
         self.label=label

@@ -1,11 +1,9 @@
 /*
- * System display backend for the official NVIDIA 595.84 NVKMS KAPI.
+ * 官方 NVIDIA 595.84 NVKMS KAPI 的 System 显示后端。
  *
- * The KAPI object set owns display memory, GPU mappings, display programming,
- * and flip completion.  This adapter owns only the System display-core
- * contract and a two-surface staging policy for the current CPU-readback
- * HBUFFER path.  It deliberately does not implement PMA, GPUVA, GMMU, or
- * GSP/RM operations.
+ * KAPI 对象集负责显示内存、GPU 映射、显示编程和翻转完成处理。此适配器只负责 System 显示核心
+ * 约定，以及当前 CPU 回读 HBUFFER 路径的双表面暂存策略。它特意不实现 PMA、GPUVA、GMMU 或
+ * GSP/RM 操作。
  */
 
 #include <kernel/display.h>
@@ -22,7 +20,7 @@
 #include <stdint.h>
 #include <string.h>
 
-/* Opt-in only: successful frame submission must not wait on COM1 or FAT. */
+/* 仅在显式启用时运行：成功提交帧时不得等待 COM1 或 FAT。 */
 #ifndef OS_NVKMS_FRAME_TRACE
 #define OS_NVKMS_FRAME_TRACE 0
 #endif
@@ -82,12 +80,9 @@ typedef struct nvkms_display_state {
 static nvkms_display_state_t g_nvkms_display;
 
 /*
- * Keep the real-test boundary visible even when an official KAPI call blocks
- * before returning.  Capture the marker in memory here; the bootstrap poller
- * can persist it while this worker is in a KAPI call, and the terminal result
- * persists the complete trace.  A FAT sync in every trace point would make
- * storage I/O part of the vendor control path and can mask the actual KAPI
- * boundary being diagnosed.
+ * 即使官方 KAPI 调用在返回前阻塞，也要保留真实硬件测试边界的可见性。在此处将标记记录到内存；
+ * 引导轮询器可在此工作线程执行 KAPI 调用期间持久化标记，最终结果也会保存完整跟踪。若每个跟踪点
+ * 都同步写入 FAT，存储 I/O 就会进入厂商控制路径，并可能掩盖正在诊断的实际 KAPI 边界。
  */
 static void nvkms_trace(const char *text)
 {
@@ -109,7 +104,7 @@ static void nvkms_gpu_pick_callback(const struct NvKmsKapiGpuInfo *info)
 {
     if (info == NULL || g_nvkms_display.functions == NULL)
         return;
-    /* System currently has one physical GPU and does not expose MIG. */
+    /* System 当前只有一块物理 GPU，且不公开 MIG。 */
     if (!((nvkms_gpu_pick_t *)g_nvkms_display.backend.context)->found) {
         nvkms_gpu_pick_t *pick =
             (nvkms_gpu_pick_t *)g_nvkms_display.backend.context;
@@ -212,10 +207,9 @@ static kstatus_t nvkms_copy_gop_to_surface(
     if (state == NULL || surface == NULL || surface->surface == NULL ||
         gop_stride < state->width)
         return K_EINVAL;
-    /* Initial modeset only needs a valid KAPI scanout surface.  Reading the
-     * firmware GOP alias and writing the VRAM alias here is not required to
-     * program the head, and is unsafe on this GB205 BAR1 mapping.  The
-     * compositor's later upload path owns surface contents after modeset. */
+    /* 初始模式设置只需要有效的 KAPI 扫描输出表面。此处读取固件 GOP 别名并写入 VRAM 别名不是
+     * 配置显示头所必需的，且对当前 GB205 BAR1 映射不安全。模式设置完成后，表面内容由合成器的
+     * 后续上传路径负责。 */
     return K_OK;
 }
 
@@ -282,7 +276,7 @@ static void nvkms_fill_layer(
     layer->config.compParams.compMode =
         NVKMS_COMPOSITION_BLENDING_MODE_OPAQUE;
     layer->config.compParams.surfaceAlpha = 255U;
-    /* Match the official non-async KAPI client defaults. */
+    /* 使用官方 KAPI 同步客户端的默认值。 */
     layer->config.tearing = NV_FALSE;
     layer->config.minPresentInterval = 1U;
     layer->config.csc = NVKMS_IDENTITY_CSC_MATRIX;
@@ -333,7 +327,7 @@ static void nvkms_fill_config(
     head->modeSetConfig.mode = state->mode;
     head->modeSetConfig.vrrEnabled = NV_FALSE;
     head->modeSetConfig.colorimetry = NVKMS_OUTPUT_COLORIMETRY_DEFAULT;
-    /* Match the official Linux KAPI client's initial CRTC state. */
+    /* 使用官方 Linux KAPI 客户端的初始 CRTC 状态。 */
     head->modeSetConfig.olutFpNormScale =
         NVKMS_OLUT_FP_NORM_SCALE_DEFAULT;
     head->flags.activeChanged = initial ? NV_TRUE : NV_FALSE;
@@ -451,9 +445,8 @@ static kstatus_t nvkms_atomic_commit(
     return K_OK;
 }
 
-/* A missing event is not proof of a missing flip. Query the hardware before
- * retiring surfaces. If the engine really remains busy, fail the client once
- * but quarantine both surfaces until a later query proves retirement safe. */
+/* 未收到事件并不代表翻转没有发生。回收表面前先查询硬件状态。如果引擎确实仍在忙，向客户端报告一次
+ * 失败，并隔离两个表面，直到后续查询确认可以安全回收。 */
 static void nvkms_pending_progress(nvkms_display_state_t *state, bool event_seen)
 {
     display_scanout_complete_fn complete = NULL;
@@ -549,8 +542,7 @@ static void nvkms_event_callback(const struct NvKmsKapiEvent *event)
         event->u.flipOccurred.layer != NVKMS_KAPI_LAYER_PRIMARY_IDX)
         return;
 
-    /* Vendor event dispatch may still own its global lock. Query hardware
-     * only after returning from that dispatch, never recursively here. */
+    /* 厂商事件分发可能仍持有全局锁。硬件查询必须等分发返回后再进行，绝不能在此递归调用。 */
     (void)nv_port_work_queue_irq(&state->progress_work);
 }
 

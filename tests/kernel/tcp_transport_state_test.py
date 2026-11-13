@@ -101,10 +101,10 @@ int main(void){
   tick=times[test%3];wire_status=errors[test%4];missing_output=test%13==0;
   socket_private_t *p=&states[0];
   p->tcp_state=(random32()>>16)%4;++state_cases[p->tcp_state];
-  // This oracle models ordinary loss/RTO, not deliberate receiver backpressure.
-  // Zero-window persistence has its own send/ACK/poll integration cases.
+  // 此判定模型模拟普通丢包/RTO，不模拟接收端主动施加的背压。
+  // 零窗口持续探测另有发送/ACK/poll 集成用例覆盖。
   p->tcp_peer_window=8192;
-  // Use independent bits; the low bit of an LCG alternates deterministically.
+  // 使用彼此独立的位；LCG 的最低位会确定性交替变化。
   p->tcp_send_pending=(random32()>>8)&1;p->tcp_fin_pending=(random32()>>8)&1;p->tcp_fin_sent=(random32()>>8)&1;
   p->tcp_send_next_sequence=random32();p->tcp_send_unacknowledged=random32();
   p->tcp_next_sequence=random32();p->tcp_peer_initial_sequence=random32();
@@ -173,9 +173,8 @@ int main(void){
  for(unsigned state=0;state<4;++state)assert(state_cases[state]>1000);
  assert(fin_cases>100 && retry_cases>100 && timeout_cases>100);
 #if VERIFY_CLOSE_GUARD
- // close() publishes closed before taking the registry lock to unregister.
- // A poll may have pinned the socket in that interval; its state must remain
- // untouched when it subsequently acquires the socket lock.
+ // close() 会先发布 closed，再获取注册表锁注销套接字。
+ // 这段间隙内 poll 可能已固定套接字；之后获取套接字锁时必须保持其状态不变。
  for(unsigned phase=0;phase<6;++phase){
   memset(states,0,sizeof(states));memset(sockets,0,sizeof(sockets));
   memset(table4,0,sizeof(table4));memset(table6,0,sizeof(table6));
@@ -204,8 +203,8 @@ int main(void){
   assert(!outputs[0] && !outputs[1] && !wakes[0] && !wakes[1] && !notifications[0] && !notifications[1]);
   assert(!locked && !refs[0] && !refs[1]);
  }
- // A probe sent before close/reset may finish afterwards. That completion
- // must not roll back its probe budget or install another retry deadline.
+ // close/reset 前发出的探测可能在之后才完成。该完成事件不得回滚探测预算，
+ // 也不得再设置一个重试期限。
  for(unsigned terminal=0;terminal<2;++terminal){
   memset(&states[0],0,sizeof(states[0]));
   states[0].tcp_state=terminal?SOCKET_TCP_CLOSED:SOCKET_TCP_ESTABLISHED;
@@ -230,10 +229,9 @@ with tempfile.TemporaryDirectory(prefix='tcp-transport-state-') as directory:
         transport = '\n'.join(line for line in file.read_text().splitlines()
                               if not line.startswith('#include'))
         if file != sources[0]:
-            # Old snapshots passed a start sequence to the completion helper.
-            # This fixture has no concurrent ACK/output mutation, so its
-            # captured exclusive end is exactly SND.NXT. Normalize that ABI
-            # only; the real concurrent completion cases are gated separately.
+            # 旧快照会向完成处理函数传入起始序列号。此测试夹具没有并发 ACK/输出修改，
+            # 因此捕获到的结束位置正好是 SND.NXT。这里只规范化该 ABI；真实并发完成
+            # 场景由单独的门禁覆盖。
             if 'socket_tcp_local_output_locked(private, sequence, send_end_sequence,' not in transport:
                 transport = transport.replace(
                     'socket_tcp_local_output_locked(private, send_end_sequence,',

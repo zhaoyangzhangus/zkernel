@@ -5,7 +5,7 @@ import subprocess
 import tempfile
 
 root = Path(__file__).resolve().parents[2]
-# Reuse the reaper fixture's lock/ref/destructor assertions without executing it.
+# 复用回收器测试夹具中的锁/引用/析构断言，但不执行回收器本身。
 tree = ast.parse((root / 'tests/kernel/thread_stack_vm_pin_test.py').read_text())
 fixture = next(ast.literal_eval(node.value) for node in tree.body
                if isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == 'fixture' for t in node.targets))
@@ -52,7 +52,7 @@ static void race_after_registration_check(thread_t *t) {
  if(!publication_race)return;
  assert(held);atomic_store(&t->state,THREAD_DEAD);
  assert(!pthread_create(&reaper_job,NULL,reaper,t));
- // The real reaper claims its flag, then waits for registration's owner lock.
+ // 真实回收器会先声明其标志，再等待注册操作的所有者锁。
  while(!(__atomic_load_n(&t->flags,__ATOMIC_ACQUIRE)&THREAD_FLAG_EXECUTION_REAPING) && !atomic_load(&thread_puts))sched_yield();
 }
 typedef struct { thread_t *thread;int status; } registration_t;

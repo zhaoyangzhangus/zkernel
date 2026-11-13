@@ -20,7 +20,7 @@ install() { copies=$((copies+1)); shift 2; command install -m 777 "$@"; }
 install_data "$PWD/source" "$PWD/target"
 [[ "$copies" == 0 ]]
 [[ "$(stat -c %a target)" == 777 ]]
-# Cache hit still compares content, and changed content is published once.
+# 命中缓存时仍会比较内容；内容变化后只发布一次。
 printf changed > source
 install_data "$PWD/source" "$PWD/target"
 [[ "$copies" == 1 ]]

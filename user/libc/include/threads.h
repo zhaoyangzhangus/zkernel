@@ -3,8 +3,7 @@
 #include <pthread.h>
 #include <time.h>
 
-/* C11 threads are a small source-compatible view over the native pthread
- * primitives.  The underlying objects retain their native representation. */
+/* C11 线程接口是原生 pthread 原语的一层轻量源码兼容封装。底层对象仍采用原生表示形式。 */
 typedef pthread_t thrd_t;
 typedef pthread_mutex_t mtx_t;
 typedef pthread_cond_t cnd_t;

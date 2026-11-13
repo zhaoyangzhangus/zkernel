@@ -182,10 +182,10 @@ static bool deferred_worker_prepare_sleep(void) {
     * 防止丢失唤醒的屏障：
      *
     * 生产者：
-     *     deferred_lock -> enqueue/publish -> unlock -> sched_wake(worker)
+     *     deferred_lock -> 入队/发布 -> 解锁 -> sched_wake(worker)
      *
     * 消费者：
-     *     deferred_lock -> verify empty -> RUNNING->BLOCKED -> unlock
+     *     deferred_lock -> 确认队列为空 -> RUNNING->BLOCKED -> 解锁
      *                   -> schedule()
      *
     * 因此 IRQ 绝不会在检查队列为空与发布 BLOCKED 状态之间发布工作。如果工作在解锁后发布，

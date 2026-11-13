@@ -1,7 +1,5 @@
-/* C++ ABI forwarding entry points for legacy System headers that predate
- * extern "C" guards.  A .set alias remains undefined in the object emitted
- * by the cross assembler, so use tiny tail-call stubs to make each mangled
- * symbol a real exported function. */
+/* 为早于 extern "C" 保护的旧版 System 头文件提供 C++ ABI 转发入口。交叉汇编器生成的对象中，
+ * .set 别名仍会保持未定义，因此使用简短的尾调用桩，使每个修饰符号都成为真正的导出函数。 */
 
     .text
 
@@ -145,9 +143,8 @@ _Z8wcsftimePwmPKwPK2tm:
 _Z8getgrgidj:
     jmp getgrgid
 
-/* Chromium is built with exceptions disabled.  libc++abi still contains the
- * ABI entry points, so provide the minimal fail-closed unwinder surface until
- * System has a real DWARF unwinder. */
+/* Chromium 构建时会禁用异常。libc++abi 仍包含 ABI 入口，因此在 System 实现真正的 DWARF 展开器前，
+ * 提供最小的安全失败展开器接口。 */
     .globl _Unwind_RaiseException
 _Unwind_RaiseException:
     movl $5, %eax
@@ -156,9 +153,8 @@ _Unwind_RaiseException:
 _Unwind_DeleteException:
     ret
 
-/* System currently has no DWARF unwinder.  Keep libc++abi/Rust's ABI surface
- * linkable and fail closed: register writes are ignored, context queries
- * return zero, and a backtrace reports end-of-stack. */
+/* System 当前没有 DWARF 展开器。保留 libc++abi/Rust ABI 接口以便链接，并安全失败：忽略寄存器写入，
+ * 上下文查询返回零，回溯结果报告栈结束。 */
     .globl _Unwind_SetGR
 _Unwind_SetGR:
     ret
@@ -207,9 +203,8 @@ _Unwind_Resume:
     movl $134, %edi
     jmp _exit
 
-/* GCC emits this helper when Chromium's half-float utility is built without
- * the host compiler runtime.  The input is the low 16 bits of xmm0 and the
- * result is returned as a float in xmm0. */
+/* 不使用宿主编译器运行库构建 Chromium 半精度浮点工具时，GCC 会生成此辅助函数。输入为 xmm0 的低
+ * 16 位，结果以 float 形式通过 xmm0 返回。 */
     .globl __extendhfsf2
 __extendhfsf2:
     movd %xmm0, %eax

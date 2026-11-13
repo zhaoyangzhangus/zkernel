@@ -90,7 +90,7 @@ static void report(unsigned f,kstatus_t status,uint8_t flags){
 static kstatus_t emit(unsigned f,uint32_t seq,uint32_t ack,uint8_t flags,uint16_t win,size_t n){
  assert(!locked);++outputs[f];last_seq[f]=seq;last_ack[f]=ack;
  last_window[f]=win;last_flags[f]=flags;last_length[f]=n;
- /* Deterministic completion interleavings, while the real output is unlocked. */
+ /* 在真实输出未持锁期间，以确定性顺序交错完成事件。 */
  unsigned action=interleave;interleave=0;
  if(action==1){now+=3;report(f,K_EAGAIN,NET_TCP_FLAG_ACK);}
  if(action==2){assert(socket_close(&sock[f])==K_OK);}
@@ -111,8 +111,8 @@ static kstatus_t output6(void *ctx,const uint8_t src[16],uint16_t sp,const uint8
 }
 void socket_tcp_output_get(socket_tcp_ipv4_output_fn *fn,void **ctx){*fn=missing_output?NULL:output4;*ctx=NULL;}
 void socket_tcp6_output_get(socket_tcp_ipv6_output_fn *fn,void **ctx){*fn=missing_output?NULL:output6;*ctx=NULL;}
-/* Close uses the production function below; registry and unrelated peer/listener
- * teardown are fixture services. No pending ACK retains a reference or work item. */
+/* Close 使用下方的生产函数；注册表和无关的对端/监听者拆除由测试夹具提供。
+ * 待处理 ACK 不得保留引用或工作项。 */
 static void socket_remove_from_accept_queue_locked(socket_t *p,socket_t *s){(void)p;(void)s;assert(0);}
 static void socket_unbind_locked(socket_t *s){(void)s;assert(locked);}
 static bool socket_unregister_tcp_locked(socket_t *s){
@@ -190,7 +190,7 @@ int main(void){
  assert(outputs[0]==2);
 #endif
  for(unsigned f=0;f<2;f++){
-  /* Ordered data + real driver ACK failure; no more incoming packets. */
+  /* 按序数据 + 真实驱动 ACK 失败；之后不再有入站数据包。 */
   reset(f);wire_status=K_EAGAIN;assert(!inject(f,1000,1416));
   assert(state[f].tcp_ack_pending && state[f].tcp_ack_retry_tsc==now+DELAY);
   uint64_t due=state[f].tcp_ack_retry_tsc;unsigned before=outputs[f];
@@ -198,23 +198,23 @@ int main(void){
   wire_status=K_OK;poll_at(due);assert(outputs[f]==before+1 && !state[f].tcp_ack_pending);
   assert(last_ack[f]==2416 && last_window[f]==32768-1416 && !last_length[f]);
   poll_at(due+DELAY);assert(outputs[f]==before+1);
-  /* Out of order, repeated out of order and entirely duplicate segments. */
+  /* 乱序、重复乱序以及完全重复的数据段。 */
   reset(f);wire_status=K_EAGAIN;assert(!inject(f,2416,1416));assert(!inject(f,2416,1416));
   assert(state[f].tcp_rx_future_count==1416 && !atomic_load(&state[f].stream_count));
   due=state[f].tcp_ack_retry_tsc;wire_status=K_OK;poll_at(due);
   assert(last_ack[f]==1000 && last_window[f]==32768);
   wire_status=K_EAGAIN;assert(!inject(f,1000,1416));assert(state[f].tcp_next_sequence==3832);
   assert(!inject(f,1000,1416));due=state[f].tcp_ack_retry_tsc;
-  /* Snapshot comes from current socket, including application consumption. */
+  /* 快照来自当前套接字，并包含应用程序已读取的数据。 */
   atomic_store(&state[f].stream_count,17);state[f].tcp_send_next_sequence=777;
   wire_status=K_OK;poll_at(due);
   assert(last_seq[f]==777 && last_ack[f]==3832 && last_window[f]==32751);
-  /* Repeated failures coalesce without moving the first deadline. */
+  /* 重复失败会合并处理，但不改变首次设置的期限。 */
   reset(f);report(f,K_EAGAIN,NET_TCP_FLAG_ACK);due=state[f].tcp_ack_retry_tsc;
   now+=100;report(f,K_EAGAIN,NET_TCP_FLAG_ACK);assert(state[f].tcp_ack_retry_tsc==due);
   wire_status=K_EAGAIN;poll_at(due);assert(outputs[f]==1 && state[f].tcp_ack_retry_tsc==due+DELAY);
   poll_at(due+DELAY-1);assert(outputs[f]==1);wire_status=K_OK;poll_at(due+DELAY);assert(outputs[f]==2);
-  /* Zero conversion, deadline == 0 and wrap are defined, not sentinel bugs. */
+  /* 零转换、deadline == 0 和回绕都有明确语义，不是哨兵值缺陷。 */
   reset(f);conversion=0;report(f,K_EAGAIN,NET_TCP_FLAG_ACK);poll_at(1000);assert(!outputs[f]);poll_at(1001);assert(outputs[f]==1);
   reset(f);now=UINT64_MAX-DELAY+1;report(f,K_EAGAIN,NET_TCP_FLAG_ACK);assert(state[f].tcp_ack_retry_tsc==0);
   poll_at(UINT64_MAX);assert(!outputs[f]);poll_at(0);assert(outputs[f]==1);
@@ -222,14 +222,14 @@ int main(void){
   poll_at(due-1);assert(!outputs[f]);poll_at(due);assert(outputs[f]==1);
   reset(f);conversion=3;report(f,K_EAGAIN,NET_TCP_FLAG_ACK);due=1000+3*DELAY;
   poll_at(due-1);assert(!outputs[f]);poll_at(due);assert(outputs[f]==1);
-  /* Old success/permanent completion may not erase a concurrent new failure. */
+  /* 旧的成功/永久错误完成事件不得清除并发产生的新失败。 */
   for(unsigned fatal=0;fatal<2;fatal++){
    reset(f);report(f,K_EAGAIN,NET_TCP_FLAG_ACK);due=state[f].tcp_ack_retry_tsc;
    interleave=1;wire_status=fatal?K_EIO:K_OK;poll_at(due);
    assert(state[f].tcp_ack_pending && state[f].tcp_ack_retry_tsc==due+3+DELAY);
    wire_status=K_OK;poll_at(state[f].tcp_ack_retry_tsc);assert(outputs[f]==2 && !state[f].tcp_ack_pending);
   }
-  /* Reentrant poll cannot resubmit the old pending ACK during its output. */
+  /* 输出期间重入 poll 时，不能重新提交旧的待处理 ACK。 */
   reset(f);report(f,K_EAGAIN,NET_TCP_FLAG_ACK);due=state[f].tcp_ack_retry_tsc;
   interleave=4;poll_at(due);assert(outputs[f]==1 && !state[f].tcp_ack_pending);
   reset(f);report(f,K_EAGAIN,NET_TCP_FLAG_ACK);due=state[f].tcp_ack_retry_tsc;
@@ -238,7 +238,7 @@ int main(void){
   interleave=3;wire_status=K_EAGAIN;poll_at(due);assert(!state[f].tcp_ack_pending && state[f].tcp_state==SOCKET_TCP_CLOSED);
   reset(f);report(f,K_EAGAIN,NET_TCP_FLAG_ACK);due=state[f].tcp_ack_retry_tsc;
   assert(socket_close(&sock[f])==K_OK);poll_at(due);assert(!outputs[f]);report(f,K_EAGAIN,NET_TCP_FLAG_ACK);assert(!refs[f]);
-  /* Permanent errors do not become ACK retry or poison ordinary send state. */
+  /* 永久错误不能转化为 ACK 重试，也不能污染普通发送状态。 */
   const int errors[]={K_EIO,K_EINVAL,K_ENOENT,K_EBUSY};
   for(unsigned i=0;i<sizeof(errors)/sizeof(errors[0]);i++){
    reset(f);report(f,errors[i],NET_TCP_FLAG_ACK);assert(!state[f].tcp_ack_pending);
@@ -250,12 +250,12 @@ int main(void){
   for(unsigned i=0;i<sizeof(flags);i++){reset(f);report(f,K_EAGAIN,flags[i]);assert(!state[f].tcp_ack_pending);}
   reset(f);pin_allowed=false;report(f,K_EAGAIN,NET_TCP_FLAG_ACK);assert(!state[f].tcp_ack_pending && pins==1 && !refs[f]);
   reset(f);report(f,K_EAGAIN,NET_TCP_FLAG_ACK);missing_output=true;poll_at(state[f].tcp_ack_retry_tsc);assert(!state[f].tcp_ack_pending && !outputs[f]);
-  /* Production recv -> window update backpressure -> latest window on poll. */
+  /* 生产路径 recv -> 窗口更新背压 -> poll 时使用最新窗口。 */
   reset(f);atomic_store(&state[f].stream_count,30000);wire_status=K_EAGAIN;
   assert(receive(f,1000)==K_OK && state[f].tcp_ack_pending);
   due=state[f].tcp_ack_retry_tsc;assert(receive(f,1000)==K_OK && state[f].tcp_ack_retry_tsc==due);
   wire_status=K_OK;before=outputs[f];poll_at(due);assert(outputs[f]==before+1 && last_window[f]==4768);
-  /* Pending ACK and ordinary data retry can coexist in the same poll. */
+  /* 待处理 ACK 和普通数据重试可以在同一次 poll 中共存。 */
   reset(f);report(f,K_EAGAIN,NET_TCP_FLAG_ACK);due=state[f].tcp_ack_retry_tsc;
   state[f].tcp_send_pending=true;state[f].tcp_send_unacknowledged=490;
   state[f].tcp_send_length=10;state[f].tcp_send_flags=NET_TCP_FLAG_ACK|NET_TCP_FLAG_PSH;
@@ -309,8 +309,8 @@ with tempfile.TemporaryDirectory(prefix='tcp-ack-backpressure-') as directory:
     finally:
         resource.setrlimit(resource.RLIMIT_CORE, limit)
     print('重复获取空闲连接锁的负面对照已被预算检查拒绝')
-    # Disable the driver's new failure notification and delayed poll only.
-    # Keep the same production RX state transitions and regression assertions.
+    # 只禁用驱动新增的失败通知和延迟轮询。
+    # 保留相同的生产接收状态转换和回归断言。
     old_replies = replies.replace('socket_tcp_ack_output_ipv4(', 'ignored4(').replace(
         'socket_tcp_ack_output_ipv6(', 'ignored6(')
     old_fixture = program.replace(replies, '\n#define ignored4(...) ((void)0)\n'
@@ -332,8 +332,8 @@ with tempfile.TemporaryDirectory(prefix='tcp-ack-backpressure-') as directory:
     finally:
         resource.setrlimit(resource.RLIMIT_CORE, limit)
     print('Negative control: original driver ACK EAGAIN loses recovery; regression rejects it')
-    # A common broken fix clears pending on successful output completion.
-    # Reject it using the unlocked old-output/new-failure interleaving above.
+    # 一种常见错误修复是在输出成功完成时清除待处理状态。
+    # 使用上方未持锁的旧输出/新失败交错场景拒绝这种实现。
     transport = (root/sources[1]).read_text()
     broken = transport.replace('    if (status == K_EAGAIN) {',
         '    if (status == K_OK) {\n'

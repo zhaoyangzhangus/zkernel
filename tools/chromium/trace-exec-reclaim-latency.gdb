@@ -26,7 +26,7 @@ class ReclaimStart(gdb.Breakpoint):
                          internal=True)
 
     def stop(self):
-        # Exact function entry: x86-64 SysV first argument and return address.
+        # 函数入口处：x86-64 SysV 的第一个参数和返回地址。
         space = int(gdb.parse_and_eval('$rdi')) & ((1 << 64) - 1)
         address = int(gdb.parse_and_eval('*(unsigned long*)$rsp'))
         print('EXEC_RECLAIM_ENTER space=%#x' % space, flush=True)

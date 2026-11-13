@@ -115,7 +115,7 @@ int main(){
   server.window_state_=PlatformWindowState::kNormal;
  }
  server.SetBoundsInPixels({301,241,800,500});assert((server.native==gfx::Rect{301,241,800,500}));
- // Reproduce the old native rejection: full size cannot move to (10,10).
+ // 复现旧原生实现的拒绝行为：全尺寸窗口无法移动到 (10,10)。
  NativeGuestWindow old;old.bounds_=old.native=full;
  nativeguest::WindowCommand old_move{};old_move.operation=nativeguest::kMove;
  old_move.x=10;old_move.y=10;
@@ -127,20 +127,20 @@ int main(){
    w.Restore();assert(w.bounds_==normal && w.native==normal);
    assert(w.window_state_==PlatformWindowState::kNormal && !w.restored_bounds_);
  }
- // Failed restore must keep state and saved bounds for a retry.
+ // 恢复失败时必须保留状态和已保存的边界，以便重试。
  for(int fail=1;fail<=2;++fail){
    NativeGuestWindow f;f.Maximize();f.calls=0;f.fail_at=fail;
    f.Restore();assert(f.window_state_==PlatformWindowState::kMaximized);
    assert(f.restored_bounds_==normal && f.bounds_==f.native);
    f.fail_at=0;f.Restore();assert(f.bounds_==normal && f.native==normal);
  }
- // Failed growth after a successful move publishes the actual partial bounds.
+ // 移动成功后扩展失败，应发布实际的部分边界。
  NativeGuestWindow f;f.fail_at=2;f.Maximize();
  assert(f.window_state_==PlatformWindowState::kNormal && f.bounds_==f.native);
  assert((f.bounds_==gfx::Rect{0,0,945,1060}));
  f.fail_at=0;f.Maximize();f.Restore();
  assert(f.bounds_==normal && f.native==normal);
- // Mixed shrink/grow needs shrink, move, grow (not an invalid intermediate).
+ // 同时缩小和扩展时必须依次执行缩小、移动、扩展，不能经过无效的中间状态。
  NativeGuestWindow mixed;mixed.bounds_=mixed.native={1000,0,920,500};
  mixed.SetBoundsInPixels({0,500,1500,580});
  assert((mixed.native==gfx::Rect{0,500,1500,580}) && mixed.bounds_==mixed.native);
@@ -162,8 +162,7 @@ int main(){
  assert(max_fs.window_state_==PlatformWindowState::kMaximized && max_fs.bounds_==full);
  assert(max_fs.restored_bounds_==normal);
  max_fs.Restore();assert(max_fs.bounds_==normal && max_fs.native==normal);
- // OnBoundsChanged is allowed to destroy the platform window. Do not invoke
- // a subsequent state callback after its weak pointer becomes invalid.
+ // OnBoundsChanged 可以销毁平台窗口。弱指针失效后，不得再调用后续状态回调。
  NativeGuestWindow gone;gone.destroy_on_bounds=true;gone.Maximize();
  assert(gone.window_state_==PlatformWindowState::kNormal);
  NativeGuestWindow gone_fs;gone_fs.destroy_on_bounds=true;gone_fs.SetFullscreen(true,0);
@@ -192,7 +191,7 @@ int main(){
    m.HandleMinimized(true);assert(m.delegate.activation_calls==notified);
    m.Restore();assert(!m.native_minimized && m.visible_ && m.delegate.active);
    assert(m.window_state_==state && m.bounds_==geometry && m.restored_bounds_==saved);
-   // A dock restore event is authoritative and must not send another command.
+   // Dock 恢复事件具有权威性，不得再发送其他命令。
    m.Minimize();const int calls=m.calls;m.native_minimized=false;m.HandleMinimized(false);
    assert(m.calls==calls && m.window_state_==state && m.visible_ && m.delegate.active);
  }

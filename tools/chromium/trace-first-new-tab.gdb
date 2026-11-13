@@ -12,14 +12,14 @@ except RuntimeError as error:
     raise gdb.GdbError("Refusing stale Chrome diagnostic: " + str(error))
 end
 target remote /tmp/system-keys.sock
-# ONLY Chrome build ID 2ea4a62ae34e05c9; addresses from its llvm-nm.
-# Kernel ELF_PIE_BIAS=0x40000000. Hardware stops perturb elapsed time:
-# this is a stage-localization diagnostic, never a latency benchmark.
+# 仅适用于 Chrome 构建 ID 2ea4a62ae34e05c9；地址来自该版本的 llvm-nm。
+# 内核 ELF_PIE_BIAS=0x40000000。硬件断点会影响经过时间：
+# 本脚本仅用于定位阶段，不可作为延迟基准。
 python
 import gdb, time, os
 
-# Each symbol was resolved from the guarded build's llvm-nm. Select one
-# nested stage per run to stay within the four hardware breakpoint slots.
+# 每个符号均通过受保护构建的 llvm-nm 解析。每次运行只选择一个嵌套阶段，
+# 以确保不超过四个硬件断点槽位。
 stage = os.environ.get('OS_NEW_TAB_STAGE', 'renderer')
 stages = {
     'renderer': (0x480310d0, 'RENDERER_INIT'),
@@ -39,8 +39,8 @@ ui_tid = None
 init_traced = False
 
 def current_tid():
-    # QEMU's GDB thread numbers are its one-based vCPU indices. Read the
-    # stopped CPU's current owner; never attribute another thread's return.
+    # QEMU 的 GDB 线程号是从 1 开始的 vCPU 索引。读取当前暂停 CPU 的所有者；
+    # 绝不能把其他线程的返回归到当前线程。
     cpu = gdb.selected_thread().num-1
     count = int(gdb.parse_and_eval('g_cpu_count'))
     if not 0 <= cpu < count:
@@ -67,8 +67,8 @@ class NewTabEntry(gdb.Breakpoint):
         ui_tid = current_tid()
         print('NEW_TAB_ENTER tid=%d' % ui_tid, flush=True)
         return_address = int(gdb.parse_and_eval('*(unsigned long long*)$rsp'))
-        # Keep at most four hardware addresses, including the temporary
-        # entry until GDB removes it. Do not delete a BP inside stop().
+        # 硬件地址最多保留四个，包括 GDB 移除临时入口断点前的那一个。
+        # 不要在 stop() 内删除断点。
         NewTabReturn(return_address)
         return False
 
@@ -95,8 +95,8 @@ class RendererInitReturn(gdb.Breakpoint):
         self.done = True
         print('%s_EXIT diagnostic_host_duration_ms=%.3f' %
               (stage_label, (time.monotonic()-self.entered)*1000), flush=True)
-        # Keep the inert address until NewTab returns; never mutate BPs
-        # inside stop(). The done flag ignores unrelated later returns.
+        # 在 NewTab 返回前保留无效地址；绝不在 stop() 内修改断点。
+        # done 标志会忽略之后无关的返回。
         return False
 
 class RendererInitEntry(gdb.Breakpoint):

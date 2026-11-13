@@ -10,14 +10,39 @@ static void message_port_unlock(message_port_t *port) {
     spinlock_unlock(&port->lock);
 }
 
-static bool message_port_ready(void *context) {
-    message_port_t *port = (message_port_t *)context;
-    bool ready;
+typedef struct message_port_receive_context {
+    message_port_t *port;
+    void *data;
+    size_t capacity;
+    size_t *size;
+    kstatus_t status;
+} message_port_receive_context_t;
+
+/* 等待层在队列锁外检查谓词。检查与取走条目使用同一把端口锁，
+ * 返回就绪即表示本次接收已完成，不能再被其他消费者抢走并重启超时。 */
+static bool message_port_try_receive(void *context) {
+    message_port_receive_context_t *receive = context;
+    message_port_t *port = receive->port;
+    bool finished = true;
     message_port_lock(port);
-    ready = port->count != 0U ||
-            atomic_load_explicit(&port->closed, memory_order_acquire);
+    if (port->count != 0U) {
+        message_port_message_t *message = &port->messages[port->head];
+        if (receive->capacity < message->size) {
+            receive->status = K_EINVAL;
+        } else {
+            memmove(receive->data, message->data, message->size);
+            *receive->size = message->size;
+            if (++port->head == port->capacity) port->head = 0U;
+            --port->count;
+            receive->status = K_OK;
+        }
+    } else if (atomic_load_explicit(&port->closed, memory_order_acquire)) {
+        receive->status = K_ECANCELED;
+    } else {
+        finished = false;
+    }
     message_port_unlock(port);
-    return ready;
+    return finished;
 }
 
 static bool message_port_is_signaled(const void *object) {
@@ -66,8 +91,8 @@ kstatus_t message_port_create(uint32_t capacity, message_port_t **out) {
     if (out == 0) return K_EINVAL;
     if (capacity == 0U) capacity = OS_PORT_DEFAULT_CAPACITY;
     if (capacity > OS_PORT_MAX_CAPACITY) return K_EINVAL;
-    /* The bounded capacity cannot overflow this size. Empty slots remain
-     * unread; send initializes size and payload before publishing count. */
+    /* 有界容量不会导致此大小溢出。空槽保持未读状态；发送方会先初始化大小和负载，
+     * 再发布计数。 */
     message_port_t *port = (message_port_t *)kmalloc(
         sizeof(*port) + (size_t)capacity * sizeof(port->messages[0]), 0);
     if (port == 0) return K_ENOMEM;
@@ -111,40 +136,23 @@ kstatus_t message_port_send(message_port_t *port, const void *data, size_t size)
 kstatus_t message_port_receive(message_port_t *port, void *data, size_t capacity,
                                size_t *size, uint64_t timeout_ns) {
     if (port == 0 || data == 0 || size == 0 || capacity == 0) return K_EINVAL;
-    for (;;) {
-        /* Consume ready data under one lock; subscribe only when empty.
-         * wait_on_queue rechecks readiness while arming the wait, so a send
-         * between this unlock and subscription is not lost. */
-        message_port_lock(port);
-        if (port->count != 0U) {
-            message_port_message_t *message = &port->messages[port->head];
-            if (capacity < message->size) {
-                message_port_unlock(port);
-                return K_EINVAL;
-            }
-            memmove(data, message->data, message->size);
-            *size = message->size;
-            if (++port->head == port->capacity) port->head = 0U;
-            --port->count;
-            message_port_unlock(port);
-            return K_OK;
-        }
-        bool closed = atomic_load_explicit(&port->closed, memory_order_acquire);
-        message_port_unlock(port);
-        if (closed) return K_ECANCELED;
-        if (timeout_ns == 0U) return K_ETIMEDOUT;
-        kstatus_t status = wait_on_queue(&port->receive_waitq, message_port_ready,
-                                         port, timeout_ns);
-        if (status != K_OK) return status;
-    }
+    message_port_receive_context_t receive = {
+        .port = port, .data = data, .capacity = capacity, .size = size,
+        .status = K_ETIMEDOUT,
+    };
+    if (message_port_try_receive(&receive)) return receive.status;
+    if (timeout_ns == 0U) return K_ETIMEDOUT;
+    kstatus_t status = wait_on_queue(&port->receive_waitq,
+        message_port_try_receive, &receive, timeout_ns);
+    return status == K_OK ? receive.status : status;
 }
 
 kstatus_t message_port_close(message_port_t *port) {
     if (port == 0) return K_EINVAL;
     bool was_closed = atomic_exchange_explicit(&port->closed, true,
                                                memory_order_acq_rel);
-    /* Closed readiness is permanent. A later waiter rechecks the predicate
-     * while subscribing; repeated closes need not rescan either wait queue. */
+    /* 关闭状态会一直保持。后续等待者会在订阅时重新检查谓词；重复关闭时无需重新
+     * 扫描任一等待队列。 */
     if (!was_closed) {
         (void)wake_all(&port->receive_waitq);
         object_notify_signaled(port);

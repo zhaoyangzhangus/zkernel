@@ -78,8 +78,8 @@ function Stop-NativeRun(
         }
     }
 
-    # The wrapper can be cancelled between Start-Process and its wait loop.
-    # Re-scan after the wrapper is gone so no child QEMU survives the round.
+    # 包装器可能在 Start-Process 启动后、进入等待循环前被取消。
+    # 包装器退出后重新扫描，确保本轮没有遗留 QEMU 子进程。
     foreach ($record in @(Get-MatchingQemu $buildName)) {
         Stop-Process -Id ([int]$record.ProcessId) -Force -ErrorAction SilentlyContinue
     }
@@ -108,9 +108,8 @@ foreach ($cpuCount in $cpuCounts) {
     $success = $false
     $savedLog = Join-Path $matrixDirectory ("qemu-serial-$cpuCount.log")
     try {
-        # The child wrapper truncates this file too, but it starts
-        # asynchronously.  Remove the previous run first so the polling loop
-        # cannot mistake stale success markers for this CPU's boot.
+        # 子包装器也会截断此文件，但它是异步启动的。先删除上次运行的文件，避免轮询循环
+        # 将过期成功标记误认为本次 CPU 已启动。
         Remove-Item -LiteralPath $serialLog -Force -ErrorAction SilentlyContinue
         Remove-Item -LiteralPath $savedLog -Force -ErrorAction SilentlyContinue
         $runArguments = @(

@@ -440,21 +440,29 @@ static int cube_window_command(int descriptor, uint32_t operation,
                                int32_t x, int32_t y, uint32_t width,
                                uint32_t height) {
     linux_window_command_t command = {0};
-    uint64_t stride;
     command.operation = operation;
     command.x = x;
     command.y = y;
     command.width = width;
     command.height = height;
-    if (operation == LINUX_WINDOW_OPERATION_PRESENT) {
-        if (width == 0U || height == 0U || width > UINT32_MAX / 4U)
-            return 0;
-        stride = (uint64_t)width * 4U;
-        if (stride > UINT32_MAX || stride > UINT64_MAX / height) return 0;
-        command.stride = (uint32_t)stride;
-        command.address = g_cube_window_buffer_address;
-        command.length = stride * height;
-    }
+    return ioctl(descriptor, (unsigned long)LINUX_WINDOW_IOCTL_COMMIT,
+                 &command) == 0;
+}
+
+/* surface 的步长/长度始终描述完整窗口，损坏宽高只限制本帧的合成与写屏区域。 */
+static int cube_window_present(int descriptor, uint32_t width, uint32_t height,
+                                uint32_t damage_width, uint32_t damage_height) {
+    if (width == 0U || height == 0U || width > UINT32_MAX / 4U ||
+        damage_width == 0U || damage_width > width ||
+        damage_height == 0U || damage_height > height) return 0;
+    uint64_t stride = (uint64_t)width * 4U;
+    linux_window_command_t command = {0};
+    command.operation = LINUX_WINDOW_OPERATION_PRESENT;
+    command.width = damage_width;
+    command.height = damage_height;
+    command.stride = (uint32_t)stride;
+    command.address = g_cube_window_buffer_address;
+    command.length = stride * height;
     return ioctl(descriptor, (unsigned long)LINUX_WINDOW_IOCTL_COMMIT,
                  &command) == 0;
 }
@@ -803,10 +811,8 @@ static char *cube_overlay_u64(char *text, uint64_t value) {
     return text;
 }
 
-static void cube_format_overlay(char text[64], uint32_t frames,
+static void cube_format_overlay(char text[64], uint64_t fps,
                                 uint64_t elapsed_ns) {
-    uint64_t fps = elapsed_ns == 0U ? 0U :
-                   ((uint64_t)frames * 1000000000ULL) / elapsed_ns;
     uint64_t seconds = elapsed_ns / 1000000000ULL;
     uint64_t tenths = (elapsed_ns / 100000000ULL) % 10U;
     char *cursor = text;
@@ -820,12 +826,13 @@ static void cube_format_overlay(char text[64], uint32_t frames,
     *cursor = '\0';
 }
 
-static void cube_draw_overlay(uint8_t *pixels, uint32_t width, uint32_t height,
-                              uint32_t frames, uint64_t elapsed_ns) {
+static uint32_t cube_draw_overlay(uint8_t *pixels, uint32_t width, uint32_t height,
+                              uint64_t fps, uint64_t elapsed_ns) {
     char text[64];
-    cube_format_overlay(text, frames, elapsed_ns);
+    cube_format_overlay(text, fps, elapsed_ns);
+    uint32_t overlay_width = 8U + (uint32_t)strlen(text) * 12U;
     cube_fill_rect(pixels, width, height, 0U, 0U,
-                   8U + (uint32_t)strlen(text) * 12U, 22U,
+                   overlay_width, 22U,
                    0x18U, 0x18U, 0x24U);
     for (uint32_t index = 0U; text[index] != '\0'; ++index) {
         uint32_t origin_x = 4U + index * 12U;
@@ -839,18 +846,20 @@ static void cube_draw_overlay(uint8_t *pixels, uint32_t width, uint32_t height,
             }
         }
     }
+    return overlay_width < width ? overlay_width : width;
 }
 
 static int cube_present(const cube_gl_api_t *api, int descriptor,
-                        uint32_t width, uint32_t height, uint32_t frames,
-                        uint64_t elapsed_ns, cube_timing_sample_t *timing) {
+                        uint32_t width, uint32_t height, uint64_t fps,
+                        uint64_t elapsed_ns, bool scene_changed,
+                        uint32_t *previous_overlay_width, cube_timing_sample_t *timing) {
     uint64_t read_begin = 0U, read_end = 0U, publish_begin = 0U, publish_end = 0U;
     int clock_valid = 0;
     if (timing != 0) timing->valid = 0;
     uint8_t *pixels = (uint8_t *)(uintptr_t)g_cube_window_buffer_address;
     uint64_t pixel_count = (uint64_t)width * height;
     if (api == 0 || descriptor < 0 || width == 0U || height == 0U ||
-        pixel_count > SIZE_MAX / 4U || pixels == 0) return 0;
+        pixel_count > SIZE_MAX / 4U || pixels == 0 || previous_overlay_width == 0) return 0;
     if (timing != 0) clock_valid = cube_now_ns(&read_begin);
     api->read_pixels(0, 0, (cube_gl_sizei_t)width, (cube_gl_sizei_t)height,
                      CUBE_GL_BGRA, CUBE_GL_UNSIGNED_BYTE, pixels);
@@ -940,10 +949,20 @@ static int cube_present(const cube_gl_api_t *api, int descriptor,
         g_cube_shared_buffer_reported = 1U;
     }
     /* FBO 清屏和片元输出已生成 XRGB 的高位零字节。不要再次读/改/写整个共享 surface。 */
-    cube_draw_overlay(pixels, width, height, frames, elapsed_ns);
+    uint32_t overlay_width = cube_draw_overlay(pixels, width, height, fps, elapsed_ns);
+    uint32_t damage_width = width, damage_height = height;
+    /* 朝向不变时只有文字条变化。文字变短也要覆盖上一帧宽度，清除旧字尾；
+     * 首帧、旋转及重试仍发布完整窗口，不把静止优化用于变化的三维场景。 */
+    if (!scene_changed && *previous_overlay_width != 0U) {
+        damage_width = overlay_width > *previous_overlay_width ?
+            overlay_width : *previous_overlay_width;
+        if (damage_width > width) damage_width = width;
+        if (damage_height > 22U) damage_height = 22U;
+    }
     if (clock_valid) clock_valid = cube_now_ns(&publish_begin);
-    int presented = cube_window_command(descriptor, LINUX_WINDOW_OPERATION_PRESENT,
-                                        0, 0, width, height);
+    int presented = cube_window_present(descriptor, width, height, damage_width, damage_height);
+    /* 发布失败不能推进损坏状态，下一次必须完整重发。 */
+    *previous_overlay_width = presented ? overlay_width : 0U;
     if (clock_valid) clock_valid = cube_now_ns(&publish_end);
     if (timing != 0 && presented && clock_valid && read_end >= read_begin &&
         publish_end >= publish_begin) {
@@ -1031,7 +1050,18 @@ static int cube_process_events(int descriptor, int *dragging, int *quit,
     }
 }
 
-int main(void) {
+/* 固定按运行时间旋转，而非按帧数旋转，避免慢版本承受不同的动画速度。 */
+static float cube_benchmark_yaw(uint64_t elapsed_ns) {
+    return 0.55F + (float)(elapsed_ns % 8000000000ULL) *
+                   (CUBE_TWO_PI / 8000000000.0F);
+}
+
+int main(int argc, char **argv) {
+    bool benchmark = argc == 2 && strcmp(argv[1], "--benchmark") == 0;
+    if (argc > 1 && !benchmark) {
+        cube_emit("Usage: cube [--benchmark]\n");
+        return 2;
+    }
     static const char vertex_source[] =
         "#version 330 core\n"
         "layout(location = 0) in vec3 cube_position;\n"
@@ -1087,6 +1117,8 @@ int main(void) {
     const char *failure_marker = "OS_CUBE_FAILURE_UNKNOWN\n";
     float yaw = 0.55F;
     float pitch = 0.35F;
+    float presented_yaw = yaw, presented_pitch = pitch;
+    uint32_t previous_overlay_width = 0U;
     int dragging = 0;
     int quit = 0;
     uint32_t drag_events = 0U;
@@ -1094,6 +1126,7 @@ int main(void) {
     uint64_t start_ns = 0U;
     uint64_t timing_report_ns = 0U;
     cube_timing_totals_t timing_totals = {0};
+    cube_fps_counter_t fps_counter = {0};
 #if CUBE_FRAME_PACING
     uint64_t next_deadline = 0U;
 #endif
@@ -1430,6 +1463,7 @@ int main(void) {
         goto cleanup;
     }
     cube_emit("OS_CUBE_MOUSE_DRAG_READY\n");
+    if (benchmark) cube_emit("OS_CUBE_BENCHMARK_FULL_PRESENT\n");
     if (!cube_now_ns(&start_ns)) {
         failure_marker = "OS_CUBE_CLOCK_FAIL\n";
         goto cleanup;
@@ -1453,6 +1487,8 @@ int main(void) {
             goto cleanup;
         }
         elapsed_ns = now >= start_ns ? now - start_ns : 0U;
+        uint64_t fps = cube_fps_update(&fps_counter, rendered_frames, elapsed_ns);
+        if (benchmark) yaw = cube_benchmark_yaw(elapsed_ns);
         cube_build_mvp(mvp, yaw, pitch, cube_width, cube_height);
         gl.uniform_matrix_4fv(mvp_location, 1, 0U, mvp);
         gl.clear_color(0.035F, 0.045F, 0.075F, 0.0F);
@@ -1462,10 +1498,14 @@ int main(void) {
          * 整个上下文的 CPU/GPU 等待。 */
         if (gl.get_error() != CUBE_GL_NO_ERROR ||
             !cube_present(&gl, window_descriptor, cube_width, cube_height,
-                          frame + 1U, elapsed_ns, &timing)) {
+                          fps, elapsed_ns,
+                          benchmark || frame == 0U || yaw != presented_yaw || pitch != presented_pitch,
+                          &previous_overlay_width, &timing)) {
             failure_marker = "OS_CUBE_PRESENT_FAIL\n";
             goto cleanup;
         }
+        presented_yaw = yaw;
+        presented_pitch = pitch;
         rendered_frames = frame + 1U;
         /* 排除首帧像素验证和驱动预热时间。 */
         if (frame != 0U) cube_timing_add(&timing_totals, &timing);

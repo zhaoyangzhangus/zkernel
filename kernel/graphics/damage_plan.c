@@ -17,60 +17,27 @@ void compositor_collapse_drag_damage(compositor_snapshot_t *snapshot) {
 
 bool compositor_view_intersects_snapshot_damage(
     const compositor_window_view_t *window,
-    const compositor_snapshot_t *snapshot) {
-
-    int64_t left;
-    int64_t top;
-    int64_t right;
-    int64_t bottom;
-
-    if (window == 0 ||
-        snapshot == 0 ||
-        snapshot->damage_count == 0U) {
+    const compositor_snapshot_t *snapshot, const Rect *bounds) {
+    if (window == 0 || snapshot == 0 || bounds == 0 || snapshot->damage_count == 0U)
         return false;
+
+    int64_t left = window->x;
+    int64_t top = window->y;
+    int64_t right = left + window_outer_width(window->width, window->flags);
+    int64_t bottom = top + window_outer_height(window->height, window->flags);
+    uint32_t first = 0U;
+    /* 少量区域直接遍历；先保留首块命中的短路径，再排除多区域包围盒外的窗口。 */
+    if (snapshot->damage_count > 4U) {
+        if (rect_intersects_bounds(snapshot->damage_rects[0], left, top, right, bottom))
+            return true;
+        if (!rect_intersects_bounds(*bounds, left, top, right, bottom)) return false;
+        first = 1U;
     }
-
-    left = window->x;
-    top = window->y;
-
-    right =
-        left +
-        (int64_t)window_outer_width(
-            window->width,
-            window->flags);
-
-    bottom =
-        top +
-        (int64_t)window_outer_height(
-            window->height,
-            window->flags);
-
-    if (left >= right || top >= bottom) {
-        return false;
+    /* 包围盒内部仍须逐块精确判断，不能填平未损坏的空隙。 */
+    for (uint32_t index = first; index < snapshot->damage_count; ++index) {
+        if (rect_intersects_bounds(snapshot->damage_rects[index], left, top, right, bottom))
+            return true;
     }
-
-    for (uint32_t index = 0U;
-         index < snapshot->damage_count;
-         ++index) {
-
-        const Rect *damage =
-            &snapshot->damage_rects[index];
-
-        if (damage->x0 >= damage->x1 ||
-            damage->y0 >= damage->y1) {
-            continue;
-        }
-
-        if (right <= (int64_t)damage->x0 ||
-            bottom <= (int64_t)damage->y0 ||
-            left >= (int64_t)damage->x1 ||
-            top >= (int64_t)damage->y1) {
-            continue;
-        }
-
-        return true;
-    }
-
     return false;
 }
 
@@ -116,17 +83,9 @@ bool compositor_snapshot_damage_bounds(
 }
 
 uint32_t compositor_snapshot_occlusion_floor(
-    const compositor_snapshot_t *snapshot) {
-
-    Rect bounds;
+    const compositor_snapshot_t *snapshot, const Rect *bounds) {
     uint32_t floor = 0U;
-
-    if (snapshot == 0 ||
-        !compositor_snapshot_damage_bounds(
-            snapshot,
-            &bounds)) {
-        return 0U;
-    }
+    if (snapshot == 0 || bounds == 0 || rect_is_empty(*bounds)) return 0U;
 
     for (uint32_t count = snapshot->window_count;
          count != 0U;
@@ -136,7 +95,7 @@ uint32_t compositor_snapshot_occlusion_floor(
 
         if (compositor_view_fully_covers_snapshot_bounds(
                 &snapshot->windows[index],
-                &bounds)) {
+                bounds)) {
             floor = index;
             break;
         }
@@ -187,8 +146,7 @@ bool compositor_registry_window_intersects_damage_bounds_locked(
     int64_t right = left + (int64_t)window_outer_width(window->width, window->flags);
     int64_t bottom = top + (int64_t)window_outer_height(window->height, window->flags);
 
-    return left < (int64_t)bounds->x1 && right > (int64_t)bounds->x0 &&
-           top < (int64_t)bounds->y1 && bottom > (int64_t)bounds->y0;
+    return rect_intersects_bounds(*bounds, left, top, right, bottom);
 }
 
 /* 在有效行范围内按位图字查找下一次状态，尾字不读取相邻行的位。 */

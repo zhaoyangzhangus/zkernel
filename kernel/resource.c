@@ -66,7 +66,7 @@ kstatus_t job_detach_process(struct process *process) {
         detached = true;
     }
     resource_unlock(&job->lock);
-    /* Only the operation which removed the attachment owns its reference. */
+    /* 只有移除该关联的操作才拥有对应引用。 */
     if (detached) {
         object_put(job);
         return K_OK;

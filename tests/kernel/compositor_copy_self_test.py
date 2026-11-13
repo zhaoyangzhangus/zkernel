@@ -4,11 +4,14 @@ import subprocess
 import tempfile
 root = Path(__file__).resolve().parents[2]
 source = (root / 'kernel/graphics/compose_cpu.c').read_text()
-source = source[source.index('void compositor_copy_wb_pixels('):source.index('void compositor_fill_wb_pixels(')]
+source = source[source.index('void compositor_copy_wb_pixels('):source.index('static void compositor_fill_wb_pixels(')]
 source = source.replace('    compositor_copy_wb_pixels(destination, source, pixel_count);',
                         '#ifndef OMIT_TEST_COPY\n    compositor_copy_wb_pixels(destination, source, pixel_count);\n#endif', 1)
 code = r'''
+#define _GNU_SOURCE
 #include <stdint.h>
+#include <sys/mman.h>
+#include <unistd.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdlib.h>
@@ -58,7 +61,25 @@ int main(void){
    else assert(dst[i]==0xA5A5A5A5);
   }
  }
- puts("Compositor copy self-test: matching stale heap buffers, 1080p, allocation failures/cleanup, invalid geometry and 4100 guarded copy spans passed");
+ /* 真实汇编的源、目标末尾紧贴不可读页，覆盖读取越界及零长度不解引用。 */
+ size_t page=(size_t)sysconf(_SC_PAGESIZE);assert(page==4096);
+ uint32_t *guard_source=mmap(0,page*2,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0);
+ uint32_t *guard_dest=mmap(0,page*2,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0);
+ assert(guard_source!=MAP_FAILED&&guard_dest!=MAP_FAILED);
+ assert(!mprotect((char *)guard_source+page,page,PROT_NONE));
+ assert(!mprotect((char *)guard_dest+page,page,PROT_NONE));
+ for(unsigned i=0;i<1024;++i)guard_source[i]=i*73513U;
+ for(unsigned n=0;n<=1024;++n){
+  for(unsigned i=0;i<1024;++i)guard_dest[i]=0xa5a5a5a5U;
+  unsigned start=1024-n;
+  compositor_copy_wb_pixels(guard_dest+start,guard_source+start,n);
+  for(unsigned i=0;i<1024;++i)
+   assert(guard_dest[i]==(i>=start?guard_source[i]:0xa5a5a5a5U));
+ }
+ compositor_copy_wb_pixels(0,guard_source+1024,1);
+ compositor_copy_wb_pixels(guard_dest+1024,0,1);
+ assert(!munmap(guard_source,page*2));assert(!munmap(guard_dest,page*2));
+ puts("Compositor copy self-test: matching stale heap buffers, 1080p, allocation failures/cleanup, invalid geometry and 4100 guarded copy spans and 1025 inaccessible-page boundaries passed");
 }
 '''
 with tempfile.TemporaryDirectory(prefix='compositor-copy-') as directory:

@@ -6,6 +6,18 @@
 #define FAT32_EOC_MIN       0x0FFFFFF8U
 #define FAT32_ENTRY_SIZE    32U
 
+/* 只扩展已经验证且物理地址一致的相邻或重叠区间，不跨越空洞。 */
+static void fat32_extend_seek_hint(UINT32 logical, UINT32 physical, UINT32 length,
+                                    UINT32 stored_logical, UINT32 stored_physical,
+                                    UINT32 *stored_length) {
+    if (logical < stored_logical) return;
+    UINT32 offset = logical - stored_logical;
+    UINT64 end = (UINT64)offset + length;
+    if (offset <= *stored_length && (UINT64)stored_physical + offset == physical &&
+        end > *stored_length && end <= UINT32_MAX)
+        *stored_length = (UINT32)end;
+}
+
 static BOOLEAN locate_file_cluster(OS_FAT32_FILE *file, UINT32 logical_cluster,
                                    UINT32 *physical_cluster) {
     OS_FAT32 *filesystem = file->FileSystem;
@@ -80,7 +92,10 @@ static BOOLEAN locate_file_cluster(OS_FAT32_FILE *file, UINT32 logical_cluster,
         filesystem->ClusterCount;
     UINT64 stride = clusters / 32U + (clusters % 32U != 0U);
     if (stride == 0U) stride = 1U;
-    for (UINT32 hops = 0; hops < filesystem->ClusterCount; ++hops) {
+    /* 按实际跨越的簇数限制工作量，不能把一个长 extent 当成一次簇访问。
+     * 损坏的回环链在大偏移定位时也只能消耗一个卷的遍历预算。 */
+    for (UINT32 hops = 0; hops < filesystem->ClusterCount;) {
+        UINT32 remaining = filesystem->ClusterCount - hops;
         /* 远距离定位按需求验证较长簇链，减少每 16 簇重复进入 FAT 缓存。
          * 单次最多 256 簇；目标附近仍保留原有短探测，不扩大普通小读。 */
         UINT32 probe = 16U;
@@ -88,27 +103,25 @@ static BOOLEAN locate_file_cluster(OS_FAT32_FILE *file, UINT32 logical_cluster,
             UINT32 distance = logical_cluster - logical;
             if (distance >= 16U) probe = distance >= 255U ? 256U : distance + 1U;
         }
+        if (probe > remaining) probe = remaining;
         UINT32 length = fat32_extent_length(filesystem, start,
-            filesystem->Fat3Available ? UINT32_MAX : probe);
+            filesystem->Fat3Available ? remaining : probe);
+        if (length == 0U || length > remaining) return 0;
+        hops += length;
         /* 在每个按文件大小划分的区间内保留首次访问的 extent。
          * 即使热点缓存被淘汰，这些检查点也无需分配即可保留。 */
         UINT64 checkpoint = logical / stride;
-        if (length != 0U && checkpoint < 32U) {
+        if (checkpoint < 32U) {
             UINT32 slot = (UINT32)checkpoint;
             if ((file->SeekIndexValid & (1U << slot)) == 0U) {
                 file->SeekIndexLogical[slot] = logical;
                 file->SeekIndexPhysical[slot] = start;
                 file->SeekIndexLength[slot] = length;
                 file->SeekIndexValid |= 1U << slot;
-            } else if (logical >= file->SeekIndexLogical[slot]) {
-                UINT32 offset = logical - file->SeekIndexLogical[slot];
-                UINT64 end = (UINT64)offset + length;
-                /* 仅合并已验证且物理地址一致的相邻/重叠区间，不能跨越碎片或未验证的空洞。
-                 * 保留首次检查点的位置，同时让后续随机缺页复用整段已走过的连续簇链。 */
-                if (offset <= file->SeekIndexLength[slot] &&
-                    (UINT64)file->SeekIndexPhysical[slot] + offset == start &&
-                    end > file->SeekIndexLength[slot] && end <= UINT32_MAX)
-                    file->SeekIndexLength[slot] = (UINT32)end;
+            } else {
+                fat32_extend_seek_hint(logical, start, length,
+                    file->SeekIndexLogical[slot], file->SeekIndexPhysical[slot],
+                    &file->SeekIndexLength[slot]);
             }
         }
         if (logical_cluster >= logical && logical_cluster - logical < length) {
@@ -126,7 +139,7 @@ static BOOLEAN locate_file_cluster(OS_FAT32_FILE *file, UINT32 logical_cluster,
             return fat32_cluster_valid(filesystem, *physical_cluster);
         }
         UINT32 next;
-        if (length == 0U || logical > UINT32_MAX - length ||
+        if (logical > UINT32_MAX - length ||
             !fat32_read_next_cluster(filesystem, start + length - 1U, &next) ||
             next == 0U) return 0;
         logical += length;
@@ -355,6 +368,19 @@ static UINT64 fat32_contiguous_extent_bytes(OS_FAT32_FILE *file, UINT32 logical_
             if (tail > 1U) {
                 file->CursorLength += tail - 1U;
                 extent_bytes += (UINT64)(tail - 1U) * cluster_bytes;
+                /* 流式 I/O 的验证结果也写回现有提示；游标移开后仍可复用，无需重新扫描 FAT。 */
+                for (UINT32 i = 0U; i < file->SeekCacheCount; ++i)
+                    fat32_extend_seek_hint(file->CursorLogicalStart, file->CursorPhysicalStart,
+                        file->CursorLength, file->SeekLogical[i], file->SeekPhysical[i],
+                        &file->SeekLength[i]);
+                UINT32 hints = file->SeekIndexValid;
+                while (hints != 0U) {
+                    UINT32 i = (UINT32)__builtin_ctz(hints);
+                    hints &= hints - 1U;
+                    fat32_extend_seek_hint(file->CursorLogicalStart, file->CursorPhysicalStart,
+                        file->CursorLength, file->SeekIndexLogical[i], file->SeekIndexPhysical[i],
+                        &file->SeekIndexLength[i]);
+                }
             }
         }
     }

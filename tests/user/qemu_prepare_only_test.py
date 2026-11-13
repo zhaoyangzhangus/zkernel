@@ -11,12 +11,18 @@ with tempfile.TemporaryDirectory(prefix='system-qemu-prepare-') as directory:
     fixture = Path(directory)
     shutil.copy2(root/'run-qemu.sh', fixture/'run-qemu.sh')
     (fixture/'tools').mkdir()
-    shutil.copy2(root/'tools/clean-runtime-aliases.py',
-                 fixture/'tools/clean-runtime-aliases.py')
+    for name in ('clean-runtime-aliases.py', 'migrate-system-layout.py',
+                 'finalize-app-layout.py', 'preserve-qemu-app-data.py'):
+        shutil.copy2(root/'tools'/name, fixture/'tools'/name)
     build = fixture/'build'
     kernel = build/'esp/EFI/OS/kernel.elf'
     kernel.parent.mkdir(parents=True)
     kernel.write_bytes(b'fixture kernel')
+    (build/'esp/usr/apps').mkdir(parents=True)
+    # 本夹具只验证启动器事务；转换器生成占位镜像，且没有待恢复的应用数据。
+    mdir = fixture/'mdir'
+    mdir.write_text('#!/bin/sh\nexit 0\n')
+    mdir.chmod(0o755)
     firmware = fixture/'firmware.fd'
     firmware.write_bytes(b'fixture firmware')
     marker = fixture/'unexpected-launch'
@@ -30,7 +36,7 @@ with tempfile.TemporaryDirectory(prefix='system-qemu-prepare-') as directory:
     converter.chmod(0o755)
     env = dict(os.environ, BUILD=str(build), QEMU_PATH=str(qemu),
                QEMU_IMG=str(converter), OVMF_CODE=str(firmware),
-               LAUNCH_MARKER=str(marker))
+               LAUNCH_MARKER=str(marker), PATH=str(fixture)+os.pathsep+os.environ['PATH'])
 
     def run(extra=(), **changes):
         return subprocess.run(['bash', str(fixture/'run-qemu.sh'),
@@ -45,7 +51,7 @@ with tempfile.TemporaryDirectory(prefix='system-qemu-prepare-') as directory:
     assert not marker.exists()
     image.write_bytes(b'previous-good-image')
     result = run(FAIL_CONVERT='1')
-    assert result.returncode != 0
+    assert result.returncode != 0 and '无法生成 QEMU FAT 磁盘镜像' in result.stderr, result.stderr
     assert image.read_bytes() == b'previous-good-image'
     assert not list(build.glob('.qemu-image.tmp.*'))
     with (build/'qemu-run.lock').open('a') as lock:
@@ -57,7 +63,7 @@ with tempfile.TemporaryDirectory(prefix='system-qemu-prepare-') as directory:
         assert result.returncode != 0 and '正在使用' in result.stderr
     assert image.read_bytes() == b'previous-good-image'
     assert not marker.exists()
-    # Explicit reuse must neither invoke the converter nor require staging.
+    # 显式复用时既不能调用转换器，也不要求暂存文件。
     kernel.unlink()
     identity = (image.stat().st_ino, image.stat().st_mtime_ns)
     result = run(('--reuse-image',), FAIL_CONVERT='1')

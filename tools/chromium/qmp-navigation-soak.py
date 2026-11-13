@@ -43,7 +43,7 @@ with tempfile.TemporaryDirectory(prefix='system-navigation-') as directory:
             width, height = map(int, image.readline().split())
             assert image.readline().strip() == b'255' and height >= 900
             pixels = image.read()
-        # Avoid focus/caret, menu and cursor areas; sample the article body.
+        # 避开焦点/插入光标、菜单和光标区域；对文章正文采样。
         return b''.join(pixels[(y * width + x) * 3:(y * width + x) * 3 + 3]
                         for y in range(200, 550, 4) for x in range(100, 850, 4))
 
@@ -51,8 +51,7 @@ with tempfile.TemporaryDirectory(prefix='system-navigation-') as directory:
         return sum(abs(x - y) > 20 for x, y in zip(a, b)) / len(a)
 
     def stable_frame():
-        # Never use a partially presented frame as the expected page. Keep
-        # the existing mismatch gate; validate baseline stability instead.
+        # 绝不将尚未完整呈现的帧作为预期页面。保留现有的不匹配门禁，改为验证基线稳定性。
         previous = frame()
         stable_since = time.monotonic()
         deadline = stable_since + 5
@@ -107,7 +106,7 @@ with tempfile.TemporaryDirectory(prefix='system-navigation-') as directory:
                 command('screendump', {'filename': str(root / 'build/chrome-soak-failure.png'), 'format': 'png'})
                 shutil.copyfile(filename, root / 'build/chrome-soak-failure.ppm')
                 raise RuntimeError('History navigation did not restore the expected page')
-            # Do not overlap the next shortcut with a pending key release.
+            # 不要让下一个快捷键与尚未释放的按键重叠。
             time.sleep(max(args.dwell_seconds,
                            args.hold_ms / 1000 - (time.monotonic() - start) + .05))
         (root / 'build/chrome-navigation-soak-progress.json').write_text(

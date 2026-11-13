@@ -54,7 +54,7 @@ static void *activate_payload(uint16_t class_index,void *payload,size_t size,uin
     ++activations;return payload;
 }
 ''' + partial + take + refill + single + r'''
-/* Preserve the original duplicated algorithms, independent of the helper. */
+/* 保留原有的重复算法，作为独立于辅助函数的对照。 */
 static bool previous_refill(uint16_t class_index,kmem_magazine_t *magazine) {
     if(!magazine||class_index>=KMEM_CLASS_COUNT)return false;
     kmem_cache_t *cache=&g_caches[class_index];unsigned moved=0;cache_lock(cache);
@@ -94,7 +94,7 @@ static void setup(unsigned trial) {
         cache_partial_insert(&g_caches[cls],slab);
     }
     if(trial%3==0) {
-        /* Historical malformed full head: preserve diagnostic pruning. */
+        /* 历史上格式错误的满载头部：保留诊断性剪枝行为。 */
         slab_page_t *slab=new_slab(0);slab->next=g_caches[cls].slabs;
         slab->prev_link=&g_caches[cls].slabs;
         if(slab->next)slab->next->prev_link=&slab->next;

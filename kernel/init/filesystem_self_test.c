@@ -108,7 +108,7 @@ static BOOLEAN filesystem_vfs_fat_delete_self_test(void) {
         shared->fat_file != retained_inode) goto cleanup;
     vfs_close(pressure_open);
     pressure_open = 0;
-    /* /sample.txt is an idle canonical inode from the preceding test. A
+    /* /sample.txt 是前一项测试遗留的空闲规范 inode。缓存未命中时，必须回收备用句柄，
     * 缓存未命中时必须回收备用句柄，同时保留当前读取者的 inode，即使此时所有原生槽位都已占用。 */
     if (vfs_open_kernel("/vfspress.asm", VFS_OPEN_READ, 0U, &pressure_open) != K_OK ||
         pressure_open == 0 || shared->fat_file != retained_inode ||

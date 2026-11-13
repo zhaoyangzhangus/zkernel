@@ -12,9 +12,8 @@ static atomic_bool g_nvabi_registry_initialized = ATOMIC_VAR_INIT(false);
 
 nv_state_t *NV_API_CALL nv_get_ctl_state(void)
 {
-    /* The vendor Linux implementation returns the state embedded in its
-     * control device.  System keeps that device private, so the RM bridge
-     * exposes the same live state as an opaque OS-adapter result. */
+    /* Linux 厂商实现会返回其控制设备中嵌入的状态。System 将该设备保持为私有，
+     * 因此 RM 桥接层会通过不透明的 OS 适配器结果公开相同的实时状态。 */
     return (nv_state_t *)nv_rm_vendor_ctl_state();
 }
 
@@ -46,9 +45,8 @@ void NV_API_CALL nv_get_screen_info(
 typedef struct nvabi_mutex {
     uint32_t magic;
     /*
-     * The 595.84 Linux OS interface backs os_*mutex with struct semaphore
-     * (down/up), not an owner-tracked mutex.  RM may release it from a
-     * completion context different from the acquirer.
+     * 595.84 Linux OS 接口使用 struct semaphore（down/up）实现 os_*mutex，
+     * 并非跟踪所有者的互斥锁。RM 可能在不同于获取者的完成上下文中释放它。
      */
     nv_port_semaphore_t semaphore;
 } nvabi_mutex_t;
@@ -167,7 +165,7 @@ static size_t nvabi_append_string(char *destination, size_t capacity,
 static size_t nvabi_append_unsigned(char *destination, size_t capacity,
                                     size_t used, NvU64 value, NvU32 base,
                                     bool upper) {
-    /* A 64-bit decimal value needs 20 digits, more than hexadecimal's 16. */
+    /* 64 位十进制数需要 20 位，比十六进制表示所需的 16 位更多。 */
     char digits[sizeof(NvU64) * 3U];
     size_t count = 0U;
     const char *alphabet = upper ? "0123456789ABCDEF" : "0123456789abcdef";
@@ -181,9 +179,8 @@ static size_t nvabi_append_unsigned(char *destination, size_t capacity,
     return used;
 }
 
-/* A bounded formatter is sufficient for the vendor's diagnostic ABI.  It
- * deliberately supports only scalar/string conversions; unsupported format
- * extensions are rendered literally instead of being silently discarded. */
+/* 有界格式化程序足以满足厂商诊断 ABI 的需求。它特意只支持标量和字符串转换；
+ * 不支持的格式扩展会按原样输出，不会被静默丢弃。 */
 static int nvabi_vsnprintf(char *destination, NvU32 capacity,
                            const char *format, va_list arguments) {
     size_t used = 0U;
@@ -276,11 +273,9 @@ static atomic_uint_fast64_t g_nvabi_post_event_unsupported_count = ATOMIC_VAR_IN
 
 void nvabi_log_unsupported(const char *function, const char *caller_stage) {
     uint64_t count = 0U;
-    /* This remains an unsupported callback, not a successful notification.
-     * Video queues can invoke it thousands of times; synchronous UART output
-     * on every invocation obscures other diagnostics and stalls completion.
-     * Retain the first eight reports and cumulative power-of-two summaries.
-     * No allocation, sleep or logging lock is introduced in callback context. */
+    /* 此回调仍不受支持，不能伪装成通知成功。视频队列可能调用数千次；每次同步输出到
+     * UART 会遮蔽其他诊断信息并阻塞完成处理。保留最初八条报告，之后按累计次数为
+     * 2 的幂输出摘要。回调上下文中不分配内存、不休眠，也不获取日志锁。 */
     if (function != NULL && nvabi_string_compare(function, "nv_post_event") == 0) {
         count = atomic_fetch_add_explicit(&g_nvabi_post_event_unsupported_count,
                                          1U, memory_order_relaxed) + 1U;
@@ -383,11 +378,9 @@ NvU64 NV_API_CALL os_get_monotonic_tick_resolution_ns(void) {
 }
 
 /*
- * Linux keeps a reference-counted struct pid for the duration of RM calls.
- * System has no PID namespaces, so the process object is the corresponding
- * stable identity.  Take an object reference on acquire and release exactly
- * that reference on put; this preserves the lifetime rule without inventing a
- * second PID object or a namespace-independent success value.
+ * Linux 会在 RM 调用期间持有带引用计数的 struct pid。System 没有 PID 命名空间，
+ * 因此进程对象就是对应的稳定标识。获取时增加对象引用，put 时准确释放该引用；
+ * 这样即可遵守生命周期约定，无需另造 PID 对象或与命名空间无关的成功值。
  */
 void *NV_API_CALL os_get_pid_info(void) {
     process_t *process = nvabi_current_process();
@@ -415,7 +408,7 @@ NV_STATUS NV_API_CALL os_find_ns_pid(void *pid_info, NvU32 *ns_pid) {
 }
 
 NvBool NV_API_CALL os_is_init_ns(void) {
-    /* System currently exposes one process/PID namespace. */
+    /* System 当前只公开一个进程/PID 命名空间。 */
     return NV_TRUE;
 }
 
@@ -441,10 +434,9 @@ static NvBool nvabi_current_process_has_nvidia_fd(void) {
 
 NvBool NV_API_CALL nv_is_gpu_accessible(nv_state_t *nv) {
     (void)nv;
-    /* The immutable Linux implementation checks whether the current task has
-     * an NVIDIA file in its files_struct.  System keeps the same observable
-     * rule over its Linux personality fd table; this is not a readiness
-     * shortcut and does not grant access to a process without a real fd. */
+    /* 不可变的 Linux 实现会检查当前任务的 files_struct 中是否有 NVIDIA 文件。System
+     * 在其 Linux personality 文件描述符表上保持相同的可观察规则；这不是就绪状态的
+     * 快捷判断，也不会向没有真实 fd 的进程授予访问权限。 */
     return nvabi_current_process_has_nvidia_fd();
 }
 

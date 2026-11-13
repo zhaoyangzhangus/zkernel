@@ -76,7 +76,7 @@ int main(void){
  hw_pending=false;nvkms_pending_progress(&s,false);
  assert(!s.pending&&s.current.id==2&&s.spare.id==1&&!s.pending_surface.id);
  assert(callbacks==1&&s.recovered_flips==1&&s.completed_flips==1);
- /* Late duplicate event must not retire a NEW hardware-pending flip. */
+ /* 延迟到达的重复事件不能回收新的硬件待处理翻转。 */
  s.pending=true;s.pending_surface.id=3;s.spare.id=0;s.pending_started_ns=now;
  s.pending_complete=complete;s.pending_context=&s;hw_pending=true;
  nvkms_pending_progress(&s,true);assert(callbacks==1&&s.pending&&s.current.id==2);
@@ -87,7 +87,7 @@ int main(void){
  query_success=true;nvkms_pending_progress(&s,false);
  assert(callbacks==2&&result==K_OK&&!s.pending&&s.current.id==3&&s.spare.id==2);
  nvkms_pending_progress(&s,true);assert(callbacks==2);
- /* Failed/unsupported queries never recycle surfaces, even after timeout. */
+ /* 查询失败或不受支持时，绝不能回收表面，即使已经超时。 */
  s.pending=true;s.pending_surface.id=4;s.spare.id=0;
  s.pending_complete=complete;s.pending_context=&s;s.pending_started_ns=now;
  f.getFlipPendingStatus=NULL;now+=250000000;

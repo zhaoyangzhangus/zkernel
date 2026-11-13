@@ -469,8 +469,8 @@ int64_t syscall_dispatch(arch_trap_frame_t *frame) {
         }
         return syscall_complete_dispatch(executing_thread, status);
     }
-    /* libc fork/exec use the native escape, including queued work before the
-     * handler. Keep them separate from Linux syscall numbers 6 and 4. */
+    /* libc 的 fork/exec 使用原生扩展入口，包括在处理程序前排队的工作。
+     * 将它们与 Linux 系统调用编号 6 和 4 分开处理。 */
     bool measure_native_transition = native_escape &&
         g_syscall_delay_process != 0U &&
         executing_thread != 0 && executing_thread->process != 0 &&
@@ -483,17 +483,16 @@ int64_t syscall_dispatch(arch_trap_frame_t *frame) {
     uint64_t native_started = (measure_native_transition || measure_native_cost) ?
                              x86_read_tsc() : 0U;
     uint64_t native_argument0 = frame->rdi;
-    /* Once the persistent worker owns bottom halves, a user syscall must
-     * not steal arbitrary callbacks (e.g. old-address-space reclamation).
-     * A four-item count is not a time bound and SyscallActive defers timer
-     * preemption. Keep synchronous draining only for pre-worker boot. */
+    /* 持久工作线程接管下半部后，用户系统调用不得擅自执行任意回调（例如回收旧地址空间）。
+     * 处理四个项目并不代表有时间上限，而且 SyscallActive 会延迟定时器抢占。
+     * 仅在工作线程启动前的引导阶段同步排空队列。 */
     if (!deferred_worker_started()) (void)deferred_run(4U);
     if (number >= SYSCALL_TABLE_SIZE || g_syscall_table[number] == 0) {
         return syscall_complete_dispatch(executing_thread, K_ENOSYS);
     }
     uint64_t argument5 = frame->r9;
-    /* PROCESS_FORK has no user argument; its private sixth argument carries
-     * the kernel-owned return frame so the child can resume after syscall. */
+    /* PROCESS_FORK 没有用户参数；它的私有第六个参数携带内核拥有的返回帧，
+     * 使子进程能够在系统调用后恢复执行。 */
     if (number == OS_SYS_PROCESS_FORK || number == OS_SYS_SIGNAL_RETURN) {
         argument5 = (uint64_t)(uintptr_t)frame;
     }

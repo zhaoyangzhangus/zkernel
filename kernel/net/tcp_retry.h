@@ -68,8 +68,8 @@ static inline bool socket_tcp_local_output_locked(socket_private_t *private,
         return true; /* Caller notifies waiters after unlocking. */
     }
     if (status != K_EAGAIN) {
-        /* An append ending at SND.NXT does not cover an older failed prefix.
-         * Only success covering the entire remaining range clears its retry. */
+        /* 追加数据的末尾即使到达 SND.NXT，也不代表覆盖了较早失败的前缀。
+         * 只有成功覆盖整个剩余范围，才会清除该重试状态。 */
         if (end_sequence == private->tcp_send_next_sequence &&
             (uint32_t)(private->tcp_send_unacknowledged - start_sequence) <
                 (uint32_t)(end_sequence - start_sequence))

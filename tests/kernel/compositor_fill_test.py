@@ -1,6 +1,7 @@
 """真实填充汇编与逐像素裁剪公式对照，覆盖连续行合并和行尾保护。"""
 from pathlib import Path
 import subprocess
+import resource
 import tempfile
 
 root = Path(__file__).resolve().parents[2]
@@ -24,7 +25,7 @@ static struct { Rect damage_bounds; uint32_t theme; } g_compositor_snapshot;
 static uint32_t compositor_corner_inset(uint32_t row,uint32_t w,uint32_t h) {
     return chrome_frame_row_inset(row,w,h);
 }
-void compositor_fill_rounded_locked(int32_t x,int32_t y,uint32_t w,uint32_t h,
+void compositor_fill_rounded_locked(Rect clip,int32_t x,int32_t y,uint32_t w,uint32_t h,
     uint32_t radius,uint32_t color);
 '''
 main = r'''
@@ -41,11 +42,21 @@ int main(void) {
         if(sample%107==0){y=INT32_MIN;height=UINT32_MAX;}
         if(sample%109==0)x=INT32_MAX;
         if(sample%113==0)y=INT32_MAX;
+        if(sample%127==0){x=-10;width=UINT32_MAX;}
         uint32_t radius=sample%3==0?0:sample%3==1?8:2,color=sample*1103515245U;
-        Rect clip=sample%4?(Rect){0,0,(int32_t)w,(int32_t)h}:
-            (Rect){(int32_t)(w/3),(int32_t)(h/3),(int32_t)(w*2/3),(int32_t)(h*2/3)};
+        Rect clip;
+        switch(sample%8){
+        case 0:clip=(Rect){(int32_t)(w/3),(int32_t)(h/3),(int32_t)(w*2/3),(int32_t)(h*2/3)};break;
+        case 1:clip=(Rect){0,0,(int32_t)w,(int32_t)h};break;
+        case 2:clip=(Rect){-10,-7,(int32_t)(w/2),(int32_t)(h/2)};break;
+        case 3:clip=(Rect){(int32_t)(w/2),(int32_t)(h/2),INT32_MAX,INT32_MAX};break;
+        case 4:clip=(Rect){5,4,5,4};break;
+        case 5:clip=(Rect){20,18,-10,-12};break;
+        case 6:clip=(Rect){INT32_MIN,INT32_MIN,INT32_MAX,INT32_MAX};break;
+        default:clip=(Rect){w+1,h+1,w+10,h+10};break;
+        }
         g_compositor_snapshot.damage_bounds=clip;
-        compositor_fill_rounded_locked(x,y,width,height,radius,color);
+        compositor_fill_rounded_locked(g_compositor_snapshot.damage_bounds,x,y,width,height,radius,color);
         for(unsigned py=0;py<h;++py)for(unsigned px=0;px<w;++px) {
             if((int64_t)px<x||(int64_t)py<y||(int64_t)px>=(int64_t)x+width||
                 (int64_t)py>=(int64_t)y+height||(int32_t)px<clip.x0||(int32_t)py<clip.y0||
@@ -63,15 +74,15 @@ int main(void) {
     g_window_server.display_width=g_window_server.display_stride=width;
     g_window_server.display_height=height;g_window_server.composite_framebuffer=frame+1;
     g_compositor_snapshot.damage_bounds=(Rect){0,0,width,height};spans=0;
-    compositor_fill_locked(0,0,width,height,0xabcdefff);
+    compositor_fill_locked(g_compositor_snapshot.damage_bounds,0,0,width,height,0xabcdefff);
     assert(spans==1&&frame[0]==0x12345678&&frame[pixels+1]==0x12345678);
     for(unsigned i=1;i<=pixels;++i)assert(frame[i]==0xabcdefff);
     /* 纵向局部损坏仍连续；横向局部损坏必须保留行间隔。 */
     spans=0;g_compositor_snapshot.damage_bounds=(Rect){0,100,width,200};
-    compositor_fill_locked(0,0,width,height,0x12345678);assert(spans==1);
+    compositor_fill_locked(g_compositor_snapshot.damage_bounds,0,0,width,height,0x12345678);assert(spans==1);
     assert(frame[1+99*width]==0xabcdefff&&frame[1+100*width]==0x12345678&&frame[1+200*width]==0xabcdefff);
     spans=0;g_compositor_snapshot.damage_bounds=(Rect){1,100,width-1,200};
-    compositor_fill_locked(0,0,width,height,0x99887766);assert(spans==100);
+    compositor_fill_locked(g_compositor_snapshot.damage_bounds,0,0,width,height,0x99887766);assert(spans==100);
     assert(frame[1+100*width]==0x12345678&&frame[2+100*width]==0x99887766&&frame[100*width+width]==0x12345678);
     free(frame);
     printf("Compositor fill: %u pixel-oracle rectangles, stride padding, clipping, corners, extreme origins; real 4K fill 1 span instead of 2160 PASS\n",cases);
@@ -79,8 +90,24 @@ int main(void) {
 '''
 with tempfile.TemporaryDirectory(prefix='compositor-fill-') as directory:
     path=Path(directory)
-    (path/'test.c').write_text(prefix+body+main)
-    subprocess.run(['cc','-std=c11','-O2','-Wall','-Wextra','-Werror',
+    command=['cc','-std=c11','-O2','-Wall','-Wextra','-Werror',
         '-fsanitize=address,undefined','-fno-pie','-no-pie','-I'+str(root/'include'),
-        str(path/'test.c'),'-o',str(path/'test')],check=True)
-    subprocess.run([str(path/'test')],check=True)
+        '-x','c','-','-o',str(path/'test')]
+    def run(code):
+        subprocess.run(command,input=code,text=True,check=True)
+        return subprocess.run([str(path/'test')],capture_output=True,text=True,
+            timeout=20,preexec_fn=lambda:resource.setrlimit(resource.RLIMIT_CORE,(0,0)))
+    program=prefix+body+main
+    result=run(program)
+    assert result.returncode==0,result.stderr
+    print(result.stdout,end='')
+    for label,old,new in (
+        ('忽略横向损坏边界','right < clip.x1 ? right : clip.x1,','right,'),
+        ('宽坐标提前截断','int64_t right = (int64_t)x + width;',
+         'int64_t right = (int32_t)((uint32_t)x + width);'),
+    ):
+        broken=program.replace(old,new)
+        assert broken!=program
+        result=run(broken)
+        assert result.returncode!=0 and 'Assertion' in result.stderr,result.stderr
+        print('反例被拒绝：',label)

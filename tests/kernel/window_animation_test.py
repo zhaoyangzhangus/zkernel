@@ -5,6 +5,11 @@ import tempfile
 
 root = Path(__file__).resolve().parents[2]
 body = (root/'kernel/graphics/animation.c').read_text().replace('#include "internal.h"', '').replace('#include <arch/x86_64/cpu.h>', '')
+compositor = (root/'kernel/graphics/compositor.c').read_text()
+initial = compositor[compositor.index('    snapshot->animation_time ='):compositor.index('    snapshot->drag_old_x =')]
+capture = compositor[compositor.index('        if (window_animation_capture_locked(view,'):compositor.index('\n    }', compositor.index('        if (window_animation_capture_locked(view,'))]
+finalize = '    if (snapshot->animations) snapshot->drag_blit_valid = false;'
+assert finalize in compositor
 program = r'''
 #include <assert.h>
 #include <stdio.h>
@@ -19,7 +24,8 @@ typedef struct {unsigned identifier,width,height,flags;int x,y;bool minimized,cl
 typedef struct {window_server_window_t *reference;void *controls,*caption;unsigned identifier,width,height,flags,animation_progress,animation_kind;int x,y,animation_dx,animation_dy;} compositor_window_view_t;
 static struct {unsigned focused_identifier,display_width,display_height,display_stride;struct {unsigned count;window_server_window_t *children[64];} scene;
  bool composing;uint32_t *framebuffer,*composite_framebuffer;} g_window_server;
-static struct {uint64_t animation_layers,animation_time;bool animations,drag_blit_valid;Rect damage_bounds;} g_compositor_snapshot;
+typedef struct {uint64_t animation_layers,animation_time;bool animations,drag_blit_valid;Rect damage_bounds;} compositor_snapshot_t;
+static compositor_snapshot_t g_compositor_snapshot;
 static uint64_t now=100;
 static unsigned lock_depth,marks,leases,documents,releases,draws;
 static unsigned pixels[128*96];
@@ -48,14 +54,28 @@ static void window_surface_snapshot_release(compositor_window_view_t *v){assert(
 static void window_control_document_put(void *p){assert(!lock_depth&&p&&documents);--documents;}
 static void caption_text_put(void *p){assert(!lock_depth&&!p);}
 static void object_put(window_server_window_t *w){assert(!lock_depth&&w->refs);--w->refs;++releases;}
-static void compositor_draw_window_locked(const compositor_window_view_t *v){
- assert(v&&g_window_server.composing);++draws;Rect r=g_compositor_snapshot.damage_bounds;
+static void compositor_draw_window_locked(Rect clip,const compositor_window_view_t *v){
+ assert(v&&g_window_server.composing);++draws;Rect r=clip;
+ assert(g_compositor_snapshot.damage_bounds.x0==0&&g_compositor_snapshot.damage_bounds.y0==0&&g_compositor_snapshot.damage_bounds.x1==128&&g_compositor_snapshot.damage_bounds.y1==96);
+ assert(g_compositor_snapshot.damage_bounds.x0<=r.x0&&g_compositor_snapshot.damage_bounds.y0<=r.y0&&g_compositor_snapshot.damage_bounds.x1>=r.x1&&g_compositor_snapshot.damage_bounds.y1>=r.y1);
  assert(r.x0>=0&&r.y0>=0&&r.x1<=128&&r.y1<=96);
  for(int y=r.y0;y<r.y1;++y)for(int x=r.x0;x<r.x1;++x)if(x>=v->x&&x<v->x+(int)v->width&&y>=v->y&&y<v->y+(int)v->height){++pixels[y*128+x];scene[y*128+x]=0xffffff;}
 }
+/* 动画模块不得直接访问帧快照；任意读写都会在编译期失败。 */
+#define g_compositor_snapshot animation_module_must_use_explicit_frame_arguments
 ''' + body + r'''
+#undef g_compositor_snapshot
 static void depart(window_server_window_t *w){window_lock();window_animation_depart_locked(w,true);window_unlock();}
-static void snapshot(void){window_lock();window_animation_snapshot_locked();g_window_server.composing=true;window_unlock();}
+static void snapshot(void){
+ window_lock();compositor_snapshot_t *snapshot=&g_compositor_snapshot;
+ snapshot->drag_blit_valid=true;
+''' + initial + finalize + r'''
+ g_window_server.composing=true;window_unlock();
+}
+static void capture_view(compositor_window_view_t *view) {
+ compositor_snapshot_t *snapshot=&g_compositor_snapshot;
+''' + capture + finalize + r'''
+}
 static void done(void){g_window_server.composing=false;}
 int main(void){
  g_window_server.display_width=128;g_window_server.display_height=96;
@@ -69,8 +89,8 @@ int main(void){
  /* 多尺寸/屏外位置/损坏矩形下，每个有效像素只绘制一次，裁剪之外不落笔。 */
  for(unsigned p=0;p<=10000;p+=137)for(int off=-20;off<=20;off+=10){
   compositor_window_view_t v={.x=off+25,.y=off+20,.width=80,.height=60,.animation_progress=p};
-  g_compositor_snapshot.damage_bounds=(Rect){13,11,111,83};memset(pixels,0,sizeof(pixels));draws=0;
-  g_window_server.composing=true;compositor_animation_window(&v);g_window_server.composing=false;
+  Rect render_clip={13,11,111,83};g_compositor_snapshot.damage_bounds=(Rect){0,0,128,96};memset(pixels,0,sizeof(pixels));draws=0;
+  g_window_server.composing=true;compositor_animation_window(render_clip,&v);g_window_server.composing=false;
   unsigned w=80*p/10000,h=60*p/10000;int x0=v.x+(80-(int)w)/2,y0=v.y+(60-(int)h)/2;
   unsigned corner=control_round_radius(8,w,h);
   for(int y=0;y<96;++y)for(int x=0;x<128;++x){
@@ -79,14 +99,14 @@ int main(void){
    inside=inside&&x>=13&&x<111&&y>=11&&y<83;
    assert(pixels[y*128+x]==(unsigned)inside);
   }
-  assert(draws<=17);assert(g_compositor_snapshot.damage_bounds.x0==13&&g_compositor_snapshot.damage_bounds.y1==83);
+  assert(draws<=17);assert(g_compositor_snapshot.damage_bounds.x0==0&&g_compositor_snapshot.damage_bounds.y1==96);
  }
  /* 关闭只淡出颜色，不能复用最小化的缩小裁剪。 */
  for(unsigned p=0;p<=10000;p+=1000){
   compositor_window_view_t v={.x=20,.y=20,.width=80,.height=60,.animation_progress=p,.animation_kind=WINDOW_ANIMATION_CLOSE};
   for(unsigned i=0;i<128*96;++i)scene[i]=0x224466;
   g_compositor_snapshot.damage_bounds=(Rect){0,0,128,96};g_window_server.composing=true;
-  compositor_animation_window(&v);g_window_server.composing=false;
+  compositor_animation_window(g_compositor_snapshot.damage_bounds,&v);g_window_server.composing=false;
   uint32_t expected=control_blend_argb(0x224466,(p*255U/10000U<<24)|0xffffff);
   for(int y=0;y<96;++y)for(int x=0;x<128;++x)
    assert(scene[y*128+x]==(x>=20&&x<100&&y>=20&&y<80?expected:0x224466));
@@ -95,28 +115,52 @@ int main(void){
   .refs=1,.controls=(void*)1,.compositor_presented_valid=true};
  g_window_server.scene.children[0]=&window;g_window_server.scene.count=1;g_window_server.focused_identifier=7;
  compositor_window_view_t view={.reference=&window};
+ /* 捕获使用指定帧的时间，而非测试中的全局快照或当前时钟。 */
+ window.animation_seen=true;window.animation_start=now;
+ assert(window_animation_capture_locked(&view,now+150000000));
+ assert(view.animation_progress==8750);
+ assert(!window_animation_capture_locked(&view,now+300000000));
+ assert(view.animation_progress==WINDOW_ANIMATION_FULL);
+ assert(window_animation_capture_locked(&view,now-1));
+ assert(view.animation_progress==0);
+ window.animation_seen=false;window.animation_start=0;
  /* 普通 UPDATE 没有栅栏序号，也没有控件文档；必须由真实内容就绪状态触发。 */
  window.controls=0;window.present_sequence=0;
- snapshot();window_animation_capture_locked(&view);done();assert(!window.animation_seen);
- window.surface_content_ready=true;
- snapshot();window_animation_capture_locked(&view);done();
- assert(view.animation_progress==0&&window_animation_ready()&&g_compositor_snapshot.animations);
+ assert(!window_content_ready_locked(&window));
+ assert(!window_content_ready_locked(0));
+ window.controls=(void*)1;assert(window_content_ready_locked(&window));window.controls=0;
+ window.present_sequence=1;assert(window_content_ready_locked(&window));window.present_sequence=0;
+ snapshot();capture_view(&view);done();assert(!window.animation_seen&&!g_compositor_snapshot.animations&&g_compositor_snapshot.drag_blit_valid);
+ window.surface_content_ready=true;assert(window_content_ready_locked(&window));
+ snapshot();capture_view(&view);done();
+ assert(view.animation_progress==0&&window_animation_ready()&&g_compositor_snapshot.animations&&!g_compositor_snapshot.drag_blit_valid);
  /* 首帧再慢也从实际发布时计时，不得在渲染期间把动画耗尽。 */
  now+=500000000;window_lock();window_animation_presented_locked(&view);window_unlock();
  assert(window.animation_start==now);
  window.controls=(void*)1;
- now+=150000000;window_animation_tick();snapshot();window_animation_capture_locked(&view);done();
+ now+=150000000;window_animation_tick();snapshot();capture_view(&view);done();
  assert(view.animation_progress>8000&&view.animation_progress<10000);
  now+=200000000;window_animation_tick();assert(!window.animation_start&&window_animation_wait_ns()==UINT64_MAX);
  /* 最小化不延迟逻辑状态；保留的引用在动画结束后准确释放。 */
  depart(&window);window.minimized=true;assert(window.refs==2&&leases==1&&documents==1);
  assert(g_window_departures[0].view.animation_kind==WINDOW_ANIMATION_MINIMIZE);
  assert(g_window_departures[0].target_dx==50&&g_window_departures[0].target_dy==38);
- snapshot();assert(g_compositor_snapshot.animation_layers&&g_compositor_snapshot.animations);
- g_compositor_snapshot.damage_bounds=(Rect){0,0,128,96};compositor_animation_layers();
+ snapshot();assert(g_compositor_snapshot.animation_layers&&g_compositor_snapshot.animations&&!g_compositor_snapshot.drag_blit_valid);
+ g_compositor_snapshot.damage_bounds=(Rect){0,0,128,96};compositor_animation_layers(g_compositor_snapshot.damage_bounds,g_compositor_snapshot.animation_layers,g_compositor_snapshot.animation_time);
  done();now+=150000000;window_animation_tick();snapshot();
- memset(pixels,0,sizeof(pixels));compositor_animation_layers();
+ memset(pixels,0,sizeof(pixels));compositor_animation_layers(g_compositor_snapshot.damage_bounds,g_compositor_snapshot.animation_layers,g_compositor_snapshot.animation_time);
  assert(pixels[83*128+102]&&!pixels[40*128+40]);
+ /* 显式传入空层掩码必须不绘制，即使全局快照仍有退场层。 */
+ unsigned old_draws=draws;
+ compositor_animation_layers(g_compositor_snapshot.damage_bounds,0,now);
+ assert(draws==old_draws);
+ /* 同一层在指定帧时刻的结果不受全局快照时间影响。 */
+ unsigned expected_layers[128*96];memcpy(expected_layers,pixels,sizeof(pixels));
+ uint64_t captured_time=g_compositor_snapshot.animation_time;
+ g_compositor_snapshot.animation_time=0;memset(pixels,0,sizeof(pixels));
+ compositor_animation_layers(g_compositor_snapshot.damage_bounds,g_compositor_snapshot.animation_layers,captured_time);
+ assert(!memcmp(expected_layers,pixels,sizeof(pixels)));
+ g_compositor_snapshot.animation_time=captured_time;
  now+=400000000;window_animation_tick();assert(window.refs==2);done();
  window_animation_tick();assert(window.refs==1&&!leases&&!documents&&releases==1);
  assert(window_animation_wait_ns()==UINT64_MAX);
@@ -131,12 +175,12 @@ int main(void){
   reverse.animation_kind=WINDOW_ANIMATION_MINIMIZE;
   reverse.x+=(int)(50LL*(10000-p)/10000);reverse.y+=(int)(38LL*(10000-p)/10000);
   memset(pixels,0,sizeof(pixels));g_window_server.composing=true;
-  compositor_animation_window(&restore);unsigned expected_pixels[128*96];memcpy(expected_pixels,pixels,sizeof(pixels));
-  memset(pixels,0,sizeof(pixels));compositor_animation_window(&reverse);g_window_server.composing=false;
+  compositor_animation_window(g_compositor_snapshot.damage_bounds,&restore);unsigned expected_pixels[128*96];memcpy(expected_pixels,pixels,sizeof(pixels));
+  memset(pixels,0,sizeof(pixels));compositor_animation_window(g_compositor_snapshot.damage_bounds,&reverse);g_window_server.composing=false;
   assert(!memcmp(expected_pixels,pixels,sizeof(pixels))&&restore.x==20&&restore.y==20&&window.x==20&&window.y==20);
  }
  view=(compositor_window_view_t){.reference=&window,.x=20,.y=20,.width=80,.height=60};
- snapshot();window_animation_capture_locked(&view);done();
+ snapshot();capture_view(&view);done();
  assert(view.animation_kind==WINDOW_ANIMATION_RESTORE&&view.animation_progress==0);
  now+=400000000;window_animation_tick();assert(!window.animation_restore&&!window.animation_start);
  /* 关闭后注册表已移除，也能完成退场，而不是提前释放表面。 */
@@ -152,6 +196,9 @@ int main(void){
  assert(leases==64&&documents==64&&window.refs==65);g_window_server.scene.count=0;
  now+=400000000;window_animation_tick();assert(window.refs==1&&!leases&&!documents);
  assert(!window_animation_ready()&&window_animation_wait_ns()==UINT64_MAX&&!lock_depth&&marks);
+ snapshot();
+ assert(!g_compositor_snapshot.animation_layers&&!g_compositor_snapshot.animations&&g_compositor_snapshot.drag_blit_valid);
+ done();
  puts("Window animation: easing, 4.5M clipped rounded pixels, frame lifetime, minimize/close/restore/pool cleanup PASS");
 }
 '''
@@ -162,3 +209,15 @@ with tempfile.TemporaryDirectory(prefix='window-animation-') as directory:
                     '-Wno-misleading-indentation', '-fsanitize=address,undefined', '-fno-pie', '-no-pie',
                     '-I'+str(root/'include'), str(work/'test.c'), '-o', str(work/'test')], check=True)
     subprocess.run([str(work/'test')], check=True)
+    # 负面对照：动画模块重新依赖全局快照时，编译必须失败。
+    for access in ('g_compositor_snapshot.animation_time',
+                   '(g_compositor_snapshot.animations = true)'):
+        mutated = program.replace('uint64_t layers=0;',
+                                  'uint64_t layers=' + access + ';')
+        assert mutated != program
+        (work/'test.c').write_text(mutated)
+        result = subprocess.run(['cc', '-std=c11', '-fsyntax-only',
+                                 '-I'+str(root/'include'), str(work/'test.c')],
+                                capture_output=True, text=True)
+        assert result.returncode != 0 and 'animation_module_must_use_explicit_frame_arguments' in result.stderr
+    print('负面对照通过：动画模块重新读写全局快照均被拒绝')

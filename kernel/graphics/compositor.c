@@ -1,3 +1,4 @@
+#include <kernel/pixel_blend.h>
 #include <kernel/sched.h>
 #include <arch/x86_64/cpu.h>
 #include <kernel/console.h>
@@ -5,6 +6,22 @@
 #include <kernel/gpu.h>
 #include <kernel/realtest.h>
 #include "internal.h"
+
+/* 这些步骤仅由本文件调度，不对其他图形模块公开。 */
+static void
+compositor_commit_snapshot(void);
+static void
+compositor_region_locked(Rect clip,
+    const compositor_render_span_t *planned_span);
+static void
+compositor_render_snapshot(void);
+static bool
+compositor_snapshot_begin_locked(void);
+static void
+compositor_snapshot_finish(void);
+static void
+compositor_snapshot_plan(void);
+
 
 /* REFACTOR_P7A_COMPOSITOR_OWNER：帧处理协调。 */
 
@@ -14,6 +31,14 @@
 
 static kstatus_t g_compositor_publication_status;
 static atomic_uint_fast64_t g_compositor_native_retry_deadline;
+
+/* 调试器按需启用；仅合成线程写入，暂停来宾后读取，不输出逐帧日志。
+ * 依次记录帧数、场景合成 TSC、画面提交 TSC。 */
+static volatile bool g_compositor_profile_enabled;
+static volatile uint64_t g_compositor_profile[3];
+/* 完整流水线：帧数、壁纸处理与捕获、桌面文字准备、规划、绘制与提交、结束与 ACK。
+ * 所有阶段完成后才累计，调试器暂停全部 CPU 时不会读到半帧统计。 */
+static volatile uint64_t g_compositor_pipeline_profile[6];
 
 bool compositor_native_retry_ready(void) {
     uint64_t deadline = atomic_load_explicit(
@@ -113,7 +138,7 @@ static void compositor_report_display_probe(void) {
     center_offset = (height / 2U) * stride + width / 2U;
     probe_pixel = (volatile uint32_t *)(uintptr_t)(scanout + center_offset);
     probe_saved = *probe_pixel;
-    compositor_copy_wc_scanline(
+    display_core_publish_xrgb8888_span(
         probe_pixel,
         (const uint32_t *)(uintptr_t)(scene + center_offset),
         1U);
@@ -168,23 +193,7 @@ static void compositor_report_display_probe(void) {
 
 
 
-static uint32_t compositor_native_cursor_blend(uint32_t background,
-                                               uint32_t cursor) {
-    uint32_t alpha = cursor >> 24U;
-    uint32_t color = cursor & 0x00FFFFFFU;
-    uint32_t inverse;
 
-    if (alpha == 0U) return background;
-    if (alpha >= 255U) return color;
-
-    inverse = 255U - alpha;
-    return (((((background >> 16U) & 0xFFU) * inverse +
-              ((color >> 16U) & 0xFFU) * alpha + 127U) / 255U) << 16U) |
-           (((((background >> 8U) & 0xFFU) * inverse +
-              ((color >> 8U) & 0xFFU) * alpha + 127U) / 255U) << 8U) |
-           ((((background & 0xFFU) * inverse +
-              (color & 0xFFU) * alpha + 127U) / 255U));
-}
 
 
 /*
@@ -268,7 +277,7 @@ static kstatus_t compositor_submit_native_snapshot(void) {
                     uint32_t cursor_x = (uint32_t)(x - origin_x);
                     uint32_t cursor_y = (uint32_t)(y - origin_y);
                     uint64_t offset = (uint64_t)y * stride + (uint64_t)x;
-                    frame[offset] = compositor_native_cursor_blend(
+                    frame[offset] = control_blend_cursor_xrgb(
                         frame[offset],
                         window_cursor_pixel(g_compositor_snapshot.cursor_shape,
                                             cursor_x, cursor_y));
@@ -302,13 +311,10 @@ static kstatus_t compositor_submit_native_snapshot(void) {
         return status;
     }
 
-    /* 已提交的快照包含当前指针。此路径不会修改直接 GOP 光标状态；下一原生帧始终是完整场景快照。 */
-    g_window_server.presented_pointer_x =
-        g_compositor_snapshot.pointer_x;
-    g_window_server.presented_pointer_y =
-        g_compositor_snapshot.pointer_y;
-    g_window_server.presented_pointer_valid = true;
-    g_window_server.presented_cursor_shape = g_compositor_snapshot.cursor_shape;
+    /* 光标已随原生快照显示；这里只记录显示位置，不再向 GOP 写入光标像素。 */
+    window_present_cursor_record(g_compositor_snapshot.pointer_x,
+                                  g_compositor_snapshot.pointer_y,
+                                  g_compositor_snapshot.cursor_shape);
 
     if (!accepted_reported) {
         accepted_reported = true;
@@ -322,7 +328,7 @@ static kstatus_t compositor_submit_native_snapshot(void) {
 }
 
 
-void compositor_commit_snapshot(void) {
+static void compositor_commit_snapshot(void) {
     bool commit_as_move_transaction;
     bool allow_yield;
     kstatus_t native_status;
@@ -355,7 +361,8 @@ void compositor_commit_snapshot(void) {
      * QEMU 和真机均在发布过程中逐行保留可见光标，
      * 合成期间则固定不可变场景。 */
     allow_yield = !commit_as_move_transaction &&
-                  compositor_publication_damage_pixels() >
+                  compositor_publication_damage_pixels(
+                      g_compositor_snapshot.damage_rects, g_compositor_snapshot.damage_count) >
                   WINDOW_COMPOSITOR_ATOMIC_PIXELS;
 
     /*
@@ -368,7 +375,7 @@ void compositor_commit_snapshot(void) {
          * 开始较大的可见包围事务前，先擦除保留拖动区域仅存在于旧位置的尾边。额外流量
          * 通常只有 delta_x*height + delta_y*overlap_width 个像素。
          */
-        compositor_publication_drag_old_exposure();
+        compositor_publication_drag_old_exposure(&g_compositor_snapshot);
 
         Rect transaction;
         if (compositor_snapshot_damage_bounds(&g_compositor_snapshot, &transaction))
@@ -444,7 +451,7 @@ const uint32_t g_linux_cursor_argb[WINDOW_CURSOR_WIDTH * WINDOW_CURSOR_HEIGHT] =
      */
 compositor_snapshot_t g_compositor_snapshot;
 
-/* REFACTOR_P7B_SNAPSHOT_TEST_OWNER: test fixtures must not write snapshots. */
+/* REFACTOR_P7B_SNAPSHOT_TEST_OWNER：测试夹具不得写入快照。 */
 void compositor_snapshot_test_clear_damage_tiles(void) {
     for (uint32_t word = 0U;
          word < WINDOW_DAMAGE_TILE_WORDS;
@@ -472,9 +479,11 @@ void compositor_reset_state_locked(void) {
     g_window_server.composing = false;
 }
 
-/* REFACTOR_P7B_FRAME_OWNER: owns the snapshot -> plan -> render -> finish order. */
+/* REFACTOR_P7B_FRAME_OWNER：负责快照 -> 规划 -> 渲染 -> 完成的顺序。 */
 void compositor_frame_run(void) {
     bool compose;
+    const bool profile = g_compositor_profile_enabled;
+    const uint64_t start = profile ? x86_read_tsc() : 0U;
 
     g_compositor_publication_status = K_OK;
 
@@ -485,11 +494,23 @@ void compositor_frame_run(void) {
     window_unlock();
 
     if (!compose) return;
+    const uint64_t captured = profile ? x86_read_tsc() : 0U;
     desktop_prepare_text();
+    const uint64_t text_ready = profile ? x86_read_tsc() : 0U;
     compositor_snapshot_plan();
-    if (g_compositor_snapshot.animations) g_compositor_render_plan_valid = false;
+    const uint64_t planned = profile ? x86_read_tsc() : 0U;
     compositor_render_snapshot();
+    const uint64_t rendered = profile ? x86_read_tsc() : 0U;
     compositor_snapshot_finish();
+    if (profile) {
+        const uint64_t finished = x86_read_tsc();
+        g_compositor_pipeline_profile[0]++;
+        g_compositor_pipeline_profile[1] += captured - start;
+        g_compositor_pipeline_profile[2] += text_ready - captured;
+        g_compositor_pipeline_profile[3] += planned - text_ready;
+        g_compositor_pipeline_profile[4] += rendered - planned;
+        g_compositor_pipeline_profile[5] += finished - rendered;
+    }
 }
 
 /* 遮挡淘汰和帧结束共用释放顺序；只能在窗口锁外调用。 */
@@ -543,7 +564,7 @@ void compositor_capture_window_locked(window_server_window_t *window, compositor
     view->title[sizeof(view->title)-1U] = 0;
 }
 
-bool compositor_snapshot_begin_locked(void) {
+static bool compositor_snapshot_begin_locked(void) {
     compositor_snapshot_t *snapshot =
         &g_compositor_snapshot;
 
@@ -600,7 +621,9 @@ bool compositor_snapshot_begin_locked(void) {
 
     snapshot->drag_blit_valid =
         g_window_server.drag_blit_valid;
-    window_animation_snapshot_locked();
+    snapshot->animation_time = x86_read_tsc();
+    snapshot->animation_layers = window_animation_layers_locked();
+    snapshot->animations = snapshot->animation_layers != 0U;
 
     snapshot->drag_old_x =
         g_window_server.drag_old_x;
@@ -665,7 +688,8 @@ bool compositor_snapshot_begin_locked(void) {
 
         if (window == 0 ||
             window->minimized ||
-            (window->flags & OS_WINDOW_VISIBLE) == 0U) {
+            (window->flags & OS_WINDOW_VISIBLE) == 0U ||
+            !window_content_ready_locked(window)) {
             continue;
         }
 
@@ -690,8 +714,12 @@ bool compositor_snapshot_begin_locked(void) {
                 snapshot->window_count++];
 
         compositor_capture_window_locked(window, view);
-        window_animation_capture_locked(view);
+        if (window_animation_capture_locked(view, snapshot->animation_time))
+            snapshot->animations = true;
     }
+
+    /* 动画和拖动复用策略只由帧捕获方写入，动画模块不修改全局快照。 */
+    if (snapshot->animations) snapshot->drag_blit_valid = false;
 
     /*
     * 立即轮换生产者状态。
@@ -711,7 +739,7 @@ bool compositor_snapshot_begin_locked(void) {
 /*
  * P16 规划阶段。调用时不持有 window_lock。
  */
-void compositor_snapshot_plan(void) {
+static void compositor_snapshot_plan(void) {
     compositor_snapshot_t *snapshot =
         &g_compositor_snapshot;
 
@@ -759,9 +787,11 @@ void compositor_snapshot_plan(void) {
             snapshot);
     }
 
+    /* 遮挡下限和窗口筛选复用同一包围盒，不在每个窗口上重复扫描损坏列表。 */
+    Rect damage_bounds = {0};
+    (void)compositor_snapshot_damage_bounds(snapshot, &damage_bounds);
     first_window_index = snapshot->animations ? 0U :
-        compositor_snapshot_occlusion_floor(
-            snapshot);
+        compositor_snapshot_occlusion_floor(snapshot, &damage_bounds);
 
     original_window_count =
         snapshot->window_count;
@@ -778,7 +808,7 @@ void compositor_snapshot_plan(void) {
             (view->identifier ==
                  snapshot->dragging_identifier ||
              compositor_view_intersects_snapshot_damage(
-                 view, snapshot));
+                 view, snapshot, &damage_bounds));
 
         if (!keep) {
             compositor_release_window_snapshot(view);
@@ -809,7 +839,7 @@ void compositor_snapshot_plan(void) {
     /*
     * 使用同一份瓦片掩码生成空间渲染计划；失败时执行精确遮挡检查。
      */
-    if (!snapshot->animations) (void)compositor_build_render_plan(snapshot);
+    (void)compositor_build_render_plan(snapshot);
 
     snapshot->damage_full_captured =
         false;
@@ -821,16 +851,15 @@ void compositor_snapshot_plan(void) {
 /* 仅让出调度并不能处理输入，因为合成器本身才是输入消费者。每个条带的所有图层绘制完成后
  * 才处理鼠标移动，避免光标从保留 RAM 中只绘制了一半的窗口/背景恢复。原生、拖动和
  * 直接显存事务仍沿用现有路径。 */
-static void compositor_render_region_bounded(
+static void compositor_render_region_bounded(Rect bounds,
     const compositor_render_span_t *span, bool service_motion) {
-    Rect bounds = g_compositor_snapshot.damage_bounds;
     uint32_t width = bounds.x1 > bounds.x0 ?
         (uint32_t)((int64_t)bounds.x1 - bounds.x0) : 0U;
     uint32_t height = bounds.y1 > bounds.y0 ?
         (uint32_t)((int64_t)bounds.y1 - bounds.y0) : 0U;
     if (!service_motion || width == 0U || height == 0U ||
         (uint64_t)width * height <= WINDOW_COMPOSITOR_ATOMIC_PIXELS) {
-        compositor_region_locked(span);
+        compositor_region_locked(bounds, span);
         /* 小区域同样可能连续出现；必须在完整图层边界服务输入，不能等整帧结束。 */
         if (service_motion && width != 0U && height != 0U)
             window_server_pump_publication_motion();
@@ -838,20 +867,21 @@ static void compositor_render_region_bounded(
     }
     uint32_t rows = WINDOW_COMPOSITOR_ATOMIC_PIXELS / width;
     if (rows == 0U) rows = 1U;
-    if (rows > 32U) rows = 32U;
+    /* 按像素预算限制输入服务间隔，避免固定 32 行造成重复裁剪和表面准备。
+     * 每个条带完成所有图层后仍推进输入，不在未完成的场景中恢复光标。 */
     for (uint32_t top = bounds.y0; top < (uint32_t)bounds.y1;) {
         uint32_t count = (uint32_t)bounds.y1 - top;
         if (count > rows) count = rows;
-        g_compositor_snapshot.damage_bounds.y0 = top;
-        g_compositor_snapshot.damage_bounds.y1 = top + count;
-        compositor_region_locked(span);
+        Rect band = {bounds.x0, (int32_t)top, bounds.x1, (int32_t)(top + count)};
+        compositor_region_locked(band, span);
         top += count;
         window_server_pump_publication_motion();
     }
-    g_compositor_snapshot.damage_bounds = bounds;
 }
 
-void compositor_render_snapshot(void) {
+static void compositor_render_snapshot(void) {
+    const bool profile = g_compositor_profile_enabled;
+    const uint64_t profile_start = profile ? x86_read_tsc() : 0U;
     bool direct_framebuffer =
         g_window_server.composite_framebuffer ==
         g_window_server.framebuffer;
@@ -885,19 +915,7 @@ void compositor_render_snapshot(void) {
             const compositor_render_span_t *span =
                 &g_compositor_render_plan[index];
 
-            g_compositor_snapshot.damage_bounds.x0 =
-                span->rect.x0;
-
-            g_compositor_snapshot.damage_bounds.y0 =
-                span->rect.y0;
-
-            g_compositor_snapshot.damage_bounds.x1 =
-                span->rect.x1;
-
-            g_compositor_snapshot.damage_bounds.y1 =
-                span->rect.y1;
-
-            compositor_render_region_bounded(span, service_motion);
+            compositor_render_region_bounded(span->rect, span, service_motion);
         }
     } else {
         /*
@@ -910,22 +928,11 @@ void compositor_render_snapshot(void) {
             const Rect *rect =
                 &g_compositor_snapshot.damage_rects[index];
 
-            g_compositor_snapshot.damage_bounds.x0 =
-                rect->x0;
-
-            g_compositor_snapshot.damage_bounds.y0 =
-                rect->y0;
-
-            g_compositor_snapshot.damage_bounds.x1 =
-                rect->x1;
-
-            g_compositor_snapshot.damage_bounds.y1 =
-                rect->y1;
-
-            compositor_render_region_bounded(0, service_motion);
+            compositor_render_region_bounded(*rect, 0, service_motion);
         }
     }
 
+    const uint64_t profile_rendered = profile ? x86_read_tsc() : 0U;
     if (direct_framebuffer) {
         __asm__ volatile (
             "sfence"
@@ -949,9 +956,14 @@ void compositor_render_snapshot(void) {
             compositor_present_cursor_direct(false);
         }
     }
+    if (profile) {
+        g_compositor_profile[0]++;
+        g_compositor_profile[1] += profile_rendered - profile_start;
+        g_compositor_profile[2] += x86_read_tsc() - profile_rendered;
+    }
 }
 
-void compositor_snapshot_finish(void) {
+static void compositor_snapshot_finish(void) {
     _Static_assert(WINDOW_SERVER_MAX_WINDOWS <= 64U, "窗口 ACK 掩码容量不足");
     uint64_t present_ack_changed = 0U;
     /*
@@ -1021,9 +1033,8 @@ void compositor_snapshot_finish(void) {
     window_unlock();
 
     /*
-    * 持有 window_lock 时不要获取窗口事件队列锁。被 window_event_read() 阻塞的客户端会
-    * 在持有队列锁时检查条件，随后还需获取 window_lock；此处唤醒会反转锁顺序，并在新窗口
-    * 打开时导致死锁。每个窗口先唤醒再释放快照引用，确保事件队列在唤醒期间有效；
+    * 显示等待队列的唤醒放在 window_lock 之外，避免队列锁延长场景临界区。
+    * 每个窗口先唤醒再释放快照引用，确保等待队列在唤醒期间有效；
     * 两项操作共用一次遍历，不必再次扫描所有窗口。
      */
     for (uint32_t index = 0U;
@@ -1035,7 +1046,7 @@ void compositor_snapshot_finish(void) {
         /* 此窗口的 PRESENT 栅栏未变化时，光标帧或其他窗口帧不得唤醒它的事件和 epoll
          * 订阅者。输入与关闭通知仍走各自独立的唤醒路径。 */
         if (view->reference != 0 && (present_ack_changed & (1ULL << index))) {
-            (void)wake_all(&view->reference->event_waitq);
+            (void)wake_all(&view->reference->present_waitq);
         }
         /* 引用释放仍在窗口锁外，避免销毁对象延长场景临界区。 */
         compositor_release_window_snapshot(view);
@@ -1053,19 +1064,19 @@ void compositor_snapshot_finish(void) {
      */
 }
 
-void compositor_region_locked(
+static void compositor_region_locked(Rect clip,
     const compositor_render_span_t *planned_span) {
     uint32_t damage_left =
-        g_compositor_snapshot.damage_bounds.x0;
+        clip.x0;
 
     uint32_t damage_top =
-        g_compositor_snapshot.damage_bounds.y0;
+        clip.y0;
 
     uint32_t damage_right =
-        g_compositor_snapshot.damage_bounds.x1;
+        clip.x1;
 
     uint32_t damage_bottom =
-        g_compositor_snapshot.damage_bounds.y1;
+        clip.y1;
 
     if (damage_left >= damage_right ||
         damage_top >= damage_bottom) {
@@ -1078,7 +1089,7 @@ void compositor_region_locked(
     uint32_t first_window = 0U;
 
     if (g_compositor_snapshot.animations) {
-        desktop_draw_wallpaper_locked();
+        desktop_draw_wallpaper_locked(clip);
         planned_span = 0;
     } else if (planned_span != 0) {
         /*
@@ -1086,22 +1097,22 @@ void compositor_region_locked(
          * 反向扫描 Z 顺序。
          */
         if (planned_span->first_window == UINT32_MAX) {
-            desktop_draw_wallpaper_locked();
+            desktop_draw_wallpaper_locked(clip);
         }
     } else {
         /*
          * 简单帧/规划溢出回退路径完全沿用 P18。
          */
         first_window =
-            compositor_occlusion_floor_for_damage();
+            compositor_occlusion_floor_for_damage(clip);
 
         if (first_window == UINT32_MAX) {
             first_window =
-                compositor_topmost_damage_cover();
+                compositor_topmost_damage_cover(clip);
         }
 
         if (first_window == UINT32_MAX) {
-            desktop_draw_wallpaper_locked();
+            desktop_draw_wallpaper_locked(clip);
             first_window = 0U;
         }
     }
@@ -1128,7 +1139,7 @@ void compositor_region_locked(
                 continue;
             }
 
-            compositor_animation_window(
+            compositor_animation_window(clip,
                 &g_compositor_snapshot.windows[index]);
         }
 
@@ -1145,17 +1156,18 @@ void compositor_region_locked(
 
             if ((window->flags & OS_WINDOW_VISIBLE) == 0U ||
                 (!g_compositor_snapshot.animations &&
-                 !compositor_window_intersects_damage_locked(window))) {
+                 !compositor_window_intersects_damage_locked(clip, window))) {
                 continue;
             }
 
-            compositor_animation_window(
+            compositor_animation_window(clip,
                 window);
         }
     }
 
-    compositor_animation_layers();
-    desktop_draw_menu();
+    compositor_animation_layers(clip, g_compositor_snapshot.animation_layers,
+        g_compositor_snapshot.animation_time);
+    desktop_draw_menu(clip);
 
     /*
     * 私有 WB 合成不得绘制光标，以便拖动时复用这些像素。低内存直接帧缓冲回退路径无法
@@ -1163,7 +1175,7 @@ void compositor_region_locked(
      */
     if (g_window_server.composite_framebuffer ==
         g_window_server.framebuffer) {
-        compositor_cursor_locked();
+        compositor_cursor_locked(clip);
     }
 
     /*

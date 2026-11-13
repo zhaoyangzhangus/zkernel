@@ -65,7 +65,7 @@ with tempfile.TemporaryDirectory(prefix='net-cache-preempt-') as directory:
             source = (root / 'kernel/net/core/core.c').read_text()
             source = source.replace('    sched_preempt_disable();\n', '')
             source = source.replace('    sched_preempt_enable();\n', '')
-            # Resolve the only relative core include after inlining it here.
+            # 在此内联后，解析唯一的相对 core 包含路径。
             source = source.replace('#include "internal.h"', '#include "kernel/net/core/internal.h"')
             candidate = candidate.replace('#include "kernel/net/core/core.c"', source)
         (path / 'test.c').write_text(candidate)

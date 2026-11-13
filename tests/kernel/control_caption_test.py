@@ -15,8 +15,8 @@ code=r'''
 #include <uapi/chrome_caption.h>
 #include <uapi/window_theme.h>
 static unsigned pixels[180*150+2];static Rect clip;
-static void compositor_blend_pixel_locked(int32_t x,int32_t y,uint32_t color,uint32_t alpha){
- assert(x>=0&&x<180&&y>=0&&y<150);
+static void compositor_blend_pixel_locked(Rect passed_clip,int32_t x,int32_t y,uint32_t color,uint32_t alpha){
+ (void)passed_clip;assert(x>=0&&x<180&&y>=0&&y<150);
  if(x<clip.x0||x>=clip.x1||y<clip.y0||y>=clip.y1)return;
  unsigned *p=pixels+1+y*180+x,result=0;
  for(unsigned shift=0;shift<24;shift+=8)
@@ -28,16 +28,18 @@ int main(void){
  unsigned cases=0;
  for(unsigned h=40;h<=128;h+=8)for(unsigned a=1;a<=3;++a)
  for(unsigned maximized=0;maximized<2;++maximized)for(unsigned active=0;active<2;++active)
- for(unsigned clipped=0;clipped<2;++clipped){
+ for(unsigned clipped=0;clipped<4;++clipped){
   unsigned w=(32*h+20)/40;
   for(unsigned i=0;i<180*150+2;++i)pixels[i]=0x345678;
-  clip=clipped?(Rect){23,24,40,45}:(Rect){0,0,180,150};
-  compositor_control_caption_icon(11,9,w,h,a,maximized,active);
+  clip=(Rect){0,0,180,150};
+  Rect node_clip=clipped==1?(Rect){23,24,40,45}:
+      clipped==2?(Rect){27,27,27,40}:clipped==3?(Rect){0,0,1,1}:clip;
+  compositor_control_caption_icon(node_clip,11,9,w,h,a,maximized,active);
   unsigned side=(w<h?w:h)*12/32,left=11+(w-side)/2,top=9+(h-side)/2;
   unsigned icon=a==OS_CONTROL_WINDOW_MAXIMIZE&&maximized?4:a;
   for(unsigned y=0;y<150;++y)for(unsigned x=0;x<180;++x){
    unsigned expected=0x345678;
-   if(x>=left&&x<left+side&&y>=top&&y<top+side&&x>=(unsigned)clip.x0&&x<(unsigned)clip.x1&&y>=(unsigned)clip.y0&&y<(unsigned)clip.y1){
+   if(x>=left&&x<left+side&&y>=top&&y<top+side&&x>=(unsigned)node_clip.x0&&x<(unsigned)node_clip.x1&&y>=(unsigned)node_clip.y0&&y<(unsigned)node_clip.y1){
     unsigned alpha=(chrome_caption_alpha(icon,(x-left)*12/side,(y-top)*12/side)*(active?255:97)+127)/255;
     expected=0;
     for(unsigned shift=0;shift<24;shift+=8)
@@ -55,3 +57,14 @@ with tempfile.TemporaryDirectory(prefix='control-caption-') as directory:
  subprocess.run(['cc','-std=c11','-O2','-Wall','-Wextra','-Werror','-fsanitize=address,undefined',
   '-fno-pie','-no-pie','-I'+str(root/'include'),str(p/'test.c'),'-o',str(p/'test')],check=True)
  subprocess.run([str(p/'test')],check=True)
+
+ # 外层损坏区域保持全屏，必须由图标自身遵守节点裁剪。
+ guard='if (px<clip.x0 || px>=clip.x1 || py<clip.y0 || py>=clip.y1) continue;'
+ assert guard in code
+ broken=code.replace(guard,'if (false && (px<clip.x0 || px>=clip.x1 || py<clip.y0 || py>=clip.y1)) continue;')
+ subprocess.run(['cc','-std=c11','-O2','-Wall','-Wextra','-Werror',
+  '-I'+str(root/'include'),'-x','c','-','-o',str(p/'test')],input=broken,text=True,check=True)
+ result=subprocess.run([str(p/'test')],capture_output=True,text=True,
+  preexec_fn=lambda:__import__('resource').setrlimit(__import__('resource').RLIMIT_CORE,(0,0)))
+ assert result.returncode != 0 and 'Assertion' in result.stderr,result.stderr
+ print('Negative control rejected: caption ignores its node clip while the outer damage remains full-screen')

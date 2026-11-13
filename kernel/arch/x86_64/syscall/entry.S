@@ -97,11 +97,9 @@ syscall_entry:
 
     cld
     /*
-     * SYSCALL entered with IF masked by IA32_FMASK.  The frame is complete
-     * now, so the C body may safely receive timer, reschedule, and TLB IPIs.
-     * Keep the frame construction above and the return-frame assembly below
-     * non-interruptible; only the syscall body is an interruptible kernel
-     * region.
+     * SYSCALL 进入时，IF 已由 IA32_FMASK 屏蔽。现在栈帧已经完整，因此 C 函数体
+     * 可以安全地接收定时器、重新调度和 TLB IPI。上方的栈帧构造以及下方的返回帧
+     * 汇编必须保持不可中断；只有系统调用函数体属于可中断的内核区域。
      */
     movl $1, %gs:80
     sti
@@ -126,10 +124,9 @@ syscall_entry:
     jne .Lreturn_to_bootstrap
 
     /*
-     * A reschedule IPI received during the syscall remains pending until a
-     * normal interrupt or scheduler boundary.  Do not call schedule() here:
-     * a context switch changes RSP to another thread's saved kernel stack,
-     * while this path still owns the current syscall return frame.
+     * 系统调用期间收到的重新调度 IPI 会一直保持待处理状态，直到常规中断或调度器
+     * 边界到来。此处不要调用 schedule()：上下文切换会将 RSP 改为另一线程保存的
+     * 内核栈，而当前路径仍持有本次系统调用的返回帧。
      */
     movl %gs:48, %ecx
     leaq g_syscall_return_progress(%rip), %rdx

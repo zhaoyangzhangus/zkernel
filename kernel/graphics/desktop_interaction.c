@@ -3,6 +3,15 @@
 #include "internal.h"
 
 static struct window_control_document *g_desktop_overlay_text;
+/* 帧捕获后的弹层布局由合成所有者准备一次，所有损坏条带共享同一份几何和文字。
+ * 输入命中仍使用生产者状态，绘制期间不重新读取正在变化的窗口注册表。 */
+static struct {
+    os_control_node_t nodes[DESKTOP_MENU_NODES];
+    control_tree_box_t boxes[DESKTOP_MENU_NODES];
+    char text[160];
+    const char *labels;
+    uint32_t count, hover, pressed;
+} g_desktop_overlay_frame;
 
 /* 每个标签独立终止，布局和绘制共用字节偏移，避免中文偏移错位。 */
 static const char desktop_menu_text[] =
@@ -411,13 +420,13 @@ bool desktop_route_button_locked(const input_event_t *event, bool over_window) {
                 }
                 desktop_menu_close();
                 if (item && item==pressed) {
-                    if (item==10U && !g_window_server.desktop_pending_launch)
-                        g_window_server.desktop_pending_launch=app;
+                    if (item==10U)
+                        (void)window_input_request_desktop_launch_locked(app);
                     if (item>=20U && item<=23U) desktop_arrange(item-20U);
-                    if (item==12U && !g_window_server.desktop_pending_launch)
-                        g_window_server.desktop_pending_launch=DESKTOP_APP_WALLPAPER;
-                    if (item==13U && !g_window_server.desktop_pending_launch)
-                        g_window_server.desktop_pending_launch=DESKTOP_APP_SETTINGS;
+                    if (item==12U)
+                        (void)window_input_request_desktop_launch_locked(DESKTOP_APP_WALLPAPER);
+                    if (item==13U)
+                        (void)window_input_request_desktop_launch_locked(DESKTOP_APP_SETTINGS);
                     if (item==14U || item==15U) state->power_request=item-13U;
                 }
             }
@@ -431,9 +440,8 @@ bool desktop_route_button_locked(const input_event_t *event, bool over_window) {
         if (event->value == INPUT_VALUE_RELEASE) {
             uint32_t app = state->pressed_app;
             if (!state->dragging && !over_window &&
-                desktop_app_at_locked(g_window_server.pointer_x, g_window_server.pointer_y) == app &&
-                !g_window_server.desktop_pending_launch)
-                g_window_server.desktop_pending_launch = app;
+                desktop_app_at_locked(g_window_server.pointer_x, g_window_server.pointer_y) == app)
+                (void)window_input_request_desktop_launch_locked(app);
             state->pressed_app = 0;
             state->dragging = false;
             desktop_mark_app_locked(app);
@@ -476,15 +484,19 @@ bool desktop_route_button_locked(const input_event_t *event, bool over_window) {
 /* 快照已捕获，字形准备不持有窗口锁；悬停、按压和位置变化复用同一份文字缓存。 */
 void desktop_prepare_text(void) {
     const desktop_interaction_t *state=&g_compositor_snapshot.desktop;
+    g_desktop_overlay_frame.count=0;
     if (!state->switch_open && !state->menu_open) return;
-    os_control_node_t nodes[DESKTOP_MENU_NODES];control_tree_box_t boxes[DESKTOP_MENU_NODES];
-    char text[160]={0};uint32_t count,text_size;Rect viewport;
+    os_control_node_t *nodes=g_desktop_overlay_frame.nodes;
+    control_tree_box_t *boxes=g_desktop_overlay_frame.boxes;
+    char *text=g_desktop_overlay_frame.text;
+    uint32_t count,text_size;Rect viewport;
     const char *labels;
     if (state->switch_open) {
         uint32_t entries[5];
+        memset(text,0,sizeof(g_desktop_overlay_frame.text));
         count=desktop_switch_tree(state,g_window_server.display_width,
             g_window_server.display_height,nodes,text,entries,&viewport);
-        labels=text;text_size=sizeof(text);
+        labels=text;text_size=sizeof(g_desktop_overlay_frame.text);
     } else {
         count=DESKTOP_MENU_NODES;labels=desktop_menu_text;text_size=sizeof(desktop_menu_text)-1U;
         viewport=desktop_menu_tree(state,g_window_server.display_width,g_window_server.display_height,nodes);
@@ -493,26 +505,17 @@ void desktop_prepare_text(void) {
     if (control_tree_layout(nodes,count,text_size,viewport,boxes))
         next=window_control_prepare_overlay(g_desktop_overlay_text,nodes,count,labels,text_size,boxes);
     window_control_document_put(g_desktop_overlay_text);g_desktop_overlay_text=next;
+    if (!next) return;
+    g_desktop_overlay_frame.labels=labels;
+    g_desktop_overlay_frame.hover=state->switch_open?0:state->menu_hover;
+    g_desktop_overlay_frame.pressed=state->switch_open?0:state->menu_pressed;
+    g_desktop_overlay_frame.count=count;
 }
 
-void desktop_draw_menu(void) {
-    const desktop_interaction_t *state = &g_compositor_snapshot.desktop;
-    if (!g_desktop_overlay_text) return;
-    if (state->switch_open) {
-        os_control_node_t nodes[6]; control_tree_box_t boxes[6];
-        char text[160]; uint32_t entries[5]; Rect viewport;
-        uint32_t count=desktop_switch_tree(state,g_window_server.display_width,
-            g_window_server.display_height,nodes,text,entries,&viewport);
-        if (control_tree_layout(nodes,count,sizeof(text),viewport,boxes))
-            compositor_control_nodes(nodes,count,boxes,text,0,0,g_desktop_overlay_text);
-        return;
-    }
-    if (!state->menu_open) return;
-    os_control_node_t nodes[DESKTOP_MENU_NODES];
-    control_tree_box_t boxes[DESKTOP_MENU_NODES];
-    Rect viewport = desktop_menu_tree(state, g_window_server.display_width,
-        g_window_server.display_height, nodes);
-    if (control_tree_layout(nodes, DESKTOP_MENU_NODES, sizeof(desktop_menu_text)-1U, viewport, boxes))
-        compositor_control_nodes(nodes, DESKTOP_MENU_NODES, boxes, desktop_menu_text,
-            state->menu_hover, state->menu_pressed,g_desktop_overlay_text);
+void desktop_draw_menu(Rect clip) {
+    if (!g_desktop_overlay_frame.count) return;
+    compositor_control_nodes(clip, g_desktop_overlay_frame.nodes,
+        g_desktop_overlay_frame.count, g_desktop_overlay_frame.boxes,
+        g_desktop_overlay_frame.labels, g_desktop_overlay_frame.hover,
+        g_desktop_overlay_frame.pressed, g_desktop_overlay_text);
 }

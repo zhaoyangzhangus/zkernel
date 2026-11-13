@@ -54,7 +54,7 @@ int main(void) {
  assert(crc32_ieee_zeroed(0,0,0)==0 && crc32_ieee_update(42,0,0)==42);
  uint8_t bytes[8192+16+4];unsigned rng=17;
  for(unsigned i=0;i<sizeof(bytes);++i) {rng=rng*1664525U+1013904223U;bytes[i]=rng>>24;}
- /* Exercise all lengths and unaligned inputs, with independent initial CRCs. */
+ /* 覆盖所有长度和未对齐输入，并使用彼此独立的初始 CRC 值。 */
  for(size_t n=0;n<=8192;++n) {
   unsigned alignment=n&15;uint8_t *p=bytes+alignment;
   uint32_t initial=(uint32_t)n*12345U;
@@ -74,7 +74,7 @@ int main(void) {
   assert(journal_crc(bytes)==masked_oracle(bytes,JOURNAL_BLOCK_SIZE,28));
   assert((journal_crc(bytes)==original)==(i>=28 && i<32));bytes[i]^=1;
  }
- /* Exact-length guard pages: no overread into a neighbouring unmapped page. */
+ /* 精确长度保护页：不得越界读取到相邻的未映射页面。 */
  size_t page=(size_t)sysconf(_SC_PAGESIZE);
  uint8_t *guard=mmap(0,page*2,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0);
  assert(guard!=MAP_FAILED && !mprotect(guard+page,page,PROT_NONE));

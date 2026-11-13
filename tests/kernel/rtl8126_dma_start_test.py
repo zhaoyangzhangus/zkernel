@@ -82,7 +82,7 @@ with tempfile.TemporaryDirectory(prefix='rtl-dma-start-') as directory:
     subprocess.run(['cc', '-std=c11', '-Wall', '-Wextra', '-Werror',
                     '-x', 'c', '-', '-o', binary], input=code, text=True, check=True)
     subprocess.run([binary], check=True)
-    # Reject the old 8111E-VL-only AUTO_FIFO setting, using the same test body.
+    # 使用相同测试主体拒绝旧版仅适用于 8111E-VL 的 AUTO_FIFO 设置。
     wrong = code.replace('tx_config = (7U << 8) | (3U << 24);',
                          'tx_config = (7U << 8) | (3U << 24) | (1U << 7);')
     assert wrong != code

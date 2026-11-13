@@ -84,7 +84,7 @@ struct ucred {
     gid_t gid;
 };
 
-/* Ancillary-data ABI used by recvmsg()/sendmsg(). */
+/* recvmsg()/sendmsg() 使用的辅助数据 ABI。 */
 struct cmsghdr {
     size_t cmsg_len;
     int cmsg_level;

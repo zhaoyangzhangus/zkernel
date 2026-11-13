@@ -44,7 +44,7 @@ static BOOLEAN fat32_write_sector(OS_FAT32 *fs,UINT64 lba,const UINT8 *in) {
     memcpy(media+lba*fs->BytesPerSector,in,fs->BytesPerSector);return 1;
 }
 ''' + '\n'.join((function('BOOLEAN fat32_cluster_valid('),
-                 function('BOOLEAN fat32_write_fat_entry('), search, baseline,
+                 function('static BOOLEAN fat32_fat_entry_location(') + '\n' + function('BOOLEAN fat32_write_fat_entry('), search, baseline,
                  function('BOOLEAN fat32_find_free_cluster('))) + r'''
 static UINT32 value(const OS_FAT32 *fs,unsigned cluster) {
     const UINT8 *p=media+fs->FatStartLba*fs->BytesPerSector+cluster*(fs->FatType/8);

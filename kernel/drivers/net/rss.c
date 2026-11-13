@@ -1,8 +1,8 @@
 #include "internal.h"
 
 /*
- * REFACTOR_P8_E1000_RSS_OWNER: flow hashing and software-queue selection are
- * kept independent from the controller's MMIO, DMA and protocol state.
+ * REFACTOR_P8_E1000_RSS_OWNER：流哈希和软件队列选择与控制器的 MMIO、DMA 及协议状态
+ * 相互独立。
  */
 
 static uint32_t e1000_hash_bytes(uint32_t hash, const uint8_t *bytes,

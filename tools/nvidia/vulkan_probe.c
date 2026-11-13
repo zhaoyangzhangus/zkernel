@@ -1,4 +1,4 @@
-/* Guest-only NVIDIA Vulkan transfer test: no display server or software fallback. */
+/* 仅在客户机中运行的 NVIDIA Vulkan 传输测试：不使用显示服务器或软件回退。 */
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
 #endif
@@ -82,8 +82,8 @@ int main(int argc, char **argv) {
     if (shared && image_path) return 2;
     if (lifetime && render) return 2;
     if (video && (render || shared || image_path)) return 2;
-    /* The glibc compatibility runtime does not consume native shell fd maps.
-     * An explicit log also makes real GPU verification independent of GDB. */
+    /* glibc 兼容运行时不会读取原生 shell 的文件描述符映射。
+     * 显式写入日志也能让真实 GPU 验证不依赖 GDB。 */
     if (log_path) {
         int fd = open(log_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
         if (fd < 0) return 2;
@@ -228,7 +228,7 @@ int main(int argc, char **argv) {
     status = 0;
 cleanup:
     if (device) {
-        /* Also drain submissions after a fence timeout before destroying resources. */
+        /* fence 超时后、销毁资源前，也要排空已提交的任务。 */
         (void)vkDeviceWaitIdle(device);
         if (mapped) vkUnmapMemory(device, memory);
         if (fence) vkDestroyFence(device, fence, NULL);

@@ -42,8 +42,8 @@ static void block_request_notify(void) {
 }
 
 static void block_initialize(void) {
-    /* Acquire pairs with publication of all queue and wait-queue state.
-     * Normal BIO submission must not modify the once-state cache line. */
+    /* Acquire 与队列及等待队列状态的发布配对。
+     * 普通 BIO 提交不得修改 once-state 所在的缓存行。 */
     if (atomic_load_explicit(&g_block_init_state, memory_order_acquire) == 2U) return;
     unsigned expected = 0U;
     if (atomic_compare_exchange_strong_explicit(&g_block_init_state, &expected, 1U,
@@ -69,7 +69,7 @@ static block_queue_state_t *block_queue_for(struct device *device) {
     if (device == 0) return 0;
     block_initialize();
     block_lock();
-    /* Slots are append-only, so only the published prefix can contain a hit. */
+    /* 槽位只追加，因此只有已发布的前缀可能包含匹配项。 */
     for (uint32_t i = 0; i < g_block_queue_count; ++i) {
         if (g_block_queues[i].device == device) {
             block_unlock();
@@ -107,7 +107,7 @@ static bool bio_page_vectors_valid(const bio_t *bio) {
             vec->length > page_capacity - vec->offset) return false;
         if (page_to_phys(vec->page).value == UINT64_MAX) return false;
     }
-    /* Every validated vector has nonzero length; no byte sum is needed. */
+    /* 每个通过验证的向量长度都非零，因此无需累加字节数。 */
     return bio->vec_count != 0 || bio->op == BIO_OP_FLUSH;
 }
 

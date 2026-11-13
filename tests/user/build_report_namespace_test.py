@@ -67,7 +67,7 @@ for name in ('run-real-hardware-test.ps1', 'collect-realtest-log.ps1'):
     assert '[SystemFirmwareEnvironment]::EnableFirmwarePrivilege()' in text, name
     assert '$runOnceName = "SystemRealTest_' in text, name
     assert 'LiteOsFirmwareEnvironment' not in text and 'LiteOSRealTest_' not in text
-    # The persisted firmware variable remains readable across an upgrade.
+    # 升级后仍可读取持久化的固件变量。
     assert "'LiteOSRealTestState', $firmwareGuid," in text, name
 firmware = (ROOT/'tools/run-real-hardware-test.ps1').read_text()
 assert '@("System USB $letter", "LiteOS USB $letter")' in firmware

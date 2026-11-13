@@ -44,7 +44,7 @@ int os_video_decoder_create(uint32_t codec, const uint8_t *extra,
                             uint32_t extra_size, os_video_decoder_t **output);
 int os_video_decoder_create_h264(const uint8_t *extra, uint32_t extra_size,
                                 os_video_decoder_t **output);
-/* Null packet and zero length drain the stream. */
+/* packet 为空且 length 为零时，排空数据流。 */
 int os_video_decoder_send(os_video_decoder_t *, const uint8_t *, uint32_t,
                           int64_t timestamp_us);
 int os_video_decoder_receive(os_video_decoder_t *, os_video_frame_t *);

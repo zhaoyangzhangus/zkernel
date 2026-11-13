@@ -63,8 +63,8 @@ typedef struct net_ipv6_udp_view {
     uint16_t payload_length;
 } net_ipv6_udp_view_t;
 
-/* Parsed TCP view; payload borrows the input frame. SYN options do not by
- * themselves enable scaling: the owning socket must validate the handshake. */
+/* 解析后的 TCP 视图；payload 借用输入帧的存储。SYN 选项本身不会启用窗口缩放：所属套接字必须
+ * 先验证握手。 */
 typedef struct net_tcp_view {
     uint8_t source_mac[6];
     uint8_t destination_mac[6];
@@ -215,8 +215,8 @@ kstatus_t net_tcp_build_ipv4(uint8_t *frame, size_t capacity,
 kstatus_t net_tcp_parse_ipv4(const uint8_t *frame, size_t frame_length,
                              net_tcp_view_t *view);
 
-/* receive_scale=-1 omits WS; 0..14 offers it on SYN only. The supplied window
- * is already the wire value; SYN windows are never shifted by the builder. */
+/* receive_scale=-1 表示省略 WS；0..14 表示仅在 SYN 中提供该选项。传入的窗口值已经是线上值，
+ * 构造函数绝不会移位 SYN 窗口。 */
 kstatus_t net_tcp_build_ipv4_scaled(uint8_t *frame, size_t capacity,
                              const uint8_t source_mac[6],
                              const uint8_t destination_mac[6],

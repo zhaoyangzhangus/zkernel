@@ -118,9 +118,8 @@ int main(void){
   reset(type);atomic_store(&state.closed,true);
   assert(socket_connect_ipv6(&target,loop,443)==K_EDEVREMOVED&&!binds);
  }
- /* Closed local probes are refused without an output backend or a dynamic
-  * receive allocation; an existing socket may subsequently connect elsewhere.
-  * A present listener retains its old path, not an unconditional ::1 reject. */
+ /* 没有输出后端或动态接收分配时，关闭状态的本地探测会被拒绝；已有套接字之后仍可
+  * 连接到其他地址。存在监听者时应沿用旧路径，不能无条件拒绝 ::1。 */
  reset(OS_SOCK_STREAM);missing_output=true;
  assert(socket_connect_ipv6(&target,loop,443)==K_ECONNREFUSED);
  assert(!state.connected&&!reserves&&!outputs&&listener_lookups==1);
@@ -133,7 +132,7 @@ int main(void){
  assert(socket_connect_ipv6(&target,loop,443)==K_ECONNREFUSED);
  have_listener=true;
  assert(socket_connect_ipv6(&target,loop,443)==K_OK&&outputs==1&&reserves==1);
- /* Every fe80::/10 boundary is on-link; fec0:: and other scopes are not. */
+ /* 每个 fe80::/10 边界都属于链路本地；fec0:: 和其他作用域则不属于。 */
  for(unsigned octet=0;octet<256;++octet){
   uint8_t dest[16]={0xfe,octet,[15]=7};memset(selected,0xa5,16);
   kstatus_t result=socket_ipv6_connect_source(dest,selected);

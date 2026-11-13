@@ -110,6 +110,13 @@ kstatus_t x86_protect_page(paddr_t root,vaddr_t va,uint32_t flags,enum x86_cache
 }
 bool x86_tlb_shootdown_root(paddr_t root) {(void)root;assert(locked);return ++flushes!=fail_flush;}
 static void vm_tlb_bump_generation(vm_space_t *s) {(void)s;assert(locked);++bumps;}
+/* 事务夹具模拟融合接口；真实页表的锁次数由融合遍历回归验证。 */
+kstatus_t x86_protect_next_user_page_deferred(paddr_t root,vaddr_t start,
+    uint64_t end,uint32_t flags,enum x86_cache_mode mode,vaddr_t *out,bool *changed) {
+    *changed=false;
+    kstatus_t status=x86_next_present_page(root,start,end,out);
+    return status==K_OK ? x86_protect_user_page_deferred(root,*out,flags,mode,changed) : status;
+}
 ''' + helpers + transaction + r'''
 static void prepare(unsigned count,unsigned mode,bool file) {
     mock_base=VM_USER_BASE;
@@ -130,7 +137,7 @@ static void prepare(unsigned count,unsigned mode,bool file) {
     rebuild_area_tree(&space);rebuilds=visits=boundary_seeks=0;
 }
 int main(void) {
-    /* Previously the end split was absent from the tree on shadow failure. */
+    /* 旧实现中，影子操作失败时尾部分割未加入树中。 */
     prepare(1,0,true);fail_shadow=1;
     assert(vm_protect(&space,VM_USER_BASE,8*PAGE_SIZE,VM_PROT_WRITE|VM_PROT_USER)==K_ENOMEM);
     assert(rebuilds==0 && !locked);
@@ -147,8 +154,7 @@ int main(void) {
             if(failure==6)fail_protect=2;
             if(failure==7)fail_flush=1;
             uint32_t prot=VM_PROT_READ|VM_PROT_WRITE|VM_PROT_USER;
-            /* Allocation failures exercise writable private-file shadows;
-             * PTE failures exercise a real user write restriction. */
+            /* 分配失败用例覆盖可写的私有文件影子；PTE 失败用例覆盖真实的用户写保护。 */
             if(failure>=5 || failure==0)prot=VM_PROT_READ|VM_PROT_USER;
             kstatus_t status=vm_protect(&space,VM_USER_BASE+start*PAGE_SIZE,(end-start)*PAGE_SIZE,prot);
             assert(!locked && rebuilds==0);
@@ -199,8 +205,7 @@ int main(void) {
     }
     for(unsigned failure=1;failure<=3;++failure) {
         prepare(4,0,true);fail_shadow=failure;
-        /* The untouched suffix belongs to another pending operation marker;
-         * failed allocation must neither release nor clear it. */
+        /* 未触及的后缀属于另一个待处理操作标记；分配失败时既不能释放，也不能清除它。 */
         areas[3].private_object=&shadows[100];
         areas[3].flags|=VM_AREA_CLONE_OLD_COW;
         refcount_init(&shadows[100].refs,1);
@@ -224,8 +229,8 @@ int main(void) {
         for(unsigned i=0;i<4;++i)
             assert(areas[i].prot==(VM_PROT_READ|VM_PROT_WRITE|VM_PROT_USER));
     }
-    /* End==VM_USER_END uses the returned last VMA too, including a start split
-     * in the last user mapping; no out-of-range second lookup is needed. */
+    /* End==VM_USER_END 时也要使用返回的最后一个 VMA，包括最后一个用户映射中的起始
+     * 分割；无需进行越界的第二次查找。 */
     for(unsigned mode=0;mode<3;++mode) {
         prepare(1,mode,false);mock_base=VM_USER_END-32*PAGE_SIZE;
         areas[0].start=mock_base;areas[0].end=VM_USER_END;rebuild_area_tree(&space);rebuilds=visits=0;

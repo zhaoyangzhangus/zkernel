@@ -4,9 +4,8 @@
 
 bool __libc_linux_personality(void) {
     /* ELF 解释器会在进入程序前启用 Linux 系统调用编号。此进程级属性在整个生命周期内
-     * 保持稳定
-     * the libc image, so cache the probe shared by malloc, futex, mmap, and
-     * socket hot paths instead of issuing a kernel call at every operation. */
+     * 保持稳定，且在 libc 映像内不变。因此缓存 malloc、futex、mmap 和 socket 热路径共用的探测
+     * 结果，避免每次操作都调用内核。 */
     static int cached_personality = -1;
     int personality = __atomic_load_n(&cached_personality, __ATOMIC_ACQUIRE);
     if (personality < 0) {

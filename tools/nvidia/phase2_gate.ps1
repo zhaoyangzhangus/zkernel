@@ -22,8 +22,8 @@ if (-not (Test-Path -LiteralPath $portRoot -PathType Container)) {
     Fail-Gate 'NVIDIA Port source root is missing'
 }
 
-# P2 is downstream of P1. Re-run the P1 proof so a changed vendor tree or
-# invalidated source inventory cannot silently become a later-stage input.
+# P2 位于 P1 之后。重新执行 P1 校验，避免已更改的供应商代码树或
+# 已失效的源码清单悄然成为后续阶段的输入。
 & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $phase1Gate
 if ($LASTEXITCODE -ne 0) { Fail-Gate 'P1 Gate did not pass' }
 

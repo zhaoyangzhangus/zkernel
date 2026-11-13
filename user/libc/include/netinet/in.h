@@ -153,7 +153,7 @@ uint16_t ntohs(uint16_t value);
 }
 #endif
 
-/* RFC 3678 group membership request ABI. */
+/* RFC 3678 组成员请求 ABI。 */
 struct group_req {
     uint32_t gr_interface;
     struct sockaddr_storage gr_group;

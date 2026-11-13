@@ -63,7 +63,7 @@ with tempfile.TemporaryDirectory(prefix='linux-socket-timeout-') as directory:
                     '-fsanitize=address,undefined','-fno-pie','-no-pie',
                     str(path/'test.c'),'-o',str(path/'test')],check=True)
     subprocess.run([str(path/'test')],check=True)
-    # Original broad conversion reproduces the browser's endless retry.
+    # 原先的宽泛转换会复现浏览器不断重试的行为。
     broken=code.replace('static int64_t linux_socket_status(kstatus_t status) {',
         'static int64_t linux_socket_status(kstatus_t status) {\n'
         '    if (status == K_ETIMEDOUT) return K_EAGAIN;')
@@ -73,7 +73,7 @@ with tempfile.TemporaryDirectory(prefix='linux-socket-timeout-') as directory:
                     str(path/'test.c'),'-o',str(path/'old')],check=True)
     result=subprocess.run([str(path/'old')],capture_output=True)
     assert result.returncode!=0 and b'Assertion' in result.stderr
-# Cover every ABI call site, not just the conversion helper in isolation.
+# 覆盖每个 ABI 调用点，而不只是单独测试转换辅助函数。
 assert 'return linux_socket_receive_status(socket, status);' in function('linux_socket_receive_payload')
 assert 'linux_socket_status(status)' in function('linux_socket_send_payload')
 assert 'return linux_socket_status(status);' in function('linux_socket_connect')

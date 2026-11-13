@@ -80,13 +80,12 @@ int main(void){
   if(length>1&&length<256){path[length-1]='/';compare(path,&fs);}
  }
  reset(0);compare(0,&fs);compare("",&fs);compare("relative",&fs);
- /* The request may alias the selected free slot or another registry path;
-  * retain the existing forward-copy publication semantics. */
+ /* 请求可能与选中的空槽或注册表中的其他路径别名；保留现有的前向复制发布语义。 */
  for(unsigned slot=0;slot<VFS_FAT32_MOUNT_LIMIT;++slot){
   reset(0);strcpy(g_fat32_mounts[slot].prefix,"/alias");
   compare(g_fat32_mounts[slot].prefix,&fs);
  }
- /* Requests ending at 6 need no byte after index 6 of other prefixes. */
+ /* 请求在索引 6 处结束时，无需读取其他前缀在索引 6 之后的字节。 */
  reset(0);g_fat32_mounts[1].mounted=true;strcpy(g_fat32_mounts[1].prefix,"/other/deep/path");
  __asan_poison_memory_region(g_fat32_mounts[1].prefix+7,249);
  request="/mount";depth=0;assert(vfs_mount_fat32(request,&fs)==K_OK&&!depth);

@@ -25,7 +25,7 @@ def click(x, y):
     move(x, y); button(True); button(False); time.sleep(.15)
 def drag(x0, y0, x1, y1):
     move(x0, y0); button(True)
-    # No origin reset during a drag: it would exercise unwanted autoscroll.
+    # 拖动期间不重置原点：这会触发不需要的自动滚动。
     command('input-send-event', {'events': [
         {'type': 'rel', 'data': {'axis': 'x', 'value': x1-x0}},
         {'type': 'rel', 'data': {'axis': 'y', 'value': y1-y0}}]})
@@ -76,7 +76,7 @@ with tempfile.TemporaryDirectory(prefix='system-mouse-frame-') as directory:
     screenshot('terminal-selected-replacement')
     drag(250,184,470,184); assert selection_count()>1000, 'No terminal output selection'
     screenshot('terminal-output-selection')
-    # A temporary unsaved document avoids editing or saving the user's notes.
+    # 使用临时且未保存的文档，避免修改或保存用户的笔记。
     type_text('notepad /tmp/mouse-qa.txt'); key('ret'); time.sleep(1)
     note_x,note_y=caret(); assert note_x<300 and note_y==175
     type_text('abcdef'); end_x,_=caret()

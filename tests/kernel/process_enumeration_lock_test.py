@@ -12,7 +12,7 @@ name_helper = name_helper.replace('    memcpy(name, process->name, copied);',
                                  '    memcpy(name, process->name, copied);')
 functions = name_helper + source[source.index('kstatus_t process_enumerate('):
                    source.index('static process_t *process_monitor_find(')]
-# Observe each list iteration, including skipped entries before list_entry.
+# 观察链表的每次迭代，包括到达 list_entry 前跳过的条目。
 iteration = '            if (remaining-- != 0U) continue;'
 assert functions.count(iteration) == 1
 functions = functions.replace(iteration, '            ++thread_visits;\n'+iteration)
@@ -140,8 +140,8 @@ int main(void) {
     process_copy_name(&parent,&process);
     assert(name_updates==1 && !memcmp(parent.name,process.name,sizeof(parent.name)));
     thread.tid=21;thread.current_cpu=3;atomic_init(&thread.state,OS_THREAD_BLOCKED);
-    /* Snapshot layouts may differ in size; copy all source bytes, including
-     * embedded NULs, and zero only the larger destination's suffix. */
+    /* 快照布局的大小可能不同；复制源中的所有字节（包括内嵌 NUL），并只将较大的目标
+     * 后缀清零。 */
     setup();
     for(unsigned pattern=0;pattern<3;++pattern)for(unsigned capacity=0;capacity<=64;++capacity){
         unsigned char arena[80];memset(arena,0xa5,sizeof(arena));

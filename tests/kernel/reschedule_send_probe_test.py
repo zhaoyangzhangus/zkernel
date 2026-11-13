@@ -58,12 +58,11 @@ int main(void) {
     assert(calls==4 && complete_calls==2 && !accepted_seen && attempts_seen==4);
     assert(elapsed_seen==40000 && atomic_load(&g_reschedule_pending[2]));
     assert(x86_smp_request_reschedule(2) && calls==4 && complete_calls==2);
-    /* Target fallback consumes the retained request; a new wake can send again. */
+    /* 目标 CPU 的回退路径会消费保留请求；新的唤醒可以再次发送请求。 */
     atomic_store(&g_reschedule_pending[2],false);calls=0;succeed_at=1;
     assert(x86_smp_request_reschedule(2));
     assert(calls==1 && complete_calls==3 && accepted_seen && attempts_seen==1);
-    /* The default disabled probe must not read the timestamp counter, even
-     * for actual sends and all four failed hardware submission attempts. */
+    /* 默认禁用探测时不得读取时间戳计数器，即使确实发送请求或四次硬件提交都失败也一样。 */
     g_sched_wake_trace_tid=0;
     for(unsigned trial=0;trial<10000;++trial) {
         atomic_store(&g_reschedule_pending[2],false);calls=0;succeed_at=trial%5;

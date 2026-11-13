@@ -68,8 +68,8 @@ static bool background_take(background_item_t *item) {
 }
 
 static bool background_prepare_sleep(void) {
-    /* Publish BLOCKED under the producer's lock, closing empty -> sleep.
-     * A producer after unlock sees BLOCKED and owns the corresponding wake. */
+    /* 在生产者持有的锁内发布 BLOCKED，关闭“队列为空到进入休眠”之间的竞争窗口。
+     * 解锁后，生产者若看到 BLOCKED，就负责相应的唤醒。 */
     uint64_t flags = background_lock();
     bool blocked = g_background.count == 0U &&
         sched_publish_blocked(&g_background.worker);
@@ -98,8 +98,8 @@ bool deferred_background_start_worker(void) {
     unsigned expected = 0U;
     if (!atomic_compare_exchange_strong_explicit(&g_background.started,
             &expected, 1U, memory_order_acq_rel, memory_order_acquire)) return false;
-    /* Prefer the last AP: input normally owns CPU0, composition the first AP.
-     * These are still separate schedulable FAIR threads on a one-CPU system. */
+    /* 优先使用最后一个 AP：输入通常由 CPU0 处理，合成则使用第一个 AP。
+     * 即使系统只有一个 CPU，它们仍是可分别调度的 FAIR 线程。 */
     for (uint32_t i = 0; i < x86_smp_discovered_count() && i < MAX_CPUS; ++i)
         if (i != x86_current_cpu_index() && x86_smp_cpu_online(i)) cpu = i;
     thread_t *worker = &g_background.worker;

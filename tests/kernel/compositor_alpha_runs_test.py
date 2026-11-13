@@ -1,6 +1,7 @@
-"""对照逐像素 source-over 结果，验证不透明短段只做线性探测。"""
+"""对照逐像素 source-over 结果，验证区间探测与透明页面边界。"""
 from pathlib import Path
 import subprocess
+import resource
 import tempfile
 
 root=Path(__file__).resolve().parents[2]
@@ -14,6 +15,7 @@ blend=blend.replace('__builtin_memcpy(&pair, source + end, sizeof(pair));',
 blend=blend.replace('source[index]','read_pixel(source,index)').replace('source[end]','read_pixel(source,end)').replace('source[i]','read_pixel(source,i)')
 program=r'''
 #include <assert.h>
+#include <kernel/pixel_blend.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -69,7 +71,7 @@ int main(void){
 with tempfile.TemporaryDirectory(prefix='compositor-alpha-runs-') as directory:
     base=Path(directory);fixture,binary=base/'test.c',base/'test'
     fixture.write_text(program)
-    command=['cc','-O2','-std=c11','-Wall','-Wextra','-Werror',
+    command=['cc','-I'+str(root/'include'),'-O2','-std=c11','-Wall','-Wextra','-Werror',
              '-fsanitize=address,undefined','-fno-pie','-no-pie',str(fixture),'-o',str(binary)]
     subprocess.run(command,check=True)
     subprocess.run([str(binary)],check=True)
@@ -90,6 +92,7 @@ print('负面对照通过：恢复短段重复扫描时，线性读取次数断�
 guarded = r'''
 #define _GNU_SOURCE
 #include <assert.h>
+#include <kernel/pixel_blend.h>
 #include <stdint.h>
 #include <string.h>
 #include <sys/mman.h>
@@ -106,16 +109,33 @@ int main(void){
  uint8_t *mapping=mmap(0,page*2,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0);
  assert(mapping!=MAP_FAILED&&mprotect(mapping+page,page,PROT_NONE)==0);
  uint32_t out[1026];
- for(unsigned n=0;n<=1024;++n)for(unsigned tail=0;tail<2;++tail){
+ for(unsigned n=0;n<=1024;++n)for(unsigned tail=0;tail<2;++tail)
+ for(unsigned layout=0;layout<4;++layout){
   uint32_t *src=(uint32_t*)(mapping+page)-n;
-  for(unsigned i=0;i<n;++i)src[i]=0xff123456;
+  for(unsigned i=0;i<n;++i){
+   uint32_t alpha=layout==0?255:layout==1?0:layout==2?(i%2?255:0):
+       (i%17==16?128:0);
+   src[i]=(alpha<<24)|0x00123456;
+  }
   if(n&&tail)src[n-1]=0;
   for(unsigned mode=0;mode<2;++mode){
    for(unsigned i=0;i<1026;++i)out[i]=0x00112233;
    compositor_surface_blend_span(mode?0:out+1,mode?out+1:0,src,0,n);
    assert(out[0]==0x00112233&&out[n+1]==0x00112233);
-   for(unsigned i=0;i<n;++i)assert(out[i+1]==(tail&&i+1==n?0x00112233:0xff123456));
+   for(unsigned i=0;i<n;++i){
+    unsigned alpha=src[i]>>24;
+    uint32_t expected=alpha==0?0x00112233:alpha==255?src[i]:
+        pixel_blend_premultiplied(0x00112233,src[i]);
+    assert(out[i+1]==expected);
+   }
   }
+ }
+ /* 源末尾与目标都紧邻不可访问页；全透明像素即使带非零 RGB，也不得读写目标。 */
+ for(unsigned n=0;n<=1024;++n){
+  uint32_t *src=(uint32_t*)(mapping+page)-n;
+  for(unsigned i=0;i<n;++i)src[i]=i*991U&0x00ffffff;
+  compositor_surface_blend_span((uint32_t*)(mapping+page),0,src,0,n);
+  compositor_surface_blend_span(0,(uint32_t*)(mapping+page),src,0,n);
  }
  assert(munmap(mapping,page*2)==0);
 }
@@ -123,8 +143,23 @@ int main(void){
 with tempfile.TemporaryDirectory(prefix='compositor-alpha-guard-') as directory:
     base=Path(directory);fixture,binary=base/'test.c',base/'test'
     fixture.write_text(guarded)
-    subprocess.run(['cc','-O2','-std=c11','-Wall','-Wextra','-Werror',
+    subprocess.run(['cc','-I'+str(root/'include'),'-O2','-std=c11','-Wall','-Wextra','-Werror',
                     '-fsanitize=address,undefined','-fno-pie','-no-pie',
                     str(fixture),'-o',str(binary)],check=True)
     subprocess.run([str(binary)],check=True,timeout=20)
-print('透明度成对扫描：4100 组不可读页边界、奇偶长度和 WB/device 输出检查通过')
+    # 只增加一次无副作用目标读取，像素对照无法识别，保护页必须捕获。
+    broken=guarded.replace('if (alpha == 0U) continue;', '''if (alpha == 0U) {
+        volatile uint32_t sampled=wb_destination!=0?wb_destination[index]:device_destination[index];
+        (void)sampled;
+        continue;
+    }''')
+    assert broken!=guarded
+    fixture.write_text(broken)
+    subprocess.run(['cc','-I'+str(root/'include'),'-O2','-std=c11','-Wall','-Wextra','-Werror',
+                    '-fsanitize=address,undefined','-fno-pie','-no-pie',
+                    str(fixture),'-o',str(binary)],check=True)
+    result=subprocess.run([str(binary)],capture_output=True,text=True,timeout=20,
+        preexec_fn=lambda:resource.setrlimit(resource.RLIMIT_CORE,(0,0)))
+    assert result.returncode!=0 and 'AddressSanitizer' in result.stderr,result.stderr
+    print('反例被拒绝：全透明像素仍读取目标')
+print('透明度边界：16400 组奇偶长度、透明/不透明/交替/半透明源边界检查；2050 组全透明输出不访问不可读目标，通过')

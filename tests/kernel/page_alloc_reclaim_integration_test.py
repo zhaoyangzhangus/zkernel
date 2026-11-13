@@ -81,7 +81,7 @@ static page_t *pool_alloc_o0_normal(uint32_t c){return pool_alloc_small(PAGE_ZON
 page_t *take_from_zone_locked(uint8_t z,uint8_t o){(void)z;(void)o;assert(0);return 0;}
 void page_stats_note_alloc(uint8_t order){
  assert(!order);++accounted;
- /* Hot success is counted pinned; slow success is counted after restoration. */
+ /* 快速成功在固定状态下计数；慢速成功在恢复后计数。 */
  assert(depth==initial_depth||depth==initial_depth+1);
 }
 void *phys_to_direct(paddr_t p){assert(p.value==(4097ULL<<PAGE_SHIFT));return memory;}
@@ -135,7 +135,7 @@ int main(void){
   }
   for(unsigned i=0;i<PAGE_SIZE;++i)assert(memory[i]==(zero&&!pin?0:0x75));
   assert(groups[0].free_mask==1&&groups[2].free_mask==3);
-  /* No unbounded retry. Hot misses add two attempts before the slow loop. */
+  /* 不进行无界重试。快速路径未命中时，在慢速循环前额外尝试两次。 */
   assert(allocations==(zero?0U:2U)+2U+(pin||remote?2U:0U)+
          ((pin?2U:remote?1U:0U)*(MAX_CPUS-1)*2U)+
          (pin||zone==PAGE_ZONE_DMA32?2U:1U));

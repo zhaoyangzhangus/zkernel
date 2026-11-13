@@ -1,7 +1,7 @@
 set pagination off
 target remote /tmp/system-address-fork.sock
-# Current Chrome nm: RenderProcessHostImpl::Init=0x7f4d5d0, PIE bias 0x40000000.
-# Revalidate after any Chrome rebuild.
+# 当前 Chrome nm：RenderProcessHostImpl::Init=0x7f4d5d0，PIE 偏移为 0x40000000。
+# Chrome 每次重建后都要重新验证。
 hbreak *0x47f4d5d0
 commands
 silent

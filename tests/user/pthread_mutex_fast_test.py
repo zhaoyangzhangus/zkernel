@@ -138,7 +138,7 @@ int main(void) {
     assert(!munmap(shared,4096));
     fixture_mutex_t fresh={.state=0xdeadbeef};
     assert(!fixture_mutex_init(&fresh,0));assert(fresh.state==0);
-    // Even a stalled side-table owner cannot stop ordinary mutex operations.
+    // 即使侧表所有者停滞，普通互斥锁操作也不能被阻塞。
     g_mutex_metadata_lock=1;unsigned before=atomic_load(&metadata_calls);
     assert(!fixture_mutex_lock(&fresh));assert(fresh.state==1);
     assert(fixture_mutex_trylock(&fresh)==EBUSY);
@@ -174,8 +174,7 @@ int main(void) {
     assert(counters[1]==160000);assert(recursive.state==LIBC_MUTEX_METADATA_BIT);
     condition_roundtrip(&normal,1);
     condition_roundtrip(&recursive,2);
-    // Complete release/restoration must preserve the marker and depth even
-    // when the condition times out instead of receiving a signal.
+    // 即使条件等待超时而非收到信号，完整的释放/恢复也必须保留标记和深度。
     assert(!fixture_mutex_lock(&recursive));assert(!fixture_mutex_lock(&recursive));
     assert(condition_wait(&condition,&recursive,1000000)==ETIMEDOUT);
     assert(!fixture_mutex_unlock(&recursive));assert(!fixture_mutex_unlock(&recursive));

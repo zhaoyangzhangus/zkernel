@@ -27,7 +27,7 @@ with tempfile.TemporaryDirectory(prefix='rtl8126-stage-') as directory:
     stamps = [path.stat().st_mtime_ns for path in targets]
     subprocess.run(command, check=True, capture_output=True)
     assert stamps == [path.stat().st_mtime_ns for path in targets]
-    # A valid changed first file must not publish if the second is corrupt.
+    # 第一个文件有效且已更改时，如果第二个文件损坏，也不得发布结果。
     changed = bytearray(data)
     changed[4], changed[5] = 1, 255
     (source / names[0]).write_bytes(changed)

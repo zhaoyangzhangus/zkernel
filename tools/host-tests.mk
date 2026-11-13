@@ -1,5 +1,5 @@
-# Host-side test compilation, validation entrypoints and regression suites.
-# Support direct invocation as well as inclusion from the main makefile.
+# 宿主侧测试编译、验证入口和回归测试套件。
+# 支持直接调用，也支持从主 makefile 中包含。
 BUILD ?= build
 HOSTCC ?= cc
 ifeq ($(strip $(BUILD)),)
@@ -8,9 +8,9 @@ endif
 ifeq ($(strip $(HOSTCC)),)
 $(error HOSTCC must not be empty)
 endif
-# With multiple translation units, one -MF file would only describe the last
-# unit. Emit all dependency rules to stdout and publish after a successful link.
-# Argument 2 overrides translation units for fixtures that include a .c file.
+# 存在多个翻译单元时，一个 -MF 文件只会描述最后一个单元。将所有依赖规则输出到 stdout，
+# 并在链接成功后发布。
+# 参数 2 用于覆盖包含 .c 文件的测试夹具中的翻译单元。
 define HOST_TEST_LINK
 @set -eu; \
 temporary=''; dependencies=''; \
@@ -62,16 +62,15 @@ vulkan-probe-test:
 
 .PHONY: vulkan-video-test
 .PHONY: chrome-vulkan-deployment-test
-# This integration gate intentionally requires the canonical guest runtime;
-# keep it separate from source-only host tests which need no deployed ESP.
+# 此集成门禁有意要求使用规范客户机运行时；将它与无需部署 ESP 的纯源码宿主测试分开。
 chrome-vulkan-deployment-test: chrome-start-test $(DYNAMIC_CHROME_START_ELF)
 	python3 tests/user/chrome_staging_build_gate_test.py
 	python3 tests/user/chrome_stage_dependencies_test.py
 	python3 tests/user/chrome_vulkan_runtime_gate_test.py
 
 .PHONY: chrome-vulkan-integration-test
-# CHROMIUM_SRC selects the same canonical checkout; these checks do not
-# regenerate GN or replace anything in the live QEMU image.
+# CHROMIUM_SRC 选择同一规范工作区；这些检查不会重新生成 GN 文件，也不会替换运行中的
+# QEMU 镜像内容。
 chrome-vulkan-integration-test: chrome-vulkan-deployment-test
 	python3 tests/user/chrome_guest_library_policy_test.py
 	python3 tests/user/chrome_glibc_toolchain_test.py
@@ -200,15 +199,15 @@ HOST_INCREMENTAL_TESTS = $(addprefix $(BUILD)/,mm-api-test.exe primitives-test.e
 $(HOST_INCREMENTAL_TESTS): $(BUILD)/.host-toolchain makefile tools/host-tests.mk
 $(NVIDIA_PORT_HOST_OBJECTS) $(BUILD)/nvidia/host-test/nv_port_test.o: $(BUILD)/.host-toolchain makefile tools/host-tests.mk
 
-# Keep graphics regressions in one ordered suite. Each script compiles actual
-# production code in a disposable fixture; none starts another QEMU or build.
-HOST_GRAPHICS_REGRESSIONS = control_caption clipboard control_blend control_tree control_paint_subtree control_style_layout control_layout_work control_surface_damage control_document control_submission_abi control_alpha control_border control_text control_text_clip control_widgets input_batch input_motion_coalesce input_motion_eviction \
-    input_pending_publication compositor_copy_self compositor_fill compositor_alpha compositor_alpha_runs compositor_present_wake graphics_worker_startup window_surface_exchange window_surface_backing compositor_surface_cache window_surface_snapshot window_surface_api surface_resize_retention linux_window_surface \
-    qemu_gop_only compositor_publication_preempt compositor_commit_clip gop_cursor_box_transaction gop_cursor_publication compositor_render_motion caption_damage_clip compositor_tile_index damage_tiles damage_capture_bounds tile_geometry tile_occlusion_query tile_animation_work \
+# 将图形回归测试放在一个有序套件中。每个脚本都在临时测试夹具中编译实际生产代码；
+# 不会启动额外的 QEMU 实例或构建任务。
+HOST_GRAPHICS_REGRESSIONS = compositor_publication_inputs framebuffer_cache compositor_pipeline_profile control_caption decoration_blend compositor_cursor_clip display_backend_publication display_initialization display_gop_movsb clipboard control_blend control_tree control_paint_subtree control_style_layout control_layout_work control_surface_damage control_document control_submission_abi control_alpha control_border control_text control_text_clip control_widgets input_batch input_motion_coalesce input_motion_eviction \
+    input_pending_publication compositor_copy_self compositor_fill compositor_alpha compositor_alpha_runs compositor_present_wake graphics_worker_startup window_surface_exchange window_surface_backing compositor_surface_cache compositor_parallel window_surface_snapshot window_surface_api surface_resize_retention linux_window_surface \
+    qemu_gop_only compositor_intersection compositor_publication_preempt compositor_commit_clip gop_cursor_box_transaction gop_cursor_publication compositor_render_motion caption_damage_clip compositor_tile_index damage_tiles damage_capture_bounds tile_geometry tile_occlusion_query tile_animation_work compositor_plan_cache \
     window_drag_move window_scene_root window_fullscreen window_minimize window_visibility standard_caption window_pointer_dispatch window_event_queue window_event_read window_event_wake_batch \
     window_popup_resize window_resize_cursor window_resize_geometry window_corner_alpha window_titlebar_fill \
     native_window_cleanup desktop_icon_clip desktop_icon_filter desktop_cache_publication desktop_cache_copy desktop_control_scene desktop_hover_style desktop_interaction window_animation \
-    publication_motion desktop_launch_cleanup desktop_launch_queue \
+    publication_motion desktop_launch_cleanup desktop_launch_queue desktop_app_identity \
     window_present_transaction
 
 .PHONY: taskmgr-regression-test
@@ -224,7 +223,7 @@ app-bundle-test:
 	python3 tests/user/ui_file_demo_test.py
 .PHONY: background-cleanup-regression-test
 # 跨组用例使用同一 phony 目标；make 在一次调用中只执行一次，独立入口仍保留覆盖。
-HOST_SHARED_REGRESSIONS = net_reap_fairness scheduler_command_release device_async_init nv_port_thread_lifetime task_monitor
+HOST_SHARED_REGRESSIONS = net_reap_fairness scheduler_command_release device_async_init nv_port_thread_lifetime task_monitor nvidia_boot_order
 HOST_SHARED_TARGETS = $(addprefix host-shared-,$(HOST_SHARED_REGRESSIONS))
 .PHONY: $(HOST_SHARED_TARGETS)
 $(HOST_SHARED_TARGETS): host-shared-%: tests/kernel/%_test.py
@@ -252,6 +251,8 @@ graphics-regression-test: taskmgr-regression-test
 	python3 tests/kernel/settings_theme_adapter_test.py
 	python3 tests/kernel/gpu_info_test.py
 	python3 tests/kernel/control_flex_index_test.py
+	python3 tests/kernel/control_popup_test.py
+	python3 tests/kernel/control_popup_index_test.py
 	python3 tests/kernel/control_identifier_validation_test.py
 	python3 tests/kernel/control_icon_resolution_test.py
 	python3 tests/kernel/control_symbol_resolution_test.py
@@ -274,8 +275,8 @@ graphics-regression-test: taskmgr-regression-test
 tcp-ack-backpressure-test:
 	python3 tests/kernel/tcp_ack_backpressure_test.py
 
-# Discover driver/core fixtures so new network regressions cannot silently
-# remain outside the normal gate. Keep the non-net-prefixed suites explicit.
+# 自动发现驱动/core 测试夹具，避免新的网络回归测试悄然遗漏在常规门禁之外。
+# 非 net 前缀的套件仍显式列出。
 HOST_NETWORK_REGRESSIONS = $(patsubst tests/kernel/%_test.py,%,$(sort $(wildcard tests/kernel/net_*_test.py))) \
     rtl8126_dma_start rtl8126_mcu_start rtl8126_phy_reset rtl8126_mac_enable rtl8126_rx_burst rtl8126_irq_rearm socket_allocation socket_datagram_receive socket_udp_lookup socket_initialization socket_registry_growth socket_slots socket_lookup_hint socket_ipv6_route socket_ipv6_boot_probe socket_loopback_refusal socket_bind_port \
     socket_stream_geometry socket_stream_ring socket_stream_reserve socket_stream_backpressure \
@@ -289,7 +290,6 @@ network-regression-test: host-shared-net_reap_fairness
 	python3 tests/kernel/linux_unix_nonblocking_lock_test.py
 	python3 tests/kernel/linux_poll_snapshot_test.py
 	python3 tests/kernel/linux_wait_source_capture_test.py
-	python3 tests/kernel/linux_epoll_wait_scratch_test.py
 	python3 tests/kernel/syscall_resource_errors_test.py
 	@set -eu; for test in $(addprefix tests/kernel/,$(addsuffix _test.py,$(filter-out net_reap_fairness,$(HOST_NETWORK_REGRESSIONS)))); do \
 	    printf 'NETWORK_REGRESSION %s\n' "$$test"; \
@@ -331,8 +331,8 @@ fileman-regression-test:
 	python3 tests/user/fileman_content_tree_test.py
 
 .PHONY: memory-regression-test
-# Keep allocator/VM recovery in the normal gate, not just API layout checks.
-# sort also deduplicates fixtures selected by more than one family.
+# 在常规门禁中保留分配器/VM 恢复测试，而不只检查 API 布局。
+# sort 也会对被多个类别选中的测试夹具去重。
 HOST_MEMORY_REGRESSIONS = $(sort $(wildcard tests/kernel/page_*_test.py \
     tests/kernel/anon_*_test.py tests/kernel/vm_*_test.py tests/kernel/vmalloc_*_test.py \
     tests/kernel/fault_*_test.py tests/kernel/tlb_*_test.py \
@@ -352,9 +352,11 @@ memory-regression-test:
 	done
 
 .PHONY: lifecycle-regression-test
-# Keep task-manager termination and stack-waiter ownership in the default
-# gate, including the real object-wait integration test (not source checks).
-HOST_LIFECYCLE_REGRESSIONS = $(sort $(wildcard tests/kernel/wait_*_test.py tests/kernel/handle_*_test.py) \
+# 在默认门禁中保留任务管理器终止和栈等待者所有权测试，包括真实的对象等待集成测试
+#（而不只是源码检查）。
+HOST_LIFECYCLE_REGRESSIONS = $(sort $(wildcard tests/kernel/wait_*_test.py tests/kernel/handle_*_test.py \
+    tests/kernel/linux_epoll_*_test.py tests/kernel/futex_*_test.py tests/kernel/pipe_*_test.py) \
+    tests/kernel/message_port_io_test.py tests/kernel/completion_port_io_test.py \
     tests/kernel/mutex_pi_lifecycle_test.py \
     tests/kernel/process_empty_exit_test.py \
     tests/kernel/process_exit_cascade_test.py tests/kernel/process_terminate_batch_test.py \
@@ -374,13 +376,11 @@ scheduler-regression-test: background-cleanup-regression-test
 	    python3 "$$test"; \
 	done
 
-host-regression-test: audio-regression-test scheduler-regression-test graphics-regression-test runtime-indirect-relocation-test fileman-regression-test vfs-regression-test network-regression-test memory-regression-test lifecycle-regression-test
+host-regression-test: host-shared-nvidia_boot_order audio-regression-test scheduler-regression-test graphics-regression-test runtime-indirect-relocation-test fileman-regression-test vfs-regression-test network-regression-test memory-regression-test lifecycle-regression-test
 	python3 tests/kernel/exec_segment_dispatch_test.py
 	python3 tests/kernel/exec_load_buffer_test.py
 	python3 tests/kernel/exec_metadata_read_test.py
 	python3 tests/kernel/smp_started_publication_test.py
-	python3 tests/kernel/linux_epoll_zero_mask_test.py
-	python3 tests/kernel/linux_epoll_fork_alias_test.py
 	python3 tests/user/rtl8126_firmware_stage_test.py
 	python3 tests/kernel/cube_result_log_test.py
 	python3 tests/kernel/nvidia_event_alloc_test.py
@@ -420,6 +420,7 @@ host-regression-test: audio-regression-test scheduler-regression-test graphics-r
 	python3 tests/user/qemu_physical_nic_test.py
 	python3 tests/kernel/build_id_cache_test.py
 	python3 tests/kernel/host_test_cache_test.py
+	python3 tests/kernel/refactor_layout_contract_test.py
 	python3 tests/kernel/host_multi_source_cache_test.py
 	python3 tests/kernel/chrome_staging_test.py
 	python3 tests/user/chrome_stage_fixed_mode_test.py
@@ -460,7 +461,6 @@ host-regression-test: audio-regression-test scheduler-regression-test graphics-r
 	python3 tests/user/loader_diagnostic_test.py
 	python3 tests/kernel/nvidia_diagnostic_protocol_test.py
 	python3 tests/kernel/boot_fast_path_test.py
-	python3 tests/kernel/nvidia_boot_order_test.py
 	python3 tests/kernel/device_boot_wait_test.py
 	python3 tests/kernel/boot_profile_test.py
 	python3 tests/kernel/nvidia_diagnostic_budget_test.py
@@ -557,11 +557,10 @@ host-regression-test: audio-regression-test scheduler-regression-test graphics-r
 	python3 tests/user/text_measure_buffer_test.py
 	python3 tests/kernel/nvidia_deployment_test.py --host-only
 
-# Deployment assertions deliberately require the actual canonical payload;
-# unlike the host suite they must not pass by silently skipping missing ELFs.
-nvidia-deployment-test: host-shared-device_async_init host-shared-nv_port_thread_lifetime
+# 部署断言有意要求实际的规范负载；与宿主套件不同，这些测试不得因静默跳过缺失的 ELF
+# 文件而通过。
+nvidia-deployment-test: host-shared-device_async_init host-shared-nv_port_thread_lifetime host-shared-nvidia_boot_order
 	python3 tests/kernel/boot_fast_path_test.py
-	python3 tests/kernel/nvidia_boot_order_test.py
 	python3 tests/kernel/device_boot_wait_test.py
 	python3 tests/kernel/boot_profile_test.py
 	python3 tests/kernel/nvidia_deployment_test.py
@@ -600,8 +599,7 @@ test: $(BUILD)/sha256-test.exe $(BUILD)/mm-api-test.exe $(BUILD)/memory-map-test
 
 # 音频后端使用实际驱动路径和真实描述符进行回归。
 .PHONY: audio-regression-test
-audio-regression-test: audiod-test
-	python3 tests/kernel/nvidia_boot_order_test.py
+audio-regression-test: audiod-test host-shared-nvidia_boot_order
 	python3 tests/kernel/audiod_wait_test.py
 	node tests/kernel/audio_playback_ui_test.cjs
 	python3 tests/kernel/audio_lifecycle_test.py

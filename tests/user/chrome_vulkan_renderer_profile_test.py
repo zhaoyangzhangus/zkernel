@@ -44,8 +44,7 @@ int main() {
   gpu::mojom::ContextCreationAttribs attributes{static_cast<gpu::mojom::ContextCreationAttribs::Tag>(tag)};
   bool allowed=forwarded&&vk&&tag==0;
   assert((bind(&channel,&attributes)==gpu::ContextResult::kSuccess)==allowed);
-  // Reproduce the old child profile: browser Vulkan did not enable raster
-  // binding in a renderer that never received its backend selection.
+  // 复现旧的子进程配置：渲染器未收到后端选择时，浏览器 Vulkan 不会启用光栅绑定。
   renderer->mode="";
   assert(bind(&channel,&attributes)==gpu::ContextResult::kFatalFailure);
  }

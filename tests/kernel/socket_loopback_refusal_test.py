@@ -104,7 +104,7 @@ int main(void){
   assert(socket_connect(&client,local[i],9229)==K_ECONNREFUSED);
   assert(!cstate.connected&&!cstate.tcp_send_pending&&!cstate.tcp_send_deadline_tsc);
   assert(!outputs&&!registrations&&!gets&&!releases&&binds==!bound);
-  /* Refusal must not poison the socket's later successful connect. */
+  /* 拒绝本次连接不能影响该套接字之后的成功连接。 */
   listening=true;
   assert(socket_connect(&client,local[i],9229)==K_OK);
   assert(cstate.connected&&cstate.peer==&child&&hstate.peer==&client);

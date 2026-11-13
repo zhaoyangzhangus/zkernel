@@ -53,12 +53,10 @@ static void nv_port_mem_clear(nv_port_mem_t *memory) {
 }
 
 /*
- * System keeps the RAM direct map WB.  NVIDIA's uncached and write-combined
- * allocations are additionally exposed through a vmalloc mapping with the
- * requested PAT mode, so the direct-map alias must not retain dirty/stale
- * lines when a device starts DMA to these pages.  Linux changes the page
- * mapping type when it makes this transition; the System port cannot rewrite
- * the global direct map here, so evict its aliases at the ownership boundary.
+ * System 会让 RAM 直接映射保持 WB。NVIDIA 的不可缓存和写合并分配还会通过 vmalloc 映射以所需
+ * PAT 模式公开，因此设备开始对这些页面执行 DMA 时，直接映射别名不得保留脏数据或过期缓存行。
+ * Linux 会在此转换期间修改页面映射类型；System 移植层无法在此处重写全局直接映射，因此要在
+ * 所有权边界驱逐其缓存别名。
  */
 static void nv_port_mem_invalidate_direct_aliases(
     const nv_port_mem_t *memory) {

@@ -23,7 +23,7 @@ if not (root/'build/qemu-running-kernel.elf').is_file():
 
 
 def command(name, arguments=None):
-    # Close before the workload creates its own control connection.
+    # 在工作负载创建自己的控制连接之前先关闭连接。
     with QMPClient() as qmp:
         return qmp.command(name, arguments)
 

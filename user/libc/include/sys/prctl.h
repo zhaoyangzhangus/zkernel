@@ -1,6 +1,6 @@
 #pragma once
 
-/* Linux prctl options referenced by portable tracing and crash helpers. */
+/* 可移植跟踪和崩溃辅助函数使用的 Linux prctl 选项。 */
 #define PR_SET_PDEATHSIG 1
 #define PR_GET_DUMPABLE 3
 #define PR_SET_DUMPABLE 4

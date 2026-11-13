@@ -140,7 +140,7 @@ kstatus_t gpu_fence_wait(gpu_fence_t *fence, uint64_t value,
                          uint64_t timeout_ns);
 kstatus_t gpu_context_mark_lost(gpu_context_t *context);
 kstatus_t gpu_context_reset(gpu_context_t *context);
-/* Failure-only runtime self-test diagnostics. */
+/* 仅在运行时自检失败时输出的诊断信息。 */
 uint32_t syscall_gpu_submit_debug_progress(uint32_t cpu_index);
 uint32_t gpu_context_debug_progress(uint32_t cpu_index);
 uint64_t gpu_context_debug_address(uint32_t cpu_index);

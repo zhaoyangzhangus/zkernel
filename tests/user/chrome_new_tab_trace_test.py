@@ -41,7 +41,7 @@ symbols = {
 }
 nm = chromium / 'third_party/llvm-build/Release+Asserts/bin/llvm-nm'
 output = subprocess.check_output([str(nm), '-C', '--defined-only', str(binary)], text=True)
-# Diagnostics target the actual staged binary, not uncompiled source names.
+# 诊断针对实际暂存的二进制文件，而不是尚未编译的源码名称。
 if symbols['create_event'] not in output:
     symbols['create_event'] = 'ui::LiteosWindow::CreateEvent(ui::liteos::InputEvent const&, gfx::Point const&)'
 addresses = {}
@@ -55,8 +55,8 @@ for stage, (address, _) in stages.items():
     assert address == addresses[symbols[stage]] + bias, stage
 newtab = int(re.search(r"NewTabEntry\('\*(0x[0-9a-f]+)'", script).group(1), 16)
 assert newtab == addresses[symbols['newtab']] + bias
-# A return callback may destroy its own object. Never remove a live GDB BP
-# from within stop(); the bounded outer helper performs detach and recovery.
+# 返回回调可能销毁自身对象。切勿在 stop() 内删除仍有效的 GDB 断点；
+# 外层有界辅助函数会负责分离和恢复。
 assert '.delete()' not in script
 assert 'self.done = True' in script and 'not init_traced' in script
 assert 'gdb.post_event' in script
@@ -125,9 +125,9 @@ pair_script = (root / 'tools/chromium/trace-draw-paint-pair.gdb').read_text()
 assert expected in pair_script and '.delete()' not in pair_script
 for label,name in [('Input','newtab'),('Draw','draw_swap'),('Paint','begin_paint')]:
     assert "%s('*%s'" % (label,hex(addresses[symbols[name]]+bias)) in pair_script
-# Five construction sites, but return and decision modes are mutually exclusive.
-# The default host suite executes these callbacks with a fake debugger and
-# verifies that each mode creates at most four live breakpoints.
+# 虽有五个构造位置，但返回模式和判定模式互斥。
+# 默认宿主测试套件会使用模拟调试器执行这些回调，并验证每种模式最多创建四个
+# 有效断点。
 assert pair_script.count('gdb.BP_HARDWARE_BREAKPOINT') == 5
 assert 'calls>=16' in pair_script and "pending['sp']+8" in pair_script
 assert "int(current()['tid'])!=pending['tid']" in pair_script

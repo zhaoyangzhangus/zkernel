@@ -31,8 +31,8 @@ function Require-File([string]$Path, [string]$Description) {
 
 Require-File $phase3Gate 'P3 Gate script'
 
-# Phase ordering is enforced here as well as in the Phase 4 build script.  A
-# stale Phase 3 report or stale Phase 4 image cannot satisfy this Gate.
+# 阶段顺序既在此处强制执行，也在阶段 4 构建脚本中执行。过期的阶段 3 报告
+# 或阶段 4 映像均不能通过此 Gate。
 $p3Args = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $phase3Gate,
             '-Make', $Make)
 $p3Output = @(& powershell.exe @p3Args 2>&1 |
@@ -211,9 +211,8 @@ if ($driverText -notmatch 'OS_NVIDIA_RM_NOT_LINKED' -or
     Fail-Gate 'normal-image vendor boundary is not fail-closed'
 }
 
-# The vendor tree is checked by P3 Gate.  This additional diff check makes
-# the Phase 4 evidence explicit and prevents a local vendor edit from being
-# hidden behind a rebuilt object.
+# P3 Gate 会检查供应商代码树。此处额外的差异检查会明确记录阶段 4 证据，
+# 防止本地对供应商源码的修改被重新构建的对象掩盖。
 $vendorRelative = 'third_party/nvidia/595.84/open-gpu-kernel-modules'
 $vendorDiff = @(& git -C $repoRoot diff --name-only -- $vendorRelative 2>&1 |
     ForEach-Object { $_.ToString() })

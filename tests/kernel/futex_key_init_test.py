@@ -8,7 +8,7 @@ source = (root / 'kernel/sync/futex.c').read_text()
 def function(name):
     start = source.index(name)
     return source[start:source.index('\n}', start) + 2]
-layout = source[source.index('#define FUTEX_BUCKET_COUNT'):source.index('/*\n * Futex bucket ownership')]
+layout = source[source.index('#define FUTEX_BUCKET_COUNT'):source.index('static void futex_bucket_lock(')]
 initializer = function('static void futex_init(').replace(
     'atomic_compare_exchange_strong_explicit(&g_futex_init_state',
     'counted_cas(&g_futex_init_state')

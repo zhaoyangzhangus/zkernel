@@ -56,8 +56,8 @@ NV_STATUS NV_API_CALL nv_register_user_pages(nv_state_t *nv, NvU64 page_count,
     if (unencrypted) return NV_ERR_NOT_SUPPORTED;
     nvabi_page_allocation_t *allocation = kzalloc(sizeof(*allocation), 0U);
     if (allocation == NULL) return NV_ERR_NO_MEMORY;
-    /* Imported ordinary RAM remains WB; never invalidate/change the CPU
-     * aliases of the compositor's shared buffer to UC. Pins own the pages. */
+    /* 导入的普通 RAM 保持 WB；绝不将合成器共享缓冲区的 CPU 别名失效或改为 UC。
+     * 页面由 pin 引用持有。 */
     kstatus_t status = nv_port_mem_wrap_pages(*private_data,
         (uint32_t)page_count, (size_t)page_count * PAGE_SIZE,
         NV_PORT_CACHE_WB, &allocation->memory);
@@ -318,9 +318,8 @@ void *NV_API_CALL nv_alloc_kernel_mapping(
     span = size + (uint64_t)pageOffset;
     map_pages = (span >> PAGE_SHIFT) +
                 ((span & (PAGE_SIZE - 1ULL)) != 0U ? 1ULL : 0ULL);
-    /* A direct map is WB on System.  It is valid only for a WB allocation;
-     * vendor UC/WC allocations must use a mapping with the requested cache
-     * attribute even when the range fits in one page. */
+    /* System 的直接映射采用 WB 属性，因此只适用于 WB 分配。即使厂商 UC/WC 分配范围
+     * 只有一个页面，也必须使用具有所需缓存属性的映射。 */
     if (span <= NVABI_PAGE_SIZE && port_cache == NV_PORT_CACHE_WB) {
         void *direct = phys_to_direct(paddr_make(
             allocation->memory.phys_pages[(uint32_t)pageIndex]));
@@ -424,11 +423,9 @@ NV_STATUS NV_API_CALL nv_alloc_user_mapping(
         return NV_ERR_INVALID_ARGUMENT;
     }
 
-    /* The immutable 595.84 nv-usermap.c returns the validated physical
-     * address here.  The later mmap path consumes the same allocation
-     * descriptor and maps its pages into the caller's address space.  No
-     * System virtual address, VRAM allocator, GPU VA, GMMU state, or GSP
-     * transaction is synthesized by this adapter. */
+    /* 不可变的 595.84 nv-usermap.c 会在此处返回经过验证的物理地址。后续 mmap 路径会
+     * 使用同一分配描述符，并将其页面映射到调用方地址空间。此适配器不会生成 System
+     * 虚拟地址、VRAM 分配器、GPU VA、GMMU 状态或 GSP 事务。 */
     if (allocation->contiguous) {
         if (allocation->memory.phys_pages[0] > UINT64_MAX -
             pageIndex * NVABI_PAGE_SIZE) {
@@ -454,9 +451,8 @@ void NV_API_CALL nv_free_user_mapping(
     void *pAllocPrivate,
     NvU64 userAddress,
     void *pPrivate) {
-    /* 595.84's user mapping is represented by the allocation descriptor and
-     * is released with the RM memory object; there is no per-map resource to
-     * tear down in nv-usermap.c. */
+    /* 595.84 的用户映射由分配描述符表示，并随 RM 内存对象一起释放；nv-usermap.c
+     * 中没有需要单独拆除的逐映射资源。 */
     (void)nv;
     (void)pAllocPrivate;
     (void)userAddress;

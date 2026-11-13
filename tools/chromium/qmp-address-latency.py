@@ -13,8 +13,8 @@ args = parser.parse_args()
 if not 1 <= args.samples <= 100:
     parser.error('samples must be between 1 and 100')
 def toolbar_extent(width, pixels):
-    # Separate disconnected pale tooltip/desktop pixels from the toolbar.
-    # Small gaps are toolbar glyphs; a large gap cannot be part of its frame.
+    # 将断开的浅色提示框/桌面像素与工具栏区分开。
+    # 小间隙属于工具栏字形；大间隙不可能是其边框的一部分。
     runs = []
     for x in range(width):
         if sum(min(pixels[(y*width+x)*3:(y*width+x)*3+3]) >= 200
@@ -30,8 +30,8 @@ def toolbar_extent(width, pixels):
     return candidates[0][0], candidates[0][-1]+1
 
 def address_is_focused(width, pixels, left):
-    # Navigation can change URL text while the page reloads. Require the
-    # actual blue focus ring, not just a text/spinner pixel difference.
+    # 页面重新加载期间导航可能改变 URL 文本。必须检测实际的蓝色焦点环，不能只依赖文本/
+    # 加载指示器的像素差异。
     blue = 0
     for y in (56,57,89,90):
         for x in range(left+140,left+340):
@@ -40,8 +40,7 @@ def address_is_focused(width, pixels, left):
             blue += b>180 and r<110 and g<170
     if blue > 300:
         return True
-    # A populated omnibox opens its suggestion popup instead of retaining
-    # the empty-field ring. The selected URL is the other focus indicator.
+    # 地址栏有内容时会打开建议弹窗，而不是保留空栏焦点环。选中的 URL 是另一种焦点指示。
     selected = 0
     for y in range(65,83):
         for x in range(left+175,left+340):
@@ -63,7 +62,7 @@ def command(name, arguments=None):
             return qmp.command(name, arguments)
         except RuntimeError as error:
             response = error.args[0] if error.args else {}
-            # GDB-paused input was rejected, not delivered; retry only that case.
+            # GDB 暂停期间输入被拒绝而非送达；仅在这种情况下重试。
             if (name == 'input-send-event' and isinstance(response, dict) and
                     response.get('error', {}).get('desc') == 'VM not running' and
                     time.monotonic() < deadline):
@@ -75,7 +74,7 @@ def command(name, arguments=None):
 position = [0, 0]
 
 def relative(dx, dy):
-    # Keep each packet within boot HID's signed 8-bit movement range.
+    # 确保每个数据包都在启动 HID 的有符号 8 位移动范围内。
     while dx or dy:
         x = max(-100, min(100, dx))
         y = max(-100, min(100, dy))
@@ -120,8 +119,8 @@ class MouseHold:
         self.release(wait=True)
 
 def key_chord(*codes, hold_ms):
-    # send-key delays each chord member, not just the final release. Do not
-    # click while Ctrl is still held or let one shortcut modify the next.
+    # send-key 会延迟组合键中的每个按键，而不只是最后释放的按键。Ctrl 仍按下时不要点击，
+    # 也不要让一个快捷键影响下一个快捷键。
     try:
         command('input-send-event', {'events': [
             {'type': 'key', 'data': {'down': True, 'key': {'type': 'qcode', 'data': code}}}
@@ -160,7 +159,7 @@ with tempfile.TemporaryDirectory(prefix='system-address-latency-') as directory,
         frame_state['capture_start'] = capture_start
         frame_state['capture_end'] = capture_end
         frame_state['capture_ms'] = (capture_end-capture_start)*1000
-        # Exclude the mouse cursor at x=400 from the comparison region.
+        # 比较区域不包含 x=400 处的鼠标光标。
         return b''.join(pixels[(y * width + left+129) * 3:(y * width + left+339) * 3]
                         for y in range(56, 145))
 
@@ -172,8 +171,8 @@ with tempfile.TemporaryDirectory(prefix='system-address-latency-') as directory,
             command('input-send-event', {'events': [{'type': 'key', 'data': {
                 'down': down, 'key': {'type': 'qcode', 'data': 'esc'}}}]})
             time.sleep(.05)
-        # Blur with keyboard focus traversal, not an assumed blank web-page
-        # pixel (which can be a link when the user moves the window).
+        # 通过键盘焦点移动来取消焦点，不假定网页上某个像素为空白（用户移动窗口后那里
+        # 可能出现链接）。
         for codes in (('ctrl', 'l'), ('f6',)):
             key_chord(*codes, hold_ms=80)
             time.sleep(.15)
@@ -182,8 +181,7 @@ with tempfile.TemporaryDirectory(prefix='system-address-latency-') as directory,
         time.sleep(.1)
         if args.reload_before_click:
             key_chord('ctrl', 'r', hold_ms=40)
-            # Release Ctrl before the ordinary click. Do not wait for load
-            # completion: this probe intentionally overlaps reload work.
+            # 普通点击前先释放 Ctrl。不要等待加载完成：此探测有意与重新加载操作并行。
             time.sleep(.02)
         before = frame()
         start = time.monotonic()

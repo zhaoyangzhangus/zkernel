@@ -57,7 +57,7 @@ int main(void) {
  assert(set.objects[1]==&socket&&!set.owned[1]&&set.objects[2]==&write&&set.owned[2]);
  assert(read.refs==2&&write.refs==2&&read.gets==1&&write.gets==1);
  linux_poll_wait_set_release(&set);assert(read.refs==1&&write.refs==1&&!held);
- /* Failure after upgrading an already-borrowed endpoint unwinds once. */
+ /* 升级已借用的端点后发生失败时，只撤销一次。 */
  write.refs=0;
  assert(linux_poll_capture_wait_set(fds,entries,3,&set)==K_ENOENT&&!set.count);
  assert(read.refs==1&&read.gets==read.puts&&!socket.lock.held);
@@ -71,7 +71,7 @@ int main(void) {
  assert(!linux_poll_wait_set_add(&set,&unique[0],true)&&set.count==4&&set.owned[0]&&unique[0].refs==2);
  assert(!linux_poll_wait_set_add(&set,&unique[0],true)&&unique[0].gets==1);
  linux_poll_wait_set_release(&set);assert(unique[0].refs==1);
- /* epoll must pin the actual wait object, not the opaque NVIDIA frontend. */
+ /* epoll 必须固定实际等待对象，而不是不透明的 NVIDIA 前端对象。 */
  linux_epoll_object_t ep={.control_sequence=123,.watch_limit=3};
  ep.watches[0]=(linux_epoll_watch_t){true,LINUX_FD_NVIDIA,1,&a,false};
  ep.watches[1]=(linux_epoll_watch_t){true,LINUX_FD_NVIDIA,1,&b,false};
@@ -80,7 +80,7 @@ int main(void) {
  assert(!linux_epoll_capture_wait_set(&ep,objects,8,&count,&sequence));
  assert(sequence==123&&count==2&&objects[0]==&ep&&objects[1]==&source&&source.refs==2&&source.gets==1);
  linux_epoll_release_wait_set(objects,count);assert(source.refs==1&&source.puts==1);
- /* Zero masks must subscribe for ERR/HUP; disarmed ONESHOT must not. */
+ /* 零掩码必须订阅 ERR/HUP；已解除布防的 ONESHOT 则不能订阅。 */
  ep.watches[0].events=0;ep.watches[1].disabled=true;
  assert(!linux_epoll_capture_wait_set(&ep,objects,8,&count,&sequence)&&count==2);
  assert(objects[1]==&source&&source.refs==2);

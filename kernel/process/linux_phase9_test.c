@@ -1,4 +1,4 @@
-/* Phase 9 Linux personality userspace-loader acceptance runner. */
+/* 第 9 阶段 Linux personality 用户态加载器验收运行程序。 */
 #include <arch/x86_64/cpu.h>
 #include <kernel/console.h>
 #include <kernel/elf_loader.h>

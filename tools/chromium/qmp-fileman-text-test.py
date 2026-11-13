@@ -40,16 +40,15 @@ with tempfile.TemporaryDirectory(prefix='fileman-text-qa-') as directory:
     sidebar=roi(baseline,260,500,261,501)
     assert min(sidebar)>220 and max(sidebar)-min(sidebar)<20, \
         'Requires fresh centered Files; desktop is not a window-under-test'
-    # The compositor caption remains at y=135..175. The application must
-    # not repeat its title in the sidebar header below it.
+    # 合成器标题栏仍位于 y=135..175。应用不能在下方侧栏标题中重复显示窗口标题。
     sidebar_title=roi(baseline,252,180,350,212)
     assert all(v>=180 for v in sidebar_title),'Duplicate dark sidebar title remains'
     assert any(v<128 for v in roi(baseline,252,145,305,168)), 'Missing compositor title'
-    # Current root-grid labels sit below the second icon row. The old
-    # y=420 probe sampled the white document icon, not any filename.
+    # 当前根网格标签位于第二排图标下方。旧的 y=420 探测采样到的是白色文档图标，而不是
+    # 文件名。
     label_bounds=(790,450,855,478)
     label=roi(baseline,*label_bounds)
-    # A completely white ROI would falsely pass without a visible file label.
+    # 如果 ROI 完全为白色，即使没有可见文件标签也会误通过。
     assert any(v<128 for v in label),'Requires fresh Files at (240,135), root directory'
     for _ in range(6):
         move(525,245);move(675,245)

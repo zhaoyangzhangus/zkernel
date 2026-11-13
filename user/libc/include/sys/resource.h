@@ -9,7 +9,7 @@ typedef unsigned long rlim_t;
 #define RLIM_INFINITY (~0UL)
 #endif
 
-/* Linux/POSIX resource identifiers used by Chromium's POSIX base layer. */
+/* Chromium POSIX 基础层使用的 Linux/POSIX 资源标识符。 */
 #define RLIMIT_CPU 0
 #define RLIMIT_FSIZE 1
 #define RLIMIT_DATA 2
@@ -35,7 +35,7 @@ struct rlimit {
 int getrlimit(int resource, struct rlimit *limit);
 int setrlimit(int resource, const struct rlimit *limit);
 
-/* POSIX process-selection constants used by getpriority/setpriority. */
+/* getpriority/setpriority 使用的 POSIX 进程选择常量。 */
 #define PRIO_PROCESS 0
 #define PRIO_PGRP 1
 #define PRIO_USER 2

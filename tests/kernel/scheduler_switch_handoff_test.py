@@ -12,8 +12,8 @@ handoff = core[begin:core.index('static inline void scheduler_thread_mailbox_loc
 assembly = (root / 'kernel/arch/x86_64/cpu/context_switch.S').read_text()
 assembly = assembly[assembly.index('x86_switch_context_root:\n'):]
 assert assembly.count('movq %rdx, %cr3') == 1
-# The sole host substitution is privileged CR3 writing. Stack/register saves,
-# restored continuation, conditional callback and ABI alignment are unchanged.
+# 宿主测试唯一替换的是特权 CR3 写入。栈/寄存器保存、恢复的续行、条件回调和 ABI 对齐
+# 均保持不变。
 assembly = '.text\n.globl x86_switch_context_root\n' + assembly.replace('movq %rdx, %cr3', 'nop')
 assembly += '\n.globl host_worker_start\nhost_worker_start:\ncall host_worker\nud2\n.section .note.GNU-stack,"",@progbits\n'
 program = '#include "' + str(root / 'kernel/sched/internal.h') + '"\n'

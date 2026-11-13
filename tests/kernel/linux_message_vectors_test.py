@@ -95,7 +95,7 @@ int main(void) {
     for(size_t j=n;j<input[i].length;++j)assert(buffers[i][j+1]==0xcc);
     assert(buffers[i][0]==0xa5 && buffers[i][65]==0xa5);position+=n;
    }
-   /* Restore source bytes for the next gather. */
+   /* 为下一次 gather 还原源字节。 */
    position=0;for(unsigned i=0;i<count;++i){memcpy(buffers[i]+1,expected+position,input[i].length);position+=input[i].length;}
    ++cases;
   }

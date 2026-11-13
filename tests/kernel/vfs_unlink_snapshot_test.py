@@ -18,7 +18,7 @@ def function(source, signature):
 
 remove = core[core.index('kstatus_t vfs_remove_typed_kernel('):
               core.index('        /* 删除磁盘目录项后同步摘除规范 vnode')]
-# Cache eviction is exercised separately; this harness stops after commit.
+# 缓存逐出另行测试；此测试框架在提交后停止。
 remove += '(void)victim; if (mounted_victim != 0) object_put(mounted_victim); return K_OK; } return K_EXDEV; }\n'
 remove += function(core, 'kstatus_t vfs_remove_kernel(') + '\n'
 code = r'''

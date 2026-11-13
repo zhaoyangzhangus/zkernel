@@ -1,4 +1,5 @@
 #include <kernel/display.h>
+#include <kernel/pixel_format.h>
 #include <arch/x86_64/cpu.h>
 #include <kernel/console.h>
 #include <kernel/deferred.h>
@@ -19,7 +20,6 @@ typedef struct display_state {
     uint32_t height;
     uint32_t pixels_per_scanline;
     uint32_t format;
-    uint32_t masks[4];
 
     /*
     * 可选的原生扫描输出后端。
@@ -28,7 +28,7 @@ typedef struct display_state {
      */
     display_scanout_backend_t scanout_backend;
     gpu_allocation_t *current_scanout;
-    bool scanout_backend_registered;
+    atomic_bool scanout_backend_registered;
 
     /* 同一输出只允许一个未完成的提交，GOP copy 与 native flip 共用此门。 */
     bool initialized;
@@ -51,6 +51,8 @@ typedef struct display_pending_commit {
 
 static display_state_t g_display;
 static atomic_uint g_display_init_state;
+/* GOP 位掩码固定不变，初始化时展开，逐像素发布只做三次颜色查表。 */
+static uint32_t g_display_components[3][256];
 
 
 static bool display_initialize(void) {
@@ -87,28 +89,24 @@ static void display_clear_pending(void) {
     display_unlock();
 }
 
-static uint32_t display_component(uint8_t value, uint32_t mask) {
-    uint32_t shift = 0U;
-    uint32_t width = 0U;
-    uint32_t maximum;
-    if (mask == 0U) return 0U;
-    while (shift < 32U && ((mask >> shift) & 1U) == 0U) ++shift;
-    while (shift + width < 32U && ((mask >> (shift + width)) & 1U) != 0U) ++width;
-    if (width == 0U || width >= 32U) return mask;
-    maximum = (1U << width) - 1U;
-    return ((((uint32_t)value * maximum + 127U) / 255U) << shift) & mask;
+static void display_prepare_pixel_format(uint32_t format, const uint32_t masks[4]) {
+    g_display.format = format;
+    if (format != 2U) return;
+    for (uint32_t channel = 0U; channel < 3U; ++channel)
+        for (uint32_t value = 0U; value < 256U; ++value)
+            g_display_components[channel][value] = pixel_format_component((uint8_t)value, masks[channel]);
 }
 
-static uint32_t display_convert_pixel(uint32_t pixel, uint32_t format,
-                                      const uint32_t masks[4]) {
-    uint8_t red = (uint8_t)(pixel >> 16);
-    uint8_t green = (uint8_t)(pixel >> 8);
-    uint8_t blue = (uint8_t)pixel;
-    if (format == 1U) return ((uint32_t)blue) | ((uint32_t)green << 8) |
-                                   ((uint32_t)red << 16);
-    if (format == 2U) return display_component(red, masks[0]) |
-                              display_component(green, masks[1]) |
-                              display_component(blue, masks[2]);
+/* 位掩码表在显示初始化后保持不变；跨度循环无需逐像素重新判断 GOP 格式。 */
+static uint32_t display_convert_masked_pixel(uint32_t pixel) {
+    return g_display_components[0][(pixel >> 16U) & 255U] |
+           g_display_components[1][(pixel >> 8U) & 255U] |
+           g_display_components[2][pixel & 255U];
+}
+
+static uint32_t display_convert_pixel(uint32_t pixel) {
+    if (g_display.format == 0U) return pixel_xrgb_to_rgbr(pixel);
+    if (g_display.format == 2U) return display_convert_masked_pixel(pixel);
     return pixel & 0x00FFFFFFU;
 }
 
@@ -133,6 +131,12 @@ static void display_copy_native_xrgb8888_span(
 
     /* 按字节计数的字符串复制可处理任意扫描线对齐，且不会触及 SIMD 状态。与此前的 volatile 像素循环
      * 一样，发布栅栏仍由调用方放在帧边界处。 */
+    /* WC 写入先对齐目标缓存行，避免每条扫描线都从未对齐位置启动字符串复制。 */
+    while (pixels != 0U && ((uintptr_t)destination & 63U) != 0U) {
+        *destination++ = *source++;
+        --pixels;
+    }
+    if (pixels == 0U) return;
     size_t bytes = (size_t)pixels * sizeof(uint32_t);
     __asm__ volatile ("cld; rep movsb"
                       : "+D"(destination), "+S"(source), "+c"(bytes)
@@ -140,11 +144,31 @@ static void display_copy_native_xrgb8888_span(
                       : "memory", "cc");
 }
 
+/* RGB GOP 将相邻两个 XRGB 像素一起交换红蓝分量。只在目标八字节对齐后写入，
+ * 源使用无对齐要求的读取；首尾像素单独处理，绝不跨越调用方给定的跨度。 */
+static void display_copy_rgb_span(volatile uint32_t *destination,
+                                  const uint32_t *source, uint32_t pixels) {
+    if (((uintptr_t)destination & 7U) != 0U && pixels != 0U) {
+        *destination++ = pixel_xrgb_to_rgbr(*source++);
+        --pixels;
+    }
+    while (pixels >= 2U) {
+        uint64_t pair;
+        __builtin_memcpy(&pair, source, sizeof(pair));
+        *(volatile uint64_t *)(void *)destination =
+            pixel_xrgb_pair_to_rgbr(pair);
+        destination += 2U;
+        source += 2U;
+        pixels -= 2U;
+    }
+    if (pixels != 0U) *destination = pixel_xrgb_to_rgbr(*source);
+}
+
 /* 光标等即时输出直接写最终像素，不需要构造临时行缓冲；仍统一处理 GOP 色彩布局。 */
 void display_core_publish_xrgb8888_pixel(volatile uint32_t *destination, uint32_t pixel) {
     if (destination == 0) return;
     *destination = g_display.format == 1U ? pixel :
-        display_convert_pixel(pixel, g_display.format, g_display.masks);
+        display_convert_pixel(pixel);
 }
 
 void display_core_publish_xrgb8888_span(
@@ -168,13 +192,18 @@ void display_core_publish_xrgb8888_span(
         return;
     }
 
-    for (uint32_t x = 0U; x < pixels; ++x) {
-        destination[x] =
-            display_convert_pixel(
-                source[x],
-                g_display.format,
-                g_display.masks);
+    if (g_display.format == 0U) {
+        display_copy_rgb_span(destination, source, pixels);
+        return;
     }
+
+    if (g_display.format == 2U) {
+        for (uint32_t x = 0U; x < pixels; ++x)
+            destination[x] = display_convert_masked_pixel(source[x]);
+        return;
+    }
+    for (uint32_t x = 0U; x < pixels; ++x)
+        destination[x] = source[x] & 0x00FFFFFFU;
 }
 
 static bool display_commit_shape_valid(const gpu_allocation_t *buffer,
@@ -246,27 +275,11 @@ static void display_release_scanout_buffer(gpu_allocation_t *buffer) {
 }
 
 
-static bool display_scanout_backend_snapshot(
-    display_scanout_backend_t *backend) {
-
-    bool registered;
-
-    if (backend == 0) {
-        return false;
-    }
-
-    display_lock();
-
-    registered =
-        g_display.scanout_backend_registered;
-
-    if (registered) {
-        *backend =
-            g_display.scanout_backend;
-    }
-
-    display_unlock();
-    return registered;
+/* 注册成功后后端不可替换；获取发布标记即可读取完整描述，无需占用提交锁。 */
+static bool display_scanout_backend_snapshot(display_scanout_backend_t *backend) {
+    if (backend == 0 || !display_core_has_native_scanout(0U)) return false;
+    *backend = g_display.scanout_backend;
+    return true;
 }
 
 
@@ -529,7 +542,7 @@ kstatus_t display_core_register_scanout_backend(
 
     display_lock();
 
-    if (g_display.scanout_backend_registered) {
+    if (atomic_load_explicit(&g_display.scanout_backend_registered, memory_order_relaxed)) {
         status = K_EEXIST;
     } else if (g_display.pending_commit) {
         /*
@@ -540,8 +553,8 @@ kstatus_t display_core_register_scanout_backend(
         g_display.scanout_backend =
             *backend;
 
-        g_display.scanout_backend_registered =
-            true;
+        /* 描述和回调写完整后才对查询者可见；后续重复注册不会改写已发布后端。 */
+        atomic_store_explicit(&g_display.scanout_backend_registered, true, memory_order_release);
     }
 
     display_unlock();
@@ -550,21 +563,8 @@ kstatus_t display_core_register_scanout_backend(
 
 
 bool display_core_has_native_scanout(uint32_t output) {
-    bool registered;
-
-    if (output != 0U ||
-        !display_initialize()) {
-
-        return false;
-    }
-
-    display_lock();
-
-    registered =
-        g_display.scanout_backend_registered;
-
-    display_unlock();
-    return registered;
+    return output == 0U && display_initialize() &&
+        atomic_load_explicit(&g_display.scanout_backend_registered, memory_order_acquire);
 }
 
 
@@ -693,8 +693,7 @@ bool display_core_init(uint64_t framebuffer_virtual, uint64_t framebuffer_size,
     g_display.width = width;
     g_display.height = height;
     g_display.pixels_per_scanline = pixels_per_scanline;
-    g_display.format = framebuffer_format;
-    for (uint32_t i = 0U; i < 4U; ++i) g_display.masks[i] = masks[i];
+    display_prepare_pixel_format(framebuffer_format, masks);
     g_display.initialized = true;
     display_unlock();
     return true;

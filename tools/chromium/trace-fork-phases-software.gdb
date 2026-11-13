@@ -1,7 +1,7 @@
 set pagination off
 target remote /tmp/system-keys.sock
-# Verified against 19c3db402a4771a9fa2e85fd18932777d9465c5da62588a92bba265decbdd518.
-# All timestamps are collected before stopping, so debugger pause is excluded.
+# 已根据 19c3db402a4771a9fa2e85fd18932777d9465c5da62588a92bba265decbdd518 验证。
+# 所有时间戳均在暂停前采集，因此不包含调试器暂停时间。
 break *0xffffffff80019df3
 commands
 silent

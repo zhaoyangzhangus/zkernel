@@ -64,8 +64,8 @@ static void validate(vm_space_t *s) {
     unsigned indexed=0;
     for(rb_node_t *node=rb_tree_first(&s->areas);node;node=rb_tree_next(node))++indexed;
     assert(indexed==count && total==atomic_load(&s->commit_pages));
-    /* Independent list oracle also verifies augmented gaps at every unlock,
-     * including partial MMU/allocation failures and head/tail/middle cuts. */
+    /* 独立链表基准会在每次解锁时验证增强间隙，包括部分 MMU/分配失败以及头部/尾部/
+     * 中间拆分。 */
     for(unsigned i=0;i<40;++i)for(unsigned pages=1;pages<=8;++pages) {
         uint64_t hint=VM_USER_BASE+i*PAGE_SIZE,cursor=hint,size=pages*PAGE_SIZE;
         for(list_head_t *item=s->area_list.next;item!=&s->area_list;item=item->next) {
@@ -115,8 +115,8 @@ static void prepare(unsigned layout) {
     rebuild_area_tree(&space);rebuilds=seeks=scans=erasures=0;
 }
 int main(void) {
-    /* Preparation must not edit the source/index, even before publication;
-     * nullable backing/shadow references transfer only to the new owner. */
+    /* 准备过程不得修改源对象/索引，即使尚未发布也一样；可空的后备/影子引用只转交给
+     * 新所有者。 */
     for(unsigned layout=0;layout<3;++layout)
       for(unsigned mask=0;mask<4;++mask)for(unsigned failure=0;failure<2;++failure) {
         prepare(layout);vm_area_t *source=&areas[1];
@@ -216,7 +216,7 @@ int main(void) {
         assert(find_area_at_or_after(&large_space,VM_USER_BASE+i*PAGE_SIZE)==expected);
         assert(seeks<=24);++lookups;
     }
-    /* Insertion overlap and list-position oracle, including an empty tree. */
+    /* 插入重叠检查和链表位置基准，包括空树。 */
     for(unsigned count=0;count<=4;++count)for(unsigned start=0;start<40;++start)
       for(unsigned length=1;length<=40;++length) {
         prepare(1);
@@ -259,8 +259,7 @@ int main(void) {
             ++insertions;
         }
     assert(insertions==4920);
-    /* Full production replacement, including partial failure: every unlock
-     * validates the real address tree against its authoritative list. */
+    /* 完整测试生产替换流程，包括部分失败：每次解锁都会将真实地址树与权威链表比较。 */
     unsigned replacements=0;
     for(unsigned layout=0;layout<3;++layout)
       for(unsigned start=0;start<40;++start)for(unsigned end=start+1;end<=40;++end)

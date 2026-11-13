@@ -6,7 +6,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-# powershell.exe -File may pass a comma-separated string for a string array.
+# powershell.exe -File 可能会将字符串数组作为逗号分隔的字符串传入。
 if ($HardwareLog.Count -eq 1 -and $HardwareLog[0].Contains(',')) {
     $HardwareLog = @($HardwareLog[0] -split ',')
 }

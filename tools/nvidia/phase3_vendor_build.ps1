@@ -150,8 +150,8 @@ foreach ($line in @(Get-Content -LiteralPath $sourceListPath)) {
     })
 }
 
-# This is the same generated symbol pair produced by the upstream Makefile.
-# It is generated outside the immutable vendor tree and is a link input only.
+# 这是上游 Makefile 生成的同一对符号。它在不可变的供应商代码树之外生成，
+# 只作为链接输入。
 $nvidSource = Join-Path $generatedRoot 'g_nvid_string.c'
 Write-AsciiLines $nvidSource @(
     'const char NVRM_ID[] = "nvidia id: UNIX Open Kernel Module for System RM, baseline 595.84";',
@@ -248,9 +248,8 @@ $defines = @(
 )
 $abiDefines = $defines + '-DOS_KERNEL_BUILD'
 
-# Match the upstream RM profile. Prefer the repository's freestanding ELF
-# cross toolchain so the relocatable link has the same object format as the
-# upstream Linux build. A native compiler remains a diagnostic fallback only.
+# 与上游 RM 配置保持一致。优先使用仓库中的 freestanding ELF 交叉工具链，
+# 使可重定位链接的对象格式与上游 Linux 构建相同。本机编译器仅作为诊断回退。
 $commonFlags = @(
     '-fno-strict-aliasing', '-fno-omit-frame-pointer', '-Wformat=2',
     '-Wno-unused-parameter', '-O2', '-ffreestanding', '-fno-stack-protector',
@@ -351,15 +350,14 @@ $compiledRecords = @($records | Where-Object Status -eq 'compiled')
 if ($compiledRecords.Count -eq 0) { throw 'no RM vendor object compiled' }
 Write-AsciiLines $objectList @($compiledRecords | ForEach-Object { $_.Object.Replace('\', '/') })
 
-# Compile the System-side ABI closure outside the immutable vendor tree.  C
-# adapters are compiled with the vendor ABI headers; assembly adapters are
-# deliberately limited to fail-closed return paths and are type-checked by
-# nvabi_contracts.c.
+# 在不可变的供应商代码树之外编译 System 侧 ABI 依赖闭包。C 适配器使用
+# 供应商 ABI 头文件编译；汇编适配器有意限制为安全失败返回路径，并由
+# nvabi_contracts.c 检查类型。
 $abiRecords = New-Object 'System.Collections.Generic.List[object]'
 $abiIndex = 0
-# Phase 3 is the closed, baseline ABI graph.  Phase 5-only adapters are
-# linked by phase5_build.ps1 so that adding firmware/timer/DMA support cannot
-# silently change the earlier Phase 3 Gate input.
+# 阶段 3 是封闭的基线 ABI 依赖图。仅供阶段 5 使用的适配器由
+# phase5_build.ps1 链接，避免新增固件、定时器或 DMA 支持时悄然改变
+# 阶段 3 Gate 的输入。
 $phase5OnlyAbiNames = @(
     'nvabi_firmware.c',
     'nvabi_dma.c',
@@ -493,10 +491,9 @@ if (-not $SkipLink) {
 $linkLogLines.Add(('status={0};exit={1};object={2}' -f $(if ($linkExitCode -eq 0) { 'linked' } else { 'link_failed' }), $linkExitCode, $linkObject))
 Write-AsciiLines $linkLog $linkLogLines
 
-# The production kernel is built by Phase 3 Gate before this probe runs.  Its
-# normal MinGW objects are PE/COFF; convert copies into the build directory so
-# the NVIDIA ELF RM object can be checked against the real System support
-# closure without changing any production object or vendor source.
+# 此探测运行前，阶段 3 Gate 已构建生产内核。常规 MinGW 对象采用 PE/COFF 格式；
+# 将副本转换到构建目录后，即可用它检查 NVIDIA ELF RM 对象是否符合真实的
+# System 支持闭包，而无需修改任何生产对象或供应商源码。
 $systemRecords = New-Object 'System.Collections.Generic.List[object]'
 $systemIndex = 0
 $systemFiles = @()
@@ -626,8 +623,8 @@ foreach ($record in $compiledRecords) {
     }
 }
 
-# The final RM-plus-System linked object is the Gate input. A relocatable link
-# preserves unresolved relocations, allowing us to inspect the complete graph.
+# 最终的 RM 与 System 链接对象是 Gate 的输入。可重定位链接会保留未解析的
+# 重定位，因此可以检查完整依赖图。
 $linkedUndefined = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
 $linkedNmExitCode = 1
 if (Test-Path -LiteralPath $systemLinkObject -PathType Leaf) {
@@ -640,10 +637,9 @@ if (Test-Path -LiteralPath $systemLinkObject -PathType Leaf) {
         }
     }
 }
-# If the final object is unavailable or nm failed, retain the per-object
-# diagnostic as a conservative fallback.  A successful empty `nm -u` result
-# is the required zero-unresolved result and must not be replaced by the raw
-# vendor inventory.
+# 如果最终对象不可用或 nm 执行失败，则保留逐对象诊断作为保守回退。
+# 成功执行且结果为空的 `nm -u` 才表示未解析符号数为零；不得用原始供应商
+# 符号清单替代该结果。
 if (-not (Test-Path -LiteralPath $systemLinkObject -PathType Leaf) -or $linkedNmExitCode -ne 0) {
     foreach ($symbol in $undefined) {
         if (-not $defined.Contains($symbol)) { [void]$linkedUndefined.Add($symbol) }

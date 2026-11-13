@@ -58,9 +58,11 @@ typedef struct control_layout_state {
     control_parent_layout_t resolved;
 } control_layout_state_t;
 
+enum {CONTROL_SUBTREE_FLEX=0x8000U,CONTROL_SUBTREE_END=0x7FFFU};
+
 /* 输入即时布局与绘制缓存经过同一解析，不修改应用快照或改变事件索引。 */
 static const os_control_node_t *control_popup_node(const os_control_node_t *nodes,uint32_t count,
-    uint32_t index,control_layout_state_t *parent,os_control_node_t *node) {
+    uint32_t index,const uint16_t *subtrees,control_layout_state_t *parent,os_control_node_t *node) {
     const os_control_node_t *source=nodes+index;
     bool menu_child=parent && (parent->resolved.flags&OS_CONTROL_MENU_PANEL);
     bool dialog_child=parent && parent->automatic_dialog;
@@ -80,16 +82,15 @@ static const os_control_node_t *control_popup_node(const os_control_node_t *node
         node->flags&=~(OS_CONTROL_JUSTIFY_CENTER|OS_CONTROL_JUSTIFY_END|
             OS_CONTROL_JUSTIFY_BETWEEN|OS_CONTROL_ALIGN_CENTER|OS_CONTROL_ALIGN_END|OS_CONTROL_ALIGN_STRETCH);
         uint32_t rows=0;
-        for (uint32_t j=index+1U;j<count;++j) {
-            if (nodes[j].parent<index) break;
-            if (nodes[j].parent==index && !(nodes[j].flags&OS_CONTROL_HIDDEN)) ++rows;
+        /* 弹层与 Flex 共用子树边界，只统计直接子项，不重复扫描其后代。 */
+        for (uint32_t j=index+1U;j<count && nodes[j].parent==index;j=subtrees[j]&CONTROL_SUBTREE_END) {
+            if (!(nodes[j].flags&OS_CONTROL_HIDDEN)) ++rows;
         }
         node->height=(int32_t)os_control_menu_height(font,rows);
     } else if ((node->flags&OS_CONTROL_DIALOG_PANEL) && !node->width && !node->height) {
         uint32_t labels=0;bool actions=false;
-        for (uint32_t j=index+1U;j<count;++j) {
-            if (nodes[j].parent<index) break;
-            if (nodes[j].parent!=index || (nodes[j].flags&OS_CONTROL_HIDDEN)) continue;
+        for (uint32_t j=index+1U;j<count && nodes[j].parent==index;j=subtrees[j]&CONTROL_SUBTREE_END) {
+            if (nodes[j].flags&OS_CONTROL_HIDDEN) continue;
             if (nodes[j].kind==OS_CONTROL_TEXT) ++labels;
             if (nodes[j].flags&OS_CONTROL_DIALOG_ACTIONS) actions=true;
         }
@@ -159,8 +160,6 @@ static const os_control_node_t *control_popup_node(const os_control_node_t *node
     return node;
 }
 
-enum {CONTROL_SUBTREE_FLEX=0x8000U,CONTROL_SUBTREE_END=0x7FFFU};
-
 static bool control_layout_index(const os_control_node_t *nodes,uint32_t count,uint16_t *subtrees) {
     _Static_assert(OS_CONTROL_TREE_MAX_NODES<CONTROL_SUBTREE_FLEX,"subtree index width");
     uint16_t ancestors[OS_CONTROL_TREE_MAX_DEPTH];
@@ -196,11 +195,12 @@ static bool control_layout_walk(const os_control_node_t *nodes, uint32_t count,
     uint32_t depth = 0U;
     if (!nodes || !count || count > OS_CONTROL_TREE_MAX_NODES || rect_is_empty(viewport))
         return false;
-    /* 普通行列布局无需统计剩余空间；输入侧不能为未使用的 Flex 功能反复扫描子树。 */
+    /* 普通行列布局无需索引；Flex 和弹层共享同一遍子树边界统计。 */
     bool distribution = false;
     for (uint32_t i = 0U; i < count; ++i) {
         if (nodes[i].flags & (OS_CONTROL_FLEX_GROW|OS_CONTROL_JUSTIFY_CENTER|
-            OS_CONTROL_JUSTIFY_END|OS_CONTROL_JUSTIFY_BETWEEN)) { distribution=true; break; }
+            OS_CONTROL_JUSTIFY_END|OS_CONTROL_JUSTIFY_BETWEEN|
+            OS_CONTROL_MENU_PANEL|OS_CONTROL_DIALOG_PANEL)) { distribution=true; break; }
     }
     if (distribution && !control_layout_index(nodes,count,subtrees)) return false;
     for (uint32_t i = 0U; i < count; ++i) {
@@ -209,7 +209,7 @@ static bool control_layout_walk(const os_control_node_t *nodes, uint32_t count,
             --depth;
         }
         os_control_node_t resolved;
-        const os_control_node_t *node = control_popup_node(nodes,count,i,
+        const os_control_node_t *node = control_popup_node(nodes,count,i,subtrees,
             depth ? stack+depth-1U : 0,&resolved);
         control_tree_box_t box = {0};
         if (i == 0U) {
@@ -513,7 +513,18 @@ uint32_t control_tree_hit_test(const os_control_node_t *nodes, uint32_t count,
     /* 与绘制采用同一顺序，后绘制的兄弟子树优先命中。禁用和隐藏状态由布局继承。 */
     for (uint32_t i = count; i != 0U; --i) {
         uint32_t index = i - 1U;
-        if (!boxes[index].visible || !boxes[index].enabled ||
+        if (!boxes[index].visible) {
+            /* 隐藏状态沿父链继承。回退到最高隐藏祖先，一次跳过其全部后代；
+             * 越界子控件和穿透父节点仍按原有反向层叠顺序检查。 */
+            uint32_t parent = nodes[index].parent;
+            while (parent < index && !boxes[parent].visible) {
+                index = parent;
+                parent = nodes[index].parent;
+            }
+            i = index + 1U;
+            continue;
+        }
+        if (!boxes[index].enabled ||
             (nodes[index].flags & OS_CONTROL_POINTER_PASSTHROUGH)) continue;
         if (control_contains(boxes[index].bounds, x, y) && control_contains(boxes[index].clip, x, y))
             return index;
@@ -525,16 +536,20 @@ void control_tree_paint(const os_control_node_t *nodes, uint32_t count,
     const control_tree_box_t *boxes, Rect damage, control_tree_paint_fn paint, void *context) {
     if (!nodes || !boxes || !paint || count > OS_CONTROL_TREE_MAX_NODES || rect_is_empty(damage)) return;
     for (uint32_t i = 0U; i < count; ++i) {
-        Rect clip = control_intersection(damage, boxes[i].clip);
-        Rect clipped = control_intersection(clip, boxes[i].bounds);
-        /* 隐藏和继承裁剪影响整条分支；父边界只在明确裁剪子控件时才能用于跳过。 */
-        if (!boxes[i].visible || rect_is_empty(clip) ||
-            ((nodes[i].flags & OS_CONTROL_CLIP_CHILDREN) && rect_is_empty(clipped))) {
-            uint32_t end = boxes[i].subtree_end;
-            if (end > i && end <= count) i = end - 1U;
-            continue;
+        /* 隐藏或继承裁剪已排除整条分支时，不再计算节点矩形交集。 */
+        if (boxes[i].visible && !rect_is_empty(boxes[i].clip) &&
+            rect_intersects(damage, boxes[i].clip)) {
+            Rect clip = control_intersection(damage, boxes[i].clip);
+            Rect clipped = control_intersection(clip, boxes[i].bounds);
+            if (!rect_is_empty(clipped)) {
+                paint(context, nodes + i, boxes + i, clipped);
+                continue;
+            }
+            /* 未声明裁剪的父节点允许子控件越界，不能按父边界跳过。 */
+            if (!(nodes[i].flags & OS_CONTROL_CLIP_CHILDREN)) continue;
         }
-        if (!rect_is_empty(clipped)) paint(context, nodes + i, boxes + i, clipped);
+        uint32_t end = boxes[i].subtree_end;
+        if (end > i && end <= count) i = end - 1U;
     }
 }
 

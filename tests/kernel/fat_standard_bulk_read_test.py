@@ -89,9 +89,11 @@ static void fat32_diag_failure(const char *tag,UINT64 a,UINT64 b,UINT64 c) {
  (void)tag;(void)a;(void)b;(void)c;
 }
 ''' + '\n'.join((
-    function(table, 'BOOLEAN fat32_read_fat_entry('),
+    function(table, 'static BOOLEAN fat32_fat_entry_location('),
+ function(table, 'BOOLEAN fat32_read_fat_entry('),
     function(table, 'BOOLEAN fat32_read_next_cluster('),
     function(table, 'UINT32 fat32_extent_length('),
+ function(files, 'static void fat32_extend_seek_hint('),
     locate,
     reference_locate,
     function(files, 'static UINT64 fat32_contiguous_extent_bytes('),
@@ -182,6 +184,25 @@ int main(void) {
    .FatCount=2,.FatType=bits,.FatStartLba=fat_start,.FatSectors=64,
    .ClusterCount=10000,.DataStartLba=data_start};
   failed_lba=UINT32_MAX;
+  /* 流式读扩大了已验证区间，切换游标后仍应通过两级提示直接命中。 */
+  if(layout==0){
+   assert(block_cache_init(&fs.Cache,&device));
+   OS_FAT32_FILE streamed={.FileSystem=&fs,.Used=1,.FirstCluster=2,.Size=4096ULL*bps*8};
+   UINT32 physical_start=0;
+   assert(locate_file_cluster(&streamed,0,&physical_start)&&physical_start==2);
+   assert(fat32_contiguous_extent_bytes(&streamed,0,0,bps*8,OS_BLOCK_CACHE_MAX_READ_BYTES)==OS_BLOCK_CACHE_MAX_READ_BYTES);
+   unsigned covered=streamed.CursorLength;
+   assert(covered>16);
+   for(unsigned mode=0;mode<2;++mode){
+    OS_FAT32_FILE moved=streamed;UINT32 found=0;
+    assert(locate_file_cluster(&moved,1024,&found)&&found==1026);
+    if(mode==0)moved.SeekIndexValid=0;else moved.SeekCacheCount=0;
+    sector_calls=0;
+    assert(locate_file_cluster(&moved,covered-1,&found)&&found==covered+1);
+    assert(sector_calls==0);
+   }
+   assert(block_cache_destroy(&fs.Cache));
+  }
   unsigned targets[]={0,15,16,254,255,256,1024,4095,128,4094,16,2048,4096,8192};
   for(unsigned cold=0;cold<2;++cold) {
    OS_FAT32_FILE a={.FileSystem=&fs,.Used=1,.FirstCluster=2,.Size=4096ULL*bps*8};
@@ -236,3 +257,13 @@ with tempfile.TemporaryDirectory(prefix='fat-standard-bulk-') as directory:
         preexec_fn=lambda: resource.setrlimit(resource.RLIMIT_CORE, (0,0)))
     assert result.returncode == -signal.SIGABRT and b'actual_calls<previous_calls' in result.stderr
     print('Negative control rejected: distant seeks repeat fixed 16-cluster probes')
+
+    # 分别破坏两级提示的回写，确保流式读取后的跳转确实依赖新逻辑。
+    for field in ('SeekLength[i]', 'SeekIndexLength[i]'):
+        broken = program.replace('&file->' + field + ');', '&file->CursorLength);')
+        assert broken != program
+        subprocess.run(command, input=broken, text=True, check=True)
+        result = subprocess.run([binary], capture_output=True, timeout=30,
+            preexec_fn=lambda: resource.setrlimit(resource.RLIMIT_CORE, (0,0)))
+        assert result.returncode == -signal.SIGABRT and b'sector_calls==0' in result.stderr
+        print('Negative control rejected: streaming range not published to ' + field)

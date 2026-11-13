@@ -7,7 +7,7 @@
 #define NVME_COMPLETION_STOPPING 0x80000000U
 #define NVME_COMPLETION_REF_MASK 0x7FFFFFFFU
 
-/* REFACTOR_P8_NVME_COMPLETION_OWNER: IRQ, CQ consumption, and deferred completion. */
+/* REFACTOR_P8_NVME_COMPLETION_OWNER：IRQ、CQ 消费和延迟完成处理。 */
 
 static void nvme_deferred_complete(void *argument);
 static bool nvme_schedule_queue_completion(nvme_queue_t *queue);

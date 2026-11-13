@@ -61,8 +61,7 @@ assert all(re.search(pattern, log) for pattern in desktop_patterns)
 assert not any(re.search(pattern, 'OS_DESKTOP_CACHE_PENDING\r\n')
                for pattern in desktop_patterns)
 assert collector.count("'OS_HOST_FIRMWARE_STATE'") == 2
-# This persisted firmware key is an intentional compatibility identity, not
-# a log marker: existing machine state must remain readable.
+# 此固件持久化键是有意保留的兼容身份，而不是日志标记：必须仍能读取已有机器状态。
 assert "'LiteOSRealTestState'" in collector
 print('Guest failure gate: current stage/framebuffer failures rejected, QEMU status preserved, clean and missing logs handled passed')
 print('Benchmark failure records and Windows real-test/firmware marker contracts passed (Windows source checks only)')

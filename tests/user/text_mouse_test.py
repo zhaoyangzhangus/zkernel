@@ -166,7 +166,7 @@ int main(void) {
  assert(shell_mouse_command_offset(10)==0 && shell_mouse_command_offset(42)==1);
  assert(shell_mouse_command_offset(10000)==3);
  g_input_view_start=2;assert(shell_mouse_command_offset(26)==1);
- /* A maximum-length path must not truncate command click positions at 255. */
+ /* 路径达到最大长度时，命令中的点击位置也不能被截断到 255。 */
  memset(g_display_line,'p',255);memcpy(g_display_line+255,"# abc",6);
  g_prompt_length=257;g_input_view_start=250;g_command_length=3;
  assert(shell_mouse_command_offset(74)==1);

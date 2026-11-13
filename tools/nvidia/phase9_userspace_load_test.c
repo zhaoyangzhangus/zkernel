@@ -1,4 +1,4 @@
-/* Phase 9: load the real 595.84 GLVND and NVIDIA EGL vendor libraries. */
+/* 阶段 9：加载真实的 595.84 GLVND 和 NVIDIA EGL 供应商库。 */
 #include <stdint.h>
 #include <string.h>
 #include <unistd.h>

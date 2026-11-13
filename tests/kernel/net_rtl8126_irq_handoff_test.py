@@ -56,8 +56,8 @@ static void rtl8126_write32(e1000_state_t *s,unsigned reg,uint32_t value){
  assert(reg==RTL8126_REG_INT_MASK);mask=value;
  if(value){
   ++rearms;cause|=unmask_cause;unmask_cause=0;
-  /* An MSI may arrive immediately on another CPU, before this write
-   * returns. It must see idle, otherwise TX/link-only work is lost. */
+  /* MSI 可能在此写入返回前立即在另一个 CPU 上到达。它必须看到空闲状态，
+   * 否则仅针对 TX/链路的工作会丢失。 */
   deliver();
  }
 }
@@ -107,7 +107,7 @@ int main(void){
     assert(mask==RTL8126_INT_MASK_VALUE);
    }
   }
-  /* An exhausted receive budget keeps MSI masked and schedules RX now. */
+  /* 接收预算耗尽时保持 MSI 屏蔽，并立即安排 RX 处理。 */
   cause=0;queued=coalesced=rearms=0;leave_rx=true;
   atomic_store(&g_e1000_poll_queued,true);
   e1000_deferred_poll(0);

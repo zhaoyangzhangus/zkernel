@@ -74,8 +74,7 @@ static void reference_test_line(ascii_font_point_t from,ascii_font_point_t to,
   ((int64_t)(y-from.y)*(to.x-from.x))/(to.y-from.y);
  if(intersection>x)*inside=!*inside;
 }
-/* Keep the original curve subdivision: production early-outs must not
- * silently enter the full-font pixel compatibility oracle. */
+/* 保留原始曲线细分逻辑：生产代码的提前退出不能意外进入全字体像素兼容基准。 */
 static void reference_test_quadratic(ascii_font_point_t from,
  ascii_font_point_t control,ascii_font_point_t to,int32_t x,int32_t y,bool *inside) {
  ascii_font_point_t previous=from;
@@ -93,8 +92,8 @@ reference_outline = source[source.index('static bool font_outline_contains('):
 reference_outline = reference_outline.replace('font_outline_contains', 'reference_outline_contains').replace(
     'font_test_quadratic', 'reference_test_quadratic').replace('font_test_line', 'reference_test_line')
 reference_raster = r'''
-/* Frozen pre-clipping rasterizer: do not derive its pixel traversal from
- * the optimized implementation or the oracle would share clipping bugs. */
+/* 固定使用裁剪前的光栅器：不能从优化实现推导其像素遍历方式，否则基准会与被测
+ * 实现共享裁剪缺陷。 */
 static bool reference_rasterize_glyph(uint16_t glyph,uint8_t *destination,
                                       uint32_t width,uint32_t height) {
  ascii_font_point_t points[ASCII_FONT_MAX_POINTS];uint16_t ends[ASCII_FONT_MAX_CONTOURS];
@@ -124,8 +123,7 @@ static bool reference_rasterize_glyph(uint16_t glyph,uint8_t *destination,
 }
 '''
 checks = r'''
-/* The prior whole-cache-clear implementation, using the unchanged actual
- * parser/rasterizer, is the pixel compatibility oracle. */
+/* 先前的整缓存清除实现使用未更改的实际解析器/光栅器，作为像素兼容基准。 */
 static void old_cache(unsigned width,unsigned height,uint8_t **out,size_t *size) {
  size_t glyph_bytes=(size_t)width*height;*size=glyph_bytes*95;
  *out=kmalloc(*size,0);memset(*out,0,*size);

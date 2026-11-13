@@ -2,7 +2,7 @@
 
 #include <kernel/base.h>
 
-/* Native Realtek RTL8126A wired-NIC backend. */
+/* 原生 Realtek RTL8126A 有线网卡后端。 */
 bool rtl8126_hardware_present(void);
 bool rtl8126_self_test(void);
 bool rtl8126_interrupt_ready(void);

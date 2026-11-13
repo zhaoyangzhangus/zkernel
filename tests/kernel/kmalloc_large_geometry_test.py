@@ -70,8 +70,8 @@ static void write_trailer(void *p,size_t n,uint64_t cookie){
  assert(n==requested_size);memcpy((char*)p+n,&cookie,sizeof(cookie));
 }
 @BODY@
-/* Combine the real VFS policy with the real large allocator rather than a
- * malloc-only fixture that hides physical-order inflation. */
+/* 将真实 VFS 策略与真实大块分配器组合测试，而不是使用会掩盖物理阶数膨胀的 malloc
+ * 专用测试夹具。 */
 typedef int kstatus_t;
 enum {K_OK=0,K_EINVAL=-1,K_EOVERFLOW=-2,K_ENOMEM=-3};
 typedef struct {uint8_t *data;uint64_t size,data_capacity;bool directory;} vfs_backend_node_t;
@@ -105,8 +105,8 @@ int main(void){
   printf("request=%zu physical=%zu order=%u\n",requested_size,physical,observed_order);
   kfree(p);assert(!live_pages && !live_bytes);
  }
- /* A fragmented allocator can have hundreds of MiB in <=2MiB blocks.
-  * The real allocation function still requests order10 (4MiB) for 2MiB. */
+ /* 碎片化分配器中可能有数百 MiB 的容量，但都位于不超过 2 MiB 的块中。
+  * 真实分配函数仍会为 2 MiB 请求 order10（4 MiB）。 */
  max_order=9;calls=0;requested_size=2097152;
  assert(!allocate_large(requested_size,0,false));
  assert(calls==1 && observed_order==10);
@@ -125,7 +125,7 @@ int main(void){
   assert(payload_zero_bytes==size && !payload_poison_bytes && !ram_zero_bytes);
   for(size_t n=0;n<size;++n)assert(b.data[n]==0);
   printf("RAM-file=%zu physical=%zu order=%u\n",size,(size_t)PAGE_SIZE<<order,order);
-  /* In-capacity changes reuse backing and re-exposed bytes must be zero. */
+  /* 容量范围内的更改会复用后备存储；重新暴露的字节必须为零。 */
   b.data[size-1]=0x5a;unsigned before=calls;
   assert(vfs_memory_backend_truncate(&b,size-1)==K_OK);
   assert(vfs_memory_backend_truncate(&b,size)==K_OK && calls==before);
@@ -133,9 +133,8 @@ int main(void){
   assert(vfs_memory_backend_truncate(&b,0)==K_OK && !storage);
   ++file_cases;
  }
- /* A large old backing and its smaller replacement coexist during shrink.
-  * Limit the allocator to the minimal new order: geometric rounding would
-  * fail and silently retain the entire old allocation in these cases. */
+ /* 缩小时，大型旧后备存储会与较小的新后备存储同时存在。
+  * 将分配器限制为最小的新阶：几何取整会失败，并在这些情况下悄然保留整个旧分配。 */
  const size_t shrinks[]={17,255,1984,2048,4040,4095,4096,131073,262145,524289,786432};
  for(unsigned i=0;i<sizeof(shrinks)/sizeof(*shrinks);++i){
   vfs_backend_node_t b={0};max_order=18;
@@ -152,7 +151,7 @@ int main(void){
   printf("RAM-shrink=%zu physical=%zu order=%u\n",size,live_bytes,order);
   assert(vfs_memory_backend_truncate(&b,0)==K_OK && !live_pages && !live_bytes);
  }
- /* No speculative larger allocation or duplicate exact-size retry on OOM. */
+ /* OOM 时不得试探性地分配更大的空间，也不得重复进行精确大小重试。 */
  vfs_backend_node_t b={0};max_order=9;calls=0;
  assert(vfs_memory_backend_truncate(&b,3145728)==K_ENOMEM);
  assert(calls==1 && observed_order==10 && !b.data && !b.size && !b.data_capacity);

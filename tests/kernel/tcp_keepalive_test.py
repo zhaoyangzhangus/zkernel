@@ -25,12 +25,12 @@ batch_output='\n'.join(line for line in (root/'kernel/net/tcp_output.h').read_te
 local_retry='\n'.join(line for line in (root/'kernel/net/tcp_retry.h').read_text().splitlines()
                       if not line.startswith(('#include', '#pragma')))
 protocol=(root/'kernel/net/socket_protocol.c').read_text()
-# Both wire families must dispatch RST before SYN, ACK and payload branches.
+# 两种线路族都必须先分发 RST，再进入 SYN、ACK 和负载分支。
 runtime=(root/'kernel/drivers/net/runtime.c').read_text()
 for family in ('4','6'):
-    start=runtime.index('packet.protocol == SOCKET_PROTOCOL_TCP && packet.family == OS_AF_INET'+family)
-    reset_branch=runtime.index('if ((packet.flags & NET_TCP_FLAG_RST) != 0U)',start)
-    syn_branch=runtime.index('if ((packet.flags & NET_TCP_FLAG_SYN) != 0U',start)
+    start=runtime.index('packet->protocol == SOCKET_PROTOCOL_TCP && packet->family == OS_AF_INET'+family)
+    reset_branch=runtime.index('if ((packet->flags & NET_TCP_FLAG_RST) != 0U)',start)
+    syn_branch=runtime.index('if ((packet->flags & NET_TCP_FLAG_SYN) != 0U',start)
     assert reset_branch < syn_branch
     assert 'socket_inject_tcp_ack_ipv'+family+'_reply(' in runtime[reset_branch:syn_branch]
 inheritance=[]
@@ -177,10 +177,9 @@ static void configure(void){
  }
 }
 int main(void){
- // Stale/future ACKs and reordered segments cannot overwrite a newer window.
- // Exercise both ingress families, zero/max windows and both sequence spaces
- // wrapping independently. Valid ACK progress still retires retained data
- // even when its older window advertisement must be ignored.
+ // 过期或超前的 ACK、以及乱序分段都不能覆盖较新的窗口。
+ // 覆盖两种入口族、零窗口和最大窗口，并分别测试两个序列空间回绕。
+ // 即使旧窗口通告必须忽略，有效 ACK 的推进仍应释放已确认的保留数据。
  unsigned window_cases=0;
  for(unsigned family=0;family<2;++family)
  for(unsigned wrap=0;wrap<4;++wrap)
@@ -214,8 +213,7 @@ int main(void){
   ++window_cases;
  }
  printf("TCP window freshness: %u IPv4/IPv6 stale/future/duplicate ACK, reordered/wrapped sequence and zero/max window cases PASS\n",window_cases);
- // Cumulative progress retires only the acknowledged prefix, including
- // sequence wrap, without losing the retained suffix or its local retry.
+ // 累积确认只释放已确认的前缀（包括序列号回绕），保留后缀及其本地重试。
  for(unsigned family=0;family<2;++family)for(unsigned wrap=0;wrap<2;++wrap)
  for(unsigned amount=1;amount<32;++amount){
   reset();socket_private_t *p=&states[family];
@@ -242,8 +240,8 @@ int main(void){
     socket_inject_tcp_ack_ipv4_reply(2,456,1,123,2000,rejected[i],NET_TCP_FLAG_ACK,8192,0);
    assert(!rc && !memcmp(p,&saved,sizeof(saved)) && wakes==1);
   }
-  // A completion after ACK progress still owns the remaining suffix. An
-  // already-ACKed or future span cannot fail it or alter the retry timer.
+  // ACK 推进后的完成事件仍对应剩余后缀。已确认或超前的区间不能使其失败，
+  // 也不能改变重试计时器。
   assert(!socket_tcp_local_output_locked(p,base,base+amount,K_EIO,now));
   assert(!socket_tcp_local_output_locked(p,base,base+33,K_EIO,now));
   assert(socket_tcp_local_output_locked(p,base,base+32,K_EIO,now));
@@ -268,16 +266,16 @@ int main(void){
   assert(!rc && !p->tcp_send_pending && !p->tcp_send_length && !p->tcp_local_retry_tsc);
   assert(wakes==2 && notifications==2 && !sockets[family].refs && !locked);
  }
- // An expired local retry is consumed, not retained as a tight-loop deadline
- // when another output completion reports backpressure later.
+ // 本地重试期限到期后应被清除；稍后的输出完成若报告背压，不能让旧期限
+ // 残留并形成紧密循环。
  reset();states[0].tcp_send_pending=true;
  states[0].tcp_send_unacknowledged=900;states[0].tcp_send_next_sequence=1000;
  states[0].tcp_send_deadline_tsc=now+1000000000ULL;
  states[0].tcp_local_retry_tsc=now-1;
  assert(!socket_tcp_local_output_locked(&states[0],900,1000,K_EAGAIN,now));
  assert(states[0].tcp_local_retry_tsc==now+20000000ULL);
- // Both wire entry points must preserve handshake, completion and reference
- // ownership, with/without reply storage and across sequence-number wrap.
+ // 两种线路入口都必须保留握手、完成状态和引用所有权语义；同时覆盖有无回复
+ // 存储以及序列号回绕。
  for(unsigned family=0;family<2;++family)
  for(unsigned phase=0;phase<3;++phase)
  for(unsigned valid=0;valid<2;++valid)
@@ -325,8 +323,8 @@ int main(void){
   }
   if(phase!=0 || !valid)assert(!reply.valid);
  }
- // A registry lookup may pin a socket just before close() unregisters it.
- // Late ACK/SYN-ACK/RST packets must not alter the now-closed socket.
+ // close() 注销套接字前，注册表查询可能刚好固定了它。
+ // 随后到达的 ACK/SYN-ACK/RST 数据包不得修改已关闭的套接字。
  for(unsigned family=0;family<2;++family)for(unsigned phase=0;phase<4;++phase){
   reset();socket_private_t *p=&states[family];
   atomic_store(&p->closed,true);
@@ -342,7 +340,7 @@ int main(void){
   assert(!rc && !reply.valid && !memcmp(p,&saved,sizeof(saved)));
   assert(!wakes && !notifications && !sockets[family].refs && !locked);
  }
- // Local EAGAIN retries without waiting for RTO or spending its retry budget.
+ // 本地 EAGAIN 应直接重试，不必等待 RTO，也不消耗其重试预算。
  reset();fail_outputs=true;
  for(unsigned i=0;i<2;++i) {
   states[i].tcp_send_pending=true;states[i].tcp_send_flags=NET_TCP_FLAG_ACK;
@@ -358,7 +356,7 @@ int main(void){
   states[i].tcp_send_deadline_tsc==2000000000ULL && states[i].tcp_local_retry_tsc==now+20000000ULL);
  fail_outputs=false;now+=20000000ULL;socket_tcp_poll(now);
  for(unsigned i=0;i<2;++i)assert(outputs[i]==2 && !states[i].tcp_local_retry_tsc && !states[i].tcp_send_retransmits);
- // Later output completion cannot alter an ACKed or different flight.
+ // 后续输出完成事件不能修改已确认或属于其他传输批次的状态。
  states[0].tcp_send_pending=false;
  socket_tcp_local_output_locked(&states[0],1000,1001,K_EAGAIN,now);
  assert(!states[0].tcp_local_retry_tsc);
@@ -370,8 +368,8 @@ int main(void){
  assert(!states[0].tcp_local_retry_tsc);
  assert(!socket_tcp_local_output_locked(&states[0],1000,1001,K_EIO,now));
  assert(states[0].tcp_send_pending && !atomic_load(&states[0].tcp_error));
- // A permanent local output failure aborts the current flight and notifies
- // immediately, preserving its errno instead of consuming the RTO budget.
+ // 本地输出发生永久错误时应中止当前传输批次并立即通知，保留其 errno，
+ // 而不是消耗 RTO 重试预算。
  reset();fatal_output=K_EIO;
  for(unsigned i=0;i<2;++i){
   states[i].tcp_send_pending=true;states[i].tcp_send_flags=NET_TCP_FLAG_ACK;
@@ -387,7 +385,7 @@ int main(void){
  assert(wakes==2 && notifications==2 && outputs[0]==1 && outputs[1]==1);
  socket_tcp_poll(now+10000000000ULL);
  assert(wakes==2 && outputs[0]==1 && outputs[1]==1);
- // Permanent local failure remains bounded by the existing RTO budget.
+ // 本地永久错误的处理仍受现有 RTO 重试预算限制。
  reset();fail_outputs=true;
  for(unsigned i=0;i<2;++i) {
   states[i].tcp_send_pending=true;states[i].tcp_send_flags=NET_TCP_FLAG_ACK;
@@ -414,7 +412,7 @@ int main(void){
  socket_tcp_poll(now+1999999999ULL);assert(!outputs[0] && !outputs[1]);
  now+=2000000000ULL;socket_tcp_poll(now);
  for(int i=0;i<2;++i){assert(outputs[i]==1 && last_sequence[i]==999 && last_ack[i]==2000);assert(states[i].tcp_send_next_sequence==1000 && !states[i].tcp_send_pending);}
- // Valid peer ACK resets idle/probe budget. Wrong sequence/future ACK does not.
+ // 对端的有效 ACK 会重置空闲/探测预算；序列号错误或超前的 ACK 不会。
  uint8_t a[16]={1},b[16]={2};
  assert(socket_inject_tcp_ack_ipv4_reply(2,456,1,123,2001,1000,NET_TCP_FLAG_ACK,8192,0)==0);
  assert(states[0].tcp_keep_probes==1);
@@ -432,7 +430,7 @@ int main(void){
  assert(socket_is_signaled(&sockets[0]) && socket_is_signaled(&sockets[1]));
  socket_wait_context_t waiting={.private=&states[0]};
  assert(socket_receive_ready(&waiting));
- // Reset precedes ACK/window processing and wakes waiters without a timer.
+ // 先处理 Reset，再处理 ACK/窗口；无需计时器即可唤醒等待者。
  for(int family=0;family<2;++family){
   for(unsigned opening=0;opening<2;++opening){
    for(unsigned wrap=0;wrap<2;++wrap){
@@ -444,7 +442,7 @@ int main(void){
     p->tcp_send_deadline_tsc=now+100;p->tcp_local_retry_tsc=now+20;
     socket_tcp_reply_t reply={0};
     uint32_t seq=p->tcp_next_sequence,ack=p->tcp_send_next_sequence;
-    // An in-window non-exact sequence needs a challenge, not a reset.
+    // 序列号落在窗口内但不精确匹配时应发送挑战 ACK，而不是重置。
     if(!opening){
      int rc=family?socket_inject_tcp_ack_ipv6_reply(b,456,a,123,seq+1,ack,NET_TCP_FLAG_RST,0,&reply):
        socket_inject_tcp_ack_ipv4_reply(2,456,1,123,seq+1,ack,NET_TCP_FLAG_RST,0,&reply);
@@ -476,8 +474,8 @@ int main(void){
    assert(!wakes && !notifications && states[family].tcp_state==SOCKET_TCP_SYN_SENT);
   }
  }
- // Ordinary SYN/data/FIN retransmission exhaustion must wake receivers too,
- // not merely signal poll while its blocking receive predicate stays false.
+ // 普通 SYN/数据/FIN 重传耗尽时也必须唤醒接收者；不能只通知 poll，
+ // 却让阻塞接收的条件继续为假。
  for(unsigned phase=0;phase<3;++phase){
   reset();configure();
   for(unsigned family=0;family<2;++family){
@@ -505,7 +503,7 @@ int main(void){
  reset();configure();waiting.private=&states[0];
  assert(!socket_receive_ready(0));waiting.private=0;assert(!socket_receive_ready(&waiting));
  reset();configure();
- // Disable, local peers, FIN and closed sockets must not be probed.
+ // 已禁用的连接、本地对端、FIN 状态和已关闭套接字都不得发送探测。
  socket_set_option(&sockets[0],OS_SOCKET_OPTION_KEEPALIVE,0);
  states[1].peer=&sockets[0];socket_tcp_poll(now+10000000000ULL);assert(!outputs[0] && !outputs[1]);
  states[1].peer=0;states[1].tcp_fin_sent=true;socket_tcp_poll(now+10000000000ULL);assert(!outputs[1]);
@@ -544,8 +542,8 @@ int main(void){
  assert(!locked && sockets[0].refs==0 && sockets[1].refs==0);
 }
 '''
-# Exercise the actual pure-ACK driver branches as well as the ACK handlers:
-# a correct protocol reply is useless if ingress still passes no reply buffer.
+# 除 ACK 处理器外，也覆盖纯 ACK 驱动分支：如果入口仍未传入回复缓冲区，
+# 协议回复正确也没有作用。
 dispatch = r'''
 typedef struct {unsigned unused;} e1000_state_t;
 typedef struct {
@@ -556,7 +554,7 @@ typedef struct {
  int peer_window_scale;
  uint16_t peer_mss;
 } probe_packet_t;
-/* Pure ACKs must never renegotiate SYN options in the shared ACK branch. */
+/* 共享 ACK 分支不得在纯 ACK 上重新协商 SYN 选项。 */
 #define socket_tcp_scale_ipv4(...) assert(0)
 #define socket_tcp_scale_ipv6(...) assert(0)
 #define socket_tcp_mss_ipv4(...) assert(0)
@@ -569,14 +567,15 @@ static bool e1000_send_tcp_reply(e1000_state_t *s,probe_packet_t *p,socket_tcp_r
 }
 '''
 for family in ('4', '6'):
-    start = runtime.index('packet.protocol == SOCKET_PROTOCOL_TCP && packet.family == OS_AF_INET'+family)
-    start = runtime.index('packet.payload_length == 0U', start)
+    start = runtime.index('packet->protocol == SOCKET_PROTOCOL_TCP && packet->family == OS_AF_INET'+family)
+    start = runtime.index('packet->payload_length == 0U', start)
     opening = runtime.index('{', start)
     cursor, depth = opening+1, 1
     while depth:
         depth += (runtime[cursor] == '{')-(runtime[cursor] == '}')
         cursor += 1
-    dispatch += ('static int probe_dispatch'+family+'(probe_packet_t packet){\n'
+    dispatch += ('static int probe_dispatch'+family+'(probe_packet_t input_packet){\n'
+                 'probe_packet_t *packet=&input_packet;\n'
                  'e1000_state_t device={0},*state=&device;int status;\n'+
                  runtime[opening+1:cursor-1]+'\nreturn status;\n}\n')
 probe_cases = r'''
@@ -609,9 +608,8 @@ probe_cases = r'''
    assert(probe_reply.flags==NET_TCP_FLAG_ACK && probe_reply.sequence==1000);
    assert(probe_reply.acknowledgement==p->tcp_next_sequence);
    assert(probe_reply.window==8192-counts[fill]);
-   /* Repeated probes remain answerable, and report the reopened window
-    * even if an earlier window-update ACK was lost. Output failure cannot
-    * consume receive data or prevent answering the next probe. */
+   /* 重复探测仍须能够得到响应，并报告重新开放的窗口，即使先前的窗口更新 ACK
+    * 已丢失。输出失败不能消耗接收数据，也不能妨碍响应下一次探测。 */
    probe_output_failure=true;
    assert((family?probe_dispatch6(packet):probe_dispatch4(packet))==K_EIO);
    probe_output_failure=false;atomic_store(&p->stream_count,0);
@@ -632,7 +630,7 @@ with tempfile.TemporaryDirectory(prefix='liteos-keepalive-') as directory:
                     '-fno-omit-frame-pointer','-no-pie','-I',str(root/'include'),
                     str(path/'test.c'),'-o',str(path/'test')],check=True)
     subprocess.run([str(path/'test')],check=True)
-    # Negative control: reproduce the old ingress ignoring RST entirely.
+    # 负对照：复现旧入口完全忽略 RST 的行为。
     broken=program.replace('if ((flags & NET_TCP_FLAG_RST) != 0U) {',
                            'if (false) {')
     assert broken != program

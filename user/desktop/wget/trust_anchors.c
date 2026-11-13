@@ -5,7 +5,7 @@
 #include <openssl/x509.h>
 #include <openssl/x509_vfy.h>
 
-/* ISRG Root X1 (Let's Encrypt), downloaded from letsencrypt.org. */
+/* ISRG Root X1（Let's Encrypt），从 letsencrypt.org 下载。 */
 static const char g_isrg_root_x1_pem[] =
     "-----BEGIN CERTIFICATE-----\n"
     "MIIFazCCA1OgAwIBAgIRAIIQz7DSQONZRGPgu2OCiwAwDQYJKoZIhvcNAQELBQAw\n"

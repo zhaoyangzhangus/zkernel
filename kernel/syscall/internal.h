@@ -5,7 +5,7 @@
 
 /* 系统调用处理程序的私有约定；不属于用户 ABI。 */
 process_t *current_process(void);
-/* Bounded Chrome-only stderr capture, shared by Linux and native writes. */
+/* Linux 和原生 write 共用的、仅用于 Chrome 的有界 stderr 捕获。 */
 void linux_chrome_stderr_write(process_t *process, const char *text,
                               size_t length);
 bool versioned_header_valid(const os_versioned_header_t *header,

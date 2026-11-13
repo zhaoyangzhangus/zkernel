@@ -109,8 +109,7 @@ with args.capture_file.open('rb') as capture:
             active[port]=key
             syn_sequences[key]=sequence if new_syn else None
         flows.setdefault(key,[]).append((stamp,incoming,len(payload),flags))
-        # Keep the first arrival for each sequence endpoint: retransmissions
-        # must not hide how long the guest took to acknowledge original data.
+        # 为每个序列终点保留首次到达时间：重传不能掩盖客户机确认原始数据所用的时间。
         waiting=pending.setdefault(key,{})
         track_ack(waiting,incoming,payload,sequence,acknowledgement,flags,stamp,
                   ack_state.setdefault(key,{}),ack_events.setdefault(key,[]))
@@ -127,8 +126,8 @@ for key,start in matched.items():
     outgoing=[p for p in packets if not p[1] and p[2]]
     samples=[event for event in ack_events.get(key,[]) if event['first_seen']>=window_start]
     delays=[event['delay_seconds'] for event in samples if event['delay_seconds']>=0]
-    # QEMU net/dump.c uses QEMU_CLOCK_VIRTUAL plus an RTC-derived start_ts.
-    # Do not present this as the host's wall clock or as pure browser latency.
+    # QEMU net/dump.c 使用 QEMU_CLOCK_VIRTUAL 和基于 RTC 的 start_ts。
+    # 不要将其描述为宿主机墙上时钟或纯浏览器延迟。
     results.append({'port':key[0],'connection':key[1],
                     'capture_clock':'QEMU virtual clock plus RTC start, not host UTC',
                     'connect_capture_timestamp_seconds':start,
@@ -163,7 +162,6 @@ if not results:
     print(json.dumps({'host':host,'packets_in_selected_interval':0,
                       'verification':'No traffic in selected interval; not a successful request test'}))
 for result in results[-3:]:
-    # Long-lived HTTP/2 connections can have thousands of packets. Keep the
-    # complete timeline in the report, not in the terminal/tool response.
+    # 长连接 HTTP/2 可能包含数千个数据包。将完整时间线放入报告，而不是输出到终端或工具响应。
     print(json.dumps({key: value for key, value in result.items()
                       if key not in ('payload_timeline','slow_ack_events')}))

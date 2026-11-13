@@ -9,8 +9,8 @@ typedef struct libc_siginfo siginfo_t;
 
 #define WNOHANG OS_PROCESS_WAIT_NOHANG
 
-/* Linux waitid() selector and option values.  System currently exposes the
- * wait operation through waitpid(); libc translates waitid() to that ABI. */
+/* Linux waitid() 的选择器和选项值。System 当前通过 waitpid() 提供等待操作；libc 会将 waitid()
+ * 转换为该 ABI。 */
 #ifndef P_ALL
 #define P_ALL 0
 #define P_PID 1

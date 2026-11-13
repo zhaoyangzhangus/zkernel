@@ -86,8 +86,8 @@ try:
     before=browser(states['before'])
     assert before['height']>500 and before['width']>700
     if args.tab_drag_only:
-        # Requires one existing tab. The second tab stays within the strip;
-        # this is not a detach-to-new-window or whole-window move trial.
+        # 要求已有一个标签页。第二个标签页仍留在标签栏中；此测试不验证拆分为新窗口或
+        # 移动整个窗口。
         qmp.key('ctrl','t')
         time.sleep(1.5)
         qmp.screenshot(args.evidence_dir/'chrome-integrated-two-tabs.png')
@@ -115,7 +115,7 @@ try:
         qmp.screenshot(args.evidence_dir/'chrome-integrated-tab-closed.png')
         print(json.dumps(states,indent=2),flush=True)
         sys.exit(0)
-    # Shorten the window to leave room for a two-axis title-bar drag.
+    # 缩短窗口，为标题栏双轴拖动留出空间。
     qmp.move(before['x']+before['width']//2,before['y']+before['height']-2)
     button(True)
     motion(0,-180)
@@ -130,8 +130,8 @@ try:
     assert resized['width']==before['width'] and not states['resized']['drag']
     qmp.screenshot(args.evidence_dir/'chrome-integrated-resized.png')
 
-    # Blank tab-strip space is HTCAPTION. The kernel must only start moving
-    # after Chromium's threshold, not intercept a tab's press itself.
+    # 标签栏中的空白区域属于 HTCAPTION。内核只能在 Chromium 阈值触发后开始移动，不能
+    # 截获标签本身的按下事件。
     qmp.move(resized['x']+600,resized['y']+20)
     button(True)
     motion(140,70)
@@ -149,8 +149,7 @@ try:
     assert not states['moved']['drag'] and not states['moved']['edges']
     qmp.screenshot(args.evidence_dir/'chrome-integrated-moved.png')
 
-    # A regular client click after handoff must still acquire and relinquish
-    # the implicit press grab, proving the interactive drag ended cleanly.
+    # 交接后普通客户区点击仍必须能获取并释放隐式按压捕获，以证明交互式拖动已正常结束。
     qmp.move(moved['x']+400,moved['y']+500)
     button(True)
     states['client-held']=snapshot()

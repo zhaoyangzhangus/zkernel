@@ -7,7 +7,7 @@ import resource
 
 root = Path(__file__).resolve().parents[2]
 source = (root / 'kernel/fs/vfs/file_io.c').read_text()
-helpers = source[source.index('static kstatus_t vfs_write_transaction_begin('):source.index('kstatus_t vfs_truncate_node(')]
+helpers = source[source.index('static kstatus_t vfs_file_write_begin('):source.index('kstatus_t vfs_truncate_node(')]
 code = helpers + source[source.index('static void vfs_read_kernel_yield('):source.index('kstatus_t vfs_fsync(')]
 program = r'''
 #define _GNU_SOURCE
@@ -64,6 +64,7 @@ typedef struct {unsigned sched_class;} thread_t;
 static thread_t current_thread={2U};
 static thread_t *sched_current_thread(void){return &current_thread;}
 static bool sched_preempt_disabled(void){return false;}
+static bool sched_tick_should_preempt(void){return true;}
 static void schedule(void){assert(!"idle test must not yield");}
 static int kmutex_try_lock(int *m){(void)m;return K_EAGAIN;}
 static int kmutex_lock(int *m,uint64_t timeout){(void)m;assert(timeout==UINT64_MAX&&!depth&&!transaction_depth);transaction_depth=1;return 0;}
@@ -134,7 +135,7 @@ int main(void) {
  unsigned char arena[10000],input[10000];
  for(unsigned i=0;i<sizeof(input);++i)input[i]=(unsigned char)(i*7+19);
  unsigned cases=0;
- // All four production functions, three initial offsets and four backend outcomes.
+ // 覆盖全部四个生产函数、三个初始偏移和四种后端结果。
  for(unsigned api=0;api<4;++api)for(unsigned start=0;start<3;++start)
  for(int fail=0;fail<3;++fail)for(int outcome=0;outcome<4;++outcome) {
   reset();initial=start==0?0:start==1?13:4090;file.position=initial;
@@ -184,7 +185,7 @@ int main(void) {
    assert(arena[i]==(i>=17&&i<17+got?disk[initial+i-17]:0x69));
   ++cases;
  }
- // Bounded kernel reads release the backend guard between contiguous batches.
+ // 有界内核读取会在连续批次之间释放后端保护。
  const size_t batch=1024U*1024U;
  size_t length=2ULL*batch+29;
  void *mapping=mmap(0,length,PROT_NONE,MAP_PRIVATE|MAP_ANONYMOUS|MAP_NORESERVE,-1,0);
@@ -199,8 +200,8 @@ int main(void) {
   ++cases;
  }
  assert(munmap(mapping,length)==0);wide=false;
- // A >4GiB request still completes without narrowing offsets or copying
- // through a temporary page. PROT_NONE makes accidental test access fail.
+ // 超过 4 GiB 的请求仍应完成，不能窄化偏移或通过临时页复制。
+ // PROT_NONE 会使意外访问测试内存立即失败。
  length=(size_t)UINT32_MAX+batch+29;
  mapping=mmap(0,length,PROT_NONE,MAP_PRIVATE|MAP_ANONYMOUS|MAP_NORESERVE,-1,0);
  assert(mapping!=MAP_FAILED);wide=true;
@@ -243,7 +244,7 @@ with tempfile.TemporaryDirectory(prefix='liteos-io-progress-') as directory:
                     '-fsanitize=address,undefined', '-fno-pie', '-no-pie',
                     str(path / 'test.c'), '-o', str(path / 'test')], check=True)
     subprocess.run([str(path / 'test')], check=True)
-    # Reintroduce the old early error exits: this must fail the same fixture.
+    # 重新引入旧的提前错误退出逻辑：相同的测试夹具必须因此失败。
     original_errors = re.sub(r'(result = [^;]+;\s*)break;',
                              r'\1return result;', code)
     assert original_errors != code
@@ -272,8 +273,7 @@ with tempfile.TemporaryDirectory(prefix='liteos-io-progress-') as directory:
                                                'status != K_OK'),
         'cache-under-backend-lock': helper.replace('    vfs_backend_unlock(backend);\n', ''),
     }
-    # On a normal successful write this control reaches the cache with the
-    # backend lock held, independently of any error-path assertions.
+    # 正常写入成功时，无论错误路径断言如何，此对照都会在持有后端锁的情况下进入缓存。
     for name, changed in controls.items():
         assert changed != helper
         (path/(name+'.c')).write_text(program.replace(helper, changed))

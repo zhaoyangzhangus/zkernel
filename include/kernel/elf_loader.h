@@ -18,6 +18,9 @@ typedef struct user_elf_image_info {
 
 kstatus_t process_load_elf_image(process_t *process, const void *image, size_t image_size,
                                  user_elf_image_info_t *info, vaddr_t *stack_pointer);
+/* 从文件分块加载新进程映像；maximum_size 保留调用者的文件大小策略。 */
+kstatus_t process_load_elf_from_vfs(process_t *process, const char *path,
+    uint64_t maximum_size, user_elf_image_info_t *info, vaddr_t *stack_pointer);
 kstatus_t process_exec_from_vfs(
     process_t *process, const char __user *path,
     const char __user *const __user *argv,

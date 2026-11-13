@@ -27,7 +27,7 @@ static size_t expected_length,completed_length;
 static uint64_t expected_timeout=123;
 static bool nested_read;
 static int64_t call(bool write,size_t length);
-static process_t *current_process(void) {return active;}
+process_t *current_process(void) {return active;}
 void *kmalloc(size_t n,uint32_t flags) {
  (void)flags;if(fail_alloc)return 0;++allocations;return malloc(n);
 }
@@ -92,11 +92,11 @@ int main(void) {
    for(size_t i=completed_length;i<sizeof(user_data);++i)assert(user_data[i]==(unsigned char)(i*11+3));
   }
  }
- // A nested/sleep-interleaved syscall must not overwrite another call's staging.
+ // 嵌套或交错休眠的系统调用不得覆盖另一调用的暂存区。
  completed_length=256;nested_read=true;
  unsigned a=allocations,t=transfers;
  assert(call(true,256)==K_OK && !nested_read && allocations==a && transfers==t+2);
- // A failing allocator cannot affect inline reads/writes or zero-byte calls.
+ // 分配器失败不得影响内嵌读取/写入或零字节调用。
  fail_alloc=true;
  for(unsigned write=0;write<2;++write) {
   for(size_t length=0;length<=256;++length) {
@@ -106,7 +106,7 @@ int main(void) {
   assert(call(write,257)==K_ENOMEM && transfers==t && puts_count==p+1);
  }
  fail_alloc=false;
- // Exercise all fault exits on both sides of the staging threshold.
+ // 覆盖暂存阈值两侧的所有故障退出路径。
  for(size_t length=256;length<=257;++length) {
   completed_length=length;
   from_fault=true;unsigned t=transfers;

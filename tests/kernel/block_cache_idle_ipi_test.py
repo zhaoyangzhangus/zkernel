@@ -46,8 +46,7 @@ static void x86_tlb_wait_begin(void) { assert(!waiting); waiting=true; ++begins;
 static void x86_tlb_wait_end(void) { assert(waiting); waiting=false; ++ends; }
 static void enable_irq(void) {
  assert(depth==outer+1 && waiting); irq_flags |= 1ULL<<9; ++enabled;
- // Model the TLB IPI unblocking the page-table owner, which unblocks
- // the remote cache owner. No scheduler switch on the idle continuation.
+ // 模拟 TLB IPI 解除页表所有者阻塞，继而解除远端缓存所有者的阻塞。空闲续执行路径上不发生调度切换。
  ++ack;
 }
 static void pause_probe(void) { assert(++pauses<=busy_attempts); }
@@ -67,7 +66,7 @@ static void block_cache_diag(UINT32 status,UINT64 lba,OS_BLOCK_CACHE *cache) {
 ''' + body + r'''
 int main(void) {
  OS_BLOCK_CACHE cache={0};
- // IRQ-off/on callers, nested preemption and preexisting TLB wait states.
+ // 覆盖关闭/开启 IRQ 的调用方、嵌套抢占和已有的 TLB 等待状态。
  for(unsigned irq=0;irq<2;++irq) for(unsigned nesting=0;nesting<3;++nesting)
  for(unsigned prior=0;prior<2;++prior) for(unsigned fail=0;fail<2;++fail)
  for(busy_attempts=1;busy_attempts<=7;++busy_attempts) {
@@ -80,12 +79,12 @@ int main(void) {
   assert(depth==outer && waiting==(bool)prior && irq_flags==(0x46|((UINT64)irq<<9)));
   assert(begins==!prior && ends==!prior && diagnostics==fail);
  }
- // Uncontended idle acquisition must not change interrupt/preemption state.
+ // 空闲时无竞争的加锁操作不得改变中断/抢占状态。
  contended=0; tries=enabled=begins=ends=ack=0; result=K_OK;
  depth=outer=2; waiting=false; irq_flags=0;
  assert(cache_lock(&cache,0));
  assert(tries==1 && !enabled && !begins && !ends && !ack && depth==2 && !irq_flags);
- // Ordinary threads retain the blocking mutex path; pre-scheduler stays raw.
+ // 普通线程仍走阻塞互斥锁路径；调度器启动前仍使用原始路径。
  thread.sched_class=1; sleeps=0;
  assert(cache_lock(&cache,0) && sleeps==1 && depth==2 && !irq_flags);
  current=0; assert(cache_lock(&cache,0) && cache.Lock==1);
@@ -124,7 +123,7 @@ with tempfile.TemporaryDirectory(prefix='cache-idle-ipi-') as directory:
     for name, mutated in mutations.items():
         assert mutated != program, name
         executable = compile_case(name, mutated)
-        # Deliberate failing controls must not create core files on the host.
+        # 有意失败的对照测试不得在宿主机上生成 core 文件。
         def no_core():
             resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
         result = subprocess.run([str(executable)], capture_output=True, text=True,

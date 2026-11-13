@@ -2,10 +2,9 @@
 
 #include <kernel/telemetry.h>
 
-/* One writer per span, one boot only. Read with the debugger stopped; no
- * allocation, UART output or filesystem writes on the boot critical path.
- * A zero end identifies an unfinished stage. Overlapping spans are inclusive
- * wall times and must not be added together. */
+/* 每个片段只由一个写入者写入，且每次引导仅写入一次。调试器停止时读取；启动关键路径上不分配内存、
+ * 不输出 UART 日志，也不写入文件系统。结束值为零表示阶段尚未完成。片段可能重叠，记录的是包含式
+ * 墙上时间，因此不能相加。 */
 enum kernel_boot_phase {
     BOOT_PROFILE_TOTAL,
     BOOT_PROFILE_EARLY,

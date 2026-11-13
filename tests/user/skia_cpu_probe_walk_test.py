@@ -43,7 +43,7 @@ for large_shift in (None,21,30):
     except RuntimeError as error:assert 'Unmapped' in str(error)
     else:raise AssertionError('missing PTE accepted')
     assert len(reads)==2
-# Cross-page symbol reads must be rejected, not silently read the next frame.
+# 跨页读取符号必须被拒绝，不能静默读取下一帧。
 env['u64']=lambda slot: 0x1001
 try:env['read_user'](va&~4095|4093,8)
 except RuntimeError as error:assert 'alignment' in str(error)

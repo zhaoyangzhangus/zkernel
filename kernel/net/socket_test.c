@@ -1,4 +1,4 @@
-/* REFACTOR_P8_SOCKET_TEST_OWNER: hostable socket protocol/runtime fixture. */
+/* REFACTOR_P8_SOCKET_TEST_OWNER：可在主机运行的套接字协议/运行时测试夹具。 */
 
 #include <arch/x86_64/cpu.h>
 #include <kernel/completion_port.h>
@@ -13,8 +13,8 @@
 #define SOCKET_LONG_TEST_BATCH 8U
 #define SOCKET_LONG_TEST_ROUNDS 8U
 
-/* Synthetic peers go through the capture callback, not the loopback path.
- * TEST-NET-1 addresses cannot collide with an in-kernel local listener. */
+/* 模拟对端通过捕获回调运行，不经过回环路径。TEST-NET-1 地址不会与内核中的本地
+ * 监听端冲突。 */
 #define SOCKET_TEST_WIRE_PEER_IPV4 0xC0000202U
 #define SOCKET_TEST_TIMEOUT_PEER_IPV4 0xC0000203U
 
@@ -208,13 +208,13 @@ static bool socket_test_shutdown_local(void) {
     uint64_t bytes = 0U;
     bool success = false;
 
-    /* The socket API must reject values outside the ABI enum. */
+    /* 套接字 API 必须拒绝超出 ABI 枚举范围的值。 */
     if (socket_create(OS_AF_INET4, OS_SOCK_STREAM, 0, &probe) != K_OK ||
         socket_shutdown(probe, OS_SOCKET_SHUT_BOTH + 1U) != K_EINVAL) goto cleanup;
     socket_test_release(probe);
     probe = 0;
 
-    /* SHUT_WR publishes EOF to the peer and rejects subsequent writes. */
+    /* SHUT_WR 会向对端发布 EOF，并拒绝后续写入。 */
     if (!socket_test_open_local_pair(17000U, 17001U, &listener, &client, &accepted) ||
         socket_shutdown(client, OS_SOCKET_SHUT_WRITE) != K_OK ||
         socket_send(client, &byte, sizeof(byte), 0U, 0U, &bytes) != K_EPIPE ||
@@ -233,7 +233,7 @@ static bool socket_test_shutdown_local(void) {
     client = 0;
     listener = 0;
 
-    /* SHUT_RD discards queued data and makes the peer's send fail with EPIPE. */
+    /* SHUT_RD 会丢弃排队的数据，并使对端发送失败并返回 EPIPE。 */
     if (!socket_test_open_local_pair(17002U, 17003U, &listener, &client, &accepted) ||
         socket_send(accepted, &byte, sizeof(byte), 0U, 0U, &bytes) != K_OK ||
         bytes != sizeof(byte) ||
@@ -253,7 +253,7 @@ static bool socket_test_shutdown_local(void) {
     client = 0;
     listener = 0;
 
-    /* SHUT_RDWR applies both local directions and signals both peer paths. */
+    /* SHUT_RDWR 会关闭本端两个方向，并通知对端的两条路径。 */
     if (!socket_test_open_local_pair(17004U, 17005U, &listener, &client, &accepted) ||
         socket_shutdown(client, OS_SOCKET_SHUT_BOTH) != K_OK ||
         socket_send(client, &byte, sizeof(byte), 0U, 0U, &bytes) != K_EPIPE ||
@@ -295,7 +295,7 @@ static bool socket_test_shutdown_wire(void) {
     socket_set_tcp_ipv4_output(socket_test_tcp_output, &capture);
     output_installed = true;
 
-    /* Complete an active handshake through the test wire and capture a FIN. */
+    /* 通过测试线路完成活动握手，并捕获 FIN。 */
     if (socket_create(OS_AF_INET4, OS_SOCK_STREAM, 0, &client) != K_OK ||
         socket_connect(client, SOCKET_TEST_WIRE_PEER_IPV4, 17010U) != K_OK ||
         capture.count != 1U || capture.flags != NET_TCP_FLAG_SYN ||
@@ -319,7 +319,7 @@ static bool socket_test_shutdown_wire(void) {
     uint32_t peer_address = capture.destination_address;
     uint16_t peer_port = capture.destination_port;
 
-    /* The FIN consumes one sequence number and its ACK stops retransmission. */
+    /* FIN 会占用一个序列号，其 ACK 会停止重传。 */
     if (socket_inject_tcp_ack_ipv4_reply(
             peer_address, peer_port, local_address, local_port,
             peer_sequence, fin_sequence + 1U, NET_TCP_FLAG_ACK,
@@ -331,7 +331,7 @@ static bool socket_test_shutdown_wire(void) {
         socket_shutdown(client, OS_SOCKET_SHUT_WRITE) != K_OK ||
         capture.count != output_count) goto cleanup;
 
-    /* An external FIN is acknowledged once; a duplicate remains idempotent. */
+    /* 外部 FIN 只确认一次；重复 FIN 仍保持幂等。 */
     if (socket_inject_tcp_ipv4_reply(
             peer_address, peer_port, local_address, local_port,
             peer_sequence, NET_TCP_FLAG_ACK | NET_TCP_FLAG_FIN, 0, 0U,
@@ -376,10 +376,9 @@ static bool socket_address6_self_test(void) {
     return true;
 }
 
-/* The capture callback below supplies the synthetic remote handshake. Own an
- * open endpoint for its always-available local route; an unbound ::1 port is
- * correctly refused and cannot stand in for an external TCP peer. The caller
- * owns both output slots, including partial setup on any failure. */
+/* 下方的捕获回调用于提供模拟的远端握手。为始终可用的本地路由持有一个已打开的端点；
+ * 未绑定的 ::1 端口会被正确拒绝，不能代替外部 TCP 对端。调用方负责持有两个输出槽位，
+ * 包括初始化失败时的部分状态。 */
 static bool socket_test_open_active6_wire(socket_t **listener_out,
                                           socket_t **client_out,
                                           const uint8_t address[16],
@@ -655,8 +654,7 @@ bool socket_self_test(void) {
         captured_tcp_output.payload_length != sizeof(tcp_payload) ||
         !socket_check_payload(captured_tcp_output.payload, tcp_payload,
                               sizeof(tcp_payload)) ||
-        /* Unacknowledged data must not block a second write while the
-         * flight buffer and peer window still have room. */
+        /* 只要发送缓冲区和对端窗口仍有空间，未确认的数据就不能阻止第二次写入。 */
         socket_send(active_client, tcp_payload, sizeof(tcp_payload), 0U, 0U,
                     &bytes) != K_OK || bytes != sizeof(tcp_payload) ||
         captured_tcp_output.count != 2U ||
@@ -687,8 +685,7 @@ bool socket_self_test(void) {
     socket_set_tcp_ipv6_output(socket_test_tcp6_output, &captured_tcp6_output);
     tcp6_output_installed = true;
     static const uint8_t active_peer6[16] = {
-        /* A synthetic output callback is not an IPv6 default route. Exercise
-         * the active TCP state machine over the always-available local route. */
+        /* 模拟输出回调不等于 IPv6 默认路由。通过始终可用的本地路由测试活动 TCP 状态机。 */
         [15] = 1U
     };
     if (!socket_test_open_active6_wire(&active_listener6, &active_client6,
@@ -746,8 +743,7 @@ bool socket_self_test(void) {
     if (captured_tcp6_output.count != retransmit6_count + 1U ||
         captured_tcp6_output.sequence == 0U) goto cleanup;
 
-    /* A SYN that never receives a reply must stop being pending and make
-     * the error observable to epoll/poll after the retransmit budget. */
+    /* SYN 一直未收到回复时，重传次数达到上限后必须结束等待，并让 epoll/poll 能观察到错误。 */
     if (socket_create(OS_AF_INET4, OS_SOCK_STREAM, 0,
                       &connect_timeout_client) != K_OK ||
         socket_connect(connect_timeout_client, SOCKET_TEST_TIMEOUT_PEER_IPV4,

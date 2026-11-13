@@ -1,7 +1,7 @@
 #ifndef P11_APP_ROOT
 #define P11_APP_ROOT "/usr/apps/p11-triangle"
 #endif
-/* Phase 11: render a real OpenGL triangle and validate CPU readback. */
+/* 阶段 11：渲染真实的 OpenGL 三角形，并验证 CPU 回读结果。 */
 #include <stdint.h>
 #include <errno.h>
 #include <string.h>
@@ -63,7 +63,7 @@ extern int ioctl(int, unsigned long, ...);
 #define P11_GL_COMPILE_STATUS 0x8B81U
 #define P11_GL_LINK_STATUS 0x8B82U
 
-/* The user explicitly reduced the long stress run to twenty frames. */
+/* 用户明确要求将长时间压力测试缩短为 20 帧。 */
 #ifndef P11_FRAME_COUNT
 #define P11_FRAME_COUNT 20U
 #endif
@@ -255,7 +255,7 @@ typedef struct p11_gl_api {
     p11_gl_check_framebuffer_status_fn check_framebuffer_status;
 } p11_gl_api_t;
 
-/* These are loaded through the guest's pinned glibc/GLVND path at runtime. */
+/* 运行时通过客户机固定版本的 glibc/GLVND 路径加载这些库。 */
 #define P11_RTLD_NOW 2
 #define P11_RTLD_GLOBAL 0x100
 

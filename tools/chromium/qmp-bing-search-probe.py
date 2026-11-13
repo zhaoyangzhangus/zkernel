@@ -15,8 +15,7 @@ def find_search_band(width, pixels):
     for y in range(200, 451):
         white = sum(min(pixels[(y*width+x)*3:(y*width+x)*3+3]) >= 248
                     for x in range(400, 700, 4))
-        # Empty form placeholder is left of this strip. Do not split the
-        # input rectangle at its glyph rows or depend on banner height.
+        # 空表单占位符位于此条带左侧。不要按字形行拆分输入矩形，也不要依赖横幅高度。
         if white >= 71 and y < 450:
             if start is None:
                 start = y

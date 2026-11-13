@@ -15,8 +15,8 @@ static atomic_uint g_irq_initialized;
 static irq_slot_t g_irq_slots[IRQ_VECTOR_LAST + 1U];
 
 static void irq_initialize(void) {
-    /* The release publication below makes the table ready for readers.
-     * Steady-state IRQ dispatch must not write its shared init cache line. */
+    /* 下方的 release 发布操作会使该表可供读取者使用。
+     * 稳态 IRQ 分发不得写入与初始化代码共享的缓存行。 */
     if (atomic_load_explicit(&g_irq_initialized, memory_order_acquire) == 2U) return;
     unsigned expected = 0U;
     if (atomic_compare_exchange_strong_explicit(&g_irq_initialized, &expected, 1U,
@@ -37,8 +37,8 @@ static void irq_initialize(void) {
 
 static uint64_t irq_lock(void) {
     uint64_t flags;
-    /* Dispatch reads this table in interrupt context. Mask local interrupts
-     * before initialization and locking, including its first publication. */
+    /* 分发程序会在中断上下文中读取此表。初始化和加锁前必须屏蔽本地中断，
+     * 首次发布时也不例外。 */
     __asm__ volatile ("pushfq; popq %0; cli" : "=r"(flags) : : "memory");
     irq_initialize();
     spinlock_lock(&g_irq_lock);

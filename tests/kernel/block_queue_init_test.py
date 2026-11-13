@@ -101,7 +101,7 @@ int main(void) {
  }
  const unsigned counts[]={0,1,3,8,9,UINT32_MAX};
  for(unsigned i=0;i<sizeof(counts)/sizeof(counts[0]);++i) {
-  /* Reset only with all workers joined, to exercise independent boot states. */
+  /* 仅在所有工作线程都已汇合后重置，以测试彼此独立的启动状态。 */
   atomic_store(&g_block_init_state,0);platform.cpu_count=counts[i];
   block_queue_state_t *p=block_queue_for(&devices[0]);
   unsigned expected=counts[i]?counts[i]:1;if(expected>8)expected=8;

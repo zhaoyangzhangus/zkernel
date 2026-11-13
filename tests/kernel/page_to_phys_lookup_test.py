@@ -52,8 +52,7 @@ int main(void) {
         g_sections[s]=(page_section_t){.base_pfn=(65535U-s)*8ULL+256,
             .pages=metadata+s*5,.present_pages=4};
     }
-    /* Every valid element and every inter-section gap; physical PFNs are in
-     * reverse order to prove only metadata address ordering is required. */
+    /* 覆盖每个有效元素和段间空隙；物理 PFN 按反向排列，以证明只需按元数据地址排序。 */
     for(unsigned s=0;s<g_section_count;++s) {
         for(unsigned i=0;i<4;++i)
             check(&g_sections[s].pages[i],(g_sections[s].base_pfn+i)<<PAGE_SHIFT);
@@ -66,7 +65,7 @@ int main(void) {
     pthread_t threads[8];
     for(unsigned i=0;i<8;++i)assert(!pthread_create(&threads[i],NULL,reader,(void *)(uintptr_t)(i+1)));
     for(unsigned i=0;i<8;++i)assert(!pthread_join(threads[i],NULL));
-    /* Random span lengths/gaps, checked by independent exact-address oracle. */
+    /* 使用独立的精确地址基准检查随机跨度长度和空隙。 */
     unsigned seed=19;
     for(unsigned layout=0;layout<64;++layout) {
         g_section_count=1+layout;unsigned offset=0;

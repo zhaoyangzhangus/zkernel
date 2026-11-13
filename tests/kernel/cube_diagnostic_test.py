@@ -55,7 +55,7 @@ int main(void) {
     for (unsigned m=3;m<=6;++m) {
         reset(m);cube_emit("OS_CUBE_FAIL\n");assert(calls==1 && !used);
     }
-    /* Every decimal digit boundary is exercised, not only the maximum. */
+    /* 覆盖每个十进制位数边界，而不只是最大值。 */
     for (uint64_t n=10;;n*=10) {
         for (unsigned offset=0;offset<3;++offset) {
             uint64_t value=n-1+offset;char expected[32];
